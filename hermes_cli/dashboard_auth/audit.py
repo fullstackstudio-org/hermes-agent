@@ -48,6 +48,20 @@ class AuditEvent(enum.Enum):
     # The ``confirm`` server request (tui_gateway/confirm.py): who was asked and who answered, never the text.
     CONFIRM_REQUEST = "confirm_request"
     CONFIRM_OUTCOME = "confirm_outcome"
+    # Passkeys for the confirm level ``passkey`` (hermes_cli/dashboard_auth/passkeys): enrolment codes,
+    # credentials, step-ups and verified answers. Fields name the user, the first 16 characters of the
+    # credential id, the RP, the base URL, the request and a reason; never a code, text or signature.
+    PASSKEY_INVITE_MINTED = "passkey_invite_minted"
+    PASSKEY_INVITE_REFUSED = "passkey_invite_refused"
+    PASSKEY_REGISTERED = "passkey_registered"
+    PASSKEY_REGISTER_REFUSED = "passkey_register_refused"
+    PASSKEY_REVOKED = "passkey_revoked"
+    PASSKEY_STEPUP_REFUSED = "passkey_stepup_refused"
+    PASSKEY_BASE_URLS_CHANGED = "passkey_base_urls_changed"
+    CONFIRM_PASSKEY_VERIFIED = "confirm_passkey_verified"
+    CONFIRM_PASSKEY_REFUSED = "confirm_passkey_refused"
+    # A dashboard or RPC config write that would have changed a protected section (confirm.passkey).
+    PROTECTED_SETTING_REFUSED = "protected_setting_refused"
 
 
 def _resolve_log_path() -> Path:

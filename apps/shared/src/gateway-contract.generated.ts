@@ -489,7 +489,7 @@ export interface ConfigProviderRef {
   authenticated?: boolean
   [key: string]: unknown
 }
-/** ``key`` picks the setter (``_CONFIG_SETTERS``, ``details_mode.<section>``, display toggles); ``value`` is the raw word/string the setter normalises (falsy non-strings are reported back in the error). ``scope`` applies to ``yolo`` / ``reasoning``; ``confirm_expensive_model`` to ``model``. */
+/** ``key`` picks the setter (``_CONFIG_SETTERS``, ``details_mode.<section>``, display toggles); ``value`` is the raw word/string the setter normalises (falsy non-strings are reported back in the error). ``scope`` applies to ``yolo`` / ``reasoning``; ``confirm_expensive_model`` to ``model``. ``confirm`` and ``confirm.passkey.*`` are operator-only: error 4030, ``data.reason`` ``protected_setting``. */
 export interface ConfigSetParams {
   profile?: string | null
   key: string

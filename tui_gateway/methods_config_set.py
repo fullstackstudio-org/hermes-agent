@@ -482,6 +482,15 @@ _SESSION_SCOPED_KEYS = frozenset({"model", "fast", "yolo", "reasoning"})
 @_profile_scoped
 def _(rid, params: dict) -> dict:
     key, value = params.get("key", ""), params.get("value", "")
+    from hermes_cli.dashboard_auth.passkeys import settings as passkey_settings
+    if passkey_settings.is_protected_key(str(key)):  # operator-only, on the gateway host
+        transport = current_transport()
+        passkey_settings.audit_refusal("config_set", user_id=_transport_auth_user_id(transport) or "",
+                                       ip=str(getattr(transport, "_peer", "") or ""),
+                                       session_id=str(params.get("session_id") or ""),
+                                       connection=type(transport).__name__ if transport else "stdio")
+        return _err(rid, 4030, passkey_settings.PROTECTED_DETAIL,
+                    data={"reason": passkey_settings.PROTECTED_SETTING})
     session = _caller_live_session(params.get("session_id", ""))
     if session is None and params.get("session_id") and key in _SESSION_SCOPED_KEYS \
             and _word(params.get("scope")) != "global":

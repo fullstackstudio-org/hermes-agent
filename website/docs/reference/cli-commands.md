@@ -1878,6 +1878,21 @@ Register this install as a self-hosted dashboard with your Nous Portal account. 
 | `--redirect-uri` | Public HTTPS OAuth redirect URI (e.g. `https://hermes.example.com/auth/callback`). Omit for localhost-only use. |
 | `--portal-url` | Override the Nous Portal base URL for registration (default: the portal you logged into). Also settable via `HERMES_DASHBOARD_PORTAL_URL`. |
 
+### `hermes dashboard passkey`
+
+Operator commands for the `confirm` level `passkey`: its base URLs and its store (`$HERMES_HOME/dashboard_auth/passkeys.db`). Run them on the gateway host as the gateway's user. The dashboard's settings page, raw config editor and file manager, and the `config.set` RPC, refuse to change the store or the `confirm.passkey` settings.
+
+That is a narrow guarantee. A stolen dashboard session can still run code on the gateway host through the dashboard itself: shell hooks (`/api/ops/hooks`), the file editor writing `config.yaml` (`/api/fs/write-text`), a console, or an agent's unsandboxed terminal. With code execution it can change these settings, write the store, or run these commands. The passkey level raises the bar for a *confirm*; it does not make a stolen dashboard session harmless.
+
+| Command | Description |
+|---------|-------------|
+| `status` | Whether the level is enabled, the listed and accepted base URLs, the native and web RPs, the sign-in providers, the stored counts, and every reason the level is unavailable with what to set. It also compares the passkey base URLs with the dashboard's public URLs and prints a hint where they differ. |
+| `base-url list` / `base-url add URL` / `base-url remove URL` | The base URLs clients dial for this gateway (`confirm.passkey.base_urls`, serialised as origin plus path prefix). A confirmation that names any other base URL is refused. This list is kept apart from `dashboard.public_url(s)` on purpose: a dashboard session can change those. Empty means the level is unavailable (`no_base_url`). |
+| `list [--user ID] [--all]` | Stored credentials (`--all` includes revoked ones). |
+| `invite [--user ID] [--ttl 15m] [--print]` | Mint a one-time enrolment code (default 15 minutes, at most 24 hours). Bind it with `--user <provider>:<user id>` when you know the id. Refused when the output is not a terminal unless `--print` is given. |
+| `revoke <credential id prefix>` / `revoke --user ID --all` | Revoke one credential, or all of one user's. |
+| `receipts [--user ID] [--since YYYY-MM-DD] [--limit N]` | Receipts of verified answers (digests, never the text); older than `confirm.passkey.receipts_days` are pruned first. |
+
 ```bash
 # Default — opens browser to http://127.0.0.1:9119
 hermes dashboard

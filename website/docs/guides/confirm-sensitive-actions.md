@@ -34,7 +34,11 @@ Every result carries `verified: false`. The gateway sets that field itself; it n
 app.
 
 A verified level, which the gateway will check itself, is planned. Its name is reserved (`passkey`):
-asking for it today returns `unavailable` without showing anything, and no app can offer it yet.
+asking for it today returns `unavailable` without showing anything, and no app can offer it yet. Its
+settings and store are operator-only (`hermes dashboard passkey`), but that is not a wall against a stolen
+dashboard session: the dashboard itself can run code on the gateway host (shell hooks, the file editor
+writing `config.yaml`, a console), and code on the host can change both. The level will raise the bar for
+a confirm; it does not make a stolen dashboard session harmless.
 
 ## Turn it on
 

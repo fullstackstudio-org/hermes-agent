@@ -9,9 +9,10 @@ import time
 from typing import Any, Dict, List, Optional
 
 import yaml
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from hermes_cli.config import get_config_path, read_raw_config
+from hermes_cli.dashboard_auth.passkeys import settings as _passkey_settings
 from hermes_cli.web_deps import late
 from hermes_cli.web_routers._common import corrupt_store_as_status
 from hermes_cli.web_server_profiles import (
@@ -50,7 +51,7 @@ async def get_config_raw(profile: Optional[str] = None):
 
 
 @router.put("/api/config/raw")
-async def update_config_raw(body: RawConfigUpdate, profile: Optional[str] = None):
+async def update_config_raw(body: RawConfigUpdate, request: Request, profile: Optional[str] = None):
     def _run():
         parsed = yaml.safe_load(body.yaml_text)
         if not isinstance(parsed, dict):
@@ -59,7 +60,12 @@ async def update_config_raw(body: RawConfigUpdate, profile: Optional[str] = None
             # Full-document replacement: the editor owns the whole file; never
             # merge omitted sections back from disk.
             # See #62723.
-            approvals_mode_changed = _approval_mode_of(parsed) != _approval_mode_of(read_raw_config())
+            existing = read_raw_config()
+            # confirm.passkey is operator-only: the editor may round-trip it, never change it.
+            if _passkey_settings.changes_protected(existing, parsed):
+                _passkey_settings.audit_refusal_for_request("config_raw", request)
+                raise HTTPException(status_code=403, detail=_passkey_settings.PROTECTED_DETAIL)
+            approvals_mode_changed = _approval_mode_of(parsed) != _approval_mode_of(existing)
             save_config(parsed, merge_existing=False)
         # Same indicator refresh as the schema-driven save.
         if approvals_mode_changed and not _is_other_profile(body.profile or profile):

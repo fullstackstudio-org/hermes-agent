@@ -1,5 +1,6 @@
 """Passkeys for the ``confirm`` level ``passkey``: the challenge construction (:mod:`.challenge`), the CBOR
-subset (:mod:`.cbor`), the WebAuthn verifier (:mod:`.webauthn`) and the store (:mod:`.store`).
+subset (:mod:`.cbor`), the WebAuthn verifier (:mod:`.webauthn`), the store (:mod:`.store`), the
+``confirm.passkey`` settings (:mod:`.settings`) and the operator commands (:mod:`.cli`).
 
 The construction and the verification order are defined by ``contract/confirm-passkey/README.md``; the
 vectors in ``contract/confirm-passkey/vectors.json`` are the test of this package. Nothing here imports

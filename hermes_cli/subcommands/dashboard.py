@@ -123,3 +123,6 @@ def build_dashboard_parser(
             "portal. Also settable via HERMES_DASHBOARD_PORTAL_URL. Mainly for "
             "testing against a staging/preview portal.")
     dashboard_register_parser.set_defaults(func=cmd_dashboard_register)
+
+    from hermes_cli.dashboard_auth.passkeys.cli import add_passkey_parser
+    add_passkey_parser(dashboard_subparsers)

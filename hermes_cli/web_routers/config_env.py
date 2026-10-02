@@ -24,6 +24,7 @@ from hermes_cli.web_server_profiles import (
     _approval_mode_of, _broadcast_gateway_session_info, _is_other_profile, _parse_model_entries,
 )
 from fastapi import HTTPException, Request
+from hermes_cli.dashboard_auth.passkeys import settings as _passkey_settings
 from hermes_cli.config import DEFAULT_CONFIG, OPTIONAL_ENV_VARS, read_raw_config, require_readable_config_before_write, custom_endpoint_key_env, coerce_provider_id, find_provider_entry, get_compatible_custom_providers, _ENV_REF_RE, _deep_merge
 from hermes_cli.config_providers import _canonical_api_mode, _custom_provider_entry_to_provider_config
 from hermes_cli.web_models import ConfigUpdate, EnvVarUpdate, EnvVarDelete, EnvVarReveal, CustomEndpointUpdate
@@ -117,7 +118,7 @@ async def get_egress_status(profile: Optional[str] = None):
 
 @router.put("/api/config")
 async def update_config(
-    body: ConfigUpdate, profile: Optional[str] = None, preserve_language: bool = False
+    body: ConfigUpdate, request: Request, profile: Optional[str] = None, preserve_language: bool = False
 ):
     def _run():
         approvals_mode_changed = False
@@ -132,6 +133,10 @@ async def update_config(
                 existing = require_readable_config_before_write()
                 incoming = _denormalize_config_from_web(body.config)
                 merged = _deep_merge(existing, incoming)
+                # confirm.passkey is operator-only: echoing it back unchanged is fine, changing it is not.
+                if _passkey_settings.changes_protected(existing, merged):
+                    _passkey_settings.audit_refusal_for_request("config_put", request)
+                    raise HTTPException(status_code=403, detail=_passkey_settings.PROTECTED_DETAIL)
                 # Compare normalized approvals.mode across the in-memory
                 # documents, not config blocks and not cache re-reads: the page
                 # PUTs the defaulted GET record while disk holds sparse YAML (a

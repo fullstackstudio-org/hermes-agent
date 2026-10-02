@@ -1692,6 +1692,31 @@ DEFAULT_CONFIG = {
         # Approve" → false. HERMES_TUI_NO_CONFIRM=1 skips the TUI modal.
         "destructive_slash_confirm": True,
     },
+    # The ``confirm`` request at level ``passkey``: the gateway verifies a passkey assertion over the text it
+    # asked about (contract/confirm-passkey). Protected: the dashboard's config writers and the config.set
+    # RPC refuse any change below ``confirm.passkey``; the operator edits it here or with `hermes config set`.
+    # Credentials and codes live in $HERMES_HOME/dashboard_auth/passkeys.db (`hermes dashboard passkey`).
+    "confirm": {
+        "passkey": {
+            "enabled": False,
+            # The base URLs clients dial for this gateway (as `hermes dashboard passkey base-url add` writes
+            # them). A challenge naming any other base URL is refused. Kept apart from dashboard.public_url(s)
+            # on purpose: a dashboard session can change those. Empty = the level is unavailable.
+            "base_urls": [],
+            # Native-app relying parties: RP id → the clientDataJSON origins allowed for it. The official
+            # app asserts under this one; a rebuilt app with its own associated domain lists its own. This
+            # mapping is merged over the default, so `confirm.hermie.dev: []` is how to remove it.
+            "native_rps": {"confirm.hermie.dev": ["https://confirm.hermie.dev"]},
+            # A person may mint an enrolment code for themselves after a passkey step-up.
+            "user_invites": True,
+            # Receipts of verified answers (digests and signed bytes, never the text) are kept this long.
+            "receipts_days": 90,
+            # Accept listed base URLs that are not public (http://, private addresses, .local, ...).
+            "allow_private_base_urls": False,
+            # Operator rules that force level passkey (enforced once the policy lands; read-only today).
+            "require": {"commands": [], "smart_denied": False, "approvals": False, "tools": []},
+        },
+    },
     # Permanently allowed dangerous command patterns (added via "always" approval).
     "command_allowlist": [],
     # User-defined quick commands that bypass the agent loop (type: exec only).

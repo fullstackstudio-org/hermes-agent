@@ -218,6 +218,54 @@ describe('JsonRpcRequestChannel', () => {
     expect(sent).toHaveLength(3)
   })
 
+  it('advertises passkey only when the gateway says the level is enabled', async () => {
+    const channel = new JsonRpcRequestChannel({
+      confirmLevels: ['plain', 'passkey'],
+      confirmPasskey: { kind: 'native', rp_id: 'confirm.example' },
+      requestIdPrefix: 'p'
+    })
+
+    const { sent, transport, last } = spyTransport()
+    const settle = () => new Promise(resolve => setTimeout(resolve, 0))
+    const ready = JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: {} } })
+
+    channel.attach(transport)
+
+    // A gateway that knows confirm but not confirm_passkey: plain only, no passkey keys at all.
+    channel.handleFrame(ready)
+    channel.handleFrame(JSON.stringify({ id: last().id, jsonrpc: '2.0', result: { server_requests: ['confirm'] } }))
+    await settle()
+    expect(JSON.parse(sent[1]).params).toEqual({ confirm: ['plain'], server_requests: true })
+
+    // Known but disabled (e.g. reason private_origin): still plain only.
+    channel.handleFrame(ready)
+    channel.handleFrame(
+      JSON.stringify({
+        id: last().id,
+        jsonrpc: '2.0',
+        result: { confirm_passkey: { enabled: false, reason: 'private_origin' }, server_requests: ['confirm'] }
+      })
+    )
+    await settle()
+    expect(JSON.parse(sent[3]).params).toEqual({ confirm: ['plain'], server_requests: true })
+
+    // Enabled: passkey and the relying party.
+    channel.handleFrame(ready)
+    channel.handleFrame(
+      JSON.stringify({
+        id: last().id,
+        jsonrpc: '2.0',
+        result: { confirm_passkey: { enabled: true, reason: '' }, server_requests: ['confirm'] }
+      })
+    )
+    await settle()
+    expect(JSON.parse(sent[5]).params).toEqual({
+      confirm: ['plain', 'passkey'],
+      confirm_passkey: { kind: 'native', rp_id: 'confirm.example', v: 1 },
+      server_requests: true
+    })
+  })
+
   it('routes a server request to the first accepting handler and answers -32601 when nobody accepts', () => {
     const unhandled: string[] = []
     const channel = new JsonRpcRequestChannel({ onUnhandledRequest: req => void unhandled.push(req.method) })

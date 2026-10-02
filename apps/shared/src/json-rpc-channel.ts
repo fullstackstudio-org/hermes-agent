@@ -99,6 +99,14 @@ export interface JsonRpcRequestChannelOptions {
    * when a request handler answers it.
    */
   confirmLevels?: readonly string[]
+  /**
+   * The passkey relying party this client asserts under. `passkey` (with this
+   * object) is advertised only when the first `client.capabilities` result
+   * carried `confirm_passkey` with `enabled: true`; a gateway without it would
+   * reject the unknown key and the connection would lose `plain` as well.
+   * See `contract/confirm-passkey/README.md` §8.
+   */
+  confirmPasskey?: { kind: 'native' | 'web'; rp_id: string }
   createRequestId?: (nextId: number) => GatewayRequestId
   heartbeatDeadlineMs?: number
   heartbeatIntervalMs?: number
@@ -191,13 +199,20 @@ export class JsonRpcRequestChannel {
   private lastLivenessAt = 0
   private readonly requestHandlers: ServerRequestHandler[] = []
   private readonly options: Required<
-    Omit<JsonRpcRequestChannelOptions, 'onEvent' | 'onHeartbeatFailure' | 'onRequestHandlerError' | 'onUnhandledRequest'>
+    Omit<
+      JsonRpcRequestChannelOptions,
+      'confirmPasskey' | 'onEvent' | 'onHeartbeatFailure' | 'onRequestHandlerError' | 'onUnhandledRequest'
+    >
   > &
-    Pick<JsonRpcRequestChannelOptions, 'onEvent' | 'onHeartbeatFailure' | 'onRequestHandlerError' | 'onUnhandledRequest'>
+    Pick<
+      JsonRpcRequestChannelOptions,
+      'confirmPasskey' | 'onEvent' | 'onHeartbeatFailure' | 'onRequestHandlerError' | 'onUnhandledRequest'
+    >
 
   constructor(options: JsonRpcRequestChannelOptions = {}) {
     this.options = {
       confirmLevels: options.confirmLevels ?? [],
+      confirmPasskey: options.confirmPasskey,
       createRequestId: options.createRequestId ?? ((nextId: number) => `${options.requestIdPrefix ?? 'r'}${nextId}`),
       heartbeatDeadlineMs: options.heartbeatDeadlineMs ?? DEFAULT_HEARTBEAT_DEADLINE_MS,
       heartbeatIntervalMs: options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
@@ -500,17 +515,33 @@ export class JsonRpcRequestChannel {
    * into the first call would cost this connection `server_requests` itself.
    */
   private advertiseCapabilities(): void {
-    const confirm = this.options.confirmLevels
+    const { confirmLevels, confirmPasskey } = this.options
 
-    this.request<{ server_requests?: unknown }>('client.capabilities', { server_requests: true })
+    this.request<{ confirm_passkey?: { enabled?: unknown }; server_requests?: unknown }>('client.capabilities', {
+      server_requests: true
+    })
       .then(result => {
         const methods = Array.isArray(result?.server_requests) ? result.server_requests : []
 
-        if (confirm.length && methods.includes('confirm')) {
-          return this.request('client.capabilities', { confirm: [...confirm], server_requests: true })
+        if (!confirmLevels.length || !methods.includes('confirm')) {
+          return undefined
         }
 
-        return undefined
+        // `passkey` only with the gateway's own say-so and this client's relying party.
+        const passkey = Boolean(confirmPasskey) && result?.confirm_passkey?.enabled === true
+        const levels = confirmLevels.filter(level => level !== 'passkey')
+
+        if (passkey && confirmLevels.includes('passkey')) {
+          return this.request('client.capabilities', {
+            confirm: [...levels, 'passkey'],
+            confirm_passkey: { v: 1, ...confirmPasskey },
+            server_requests: true
+          })
+        }
+
+        return levels.length
+          ? this.request('client.capabilities', { confirm: levels, server_requests: true })
+          : undefined
       })
       .catch(() => undefined)
   }

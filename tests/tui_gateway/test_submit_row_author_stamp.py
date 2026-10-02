@@ -137,18 +137,22 @@ def test_a_signed_in_submit_stamps_the_submitting_connection(room):
 def test_the_id_keeps_the_provider_apart_from_the_login(room):
     """One spelling, ``<provider>:<user id>``, so a basic-auth ``user-a`` and an OIDC ``user-a``
     are two people to every reader."""
-    submit, user_rows, _session, _creator = room
+    submit, user_rows, session, _creator = room
+    peer = _peer("basic", "user-a", "Robin")
+    server._attach_session_transport(session, peer)  # another login must attach before it may submit
 
-    submit(_peer("basic", "user-a", "Robin"))
+    submit(peer)
     assert _authors(user_rows) == [{"id": "basic:user-a", "name": "Robin"}]
 
 
 def test_a_credential_without_a_name_stamps_the_id_alone(room):
     """``name`` is omitted rather than empty: a client falls back to its own directory or to the
     id, and an empty string would read as a person with no name."""
-    submit, user_rows, _session, _creator = room
+    submit, user_rows, session, _creator = room
+    peer = _peer("oidc", "user-c")
+    server._attach_session_transport(session, peer)
 
-    submit(_peer("oidc", "user-c"))
+    submit(peer)
     assert _authors(user_rows) == [{"id": "oidc:user-c"}]
 
 
@@ -194,9 +198,11 @@ def test_a_transport_that_names_no_login_stamps_nothing(room):
 def test_a_client_cannot_name_itself(room):
     """Server-minted end to end. ``display_metadata`` is not an accepted ``prompt.submit``
     parameter, and neither is an author under any other spelling."""
-    submit, user_rows, _session, joiner = room
+    submit, user_rows, session, _creator = room
+    joiner = _peer("oidc", "user-b", "Sam")
+    server._attach_session_transport(session, joiner)
 
-    submit(_peer("oidc", "user-b", "Sam"),
+    submit(joiner,
            display_metadata={"author": {"id": "oidc:user-a", "name": "Robin"}},
            author={"id": "oidc:user-a"}, user_id="oidc:user-a", user_name="Robin",
            auth_user_id="oidc:user-a", auth_user_name="Robin")

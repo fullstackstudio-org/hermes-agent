@@ -547,7 +547,9 @@ def test_a_relayed_bot_message_under_isolation_never_runs_as_the_relaying_person
     if shared:
         session["auth_user_shared"] = True
     try:
-        submit(socket, _turn_author=DeliveryAuthor({"id": "bot:ledger", "name": "Ledger", "is_bot": True}))
+        # bot_relay.deliver makes this submit as the gateway's own in-process dispatch.
+        with srv._internal_dispatch():
+            submit(socket, _turn_author=DeliveryAuthor({"id": "bot:ledger", "name": "Ledger", "is_bot": True}))
     finally:
         db.close()
     [frame] = frames

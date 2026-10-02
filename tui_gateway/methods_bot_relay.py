@@ -170,7 +170,10 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
             submit_params: dict = {"session_id": live_sid, "text": message, "queued": True}
             if author:
                 submit_params["_turn_author"] = DeliveryAuthor(author)
-            submitted = _methods["prompt.submit"](rid, submit_params)
+            # The relay itself was authorized above (any signed-in client may relay into a Bot Chat); the
+            # submit it makes is the gateway's own, not the relaying connection acting on that session.
+            with _internal_dispatch():
+                submitted = _methods["prompt.submit"](rid, submit_params)
             if "error" in submitted:
                 return submitted
             reply = f"Delivered into @{resolved}'s open Bot Chat; the reply will appear there."

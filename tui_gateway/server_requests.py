@@ -82,6 +82,9 @@ _emit: Callable[[str, str, dict], Any] = lambda event, sid, payload: None  # noq
 # ``answerable(sid)``: False only when every client attached to the session is a build that never
 # advertised handling server→client requests (session_transports.py::_session_client_answers_requests).
 _answerable: Callable[[str], bool] = lambda sid: True  # noqa: E731
+# ``access(sid, transport)``: whether that connection may settle (and see) requests of session *sid*
+# (session_transports.py::_transport_may_access_session). Unbound (tests of this module alone): everyone.
+_access: Callable[[str, Any], bool] = lambda sid, transport: True  # noqa: E731
 
 # Client transports that sent ``client.capabilities {server_requests: true}`` (identity set: StdioTransport
 # has __slots__ and cannot be weak-referenced; ws.py forgets a peer on disconnect).
@@ -89,9 +92,17 @@ _answering_clients: set = set()
 
 
 def bind_sinks(write_json: Callable[[dict], Any], emit: Callable[[str, str, dict], Any],
-               answerable: Callable[[str], bool]) -> None:
-    global _write, _emit, _answerable
+               answerable: Callable[[str], bool], access: Callable[[str, Any], bool] | None = None) -> None:
+    global _write, _emit, _answerable, _access
     _write, _emit, _answerable = write_json, emit, answerable
+    if access is not None:
+        _access = access
+
+
+def _caller() -> Any:
+    """The connection the current RPC or response frame arrived on (``rpc_dispatch`` binds it); None outside one."""
+    from tui_gateway.transport import current_transport
+    return current_transport()
 
 
 def advertise(transport: Any, server_requests: bool) -> None:
@@ -198,6 +209,25 @@ def send_async(method: str, sid: str, params: dict, on_result: Callable[[dict | 
     return settle
 
 
+def answer_problem(request_id: str, result: Any) -> tuple[int, str] | None:
+    """Why the CALLING connection may not settle the open request *request_id*, as ``(code, message)`` for a
+    ``request.answer`` error; None when it may, or when *request_id* is not open here (the ordinary path
+    decides). 4033: the connection may not act on the request's session."""
+    transport = _caller()
+    with _lock:
+        req = _open.get(request_id)
+        if req is None or _access(req.sid, transport):
+            return None
+    return 4033, "this connection may not answer requests of that session"
+
+
+def request_session(request_id: str) -> str | None:
+    """The session id an open request belongs to (None when it is not open here)."""
+    with _lock:
+        req = _open.get(request_id)
+        return req.sid if req is not None else None
+
+
 def resolve_response(frame: dict) -> bool:
     """Route one client response frame to its open request. False when nothing is waiting for that id
     (already timed out / cancelled, or owned by another process — see the compute-host bridge)."""
@@ -210,6 +240,10 @@ def resolve_response(frame: dict) -> bool:
             # Already settled (timed out, cancelled, answered from another surface) or owned by
             # another process; say so — a dropped answer used to vanish without a trace.
             logger.debug("server request %s: response dropped, request no longer open", rid)
+            return False
+        if not _access(req.sid, _caller()):
+            logger.warning("server request %s (%s): response refused, the connection may not act on session %s",
+                           rid, req.method, req.sid)
             return False
         # Removing the request and committing its outcome are one settlement.
         # ``cancel()`` also settles under this lock, so the first side to get
@@ -274,7 +308,9 @@ def cancel(sid: str | None = None, reason: str = "interrupted") -> int:
 
 
 def open_requests(sid: str) -> list[dict]:
-    """Unanswered requests for *sid*, oldest first."""
+    """Unanswered requests for *sid*, oldest first, when the calling connection may act on *sid* (else none)."""
+    if not _access(sid, _caller()):
+        return []
     with _lock:
         reqs = sorted((req for req in _open.values() if req.sid == sid), key=lambda r: r.created_at)
     return [req.snapshot() for req in reqs]

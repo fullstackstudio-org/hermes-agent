@@ -215,7 +215,7 @@ def _joined_output(r) -> str:
 
 def _toolset_rows(params: dict, *, with_tools: bool) -> list[dict]:
     toolsets = _tools_mod("toolsets")
-    session = _sessions.get(params.get("session_id", ""))
+    session = _caller_live_session(params.get("session_id", ""))
     enabled = set((getattr(session["agent"], "enabled_toolsets", []) if session else _load_enabled_toolsets()) or [])
     items = []
     for name in sorted(toolsets.get_all_toolsets().keys()):
@@ -256,7 +256,8 @@ _SIMPLE_RPCS = {
     "toolsets.list": (5032, lambda params: {"toolsets": _toolset_rows(params, with_tools=False)}),
     "agents.list": (5033, lambda params: {"processes": [
         {"session_id": p["session_id"], "command": p["command"][:80], "status": p["status"], "uptime": p["uptime_seconds"]}
-        for p in _tools_mod("tools.process_registry").process_registry.list_sessions()]}),
+        for p in _tools_mod("tools.process_registry").process_registry.list_sessions()
+        if _caller_may_access_session_key(p["session_id"])]}),
 }
 for _name, (_code, _build) in _SIMPLE_RPCS.items():
     # Look the builder up at call time: bind_module rebinds the table's lambdas onto server globals.
@@ -329,7 +330,7 @@ def refresh_plugin_sessions(home, note: str) -> None:
 
 @_rpc("reload.mcp", 5015)
 def _(rid, params: dict) -> dict:
-    session = _sessions.get(params.get("session_id", ""))
+    session = _caller_live_session(params.get("session_id", ""))
     # Prompt-cache invalidation gate: without confirm=true honour ``approvals.mcp_reload_confirm``
     # (Ink prints ``message`` and re-invokes with confirm=true, or flips the config).
     if not bool(params.get("confirm", False)) and _mcp_reload_confirm_required():
@@ -503,7 +504,7 @@ def _(rid, params: dict) -> dict:
         warning = warning or f"plugin command discovery unavailable: {e}"
     skills: dict[str, dict] = {}
     try:
-        with _session_home_scope(_sessions.get(params.get("session_id", "")), cwd=_completion_cwd(params)):
+        with _session_home_scope(_caller_live_session(params.get("session_id", "")), cwd=_completion_cwd(params)):
             collision_note = _catalog_skills(cat, skills)  # always runs: skills must list even when a loader failed
         warning = warning or collision_note
     except Exception as e:
@@ -944,7 +945,7 @@ _SLASH_BUILTINS = {
 @method("command.dispatch")
 def _(rid, params: dict) -> dict:
     name, arg = _resolve_name(params.get("name", "").lstrip("/")), params.get("arg", "")
-    session = _sessions.get(params.get("session_id", ""))
+    session = _caller_live_session(params.get("session_id", ""))
 
     # Stage order is load-bearing: quick > plugin > bundle > skill > built-in. One home binding
     # around the whole loop: the routing guard (``_is_profile_skill_command``) and the stages
@@ -1146,7 +1147,7 @@ def _(rid, params: dict) -> dict:
 @_rpc("tools.show", 5034)
 def _(rid, params: dict) -> dict:
     mt = _tools_mod("model_tools")
-    session = _sessions.get(params.get("session_id", ""))
+    session = _caller_live_session(params.get("session_id", ""))
     enabled = getattr(session["agent"], "enabled_toolsets", None) if session else _load_enabled_toolsets()
     # Pre-assembly list: /tools must also show tools deferred behind the tool_search bridge (as the CLI).
     tools = mt.get_tool_definitions(enabled_toolsets=enabled, quiet_mode=True, skip_tool_search_assembly=True)
@@ -1313,7 +1314,7 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     # Bound like ``commands.catalog``: an unbound rescan runs against the launch env, reports the session's
     # project skills as "Removed" and republishes a registry without them (#114359).
-    with _session_home_scope(_sessions.get(params.get("session_id", "")), cwd=_completion_cwd(params)):
+    with _session_home_scope(_caller_live_session(params.get("session_id", "")), cwd=_completion_cwd(params)):
         result = _tools_mod("agent.skill_commands").reload_skills()
     added, removed = result.get("added") or [], result.get("removed") or []
     lines = ["Reloading skills..."] + ([] if added or removed else ["No new skills detected."])

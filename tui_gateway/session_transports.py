@@ -1,7 +1,10 @@
 """Additive transport membership for shared live sessions."""
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import threading
+from collections import OrderedDict
 from tui_gateway.method_ctx import bind_module
 
 # Leaf lock: callers may hold sessions/history locks, never acquire them here.
@@ -47,6 +50,143 @@ def _session_client_answers_requests(sid: str) -> bool:
     return not clients or any(server_requests.answers_requests(peer) for peer in clients)
 
 
+#: Set while the gateway itself dispatches an RPC handler in process on a caller's behalf after that caller
+#: was authorized for the outer action (a relayed bot DM landing in a Bot Chat, a hosted room driving its
+#: member sessions). Never settable from the wire: underscore params can be, so they are no marker.
+_INTERNAL_DISPATCH: contextvars.ContextVar = contextvars.ContextVar("tui_gateway_internal_dispatch", default=False)
+
+
+@contextlib.contextmanager
+def _internal_dispatch():
+    token = _INTERNAL_DISPATCH.set(True)
+    try:
+        yield
+    finally:
+        _INTERNAL_DISPATCH.reset(token)
+
+
+def _record_attached_login(session: dict, transport) -> None:
+    """Remember every signed-in login that ever attached to *session* (never pruned, like ``auth_user_shared``):
+    a person who took part may reconnect and replay or answer before their new socket has resumed."""
+    login = _transport_auth_user_id(transport)
+    if login is not None:
+        session.setdefault("attached_logins", set()).add(login)
+
+
+def _transport_may_access_session(session: dict | None, transport, *, sid: str = "") -> bool:
+    """Whether *transport* may read *session*'s event ring and settle its server→client requests.
+
+    Allowed: in-process callers (no transport); a connection attached to the session now (a peer of its slot
+    or a viewer); a connection with no per-person identity (session-token / loopback mode, stdio, the
+    server-internal credential: one trust domain, as before); and a signed-in connection whose login created
+    the session or has attached to it before. The last rule keeps a reconnecting client working: it replays
+    (``session.events.since``) before its new socket resumes. A different signed-in person has to attach
+    first, through resume, which is logged and marks the session shared (``_note_foreign_login``).
+
+    The app-level empty session id (``""``) has no record and stays open to every caller."""
+    if transport is None or _INTERNAL_DISPATCH.get():
+        return True
+    login = _transport_auth_user_id(transport)
+    if session is None:
+        return not sid or login is None
+    if (_session_transport_contains(session, transport)
+            or any(viewer is transport for viewer in list(session.get("viewers") or {}))):
+        return True
+    if login is None:
+        return True
+    return login == _session_auth_user_id(session) or login in (session.get("attached_logins") or ())
+
+
+def _caller_may_access_session_id(sid: str) -> bool:
+    """:func:`_transport_may_access_session` for the connection of the current RPC and the live session *sid*."""
+    return _transport_may_access_session(_sessions.get(sid), current_transport(), sid=sid)
+
+
+def _caller_may_access_session_key(key) -> bool:
+    """Whether the current RPC's connection may see work keyed by *key* (a live sid or a session key, as the
+    process registry records it). Work with no live session behind it is visible only to connections without
+    a per-person identity (the operator's own trust domain)."""
+    transport = current_transport()
+    if transport is None or _transport_auth_user_id(transport) is None:
+        return True
+    key = str(key or "")
+    for sid, session in list(_sessions.items()):
+        if sid == key or str(session.get("session_key") or "") == key:
+            return _transport_may_access_session(session, transport, sid=sid)
+    return False
+
+
+def _caller_live_session(sid) -> dict | None:
+    """The live session *sid* when the current RPC's connection may act on it, else None — for handlers that
+    treat "no live session" as a normal case (completion, one-shot LLM, config, slash dispatch): a session the
+    caller may not access looks exactly like one that does not exist."""
+    session = _sessions.get(str(sid or ""))
+    if session is not None and not _transport_may_access_session(session, current_transport(), sid=str(sid)):
+        return None
+    return session
+
+
+# ── resume guessing throttle and the foreign-attach audit ─────────────────────────────────────────────
+
+#: Failed resume lookups (no session under that id or title) one signed-in login may make per window before
+#: EVERY resume by that login is refused until the window has passed. Refusing all of them, not only the
+#: failures, keeps a throttled guesser from telling a hit from a miss.
+RESUME_FAILURE_LIMIT = 30
+RESUME_FAILURE_WINDOW_S = 600.0
+_RESUME_FAILURE_KEYS_MAX = 10_000
+# Module-level state is published onto server.py by ``bind_module``; functions import what they use locally
+# (imported modules are not published).
+_resume_failures: OrderedDict = OrderedDict()
+_resume_failures_lock = threading.Lock()
+
+
+def _resume_failure_count(login: str, now: float) -> int:
+    """Caller holds the lock. Failures of *login* still inside the window."""
+    window = _resume_failures.get(login)
+    if window is None:
+        return 0
+    while window and now - window[0] >= RESUME_FAILURE_WINDOW_S:
+        window.popleft()
+    if not window:
+        _resume_failures.pop(login, None)
+        return 0
+    return len(window)
+
+
+def _resume_throttled(login: str | None) -> bool:
+    """Whether *login* has used up its failed-resume budget. Connections without a per-person identity are
+    never throttled (one trust domain)."""
+    import time
+    if login is None:
+        return False
+    with _resume_failures_lock:
+        return _resume_failure_count(login, time.monotonic()) >= RESUME_FAILURE_LIMIT
+
+
+def _note_resume_failure(login: str | None) -> None:
+    import time
+    from collections import deque
+    if login is None:
+        return
+    now = time.monotonic()
+    with _resume_failures_lock:
+        _resume_failure_count(login, now)
+        _resume_failures.setdefault(login, deque()).append(now)
+        _resume_failures.move_to_end(login)
+        while len(_resume_failures) > _RESUME_FAILURE_KEYS_MAX:
+            _resume_failures.popitem(last=False)
+
+
+def _session_audit(event: str, transport, **fields) -> None:
+    """One record in the dashboard auth audit log (``dashboard-auth.log``); never raises."""
+    try:
+        from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
+        audit_log(AuditEvent(event), login=_transport_auth_user_id(transport) or "",
+                  ip=str(getattr(transport, "_peer", "") or ""), **fields)
+    except Exception:
+        logger.debug("session audit record not written", exc_info=True)
+
+
 def _note_foreign_login(session: dict, transport) -> None:
     """Ownership is not enforced; a second login sharing a session is only logged, and the agent keeps the
     creator's user id. The record is ALSO marked shared, for good: from here on ``auth_user_id`` is the
@@ -60,6 +200,8 @@ def _note_foreign_login(session: dict, transport) -> None:
         session["auth_user_shared"] = True
         logger.warning("Session %s keeps the user id %s it was created with; a client logged in as %s attached",
                        session.get("session_key"), creator or "(none)", attaching)
+        _session_audit("session_foreign_attach", transport, session_id=str(session.get("session_key") or ""),
+                       owner=creator or "", how="attach")
 
 
 def _session_auth_logins(session: dict | None) -> set[str]:
@@ -110,6 +252,7 @@ def _attach_session_transport(session: dict | None, transport) -> bool:
                 return False
             session["transport"] = transport
             return True
+        _record_attached_login(session, transport)
         if existing is transport:
             return True
         if isinstance(existing, FanoutTransport):

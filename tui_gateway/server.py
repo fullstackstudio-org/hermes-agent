@@ -661,7 +661,9 @@ def _emit(event: str, sid: str, payload: dict | None = None) -> bool:
 from tui_gateway import server_requests as _server_requests  # noqa: E402
 
 _server_requests.bind_sinks(lambda frame: write_json(frame), lambda event, sid, payload: _emit(event, sid, payload),
-                            lambda sid: _session_client_answers_requests(sid))
+                            lambda sid: _session_client_answers_requests(sid),
+                            access=lambda sid, transport: _transport_may_access_session(
+                                _sessions.get(sid), transport, sid=sid))
 
 
 # Live WS peer transports (maintained by tui_gateway.ws): the only route for session-less background
@@ -1150,8 +1152,15 @@ def _start_agent_build(sid: str, session: dict) -> None:
 def _sess_nowait(params, rid):
     sid = params.get("session_id") or ""
     s = _sessions.get(sid)
-    if s:
+    if s and _transport_may_access_session(s, current_transport(), sid=sid):
         return (s, None)
+    if s:
+        # A live session this connection may not act on (session_transports._transport_may_access_session):
+        # the same answer as for an unknown id, so the refusal is no oracle for another person's sessions.
+        logger.warning("session-scoped RPC refused: method=%s session_id=%r login=%s: the connection is not "
+                       "attached and its login never was", _current_rpc_method.get() or "?", sid,
+                       _transport_auth_user_id(current_transport()))
+        return (None, _err(rid, 4001, "session not found"))
     # Stale runtime id (reaped/evicted/TTL): the client should session.resume the STORED id. Logged so
     # "message vanished" reads as "arrived and was rejected".
     logger.warning("session-scoped RPC rejected: method=%s session_id=%r not in memory "

@@ -234,7 +234,7 @@ def _(rid, params: dict) -> dict:
     word = params.get("word", "")
     if not word:
         return _ok(rid, {"items": []})
-    session = _sessions.get(params.get("session_id", ""))
+    session = _caller_live_session(params.get("session_id", ""))
     local = _effective_terminal_backend() == "local"
     # A non-local backend's cwd lives inside the target; the host cannot validate it, so take the composer's
     # session cwd (Desktop sends it) or the session's terminal cwd as-is.
@@ -286,7 +286,7 @@ def _(rid, params: dict) -> dict:
     from agent.skill_bundles import get_skill_bundles
     # Skill/bundle lookups are home- and cwd-keyed: bind the calling session's profile and workspace so
     # the popup offers the project-local skills ``command.dispatch`` accepts for that session (#114359).
-    with _session_home_scope(_sessions.get(params.get("session_id", "")), cwd=_completion_cwd(params)):
+    with _session_home_scope(_caller_live_session(params.get("session_id", "")), cwd=_completion_cwd(params)):
         skill_commands, skill_bundles = dict(get_skill_commands()), dict(get_skill_bundles())
     completer = SlashCommandCompleter(
         skill_commands_provider=lambda: skill_commands, skill_bundles_provider=lambda: skill_bundles)
@@ -328,7 +328,7 @@ def _(rid, params: dict) -> dict:
 
 
 def _session_agent(params: dict):
-    session = _sessions.get(params.get("session_id", ""))
+    session = _caller_live_session(params.get("session_id", ""))
     return session.get("agent") if session else None
 
 

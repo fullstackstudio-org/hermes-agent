@@ -4,6 +4,7 @@ task proof as an in-process-only Python object that JSON clients cannot forge.""
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import threading
 from collections.abc import Mapping, Sequence
@@ -32,7 +33,10 @@ class HostedRoomServerRPC:
         self._ids = itertools.count(1)
 
     def _call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        envelope = self.server._methods[method](f"hosted-room-{next(self._ids)}", params)
+        # The room driver acts on its own member sessions in process, whatever connection's thread it runs on.
+        internal = getattr(self.server, "_internal_dispatch", None)
+        with internal() if internal is not None else contextlib.nullcontext():
+            envelope = self.server._methods[method](f"hosted-room-{next(self._ids)}", params)
         if not isinstance(envelope, dict):
             envelope = {}
         error = envelope.get("error")

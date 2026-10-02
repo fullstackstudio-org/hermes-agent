@@ -41,6 +41,10 @@ class AuditEvent(enum.Enum):
     NATIVE_CODE_ISSUED = "native_code_issued"
     NATIVE_TOKEN_SUCCESS = "native_token_success"
     NATIVE_TOKEN_FAILURE = "native_token_failure"
+    # Session access (tui_gateway/session_transports.py): a signed-in person joined a conversation another
+    # login opened, or was throttled for failed resume lookups.
+    SESSION_FOREIGN_ATTACH = "session_foreign_attach"
+    SESSION_RESUME_THROTTLED = "session_resume_throttled"
 
 
 def _resolve_log_path() -> Path:

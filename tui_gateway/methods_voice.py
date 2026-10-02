@@ -730,7 +730,8 @@ def _(rid, params: dict) -> dict:
         if action == "start" and not _voice_mode_enabled():
             return _err(rid, 4015, "voice mode is off — enable with /voice on")
         with _voice_sid_lock:
-            _voice_event_sid = params.get("session_id") or _voice_event_sid
+            if _caller_may_access_session_id(str(params.get("session_id") or "")):
+                _voice_event_sid = params.get("session_id") or _voice_event_sid
         if action == "stop":
             from hermes_cli.voice import stop_continuous
             stop_continuous(force_transcribe=True)

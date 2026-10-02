@@ -150,7 +150,7 @@ def _cfg_get_personality(params):
 
 def _cfg_get_reasoning(params):
     cfg = _load_cfg()
-    session = _sessions.get(params.get("session_id", "")) or {}
+    session = _caller_live_session(params.get("session_id", "")) or {}
     reasoning_config = session.get("create_reasoning_override")
     if session and not isinstance(reasoning_config, dict):
         reasoning_config = getattr(session.get("agent"), "reasoning_config", None)
@@ -172,7 +172,7 @@ def _cfg_get_reasoning(params):
 def _cfg_get_fast(params):
     # `config.set fast` is session-scoped: prefer the session's live/pinned value over the
     # global key (a pre-build session keeps its pin in create_service_tier_override).
-    session = _sessions.get(params.get("session_id", "")) or {}
+    session = _caller_live_session(params.get("session_id", "")) or {}
     agent = session.get("agent")
     tier = (getattr(agent, "service_tier", None) if agent is not None
             else session.get("create_service_tier_override"))

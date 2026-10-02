@@ -371,7 +371,9 @@ def test_a_relayed_turn_is_not_attributed_to_the_relaying_socket(live_room):
         key="bot-chat", transport=bot_chat, auth_user_id=None)
     relayer = _peer("oidc", "user-a", "Robin")
 
-    response = submit(relayer, _turn_author=DeliveryAuthor({"id": "bot:coder", "name": "coder", "is_bot": True}))
+    # bot_relay.deliver makes this submit as the gateway's own in-process dispatch.
+    with server._internal_dispatch():
+        response = submit(relayer, _turn_author=DeliveryAuthor({"id": "bot:coder", "name": "coder", "is_bot": True}))
 
     assert "error" not in response
     assert seen == [("", "", "")]

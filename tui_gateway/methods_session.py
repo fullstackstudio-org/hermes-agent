@@ -916,6 +916,13 @@ def _resume_eager(ctx: _Resume) -> dict:
 def _(rid, params: dict) -> dict:
     if not (target := params.get("session_id", "")):
         return _err(rid, 4006, "session_id required")
+    transport = current_transport()
+    login = _transport_auth_user_id(transport)
+    if _resume_throttled(login):
+        # Too many failed lookups: refuse every resume by this login for the rest of the window, hits included,
+        # so the throttle is no oracle either.
+        _session_audit("session_resume_throttled", transport, session_id=str(target))
+        return _err(rid, 4029, "too many resume attempts for sessions that do not exist; try again later")
     ctx = _Resume(rid, params, target)
     # Profile scope: a DEDICATED handle we own until the agent takes it; else the shared launch db.
     ctx.db, ctx.owns_db = _profile_session_db(ctx.profile_home)
@@ -923,27 +930,49 @@ def _(rid, params: dict) -> dict:
         if ctx.db is None:
             return _db_unavailable_error(rid, code=5000)
         if (resp := _resume_locate(ctx)) is not None:
+            if (resp.get("error") or {}).get("code") == 4007:
+                _note_resume_failure(login)
             return resp
         _resume_follow_tip(ctx)
         if (resp := _resume_guard(ctx)) is not None:
             return resp
         ctx.profile_resume_cwd = _str_param(ctx.found, "cwd") or _profile_configured_cwd(ctx.profile_home)
-        # Fast path: reuse a session live IN THIS PROFILE (never another profile's runtime).
+        # Fast path: reuse a session live IN THIS PROFILE (never another profile's runtime). Attaching to it
+        # as another login is audited by ``_note_foreign_login``.
         with _session_resume_lock:
             live = _find_live_session_by_key(ctx.target, ctx.profile_home)
         if live is not None:
             return _resume_reuse_live(ctx, *live)
         if ctx.lazy:
-            return _resume_lazy(ctx)
-        if ctx.eager_build:
-            return _resume_eager(ctx)
-        return _resume_deferred(ctx) if ctx.defer_history else _resume_cold(ctx)
+            resp = _resume_lazy(ctx)
+        elif ctx.eager_build:
+            resp = _resume_eager(ctx)
+        else:
+            resp = _resume_deferred(ctx) if ctx.defer_history else _resume_cold(ctx)
+        _resume_note_stored_owner(ctx, resp, transport, login)
+        return resp
     finally:
         # Refcounting alone does not release the sqlite fds: SessionDB pins ITSELF (atexit.register) once its
         # background token writer starts; only close() unregisters.
         if ctx.owns_db and ctx.db is not None:
             with contextlib.suppress(Exception):
                 ctx.db.close()
+
+
+def _resume_note_stored_owner(ctx: _Resume, resp: dict, transport, login: str | None) -> None:
+    """A parked conversation was reopened into a new live record, which is stamped with whoever reopened it.
+    Keep the login the stored row was created under a participant of that record (so its own reconnecting
+    client is not refused), and audit a reopening by a different signed-in person."""
+    owner = str((ctx.found or {}).get("user_id") or "") or None
+    sid = str(((resp or {}).get("result") or {}).get("session_id") or "")
+    session = _sessions.get(sid) if sid else None
+    if owner is None or session is None:
+        return
+    session.setdefault("attached_logins", set()).add(owner)
+    if login is not None and login != owner:
+        session["auth_user_shared"] = True
+        logger.warning("Session %s (opened by %s) was reopened by %s", ctx.target, owner, login)
+        _session_audit("session_foreign_attach", transport, session_id=str(ctx.target), owner=owner, how="resume")
 
 
 # ── cwd / workspace / live-session bookkeeping ───────────────────────
@@ -1011,7 +1040,21 @@ def _(rid, params: dict) -> dict:
     # ``_finalized`` sessions linger until the reaper pops them (they inflated the footer). Do NOT filter on
     # the WS-detached sentinel: detached is attachable until grace-reap, and ``hermes --tui`` rides stdio.
     # Keep insertion order (focused must not jump).
-    rows = [_session_live_item(sid, session, current) for sid, session in snapshot if not session.get("_finalized")]
+    # Full rows only for sessions this connection may act on (``_transport_may_access_session``). A busy
+    # session it may not act on appears as a bare row: its stored key (already listed by ``session.list``)
+    # and its status, so a bot roster can still show "working"; never its runtime id, title, preview,
+    # model or counts.
+    transport = current_transport()
+    rows = []
+    for sid, session in snapshot:
+        if session.get("_finalized"):
+            continue
+        if _transport_may_access_session(session, transport, sid=sid):
+            rows.append(_session_live_item(sid, session, current))
+        elif (status := _session_live_status(sid, session)) != "idle":
+            rows.append({"current": False, "id": "", "last_active": 0.0, "message_count": 0, "model": "",
+                         "preview": "", "session_key": _session_lookup_key(session, fallback=sid),
+                         "started_at": 0.0, "status": status, "title": ""})
     return _ok(rid, {"sessions": rows})
 
 
@@ -1112,6 +1155,8 @@ def _(rid, params: dict) -> dict:
     # rejection — _sess_nowait would log "session-scoped RPC rejected … not in memory" for a request that is
     # then fulfilled from the profile db, burying the real stale-runtime-id signal under sweep noise.
     session = _sessions.get(str(params.get("session_id") or ""))
+    if session is not None and not _caller_may_access_session_id(str(params.get("session_id") or "")):
+        return _err(rid, 4001, "session not found")
     with (_profile_db(params, writer=True) if session is None else _session_db(session)) as db:
         if db is None:
             return _db_unavailable_error(rid, code=5007)
@@ -1176,7 +1221,7 @@ def _(rid, params: dict) -> dict:
         temperature = 0.3
     if not template and not str(instructions).strip() and not str(user_input).strip():
         return _err(rid, 4030, "llm.oneshot requires a template or instructions/input")
-    session = _sessions.get(params.get("session_id") or "")
+    session = _caller_live_session(params.get("session_id") or "")
     try:
         from agent.oneshot import run_oneshot
         with (_session_profile_runtime_scope(session) if session else contextlib.nullcontext()):
@@ -1757,6 +1802,8 @@ def _(rid, params: dict) -> dict:
     for minutes); URL/code reach the TUI via ``billing.step_up.verification`` (stdout is the RPC pipe) and the
     browser opens TUI-side, never via the gateway's headless webbrowser.open."""
     sid = params.get("session_id") or ""
+    if not _caller_may_access_session_id(sid):
+        sid = ""  # route the verification code to the caller only, never into a session it may not act on
 
     def call():
         from hermes_cli.auth import step_up_nous_billing_scope
@@ -2014,6 +2061,8 @@ def _(rid, params: dict, session: dict) -> dict:
 
 @method("session.close")
 def _(rid, params: dict) -> dict:
+    if not _caller_may_access_session_id(str(params.get("session_id", "") or "")):
+        return _ok(rid, {"closed": False})  # the answer for an unknown id: nothing closed, no oracle
     with _session_resume_lock:  # lock only the ownership claim; finalization must not block resumes
         session = _pop_session_by_id(params.get("session_id", ""))
     return _ok(rid, {"closed": _teardown_popped_session(session, end_reason="tui_close")})
@@ -2336,12 +2385,17 @@ def _(rid, params: dict, session: dict) -> dict:
 
 @method("session.events.since")
 def _(rid, params: dict) -> dict:
-    """Replay events after ``last_seen`` (WS reconnect); ``truncated`` past the ring window → client refetches."""
+    """Replay events after ``last_seen`` (WS reconnect); ``truncated`` past the ring window → client refetches.
+    4001 for a connection that may not read the session (``_transport_may_access_session``)."""
     sid = str(params.get("session_id") or "")
     try:
         last_seen = int(params.get("last_seen", 0))
     except (TypeError, ValueError):
         return _err(rid, -32602, "invalid params: last_seen must be an integer")
+    if not _caller_may_access_session_id(sid):
+        # The same answer as for an unknown session: no oracle for another person's session ids.
+        logger.warning("session.events.since refused: the connection may not read session %s", sid)
+        return _err(rid, 4001, "session not found")
     from tui_gateway import event_replay as er
     frames = er.events_since(sid, last_seen)
     # ``epoch``: in-process seq — clients reset watermarks when this differs from gateway.ready's.

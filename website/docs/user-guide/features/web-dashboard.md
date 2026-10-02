@@ -158,6 +158,27 @@ The **Chat** tab embeds the full Hermes TUI (the same interface you get from `he
 
 Close the browser tab and the PTY is reaped cleanly on the server. Re-opening spawns a fresh session.
 
+#### Who can read and act on a live conversation
+
+On a dashboard that requires sign-in, a connection may read a live conversation (its events, its open
+prompts, its history) and act on it (send a message, stop or steer a turn, answer a prompt, change its
+title, close it) only when one of these holds:
+
+- it is attached to the conversation: it opened or resumed it on this connection;
+- it is signed in as the person who opened the conversation, or as someone who has joined it before (so
+  your own reconnecting app, phone or second window keeps working before it resumes);
+- it has no per-person sign-in at all (a gateway without sign-in, or the host's own terminal), where
+  everyone already shares one credential.
+
+A conversation another signed-in person can reach without meeting any of these answers exactly like one
+that does not exist. To take part in someone else's conversation, a person resumes it by its id: that
+works (shared chats are a feature), marks the conversation as shared, and is written to the dashboard
+auth audit log (`$HERMES_HOME/logs/dashboard-auth.log`, event `session_foreign_attach`). A login that keeps
+asking to resume conversations that do not exist (30 times in 10 minutes) is refused every resume for the
+rest of that window (`session_resume_throttled`). The live session list shows only the conversations you
+may act on; a busy conversation of someone else's appears only as its stored id and a status, so bot
+"working" indicators keep working. Nothing removes a person from a conversation they have joined.
+
 To point [Hermes Desktop](#connecting-hermes-desktop-to-a-remote-backend) at a dashboard running on another machine instead of its own bundled backend, see the remote-backend section below.
 
 ### Connecting Hermes Desktop to a remote backend

@@ -1225,6 +1225,8 @@ def _(rid, params: dict) -> dict:
     if (proxied := _lock_compute_host_clarify(rid, request_id, question_id, answer)) is not None:
         return proxied
     from tui_gateway import server_requests
+    if (sid := server_requests.request_session(request_id)) is not None and not _caller_may_access_session_id(sid):
+        return _err(rid, 4033, "this connection may not answer requests of that session")
     try:
         remaining = server_requests.lock_answer(request_id, question_id, answer)
     except ValueError as e:
@@ -1239,12 +1241,15 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Answer an open server→client request from a client that did not receive it (a Bot Mode room
     window answering a member's prompt mirrored from its resume snapshot). The response-frame path is
-    the norm; this is the proxy for it. ``expired`` when the request already ended."""
+    the norm; this is the proxy for it. ``expired`` when the request already ended; 4033 for a connection
+    that may not act on the request's session (``_transport_may_access_session``)."""
     request_id = str(params.get("id") or "")
     result = params.get("result")
     if not request_id or not isinstance(result, dict):
         return _err(rid, 4002, "id and an object result required")
     from tui_gateway import server_requests
+    if (refusal := server_requests.answer_problem(request_id, result)) is not None:
+        return _err(rid, *refusal)
     frame = {"jsonrpc": "2.0", "id": request_id, "result": result}
     if server_requests.resolve_response(frame) or _relay_compute_host_response(frame):
         return _ok(rid, {"status": "ok"})
@@ -1262,11 +1267,21 @@ def _approval_reply(rid, result_key, call):
         return _err(rid, 5004, str(e))
 
 
+def _approval_session_refused(rid, session: dict):
+    """4001 (as for an unknown session) when the calling connection may not act on *session*."""
+    if _transport_may_access_session(session, current_transport()):
+        return None
+    logger.warning("approval RPC refused: the connection may not act on session %s", session.get("session_key"))
+    return _err(rid, 4001, "session not found")
+
+
 @method("approval.pending")
 def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+    if refused := _approval_session_refused(rid, session):
+        return refused
     return _approval_reply(
         rid, "approvals", lambda a: a.list_gateway_approvals(session["session_key"]))
 
@@ -1276,6 +1291,8 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+    if refused := _approval_session_refused(rid, session):
+        return refused
     if not isinstance(request_id := params.get("request_id"), str) or not request_id:
         return _err(rid, 4006, "request_id required")
     return _approval_reply(
@@ -1322,6 +1339,8 @@ def _(rid, params: dict) -> dict:
         session = _approval_respond_session_fallback(params)
         if session is None:
             return err
+    if refused := _approval_session_refused(rid, session):
+        return refused
     return _approval_reply(
         rid, "resolved",
         lambda a: a.resolve_gateway_approval(

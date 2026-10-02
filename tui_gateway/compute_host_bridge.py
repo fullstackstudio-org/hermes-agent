@@ -205,6 +205,9 @@ def _relay_compute_host_response(frame: dict) -> bool:
     if located is None or not _session_uses_compute_host(located[1]):
         return False
     sid, session = located
+    if not _transport_may_access_session(session, current_transport(), sid=sid):
+        logger.warning("compute-host response refused: the connection may not act on session %s", sid)
+        return False
     with _history_lock(session):
         session.pop("_compute_host_open_request", None)
     try:
@@ -221,6 +224,8 @@ def _lock_compute_host_clarify(rid: str, request_id: str, question_id: str, answ
     if located is None or not _session_uses_compute_host(located[1]):
         return None
     sid, session = located
+    if not _transport_may_access_session(session, current_transport(), sid=sid):
+        return _err(rid, 4033, "this connection may not answer requests of that session")
     try:
         ack = _get_compute_host_supervisor().respond(
             sid, {"lock": {"request_id": request_id, "question_id": question_id, "answer": answer}})

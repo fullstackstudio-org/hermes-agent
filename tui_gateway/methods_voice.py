@@ -500,7 +500,9 @@ def _(rid, params: dict) -> dict:
     if existing_owner is not None and existing_owner is not transport:
         return refused("owned", owner_surface=existing_surface)
     try:
-        on_detect = _wake_detect_handler(transport, str(params.get("session_id") or ""),
+        # A session this connection may not act on gets no wake event in its stream or replay ring.
+        wake_sid = str(params.get("session_id") or "")
+        on_detect = _wake_detect_handler(transport, wake_sid if _caller_may_access_session_id(wake_sid) else "",
                                          wake_phrase(cfg), bool(cfg.get("start_new_session", True)))
         start_listening(on_detect, owner=transport, config=cfg,
                         external_audio=capture_mode == "client")

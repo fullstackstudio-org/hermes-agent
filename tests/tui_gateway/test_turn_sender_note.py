@@ -529,8 +529,10 @@ def test_a_person_typing_on_a_connection_without_a_login_is_not_called_automatic
     assert "started it itself" not in notes[0] and SPAN.findall(notes[0]) == ["Robin"]
 
 
+# A relay is the gateway's own dispatch and never joins the relayer to the chat, so a chat only Robin is in
+# stays Robin's: the relayed turn is unattributed and falls back to its owner, never to the relayer.
 @pytest.mark.parametrize("shared, relayer, expected", [
-    (True, SAM, None), (False, SAM, None), (False, ROBIN, ROBIN[0]),
+    (True, SAM, None), (False, SAM, ROBIN[0]), (False, ROBIN, ROBIN[0]),
 ], ids=["shared-relayed-by-sam", "single-user-relayed-by-sam", "single-user-relayed-by-its-owner"])
 def test_a_relayed_bot_message_under_isolation_never_runs_as_the_relaying_person(
         tmp_path, monkeypatch, shared, relayer, expected):

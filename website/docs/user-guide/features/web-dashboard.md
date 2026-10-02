@@ -158,26 +158,37 @@ The **Chat** tab embeds the full Hermes TUI (the same interface you get from `he
 
 Close the browser tab and the PTY is reaped cleanly on the server. Re-opening spawns a fresh session.
 
-#### Who can read and act on a live conversation
+#### Several people on one dashboard: what is and is not separated
 
-On a dashboard that requires sign-in, a connection may read a live conversation (its events, its open
-prompts, its history) and act on it (send a message, stop or steer a turn, answer a prompt, change its
-title, close it) only when one of these holds:
+Read this before you let more than one person sign in to the same dashboard. Conversations are **not
+private between people signed in to one gateway.** What the gateway does is attribute work to the right
+person and keep one person's connection from silently driving another person's *live* conversation.
 
-- it is attached to the conversation: it opened or resumed it on this connection;
-- it is signed in as the person who opened the conversation, or as someone who has joined it before (so
-  your own reconnecting app, phone or second window keeps working before it resumes);
-- it has no per-person sign-in at all (a gateway without sign-in, or the host's own terminal), where
-  everyone already shares one credential.
+**What is enforced** for the live-session calls the chat clients make (sending a message, stopping or
+steering a turn, answering a prompt, replaying events, changing a title, closing): a connection may do
+them only when it is attached to the conversation (it opened or resumed it), when it is signed in as the
+person who opened it or someone who has joined it before, or when it has no per-person sign-in at all (a
+gateway without sign-in, the host's own terminal). Anything else answers as if the conversation did not
+exist. The Chat tab here counts as the person who opened it. The live session list shows full entries
+only for conversations you may act on; another person's busy conversation appears only as its stored id
+and a status.
 
-A conversation another signed-in person can reach without meeting any of these answers exactly like one
-that does not exist. To take part in someone else's conversation, a person resumes it by its id: that
-works (shared chats are a feature), marks the conversation as shared, and is written to the dashboard
-auth audit log (`$HERMES_HOME/logs/dashboard-auth.log`, event `session_foreign_attach`). A login that keeps
-asking to resume conversations that do not exist (30 times in 10 minutes) is refused every resume for the
-rest of that window (`session_resume_throttled`). The live session list shows only the conversations you
-may act on; a busy conversation of someone else's appears only as its stored id and a status, so bot
-"working" indicators keep working. Nothing removes a person from a conversation they have joined.
+**What a signed-in person can still do** on a gateway shared with others:
+
+- read any stored conversation, including live ones, through the dashboard's session pages and their API
+  (`/api/sessions/{id}/messages`, `/export`, `/search`), without any audit record;
+- see every stored conversation's id, title and preview in the session list (`session.list`,
+  `session.most_recent`);
+- join any conversation by resuming it with that id. That is how shared chats work: it marks the
+  conversation as shared and writes `session_foreign_attach` to the dashboard auth audit log
+  (`$HERMES_HOME/logs/dashboard-auth.log`), but it is not refused;
+- delete, hide, rename or move stored conversations by id, and stop every background process.
+
+Nothing removes a person from a conversation they have joined.
+
+A login that keeps asking to resume conversations that do not exist (30 times in 10 minutes) is refused
+every resume for the rest of that window (`session_resume_throttled`, recorded once per window). That
+only slows guessing; it does not make ids secret while the session list hands them out.
 
 To point [Hermes Desktop](#connecting-hermes-desktop-to-a-remote-backend) at a dashboard running on another machine instead of its own bundled backend, see the remote-backend section below.
 

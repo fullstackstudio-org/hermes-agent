@@ -6,7 +6,7 @@ import logging
 import json
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from agent.interrupt_compat import request_hard_interrupt
 from tools.registry import tool_error
 
@@ -170,11 +170,14 @@ def _capture_gateway_steer_authority(owner_session_id: Optional[str]) -> tuple[A
 # Registry record fields never exposed to the TUI/RPC snapshot.
 _PRIVATE_RECORD_KEYS = frozenset({"agent", "owner_session_id", "owner_transport", "owner_session_record", "accepting_steer"})
 
-def list_active_subagents() -> List[Dict[str, Any]]:
+def list_active_subagents(owner_visible: Optional[Callable[[str], bool]] = None) -> List[Dict[str, Any]]:
     """Copy of the running subagent tree ({subagent_id, parent_id, depth, goal, model,
-    started_at, tool_count, status, ...}); safe from any thread."""
+    started_at, tool_count, status, ...}); safe from any thread. ``owner_visible(owner_session_id)``
+    keeps only the records whose owning session the caller may see (the gateway's per-connection rule)."""
     with _active_subagents_lock:
-        return [{k: v for k, v in r.items() if k not in _PRIVATE_RECORD_KEYS} for r in _active_subagents.values()]
+        records = list(_active_subagents.values())
+    return [{k: v for k, v in r.items() if k not in _PRIVATE_RECORD_KEYS} for r in records
+            if owner_visible is None or owner_visible(str(r.get("owner_session_id") or ""))]
 
 def _is_descendant_of(child_agent: Any, parent_agent: Any, max_hops: int = 8) -> bool:
     """True when *child_agent* sits below *parent_agent* in the spawn tree (walks the ``_delegate_parent_ref`` weakref

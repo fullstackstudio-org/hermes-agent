@@ -11,6 +11,7 @@ per-person identity (session-token mode, stdio, the server-internal credential).
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -430,3 +431,222 @@ def test_the_chat_tab_of_another_login_cannot_act_on_a_live_session_without_an_a
     assert _rpc(server, bob_tab, "request.answer", {"id": req.id, "result": {"value": "x"}})["error"]["code"] == 4033
     server._attach_session_transport(session, bob_tab)  # what resuming Alice's chat from Bob's tab does
     assert audits[-1][0] == "session_foreign_attach" and audits[-1][1]["login"] == BOB
+
+
+# ── in-process dispatch never attaches the connection it runs on ────────────────────────────
+
+
+def _relayed_submit(server, transport, sid):
+    """The real prompt.submit, as bot_relay.deliver makes it: in process, on the relaying connection."""
+    from tools.bot_relay import DeliveryAuthor
+    with server._internal_dispatch():
+        return _as(transport, server._methods["prompt.submit"], "r",
+                   {"session_id": sid, "text": "ping", "queued": True,
+                    "_turn_author": DeliveryAuthor({"id": "bot:ops", "name": "ops", "is_bot": True})})
+
+
+def test_a_relayed_dm_does_not_attach_the_relaying_connection(server, audits):
+    from tui_gateway import event_replay
+    bot_chat = _session(server, "live-ops", _WS("alice-phone", ALICE))
+    bot_chat.update(running=True, agent=None)  # mid-turn: the relayed DM is queued
+    bob = _WS("bob-desktop", BOB)
+    out = _relayed_submit(server, bob, "live-ops")
+    assert "error" not in out, out
+    assert not server._session_transport_contains(bot_chat, bob)
+    assert not any(v is bob for v in (bot_chat.get("viewers") or {}))
+    assert BOB not in (bot_chat.get("attached_logins") or set())
+    assert not [a for a in audits if a[0] == "session_foreign_attach"]
+    # Afterwards Bob's connection still may not read, receive or answer anything of that session.
+    event_replay.reset_replay_state()
+    server._emit("message.delta", "live-ops", {"text": "secret"})
+    assert bob.frames == []
+    assert _rpc(server, bob, "session.events.since", {"session_id": "live-ops", "last_seen": 0})["error"]["code"] == 4001
+    req = _open_sudo("live-ops")
+    assert _rpc(server, bob, "request.answer", {"id": req.id, "result": {"value": "x"}})["error"]["code"] == 4033
+
+
+def test_the_hosted_room_adapter_does_not_attach_the_connection_it_runs_on(server, monkeypatch):
+    """HostedRoomServerRPC._call (resume, then a local approval) on a thread bound to a client connection."""
+    from tui_gateway.hosted_room_server_rpc import HostedRoomServerRPC
+    import tools.approval as approval
+    monkeypatch.setattr(approval, "resolve_gateway_approval", lambda *a, **k: 1)
+    monkeypatch.setattr(server, "_wait_agent", lambda session, rid: None)
+    member = _session(server, "member", _WS("alice-phone", ALICE))
+    bob = _WS("bob-desktop", BOB)
+    adapter = HostedRoomServerRPC(server)
+    result = _as(bob, adapter._call, "approval.respond", {"session_id": "member", "choice": "once",
+                                                          "request_id": "ap-1"})
+    assert result == {"resolved": 1}
+    with member["history_lock"]:
+        with server._internal_dispatch():
+            _as(bob, server._rebind_live_transport, "member", member, bob)
+    assert not server._session_transport_contains(member, bob)
+    assert BOB not in (member.get("attached_logins") or set())
+
+
+# ── after the live record is gone ───────────────────────────────────────────────────────────
+
+
+def test_replay_after_the_record_is_gone_serves_its_people_only(server):
+    from tui_gateway import event_replay
+    session = _session(server, "gone", _WS("alice-phone", ALICE))
+    server._attach_session_transport(session, _WS("bob-phone", BOB))  # Bob took part
+    event_replay.reset_replay_state()
+    server._emit("message.delta", "gone", {"text": "x"})
+    server._pop_session_by_id("gone")  # closed / reaped
+    assert "gone" not in server._sessions
+    for who in (ALICE, BOB):
+        replay = _rpc(server, _WS("reconnected", who), "session.events.since", {"session_id": "gone", "last_seen": 0})
+        assert [e["type"] for e in replay["result"]["events"]] == ["message.delta"], who
+        assert replay["result"]["epoch"] == event_replay.replay_epoch()
+    stranger = _rpc(server, _WS("carol", "self_hosted:carol"), "session.events.since",
+                    {"session_id": "gone", "last_seen": 0})
+    assert stranger["error"]["code"] == 4001
+    assert "result" in _rpc(server, _WS("token", None), "session.events.since", {"session_id": "gone", "last_seen": 0})
+
+
+# ── handlers that treat an inaccessible session as absent ───────────────────────────────────
+
+
+def test_session_scoped_config_set_for_another_persons_session_is_refused(server):
+    session = _session(server, "s1", _WS("alice-phone", ALICE))
+    session["reasoning_effort"] = "low"
+    out = _rpc(server, _WS("bob", BOB), "config.set", {"session_id": "s1", "key": "reasoning", "value": "high"})
+    assert out.get("error", {}).get("code") == 4001, out
+    assert session["reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize("method, params", [
+    ("command.dispatch", {"name": "retry"}), ("command.dispatch", {"name": "undo"}),
+    ("complete.slash", {"text": "/re"}), ("complete.path", {"word": "./"}),
+    ("reload.mcp", {}), ("llm.oneshot", {"prompt": "hi"}),
+])
+def test_fallback_handlers_never_scope_to_another_persons_session(server, monkeypatch, method, params):
+    """These handlers treat "no live session" as normal; another person's session must look absent, so it
+    never lends its profile home, cwd, model or history to the caller."""
+    alice = _session(server, "s1", _WS("alice-phone", ALICE))
+    alice.update(profile_home="/profiles/alice", cwd="/home/alice/secret-project", history=[{"role": "user"}])
+    seen: list = []
+    real_scope = server._session_home_scope
+    monkeypatch.setattr(server, "_session_home_scope",
+                        lambda session=None, *a, **k: seen.append(session) or real_scope(None, *a, **k))
+    monkeypatch.setattr(server, "_session_profile_runtime_scope",
+                        lambda session: seen.append(session) or contextlib.nullcontext(), raising=False)
+    try:
+        _rpc(server, _WS("bob", BOB), method, {"session_id": "s1", **params})
+    except Exception:
+        pass  # whatever the handler does next with no session, it must not have used Alice's
+    assert all(s is not alice for s in seen)
+    assert alice["history"] == [{"role": "user"}]
+    assert _as(_WS("bob", BOB), server._caller_live_session, "s1") is None
+
+
+# ── real session.resume through the handler ────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def store(server, monkeypatch, tmp_path):
+    from hermes_state import SessionDB
+    db = SessionDB(db_path=tmp_path / "state.db")
+    monkeypatch.setattr(server, "_profile_session_db", lambda profile_home: (db, False))
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    yield db
+    db.close()
+
+
+def test_resume_of_a_live_session_by_another_person_attaches_and_is_audited(server, store, audits):
+    store.create_session("20261002_101010_abcdef", source="hermie", user_id=ALICE)
+    live = _session(server, "rt1", _WS("alice-phone", ALICE))
+    live["session_key"] = "20261002_101010_abcdef"
+    bob = _WS("bob", BOB)
+    out = _rpc(server, bob, "session.resume", {"session_id": "20261002_101010_abcdef", "omit_messages": True})
+    assert out.get("result", {}).get("session_id") == "rt1", out
+    assert server._session_transport_contains(live, bob)
+    assert [a for a in audits if a[0] == "session_foreign_attach" and a[1]["how"] == "attach"]
+
+
+def test_cold_reopen_of_a_stored_conversation_keeps_its_owner(server, store, audits):
+    store.create_session("20261002_111111_aaaaaa", source="hermie", user_id=ALICE)
+    out = _rpc(server, _WS("bob", BOB), "session.resume", {"session_id": "20261002_111111_aaaaaa", "lazy": True})
+    sid = out.get("result", {}).get("session_id")
+    assert sid in server._sessions, out
+    record = server._sessions[sid]
+    assert record.get("stored_owner") == ALICE and ALICE in record["attached_logins"]
+    assert [a for a in audits if a[0] == "session_foreign_attach" and a[1]["how"] == "resume"]
+    # Alice's own reconnecting client may replay it before resuming, and joining it is not "foreign".
+    assert "result" in _rpc(server, _WS("alice-new", ALICE), "session.events.since", {"session_id": sid, "last_seen": 0})
+    before = len(audits)
+    server._attach_session_transport(record, _WS("alice-again", ALICE))
+    assert not [a for a in audits[before:] if a[0] == "session_foreign_attach"]
+
+
+def test_a_messaging_platform_owner_is_not_a_person_joined_by_a_reopen(server, store, audits):
+    store.create_session("20261002_121212_bbbbbb", source="matrix", user_id="@someone:example.org")
+    out = _rpc(server, _WS("bob", BOB), "session.resume", {"session_id": "20261002_121212_bbbbbb", "lazy": True})
+    assert "result" in out, out
+    assert not [a for a in audits if a[0] == "session_foreign_attach"]
+
+
+def test_the_retry_answer_is_not_counted_and_the_throttle_audits_once(server, store, monkeypatch, audits):
+    monkeypatch.setattr(server, "RESUME_FAILURE_LIMIT", 2)
+    server._resume_failures.clear()
+    server._resume_throttle_noted.clear()
+    store.create_session("20261002_131313_cccccc", source="hermie", user_id=ALICE)
+    live = _session(server, "rt2", _WS("alice-phone", ALICE))
+    live["session_key"] = "20261002_131313_cccccc"
+    monkeypatch.setattr(server, "_reattach_refusal",
+                        lambda rid, sid, session: server._err(rid, 4007, "session no longer live; retry resume"))
+    alice = _WS("alice-laptop", ALICE)
+    for _ in range(5):
+        assert _rpc(server, alice, "session.resume", {"session_id": "20261002_131313_cccccc"})["error"]["code"] == 4007
+    assert not server._resume_throttled(ALICE)[0]
+    for _ in range(2):
+        _rpc(server, alice, "session.resume", {"session_id": "20261002_000000_000000"})
+    for _ in range(3):
+        assert _rpc(server, alice, "session.resume", {"session_id": "x"})["error"]["code"] == 4029
+    assert [e for e, _ in audits].count("session_resume_throttled") == 1
+    server._resume_failures.clear()
+    server._resume_throttle_noted.clear()
+
+
+def test_the_hosted_room_adapter_resumes_without_attaching_its_thread_connection(server, store):
+    from tui_gateway.hosted_room_server_rpc import HostedRoomServerRPC
+    store.create_session("20261002_141414_dddddd", source="room", user_id=ALICE)
+    live = _session(server, "rt3", _WS("alice-phone", ALICE))
+    live["session_key"] = "20261002_141414_dddddd"
+    bob = _WS("bob-desktop", BOB)
+    adapter = HostedRoomServerRPC(server)
+    result = _as(bob, lambda: adapter.resume(profile=None, session_id="20261002_141414_dddddd", source="room"))
+    assert result.get("session_id") == "rt3"
+    assert not server._session_transport_contains(live, bob)
+
+
+def test_delegation_status_lists_only_children_of_accessible_sessions(server, monkeypatch):
+    import tools.delegate_tool_registry as registry
+    _session(server, "s1", _WS("alice-phone", ALICE))
+    monkeypatch.setattr(registry, "_active_subagents", {
+        "a": {"subagent_id": "a", "goal": "alice's task", "owner_session_id": "s1"},
+        "b": {"subagent_id": "b", "goal": "someone else's task", "owner_session_id": "elsewhere"}})
+    alice = _rpc(server, _WS("alice-laptop", ALICE), "delegation.status", {})["result"]["active"]
+    bob = _rpc(server, _WS("bob", BOB), "delegation.status", {})["result"]["active"]
+    token = _rpc(server, _WS("token", None), "delegation.status", {})["result"]["active"]
+    assert [r["subagent_id"] for r in alice] == ["a"] and bob == [] and len(token) == 2
+    assert all("owner_session_id" not in r for r in alice + token)
+
+
+def test_wake_start_never_routes_into_another_persons_session(server, monkeypatch):
+    import tools.wake_word as wake
+    captured: list = []
+    monkeypatch.setattr(server, "_wake_detect_handler", lambda transport, sid, *a: captured.append(sid) or (lambda: None))
+    monkeypatch.setattr(server, "_wake_probe", lambda cfg, params, surface: (
+        "server", {"available": True, "phrase": "hey hermes", "provider": "test"}))
+    monkeypatch.setattr(server, "_wake_owner_snapshot", lambda: (None, ""))
+    monkeypatch.setattr(wake, "load_wake_word_config", lambda: {"enabled": True, "phrase": "hey hermes"})
+    monkeypatch.setattr(wake, "wake_phrase", lambda cfg: "hey hermes")
+    monkeypatch.setattr(wake, "wake_surface_enabled", lambda surface, cfg=None: True)
+    monkeypatch.setattr(wake, "start_listening", lambda *a, **k: None)
+    _session(server, "s1", _WS("alice-phone", ALICE))
+    for transport, expected in ((_WS("bob", BOB), ""), (_WS("alice-laptop", ALICE), "s1")):
+        captured.clear()
+        _rpc(server, transport, "wake.start", {"surface": "gui", "session_id": "s1"})
+        assert captured == [expected], (transport, captured)

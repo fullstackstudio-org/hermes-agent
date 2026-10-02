@@ -65,6 +65,31 @@ def _internal_dispatch():
         _INTERNAL_DISPATCH.reset(token)
 
 
+#: Who could access a live session that has since been dropped (closed, reaped, evicted): its creator and
+#: everyone who attached, kept so a reconnecting owner or participant still gets the replay ring's tail and
+#: the epoch from ``session.events.since`` (a client turns a refusal into "no gap" and would never refetch).
+#: Bounded like the replay ring itself; the oldest entries go first.
+DROPPED_ACCESS_MAX = 512
+_dropped_access: OrderedDict = OrderedDict()
+_dropped_access_lock = threading.Lock()
+
+
+def _remember_dropped_session(sid: str, session: dict | None) -> None:
+    """Called when *sid* leaves the live registry."""
+    if not sid or not session:
+        return
+    logins = set(session.get("attached_logins") or ())
+    if (creator := _session_auth_user_id(session)) is not None:
+        logins.add(creator)
+    if not logins:
+        return
+    with _dropped_access_lock:
+        _dropped_access[sid] = frozenset(logins)
+        _dropped_access.move_to_end(sid)
+        while len(_dropped_access) > DROPPED_ACCESS_MAX:
+            _dropped_access.popitem(last=False)
+
+
 def _record_attached_login(session: dict, transport) -> None:
     """Remember every signed-in login that ever attached to *session* (never pruned, like ``auth_user_shared``):
     a person who took part may reconnect and replay or answer before their new socket has resumed."""
@@ -87,8 +112,17 @@ def _transport_may_access_session(session: dict | None, transport, *, sid: str =
     if transport is None or _INTERNAL_DISPATCH.get():
         return True
     login = _transport_auth_user_id(transport)
+    # Rule B below trusts EVERY transport without a per-person identity: session-token / loopback clients,
+    # stdio, but also non-client objects that can be bound as the current transport (a fan-out, the detached
+    # drop sentinel, the slot a turn thread runs with). Nothing in a turn calls this today; a future
+    # dispatcher that runs session RPCs from inside a turn must bind None or use ``_internal_dispatch``
+    # deliberately, never inherit the slot. The ContextVar isolation this relies on is per thread/task;
+    # revisit if the gateway ever runs on free-threaded Python with shared contexts.
     if session is None:
-        return not sid or login is None
+        if not sid or login is None:
+            return True
+        with _dropped_access_lock:
+            return login in _dropped_access.get(sid, ())
     if (_session_transport_contains(session, transport)
             or any(viewer is transport for viewer in list(session.get("viewers") or {}))):
         return True
@@ -138,6 +172,7 @@ _RESUME_FAILURE_KEYS_MAX = 10_000
 # (imported modules are not published).
 _resume_failures: OrderedDict = OrderedDict()
 _resume_failures_lock = threading.Lock()
+_resume_throttle_noted: dict = {}  # login -> monotonic time until which its refusal is already audited
 
 
 def _resume_failure_count(login: str, now: float) -> int:
@@ -153,14 +188,23 @@ def _resume_failure_count(login: str, now: float) -> int:
     return len(window)
 
 
-def _resume_throttled(login: str | None) -> bool:
-    """Whether *login* has used up its failed-resume budget. Connections without a per-person identity are
-    never throttled (one trust domain)."""
+def _resume_throttled(login: str | None) -> tuple[bool, bool]:
+    """``(throttled, first_in_window)`` for *login*: whether it has used up its failed-resume budget, and
+    whether this is the first refusal of the window (audit once per window, not per refused request).
+    Connections without a per-person identity are never throttled (one trust domain)."""
     import time
     if login is None:
-        return False
+        return False, False
+    now = time.monotonic()
     with _resume_failures_lock:
-        return _resume_failure_count(login, time.monotonic()) >= RESUME_FAILURE_LIMIT
+        if _resume_failure_count(login, now) < RESUME_FAILURE_LIMIT:
+            return False, False
+        first = _resume_throttle_noted.get(login, 0.0) <= now
+        if first:
+            _resume_throttle_noted[login] = now + RESUME_FAILURE_WINDOW_S
+            while len(_resume_throttle_noted) > _RESUME_FAILURE_KEYS_MAX:
+                _resume_throttle_noted.pop(next(iter(_resume_throttle_noted)))
+        return True, first
 
 
 def _note_resume_failure(login: str | None) -> None:
@@ -200,8 +244,13 @@ def _note_foreign_login(session: dict, transport) -> None:
         session["auth_user_shared"] = True
         logger.warning("Session %s keeps the user id %s it was created with; a client logged in as %s attached",
                        session.get("session_key"), creator or "(none)", attaching)
-        _session_audit("session_foreign_attach", transport, session_id=str(session.get("session_key") or ""),
-                       owner=creator or "", how="attach")
+        # Audit a person joining someone else's conversation. The owner is the login the STORED conversation
+        # was opened under when the record is a reopening (whoever reopened it stamped the record), so the
+        # owner coming back is not "foreign".
+        owner = session.get("stored_owner") or creator
+        if owner != attaching:
+            _session_audit("session_foreign_attach", transport, session_id=str(session.get("session_key") or ""),
+                           owner=owner or "", how="attach")
 
 
 def _session_auth_logins(session: dict | None) -> set[str]:

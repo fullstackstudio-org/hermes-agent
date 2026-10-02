@@ -495,6 +495,7 @@ def _pop_session_by_id(sid: str) -> dict | None:
     close/reaper no-ops). Separate from ``_teardown_session``: slow finalization must not run under the resume lock."""
     with _sessions_lock:
         session = _sessions.pop(sid, None)
+        _remember_dropped_session(sid, session)
         if session is not None:
             from hermes_constants import get_hermes_home
 
@@ -703,6 +704,11 @@ def _rebind_live_transport(sid: str, session: dict, transport: Transport) -> Non
     """Attach a live peer without displacing existing subscribers (caller holds ``history_lock``).
     Subagent control authority needs no bookkeeping here: it resolves against ``session["transport"]``
     at RPC time (``tools.delegate_tool_registry._subagent_transport_matches``)."""
+    if _INTERNAL_DISPATCH.get() and _transport_is_live_peer(transport):
+        # The gateway's own in-process dispatch (a relayed bot DM, a hosted room) runs on whichever client
+        # connection's context it was started from; that connection did not open this session and must not
+        # become a peer, a viewer or a participant of it.
+        return
     if transport is not _detached_ws_transport and _transport_is_dead(transport):
         # The rebinding socket already closed: its disconnect cleanup ran before this late RPC (a
         # resume-then-drop burst), so nothing will detach it again. The client is NOT back — re-arm the

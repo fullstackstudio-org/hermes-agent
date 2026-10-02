@@ -918,10 +918,12 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4006, "session_id required")
     transport = current_transport()
     login = _transport_auth_user_id(transport)
-    if _resume_throttled(login):
+    throttled, first_in_window = _resume_throttled(login)
+    if throttled:
         # Too many failed lookups: refuse every resume by this login for the rest of the window, hits included,
-        # so the throttle is no oracle either.
-        _session_audit("session_resume_throttled", transport, session_id=str(target))
+        # so the throttle is no oracle either. Audited once per window.
+        if first_in_window:
+            _session_audit("session_resume_throttled", transport, session_id=str(target))
         return _err(rid, 4029, "too many resume attempts for sessions that do not exist; try again later")
     ctx = _Resume(rid, params, target)
     # Profile scope: a DEDICATED handle we own until the agent takes it; else the shared launch db.
@@ -930,7 +932,9 @@ def _(rid, params: dict) -> dict:
         if ctx.db is None:
             return _db_unavailable_error(rid, code=5000)
         if (resp := _resume_locate(ctx)) is not None:
-            if (resp.get("error") or {}).get("code") == 4007:
+            # Only "no such session" counts. A lookup that found the row and then answered "session no longer
+            # live; retry resume" (also 4007, _reattach_refusal) is a normal race, not a guess.
+            if (resp.get("error") or {}).get("code") == 4007 and ctx.found is None:
                 _note_resume_failure(login)
             return resp
         _resume_follow_tip(ctx)
@@ -963,12 +967,23 @@ def _resume_note_stored_owner(ctx: _Resume, resp: dict, transport, login: str | 
     """A parked conversation was reopened into a new live record, which is stamped with whoever reopened it.
     Keep the login the stored row was created under a participant of that record (so its own reconnecting
     client is not refused), and audit a reopening by a different signed-in person."""
-    owner = str((ctx.found or {}).get("user_id") or "") or None
+    from gateway.config import Platform
+    from gateway.session_context import NON_MESSAGING_SESSION_SURFACES
+    found = ctx.found or {}
+    owner = str(found.get("user_id") or "") or None
+    # A messaging platform stores its own user ids on its rows (source = the platform: a Telegram number,
+    # a Matrix ``@user:server``); only a gateway login (``<provider>:<id>`` on any other row, the apps'
+    # own sources included) is a person who can be "someone else" here.
+    messaging = {platform.value for platform in Platform} - NON_MESSAGING_SESSION_SURFACES
+    if owner is not None and (":" not in owner or str(found.get("source") or "").strip().lower() in messaging):
+        owner = None
     sid = str(((resp or {}).get("result") or {}).get("session_id") or "")
     session = _sessions.get(sid) if sid else None
     if owner is None or session is None:
         return
-    session.setdefault("attached_logins", set()).add(owner)
+    with _session_transport_lock:
+        session.setdefault("attached_logins", set()).add(owner)
+        session["stored_owner"] = owner
     if login is not None and login != owner:
         session["auth_user_shared"] = True
         logger.warning("Session %s (opened by %s) was reopened by %s", ctx.target, owner, login)
@@ -2273,7 +2288,8 @@ _correction_method("session.redirect", "redirect", "redirected",
 @method("delegation.status")
 def _(rid, params: dict) -> dict:
     from tools import delegate_tool as dt
-    return _ok(rid, {"active": dt.list_active_subagents(), "paused": dt.is_spawn_paused(),
+    # Only children of sessions this connection may see: goals and lineage are another person's work.
+    return _ok(rid, {"active": dt.list_active_subagents(_caller_may_access_session_key), "paused": dt.is_spawn_paused(),
                      "max_spawn_depth": dt._get_max_spawn_depth(),
                      "max_concurrent_children": dt._get_max_concurrent_children()})
 

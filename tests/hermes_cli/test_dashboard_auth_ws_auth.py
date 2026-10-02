@@ -25,7 +25,9 @@ from hermes_cli.dashboard_auth import clear_providers, register_provider
 from hermes_cli.dashboard_auth.ws_tickets import (
     _reset_for_tests,
     consume_internal_credential,
+    consume_pty_credential,
     internal_ws_credential,
+    mint_pty_credential,
     mint_ticket,
 )
 from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
@@ -431,20 +433,18 @@ class TestSidecarUrl:
         assert f"token={web_server._SESSION_TOKEN}" in url
         assert "ticket=" not in url
 
-    def test_gated_uses_internal_credential(self, gated_app):
-        url = _web_server_chat._build_sidecar_url("ch-1")
+    def test_gated_uses_the_ptys_own_credential(self, gated_app):
+        """Gated: the PTY's credential, carrying the login that opened the Chat tab, multi-use so the child
+        can reconnect /api/pub; without one there is no URL (the process-wide credential is never handed
+        to a child)."""
+        assert _web_server_chat._build_sidecar_url("ch-1") is None
+        cred = mint_pty_credential(user_id="u1", provider="stub", user_name="Robin")
+        url = _web_server_chat._build_sidecar_url("ch-1", cred)
         assert url is not None
-        assert "token=" not in url
-        assert "ticket=" not in url
-        assert "internal=" in url
-        # The value should be the live process-lifetime internal credential,
-        # multi-use so the child can reconnect /api/pub.
-        cred = url.split("internal=")[1].split("&")[0]
-        info = consume_internal_credential(cred)
-        assert info["user_id"] == "server-internal"
-        assert info["provider"] == "server-internal"
-        # Multi-use: a second consume still succeeds (unlike a ticket).
-        assert consume_internal_credential(cred)["provider"] == "server-internal"
+        assert "token=" not in url and "ticket=" not in url and "internal=" not in url
+        assert url.split("pty=")[1].split("&")[0] == cred
+        assert consume_pty_credential(cred) == {"user_id": "u1", "provider": "stub", "user_name": "Robin"}
+        assert consume_pty_credential(cred)["user_id"] == "u1"  # multi-use, unlike a ticket
 
     def test_no_bound_host_returns_none(self, gated_app):
         web_server.app.state.bound_host = None
@@ -465,14 +465,13 @@ class TestGatewayWsUrl:
 
 
     def test_gated_credential_matches_sidecar(self, gated_app):
-        """Both server-internal builders share one process credential, so a
-        single value authenticates /api/ws and /api/pub alike."""
-        gw = _web_server_chat._build_gateway_ws_url()
-        sc = _web_server_chat._build_sidecar_url("ch-1")
+        """Both builders carry the same PTY's credential, so one value authenticates /api/ws and /api/pub."""
+        cred = mint_pty_credential(user_id="u1", provider="stub")
+        gw = _web_server_chat._build_gateway_ws_url(cred)
+        sc = _web_server_chat._build_sidecar_url("ch-1", cred)
         assert gw is not None and sc is not None
-        gw_cred = gw.split("internal=")[1].split("&")[0]
-        sc_cred = sc.split("internal=")[1].split("&")[0]
-        assert gw_cred == sc_cred
+        assert gw.split("pty=")[1].split("&")[0] == sc.split("pty=")[1].split("&")[0] == cred
+        assert _web_server_chat._build_gateway_ws_url() is None
 
 
 
@@ -496,6 +495,18 @@ class TestWsIdentityCarriesTheDisplayName:
 
         assert _web_server_chat._ws_auth_ok(ws) is True
         assert ws._hermes_auth_identity == {"user_id": "u1", "provider": "stub"}
+
+    def test_a_pty_credential_is_the_login_that_opened_the_pty(self, gated_app):
+        """The Chat tab's PTY child authenticates as the person who opened it, so the gateway's access
+        rules, throttle and audit apply to it; a revoked value is refused."""
+        from hermes_cli.dashboard_auth.ws_tickets import revoke_pty_credential
+        cred = mint_pty_credential(user_id="u2", provider="stub", user_name="Sam")
+        ws = _fake_ws(query={"pty": cred}, path="/api/ws")
+        assert _web_server_chat._ws_auth_ok(ws) is True
+        assert ws._hermes_auth_identity == {"user_id": "u2", "provider": "stub", "user_name": "Sam"}
+        revoke_pty_credential(cred)
+        assert _web_server_chat._ws_auth_ok(_fake_ws(query={"pty": cred}, path="/api/ws")) is False
+        assert _web_server_chat._ws_auth_ok(_fake_ws(query={"pty": "made-up"}, path="/api/ws")) is False
 
     def test_the_internal_credential_names_no_person(self, gated_app):
         """The PTY child's server-internal credential is not a login; it must not

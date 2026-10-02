@@ -411,3 +411,22 @@ def test_reopening_a_parked_conversation_keeps_its_owner_a_participant(server, a
     assert ALICE in session["attached_logins"] and session["auth_user_shared"] is True
     assert audits[-1][0] == "session_foreign_attach" and audits[-1][1]["how"] == "resume"
     assert server._transport_may_access_session(session, _WS("alice-phone", ALICE), sid="s9")
+
+
+# ── the dashboard Chat tab carries its login ────────────────────────────────────────────────
+
+
+def test_the_chat_tab_of_another_login_cannot_act_on_a_live_session_without_an_audited_attach(server, audits):
+    """The Chat tab's PTY child authenticates with a per-PTY credential carrying the login that opened it
+    (hermes_cli/dashboard_auth/ws_tickets.py), not with an identity that names nobody: rule B no longer
+    covers it, so Bob's tab is refused on Alice's session and joining it is audited."""
+    from hermes_cli.dashboard_auth.ws_tickets import consume_pty_credential, mint_pty_credential
+    session = _session(server, "s1", _WS("alice-phone", ALICE))
+    bob_tab = _WS("bob-chat-tab", None)
+    bob_tab.auth_identity = consume_pty_credential(mint_pty_credential(user_id="bob", provider="self_hosted"))
+    assert server._transport_auth_user_id(bob_tab) == BOB
+    assert _rpc(server, bob_tab, "session.events.since", {"session_id": "s1", "last_seen": 0})["error"]["code"] == 4001
+    req = _open_sudo("s1")
+    assert _rpc(server, bob_tab, "request.answer", {"id": req.id, "result": {"value": "x"}})["error"]["code"] == 4033
+    server._attach_session_transport(session, bob_tab)  # what resuming Alice's chat from Bob's tab does
+    assert audits[-1][0] == "session_foreign_attach" and audits[-1][1]["login"] == BOB

@@ -55,6 +55,16 @@ class PtySession:
         self._attach_generation = 0
         self._drain_task: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
+        # Run once when the PTY ends (child exit, reap, shutdown): e.g. revoking the PTY's credential.
+        self.on_end: list[Callable[[], None]] = []
+
+    def _ended(self) -> None:
+        callbacks, self.on_end = self.on_end, []
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                pass
 
     async def start(self) -> None:
         self._drain_task = asyncio.create_task(self._drain())
@@ -65,6 +75,7 @@ class PtySession:
             chunk = await loop.run_in_executor(None, self.bridge.read, self._read_timeout)
             if chunk is None:                       # EOF — the agent process exited
                 self.alive = False
+                self._ended()
                 await _close_ws(self._ws, WS_CLOSE_PROCESS_EXITED)
                 return
             if not chunk:                            # idle tick
@@ -135,6 +146,7 @@ class PtySession:
 
     async def close(self) -> None:
         self.alive = False
+        self._ended()
         if self._drain_task is not None:
             self._drain_task.cancel()
             try:

@@ -250,7 +250,7 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
         # that don't bring in the dashboard_auth layer.
         from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
         from hermes_cli.dashboard_auth.ws_tickets import (
-            TicketInvalid, consume_internal_credential, consume_ticket)
+            TicketInvalid, consume_internal_credential, consume_pty_credential, consume_ticket)
 
         def _reject(reason: str) -> None:
             audit_log(
@@ -269,6 +269,16 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
             if user_name := str(info.get("user_name") or "").strip():
                 identity["user_name"] = user_name
             ws._hermes_auth_identity = identity
+
+        pty = ws.query_params.get("pty", "")
+        if pty:
+            # The embedded Chat tab's PTY child: the login that opened that PTY, for its lifetime.
+            try:
+                _stamp_identity(consume_pty_credential(pty))
+                return None, "pty"
+            except TicketInvalid as exc:
+                _reject(f"pty: {exc}")
+                return "pty_invalid", "pty"
 
         internal = ws.query_params.get("internal", "")
         if internal:
@@ -320,7 +330,8 @@ def _ws_auth_ok(ws: "WebSocket") -> bool:
 def _resolve_chat_argv(
     resume: Optional[str] = None, sidecar_url: Optional[str] = None, profile: Optional[str] = None,
     active_session_file: Optional[str] = None,
-    workspace_cwd: Optional[str] = None) -> tuple[list[str], Optional[str], Optional[dict]]:
+    workspace_cwd: Optional[str] = None,
+    pty_credential: Optional[str] = None) -> tuple[list[str], Optional[str], Optional[dict]]:
     """Resolve the argv + cwd + env for the chat PTY (what ``hermes --tui`` runs).
 
     Tests monkeypatch this with a tiny fake command.  Env contract: resume goes
@@ -402,7 +413,7 @@ def _resolve_chat_argv(
 
     # Without the attach URL, gatewayClient spawns its own `tui_gateway.entry`,
     # which inherits the profile HERMES_HOME set above.
-    if profile_dir is None and (gateway_ws_url := _build_gateway_ws_url()):
+    if profile_dir is None and (gateway_ws_url := _build_gateway_ws_url(pty_credential)):
         env["HERMES_TUI_GATEWAY_URL"] = gateway_ws_url
 
     return list(argv), str(cwd) if cwd else None, env
@@ -426,13 +437,14 @@ def _resolve_client_ws_host() -> Optional[str]:
     return "127.0.0.1" if host in _WILDCARD_HOSTS else host
 
 
-def _server_internal_ws_url(path: str, **extra_qs) -> Optional[str]:
-    """``ws://<host>:<port><path>?<auth>&<extra>`` for server-spawned WS clients,
-    or None when unbound.
+def _server_internal_ws_url(path: str, pty_credential: Optional[str] = None, **extra_qs) -> Optional[str]:
+    """``ws://<host>:<port><path>?<auth>&<extra>`` for the embedded-chat PTY child, or None when unbound.
 
-    Gated mode uses the process-lifetime internal credential, NOT a single-use
-    browser ticket: the child reads the URL once and reuses it on every
-    reconnect, and a 30s-TTL ticket can expire before a slow cold boot dials.
+    Gated mode uses the PTY's own credential (``ws_tickets.mint_pty_credential``, bound to the login that
+    opened the Chat tab), NOT a single-use browser ticket: the child reads the URL once and reuses it on
+    every reconnect, and a 30s-TTL ticket can expire before a slow cold boot dials. Without one (no login
+    behind the PTY) there is no URL and the child runs its own gateway; the process-wide internal
+    credential is never handed out, because a child's environment is readable by other processes.
     """
     from hermes_cli.web_server import _SESSION_TOKEN, app
     host = _resolve_client_ws_host()
@@ -441,28 +453,29 @@ def _server_internal_ws_url(path: str, **extra_qs) -> Optional[str]:
         return None
     netloc = f"[{host}]:{port}" if ":" in host and not host.startswith("[") else f"{host}:{port}"
     if getattr(app.state, "auth_required", False):
-        from hermes_cli.dashboard_auth.ws_tickets import internal_ws_credential
-
-        auth = {"internal": internal_ws_credential()}
+        if not pty_credential:
+            return None
+        auth = {"pty": pty_credential}
     else:
         auth = {"token": _SESSION_TOKEN}
     return f"ws://{netloc}{path}?{urllib.parse.urlencode({**auth, **extra_qs})}"
 
 
-def _build_gateway_ws_url() -> Optional[str]:
+def _build_gateway_ws_url(pty_credential: Optional[str] = None) -> Optional[str]:
     """ws:// URL the PTY child attaches to for JSON-RPC gateway traffic."""
-    return _server_internal_ws_url("/api/ws")
+    return _server_internal_ws_url("/api/ws", pty_credential)
 
 
-def _build_sidecar_url(channel: str) -> Optional[str]:
+def _build_sidecar_url(channel: str, pty_credential: Optional[str] = None) -> Optional[str]:
     """ws:// URL the PTY child publishes events to, or None when unbound."""
-    return _server_internal_ws_url("/api/pub", channel=channel)
+    return _server_internal_ws_url("/api/pub", pty_credential, channel=channel)
 
 
 async def _resolve_chat_argv_async(
     resume: Optional[str] = None, sidecar_url: Optional[str] = None, profile: Optional[str] = None,
     active_session_file: Optional[str] = None,
-    workspace_cwd: Optional[str] = None) -> tuple[list[str], Optional[str], Optional[dict]]:
+    workspace_cwd: Optional[str] = None,
+    pty_credential: Optional[str] = None) -> tuple[list[str], Optional[str], Optional[dict]]:
     """Resolve chat argv off the event loop (it may run ``npm run build``); the
     async lock keeps one-build-at-a-time without parking worker threads."""
     from hermes_cli.web_server import _get_chat_argv_lock, app
@@ -471,6 +484,8 @@ async def _resolve_chat_argv_async(
         kwargs["active_session_file"] = active_session_file
     if workspace_cwd is not None:
         kwargs["workspace_cwd"] = workspace_cwd
+    if pty_credential is not None:
+        kwargs["pty_credential"] = pty_credential
 
     async with _get_chat_argv_lock(app):
         return await asyncio.to_thread(_resolve_chat_argv, **kwargs)

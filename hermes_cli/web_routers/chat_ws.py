@@ -430,6 +430,27 @@ async def _pty_fail(ws: WebSocket, exc: BaseException) -> None:
     await ws.close(code=1011)
 
 
+def _mint_pty_credential_for(ws: WebSocket) -> tuple[Optional[str], Optional[str]]:
+    """``(credential, login)`` for a gated ``/api/pty`` opened by a signed-in person, else ``(None, None)``
+    (session-token / loopback mode keeps the shared token: one trust domain)."""
+    from hermes_cli.web_server import app
+    from tui_gateway.methods_browser_control import _is_authenticated_identity
+    identity = getattr(ws, "_hermes_auth_identity", None)
+    if (not getattr(app.state, "auth_required", False) or not isinstance(identity, dict)
+            or not _is_authenticated_identity(identity)):
+        return None, None
+    from hermes_cli.dashboard_auth.ws_tickets import mint_pty_credential
+    credential = mint_pty_credential(user_id=str(identity["user_id"]), provider=str(identity["provider"]),
+                                     user_name=str(identity.get("user_name") or ""))
+    return credential, f"{identity['provider']}:{identity['user_id']}"
+
+
+def _revoke(pty_credential: Optional[str]) -> None:
+    if pty_credential:
+        from hermes_cli.dashboard_auth.ws_tickets import revoke_pty_credential
+        revoke_pty_credential(pty_credential)
+
+
 @router.websocket("/api/pty")
 async def pty_ws(ws: WebSocket) -> None:
     from hermes_cli.web_server_chat import PTY_REGISTRY, PtyBridge, PtyUnavailableError, _PTY_BRIDGE_AVAILABLE, _RESIZE_RE
@@ -454,8 +475,11 @@ async def pty_ws(ws: WebSocket) -> None:
     raw_resume = ws.query_params.get("resume") or None
     resume = raw_resume
     profile = ws.query_params.get("profile") or None
+    # Gated: this PTY's child talks to the gateway as the person who opened it (a credential of its own,
+    # revoked when the PTY ends), never as a process-wide identity that names nobody.
+    pty_credential, login = _mint_pty_credential_for(ws)
     channel = _channel_or_close_code(ws)
-    sidecar_url = _build_sidecar_url(channel) if channel else None
+    sidecar_url = _build_sidecar_url(channel, pty_credential) if channel else None
     force_fresh = (ws.query_params.get("fresh") or "").strip().lower() in {"1", "true", "yes", "on"}
     active_session_file: Optional[Path] = None
 
@@ -477,6 +501,8 @@ async def pty_ws(ws: WebSocket) -> None:
                 await ws.send_json({"type": "resume", "id": resume})
 
     resolve_kwargs = {"resume": resume, "sidecar_url": sidecar_url, "profile": profile}
+    if pty_credential is not None:
+        resolve_kwargs["pty_credential"] = pty_credential
     if active_session_file is not None:
         resolve_kwargs["active_session_file"] = str(active_session_file)
     # A picked workspace only applies to a FRESH chat; a resumed session keeps its own cwd.
@@ -485,6 +511,7 @@ async def pty_ws(ws: WebSocket) -> None:
         try:
             workspace_cwd = resolve_chat_cwd(ws.query_params.get("cwd"))
         except HTTPException as exc:  # dead/relative path: fail closed, never the launch dir
+            _revoke(pty_credential)
             await _pty_fail(ws, exc)
             return
         if workspace_cwd:
@@ -493,9 +520,11 @@ async def pty_ws(ws: WebSocket) -> None:
     try:
         argv, cwd, env = await _resolve_chat_argv_async(**resolve_kwargs)
     except HTTPException as exc:  # unknown/invalid profile
+        _revoke(pty_credential)
         await _pty_fail(ws, exc)
         return
     except SystemExit as exc:  # _make_tui_argv sys.exit(1)s when node/npm is missing
+        _revoke(pty_credential)
         await _pty_fail(ws, exc)
         return
 
@@ -506,29 +535,41 @@ async def pty_ws(ws: WebSocket) -> None:
     if attach_token is not None and (registry_resume or profile):
         # Key explicit resumes on their canonical target, never the active-session fallback.
         attach_token = f"{attach_token}\0{profile or ''}\0{registry_resume or ''}"
+    if attach_token is not None and login:
+        # A kept-alive PTY talks to the gateway as the login that spawned it: another login presenting the
+        # same attach token gets a PTY of its own, never that one.
+        attach_token = f"{login}\0{attach_token}"
 
     def _spawn():
         return PtyBridge.spawn(argv, cwd=cwd, env=env)
 
     if attach_token is None:
-        # Legacy path: 1:1 socket<->PTY, killed on disconnect.
+        # Legacy path: 1:1 socket<->PTY, killed on disconnect; the credential ends with it.
         try:
-            bridge = _spawn()
-        except PtyUnavailableError as exc:
-            await _pty_fail(ws, exc)
-            return
-        except (FileNotFoundError, OSError) as exc:
-            await _pty_fail(ws, exc)
-            return
-        await _legacy_pump(ws, bridge)
+            try:
+                bridge = _spawn()
+            except PtyUnavailableError as exc:
+                await _pty_fail(ws, exc)
+                return
+            except (FileNotFoundError, OSError) as exc:
+                await _pty_fail(ws, exc)
+                return
+            await _legacy_pump(ws, bridge)
+        finally:
+            _revoke(pty_credential)
         return
 
     # Keep-alive path: the PTY outlives this socket; reattach by token.
     try:
         session, _created = await PTY_REGISTRY.attach_or_spawn(attach_token, spawn=_spawn)
     except (PtyUnavailableError, FileNotFoundError, OSError, RegistryFull) as exc:
+        _revoke(pty_credential)
         await _pty_fail(ws, exc)
         return
+    if _created:
+        session.on_end.append(lambda: _revoke(pty_credential))
+    else:
+        _revoke(pty_credential)  # reattached to a PTY that already runs with its own credential
 
     # A fresh xterm can't rebuild the TUI from an arbitrary tail of alternate-
     # screen differential output; reused PTYs emit a full frame after replay.

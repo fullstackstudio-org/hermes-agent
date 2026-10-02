@@ -242,7 +242,9 @@ class ConfirmRequestParams(ServerRequestParams):
     """Built and bounded by the gateway (``tui_gateway/confirm.py``), never passed through from the agent:
     control and format characters are stripped, lengths are capped, and every string is PLAIN TEXT — a
     client renders it verbatim, never as markdown or HTML. Button wording is the client's own, not the
-    agent's. Sent only to connections whose ``client.capabilities`` listed ``level`` under ``confirm``."""
+    agent's. The text is the AGENT's own words: a client marks it as such and never lets it style its frame.
+    Sent only to connections attached to the session whose ``client.capabilities`` listed ``level`` under
+    ``confirm``; only such a connection, still attached, may answer."""
 
     title: str = Field(min_length=1, max_length=CONFIRM_TITLE_MAX)
     summary: str = Field(min_length=1, max_length=CONFIRM_SUMMARY_MAX)

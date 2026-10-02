@@ -16,8 +16,10 @@ What this module adds on top of ``server_requests.send_gated``:
 - ``verified`` decided by the gateway from the level, never taken from the client;
 - a per-conversation rate limit: one open confirmation at a time and at most
   :data:`MAX_PER_WINDOW` sent per :data:`WINDOW_SECONDS`;
-- one audit log line per request and per outcome (conversation, level, outcome, method — never the
-  title, summary or detail).
+- one audit record per request and per outcome in the dashboard auth audit log
+  (``$HERMES_HOME/logs/dashboard-auth.log``, events ``confirm_request`` / ``confirm_outcome``): session,
+  request id, level, the login the turn acts for, the connections reached, outcome, method, reason, and the
+  login and peer address of the connection whose answer settled it — never the title, summary or detail.
 
 Extension points for a verified level (each is one method on :class:`Level`):
 
@@ -125,18 +127,36 @@ class ConfirmParamsError(ValueError):
 # ── text ──────────────────────────────────────────────────────────────────────────────────────
 
 
+# Letters that render as nothing (Hangul fillers, the blank Braille pattern): text built from them looks
+# empty or hides where a line really ends.
+_INVISIBLE_LETTERS = frozenset({"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800"})
+_LINE_BREAKS = frozenset({"\n", "\u2028", "\u2029"})
+#: At most this many combining marks (Mn, Me) on one base character; more stack into unreadable glyphs.
+MAX_COMBINING_MARKS = 4
+
+
 def _clean(text: object, *, multiline: bool) -> str:
     """Plain text safe to show verbatim: line/paragraph separators become newlines, every other control
     (Cc), format (Cf: bidi overrides and isolates, zero-width characters), surrogate (Cs) and private-use
-    (Co) code point is dropped. A single-line field collapses all whitespace to single spaces."""
+    (Co) code point is dropped, as are invisible letters, and combining marks beyond
+    :data:`MAX_COMBINING_MARKS` per base character. A single-line field collapses all whitespace to single
+    spaces."""
     raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     out = []
+    marks = 0
     for ch in raw:
-        if ch in "\n  ":
+        category = unicodedata.category(ch)
+        if category in ("Mn", "Me"):
+            marks += 1
+            if marks <= MAX_COMBINING_MARKS:
+                out.append(ch)
+            continue
+        marks = 0
+        if ch in _LINE_BREAKS:
             out.append("\n" if multiline else " ")
         elif ch == "\t":
             out.append(" ")
-        elif unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co"):
+        elif category in ("Cc", "Cf", "Cs", "Co") or ch in _INVISIBLE_LETTERS:
             continue
         else:
             out.append(ch)
@@ -239,10 +259,53 @@ def reset_for_tests() -> None:
 # ── request ───────────────────────────────────────────────────────────────────────────────────
 
 
-def _log_outcome(sid: str, level: str, outcome: ConfirmOutcome) -> ConfirmOutcome:
-    audit.info("confirm outcome session=%s level=%s outcome=%s method=%s reason=%s",
-               sid, level, outcome.outcome, outcome.method or "-", outcome.reason or "-")
-    return outcome
+def _audit_sink(event: str, **fields) -> None:
+    """Write one record to the dashboard auth audit log (never raises). Replaced in tests."""
+    try:
+        from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
+        audit_log(AuditEvent(event), **fields)
+    except Exception:
+        logger.debug("confirm audit record not written", exc_info=True)
+
+
+def _connection(transport) -> tuple[str, str]:
+    """``(login, peer address)`` of a client connection, ``"-"`` for what is unknown."""
+    if transport is None:
+        return "-", "-"
+    from tui_gateway import server
+    login = server._transport_auth_user_id(transport)
+    return login or "-", str(getattr(transport, "_peer", "") or "-")
+
+
+class _Audit:
+    """The two audit records of one confirm request. Fields name who and what, never the text."""
+
+    def __init__(self, sid: str, level: str) -> None:
+        self.sid, self.level, self.request_id, self.reached = sid, level, "", 0
+        self.acting = "-"
+        try:
+            from tui_gateway import server
+            self.acting = server._acting_auth_user(server._sessions.get(sid))[0] or "-"
+        except Exception:
+            logger.debug("confirm audit: acting user unresolved", exc_info=True)
+
+    def opened(self, request_id: str, reached: int) -> None:
+        self.request_id, self.reached = request_id, reached
+        audit.info("confirm request session=%s request=%s level=%s acting_user=%s reached=%d",
+                   self.sid, request_id, self.level, self.acting, reached)
+        _audit_sink("confirm_request", session_id=self.sid, request_id=request_id, level=self.level,
+                    acting_user=self.acting, reached=reached)
+
+    def outcome(self, outcome: ConfirmOutcome, *, request_id: str = "", answered_by=None) -> ConfirmOutcome:
+        user, peer = _connection(answered_by)
+        request_id = request_id or self.request_id or "-"
+        audit.info("confirm outcome session=%s request=%s level=%s acting_user=%s outcome=%s method=%s reason=%s "
+                   "answered_by=%s peer=%s", self.sid, request_id, self.level, self.acting, outcome.outcome,
+                   outcome.method or "-", outcome.reason or "-", user, peer)
+        _audit_sink("confirm_outcome", session_id=self.sid, request_id=request_id, level=self.level,
+                    acting_user=self.acting, outcome=outcome.outcome, method=outcome.method or "",
+                    reason=outcome.reason, verified=outcome.verified, answered_by=user, answered_from=peer)
+        return outcome
 
 
 def request(sid: str, params: dict, *, timeout: float = TIMEOUT_SECONDS) -> ConfirmOutcome:
@@ -251,40 +314,41 @@ def request(sid: str, params: dict, *, timeout: float = TIMEOUT_SECONDS) -> Conf
     getting a valid answer is ``unavailable`` or ``timeout``, never ``declined`` and never ``confirmed``."""
     level_name = params["level"]
     level = LEVELS[level_name]
-    audit.info("confirm request session=%s level=%s", sid, level_name)
+    log = _Audit(sid, level_name)
     if not level.implemented:
-        return _log_outcome(sid, level_name, ConfirmOutcome("unavailable", reason="level_not_implemented"))
+        return log.outcome(ConfirmOutcome("unavailable", reason="level_not_implemented"))
     if os.environ.get("HERMES_COMPUTE_HOST_CHILD") == "1":
         # Under turn isolation the agent runs in a child whose only peer is the host pipe: it cannot see
         # which connection advertised which level, so it cannot gate the frame. Fail closed.
-        return _log_outcome(sid, level_name, ConfirmOutcome("unavailable", reason="turn_isolation"))
+        return log.outcome(ConfirmOutcome("unavailable", reason="turn_isolation"))
     key = _rate_key(sid)
     refused = _reserve(key, time.monotonic())
     if refused:
-        return _log_outcome(sid, level_name, ConfirmOutcome("unavailable", reason=refused))
+        return log.outcome(ConfirmOutcome("unavailable", reason=refused))
     outgoing = {**params, **level.challenge(sid, params)}
     sent_at: float | None = None
     try:
         sent_at = time.monotonic()
         result = server_requests.send_gated("confirm", sid, outgoing, level=level_name, timeout=timeout,
-                                            validate=result_problem(outgoing))
+                                            validate=result_problem(outgoing), on_open=log.opened)
         if result.status == "unavailable" and result.reason in ("no_capable_client", "write_failed"):
             sent_at = None  # nothing reached a person: it does not count against the window
     except BaseException:
         _release(key, sent_at=sent_at)
         raise
     _release(key, sent_at=sent_at)
+    rid = result.request_id
     if result.status == "answered":
         answer = result.result or {}
         # The gateway decides ``verified`` (the level's check), never the client.
         _, verified = level.check(outgoing, answer)
-        return _log_outcome(sid, level_name, ConfirmOutcome(str(answer["decision"]), method=str(answer["method"]),
-                                                            verified=verified))
+        return log.outcome(ConfirmOutcome(str(answer["decision"]), method=str(answer["method"]), verified=verified),
+                           request_id=rid, answered_by=result.answered_by)
     if result.status == "timeout":
-        return _log_outcome(sid, level_name, ConfirmOutcome("timeout", reason="timeout"))
+        return log.outcome(ConfirmOutcome("timeout", reason="timeout"), request_id=rid)
     if result.status == "cancelled":
-        return _log_outcome(sid, level_name, ConfirmOutcome("unavailable", reason=f"cancelled:{result.reason}"))
-    return _log_outcome(sid, level_name, ConfirmOutcome("unavailable", reason=result.reason or "unavailable"))
+        return log.outcome(ConfirmOutcome("unavailable", reason=f"cancelled:{result.reason}"), request_id=rid)
+    return log.outcome(ConfirmOutcome("unavailable", reason=result.reason or "unavailable"), request_id=rid)
 
 
 def request_from_tool(sid: str, *, summary: object, detail: object = None, title: object = None,
@@ -295,5 +359,5 @@ def request_from_tool(sid: str, *, summary: object, detail: object = None, title
     from tui_gateway import server
     params = build_params(summary=summary, detail=detail, title=title, level=level)
     if not sid or sid not in server._sessions:
-        return _log_outcome(sid or "-", params["level"], ConfirmOutcome("unavailable", reason="no_session"))
+        return _Audit(sid or "-", params["level"]).outcome(ConfirmOutcome("unavailable", reason="no_session"))
     return request(sid, params)

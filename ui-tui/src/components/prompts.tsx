@@ -414,30 +414,75 @@ export function ClarifyPrompt({ cols = 80, onAnswer, onCancel, onQuestionAnswer,
   )
 }
 
+/** A backend `confirm` card ignores every key for this long after it appears, so a keystroke meant for
+ *  the composer cannot answer it. */
+export const CONFIRM_INPUT_GRACE_MS = 500
+
+export type ConfirmAction = 'cancel' | 'confirm' | 'down' | 'noop' | 'up'
+
+/**
+ * Key handling for {@link ConfirmPrompt}, pure so it can be tested without Ink. Row 0 is cancel, row 1
+ * confirm. A local confirm takes Y/N as shortcuts. A `deliberate` card (a backend `confirm` request: the
+ * agent asks the person) ignores input during the grace period and confirms ONLY with Enter on an
+ * explicitly selected Confirm row; Esc, Ctrl+C and N still decline.
+ */
+export function confirmPromptAction(
+  ch: string,
+  key: ApprovalKey & { ctrl?: boolean },
+  sel: number,
+  { deliberate, elapsedMs }: { deliberate: boolean; elapsedMs: number }
+): ConfirmAction {
+  if (deliberate && elapsedMs < CONFIRM_INPUT_GRACE_MS) {
+    return 'noop'
+  }
+
+  const lower = ch.toLowerCase()
+
+  if (key.escape || (key.ctrl && lower === 'c') || lower === 'n') {
+    return 'cancel'
+  }
+
+  if (lower === 'y' && !deliberate) {
+    return 'confirm'
+  }
+
+  if (key.upArrow) {
+    return 'up'
+  }
+
+  if (key.downArrow) {
+    return 'down'
+  }
+
+  if (key.return) {
+    return sel === 0 ? 'cancel' : 'confirm'
+  }
+
+  return 'noop'
+}
+
 export function ConfirmPrompt({ onCancel, onConfirm, req, t }: ConfirmPromptProps) {
   const [sel, setSel] = useState(0)
+  const [shownAt] = useState(() => Date.now())
+  const deliberate = Boolean(req.requestId)
 
   useInput((ch, key) => {
-    const lower = ch.toLowerCase()
+    const action = confirmPromptAction(ch, key, sel, { deliberate, elapsedMs: Date.now() - shownAt })
 
-    if (key.escape || (key.ctrl && lower === 'c') || lower === 'n') {
+    if (action === 'cancel') {
       return onCancel()
     }
 
-    if (lower === 'y') {
+    if (action === 'confirm') {
       return onConfirm()
     }
 
-    if (key.upArrow) {
+    if (action === 'up') {
       setSel(0)
     }
 
-    if (key.downArrow) {
+    if (action === 'down') {
       setSel(1)
-    }
-
-    if (key.return) {
-      sel === 0 ? onCancel() : onConfirm()
     }
   })
 
@@ -471,7 +516,11 @@ export function ConfirmPrompt({ onCancel, onConfirm, req, t }: ConfirmPromptProp
         </Text>
       ))}
 
-      <Text color={t.color.muted}>↑/↓ select · Enter confirm · Y/N quick · Esc cancel</Text>
+      <Text color={t.color.muted}>
+        {deliberate
+          ? '↓ select Confirm, then Enter · Esc decline'
+          : '↑/↓ select · Enter confirm · Y/N quick · Esc cancel'}
+      </Text>
     </Box>
   )
 }

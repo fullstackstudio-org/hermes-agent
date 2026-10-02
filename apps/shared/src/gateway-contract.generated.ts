@@ -4243,7 +4243,7 @@ export interface TourStep {
   side?: string | null
   [key: string]: unknown
 }
-/** Built and bounded by the gateway (``tui_gateway/confirm.py``), never passed through from the agent: control and format characters are stripped, lengths are capped, and every string is PLAIN TEXT — a client renders it verbatim, never as markdown or HTML. Button wording is the client's own, not the agent's. Sent only to connections whose ``client.capabilities`` listed ``level`` under ``confirm``. */
+/** Built and bounded by the gateway (``tui_gateway/confirm.py``), never passed through from the agent: control and format characters are stripped, lengths are capped, and every string is PLAIN TEXT — a client renders it verbatim, never as markdown or HTML. Button wording is the client's own, not the agent's. The text is the AGENT's own words: a client marks it as such and never lets it style its frame. Sent only to connections attached to the session whose ``client.capabilities`` listed ``level`` under ``confirm``; only such a connection, still attached, may answer. */
 export interface ConfirmRequestParams {
   session_id: string
   title: string

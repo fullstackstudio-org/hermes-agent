@@ -35,27 +35,42 @@ def available() -> bool:
     return _bridge is not None
 
 
-_SENTENCES = {
-    ("confirmed", "tap"): "The person tapped Confirm in a connected app.",
+_NOT_CONSENT = "This is not consent: do not perform the action."
+
+# One sentence per outcome and reason, each saying only what is known. A ``plain`` confirmation proves that
+# someone tapped Confirm in an app attached to this conversation; not who, and not that they read it.
+_OUTCOME_SENTENCES = {
+    "confirmed": "Someone confirmed in a connected app (level plain: not verified, and not proof of who it was).",
+    "declined": "Declined in a connected app. Do not perform the action.",
+    "timeout": f"No answer within 120 seconds. {_NOT_CONSENT} Tell the person it is waiting for their "
+               "confirmation; do not ask again unless they want you to.",
 }
-_UNAVAILABLE = ("No connected app can confirm this right now — ask the person to open their app, or proceed "
-                "without the action.")
 _REASON_SENTENCES = {
-    "already_pending": "Another confirmation is still waiting for an answer; do not ask again until it ends.",
-    "rate_limited": "Too many confirmation requests in this conversation; wait several minutes before asking again.",
+    "no_capable_client": f"No app attached to this conversation can answer a confirmation right now. {_NOT_CONSENT} "
+                         "Tell the person a confirmation is needed; they can open an app that supports it and "
+                         "ask you again.",
+    "write_failed": f"The confirmation could not be delivered to any connected app. {_NOT_CONSENT} Tell the person.",
+    "error_response": f"The connected app could not show the confirmation. {_NOT_CONSENT} Tell the person.",
+    "no_session": f"Confirmations are not available in this conversation (no interactive app session). "
+                  f"{_NOT_CONSENT}",
+    "already_pending": f"Another confirmation is still open in this conversation. {_NOT_CONSENT} Wait for it to "
+                       "end before asking again.",
+    "rate_limited": f"Too many confirmations in this conversation; wait several minutes. {_NOT_CONSENT}",
+    "level_not_implemented": f"That confirmation level is not available yet. {_NOT_CONSENT}",
+    "turn_isolation": f"Confirmations are not available on this gateway while turns run isolated. {_NOT_CONSENT}",
+    "cancelled:interrupted": f"The confirmation was withdrawn because the turn was stopped. {_NOT_CONSENT} Do not "
+                             "ask again unless the person asks you to.",
+    "cancelled:session_closed": f"The confirmation was withdrawn because the conversation was closed. {_NOT_CONSENT}",
+    "cancelled:shutdown": f"The confirmation was withdrawn because the gateway is shutting down. {_NOT_CONSENT}",
 }
+_UNAVAILABLE = f"No confirmation was obtained. {_NOT_CONSENT}"
 
 
 def _sentence(result: dict) -> str:
-    outcome = result.get("outcome")
-    if outcome == "confirmed":
-        return _SENTENCES.get(("confirmed", str(result.get("method"))), "The person confirmed.")
-    if outcome == "declined":
-        return "The person declined."
-    if outcome == "timeout":
-        return "No answer within 120 seconds."
-    reason = _REASON_SENTENCES.get(str(result.get("reason") or ""))
-    return f"{_UNAVAILABLE} {reason}" if reason else _UNAVAILABLE
+    outcome = str(result.get("outcome") or "")
+    if outcome in _OUTCOME_SENTENCES:
+        return _OUTCOME_SENTENCES[outcome]
+    return _REASON_SENTENCES.get(str(result.get("reason") or ""), _UNAVAILABLE)
 
 
 def _reply(result: dict) -> str:
@@ -80,16 +95,19 @@ def confirm_action_tool(summary: str, detail: str | None = None, level: str = "p
 CONFIRM_ACTION_SCHEMA = {
     "name": "confirm_action",
     "description": (
-        "Ask the person to confirm ONE sensitive action in their connected app before you do it (spending "
-        "money, deleting data, sending something on their behalf, changing access). Blocks for up to 120 "
-        "seconds. Describe exactly what will happen in summary, in plain text; the person sees your words "
-        "verbatim with fixed Confirm / Decline buttons. "
-        "What it proves (level 'plain', the only one today): someone tapped Confirm in a connected app, "
-        "nothing more — not who tapped it, not that it was the account owner; verified is always false. "
-        "Outcomes: 'confirmed' — go ahead with exactly what you described, nothing more; 'declined' — "
-        "do not do it; 'unavailable' or 'timeout' — NOT consent: do not do the action, tell the person, "
-        "and do not keep asking. One confirmation at a time, a few per conversation; do not ask for "
-        "routine steps."
+        "Ask for a confirmation of ONE sensitive action in the connected app before you do it (spending "
+        "money, deleting data, sending something on someone's behalf, changing access). It only helps when "
+        "you ask: nothing forces this tool. Blocks for up to 120 seconds. Write title, summary and detail as "
+        "plain, factual text saying exactly what will happen; the app shows your words verbatim, marked as "
+        "coming from you, with its own Confirm / Decline buttons. Never word it as a system or security "
+        "message. "
+        "What a 'confirmed' proves (level 'plain', the only one today): someone tapped Confirm in an app "
+        "attached to this conversation. Not who it was (in a shared conversation it can be any participant), "
+        "not that they read the text; verified is always false. "
+        "Outcomes: 'confirmed' — do exactly what you described, nothing more; 'declined' — do not do it; "
+        "'unavailable' or 'timeout' — NOT consent: do not do the action, do not reach the same effect another "
+        "way, tell the person, and follow the message. One confirmation at a time, a few per conversation; do "
+        "not ask for routine steps."
     ),
     "parameters": {
         "type": "object",

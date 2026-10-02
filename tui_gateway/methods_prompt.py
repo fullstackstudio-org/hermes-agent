@@ -1256,8 +1256,7 @@ def _(rid, params: dict) -> dict:
     if not request_id or not isinstance(result, dict):
         return _err(rid, 4002, "id and an object result required")
     from tui_gateway import server_requests
-    if (refusal := (server_requests.answer_problem(request_id, result)
-                    or server_requests.gated_answer_problem(request_id, result))) is not None:
+    if (refusal := server_requests.answer_problem(request_id, result)) is not None:
         return _err(rid, *refusal)
     frame = {"jsonrpc": "2.0", "id": request_id, "result": result}
     if server_requests.resolve_response(frame) or _relay_compute_host_response(frame):

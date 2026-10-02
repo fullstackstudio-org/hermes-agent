@@ -45,6 +45,9 @@ class AuditEvent(enum.Enum):
     # login opened, or was throttled for failed resume lookups.
     SESSION_FOREIGN_ATTACH = "session_foreign_attach"
     SESSION_RESUME_THROTTLED = "session_resume_throttled"
+    # The ``confirm`` server request (tui_gateway/confirm.py): who was asked and who answered, never the text.
+    CONFIRM_REQUEST = "confirm_request"
+    CONFIRM_OUTCOME = "confirm_outcome"
 
 
 def _resolve_log_path() -> Path:

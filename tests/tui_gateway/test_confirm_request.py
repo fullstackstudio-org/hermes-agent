@@ -21,16 +21,21 @@ import pytest
 
 
 class _Peer:
-    """A client connection: records frames, never answers on its own."""
+    """A client connection: records frames, never answers on its own. *login* makes it a signed-in one."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, login: str | None = None, *, write_ok: bool = True):
         self.name = name
         self.frames: list[dict] = []
         self._closed = False
+        self._peer = f"10.0.0.{len(name)}:5{len(name)}00"
+        self.write_ok = write_ok
+        if login is not None:
+            provider, user_id = login.split(":", 1)
+            self.auth_identity = {"provider": provider, "user_id": user_id}
 
     def write(self, obj):
         self.frames.append(json.loads(json.dumps(obj)))
-        return True
+        return self.write_ok
 
     def close(self):
         self._closed = True
@@ -44,6 +49,15 @@ class _Peer:
 
     def __repr__(self):
         return f"<peer {self.name}>"
+
+
+@pytest.fixture(autouse=True)
+def audit_records(monkeypatch):
+    """Capture the dashboard audit records instead of writing them to disk."""
+    import tui_gateway.confirm as confirm_module
+    records: list[tuple[str, dict]] = []
+    monkeypatch.setattr(confirm_module, "_audit_sink", lambda event, **fields: records.append((event, fields)))
+    return records
 
 
 @pytest.fixture()
@@ -73,11 +87,12 @@ def server():
     confirm.reset_for_tests()
 
 
-def _session(server, sid, *peers):
+def _session(server, sid, *peers, creator=None):
     from tui_gateway.transport import FanoutTransport
     transport = peers[0] if len(peers) == 1 else FanoutTransport(*peers)
     server._sessions[sid] = {"session_key": f"key-{sid}", "transport": transport, "history": [],
-                             "history_lock": threading.Lock(), "agent_ready": None}
+                             "history_lock": threading.Lock(), "agent_ready": None, "auth_user_id": creator,
+                             "auth_user_name": ""}
     return transport
 
 
@@ -376,6 +391,13 @@ def test_open_requests_lists_confirm_only_to_a_connection_with_the_level(server)
     _advertise(server, web)
     thread, box = _ask("s1")
     req = _wait_open()
+    # Not attached yet (a reconnecting socket before its resume): the request is not listed, and its answer
+    # is refused. After it reattaches (resume / activate), it is.
+    assert _as(later, server._open_requests, "s1") == []
+    assert _as(later, server.handle_request, {"id": 3, "method": "request.answer", "params": {
+        "id": req.id, "result": CONFIRMED}})["error"]["code"] == 4033
+    server._attach_session_transport(server._sessions["s1"], later)
+    server._attach_session_transport(server._sessions["s1"], web)
     listed = _as(later, server._open_requests, "s1")
     assert [entry["id"] for entry in listed] == [req.id]
     assert listed[0]["method"] == "confirm" and listed[0]["params"]["level"] == "plain"
@@ -406,7 +428,7 @@ def test_send_detailed_tells_unavailable_from_cancelled_and_send_is_unchanged(se
     rid = next(iter(server_requests._open))
     server_requests.resolve_response({"id": rid, "error": {"code": -32601}})
     thread.join(5)
-    assert box["r"] == server_requests.RequestOutcome("unavailable", None, "error_response")
+    assert box["r"] == server_requests.RequestOutcome("unavailable", None, "error_response", rid)
     assert server_requests.send_detailed("sudo", "s9", {}, timeout=0).status == "timeout"
     assert server_requests.send("sudo", "s9", {}, timeout=0) is None
     batch = server_requests.send("clarify", "s9", {"questions": [{"qid": "q1", "question": "?"}]}, timeout=0,
@@ -420,26 +442,191 @@ def test_ungated_requests_are_still_listed_and_answerable_by_anyone(server):
     with server_requests._lock:
         server_requests._open[req.id] = req
     assert [e["id"] for e in server_requests.open_requests("s1")] == [req.id]
-    assert server_requests.gated_answer_problem(req.id, {"value": "x"}) is None
+    assert server_requests.answer_problem(req.id, {"value": "x"}) is None
     assert server_requests.resolve_response({"id": req.id, "result": {"value": "x"}})
 
 
 # ── audit ───────────────────────────────────────────────────────────────────────────────────
 
 
-def test_audit_lines_never_carry_the_text(server, caplog):
-    app = _Peer("app")
-    _session(server, "s1", app)
+def test_audit_records_who_was_asked_and_who_answered_never_the_text(server, caplog, audit_records):
+    app = _Peer("app", "self_hosted:alice")
+    _session(server, "s1", app, creator="self_hosted:alice")
     _advertise(server, app, confirm=["plain"])
     caplog.set_level(logging.INFO, logger="tui_gateway.confirm.audit")
     thread, box = _ask("s1", level="plain", summary="SECRET-SUMMARY", detail="SECRET-DETAIL", title="SECRET-T")
     req = _wait_open()
     _answer(server, app, req.id, {"decision": "confirmed", "method": "tap"})
     thread.join(5)
-    lines = [r.getMessage() for r in caplog.records if r.name == "tui_gateway.confirm.audit"]
-    assert lines == ["confirm request session=s1 level=plain",
-                     "confirm outcome session=s1 level=plain outcome=confirmed method=tap reason=-"]
+    assert audit_records == [
+        ("confirm_request", {"session_id": "s1", "request_id": req.id, "level": "plain",
+                             "acting_user": "self_hosted:alice", "reached": 1}),
+        ("confirm_outcome", {"session_id": "s1", "request_id": req.id, "level": "plain",
+                             "acting_user": "self_hosted:alice", "outcome": "confirmed", "method": "tap",
+                             "reason": "", "verified": False, "answered_by": "self_hosted:alice",
+                             "answered_from": app._peer}),
+    ]
     assert not any("SECRET" in r.getMessage() for r in caplog.records)
+    assert "SECRET" not in json.dumps(audit_records)
+
+
+def test_audit_event_names_exist_in_the_dashboard_audit_log():
+    from hermes_cli.dashboard_auth.audit import AuditEvent
+    assert AuditEvent("confirm_request") and AuditEvent("confirm_outcome")
+
+
+def test_clean_drops_invisible_letters_and_caps_combining_marks():
+    from tui_gateway import confirm
+    params = confirm.build_params(summary="Pay\u3164\u115f now e" + "\u0301" * 30 + ".", title="\uffa0T\u2800")
+    assert params["summary"] == "Pay now e" + "\u0301" * confirm.MAX_COMBINING_MARKS + "."
+    assert params["title"] == "T"
+    with pytest.raises(confirm.ConfirmParamsError):
+        confirm.build_params(summary="\u3164\u1160 \u2800")
+
+
+# ── finding: answering needs attachment ─────────────────────────────────────────────────────
+
+
+def test_a_connection_attached_elsewhere_cannot_see_or_answer_a_confirm(server):
+    """A connection that advertised plain but is attached to ANOTHER session (or none) never sees the
+    request and cannot settle it — even in token mode, where it may read the session's events."""
+    alice, outsider = _Peer("alice"), _Peer("outsider")
+    _session(server, "s1", alice)
+    _session(server, "s2", outsider)
+    _advertise(server, alice, confirm=["plain"])
+    _advertise(server, outsider, confirm=["plain"])
+    thread, box = _ask("s1")
+    req = _wait_open()
+    replay = _as(outsider, server.handle_request, {"id": 1, "method": "session.events.since",
+                                                   "params": {"session_id": "s1", "last_seen": 0}})
+    assert replay["result"]["open_requests"] == []
+    assert _as(outsider, server.handle_request, {"id": 2, "method": "request.answer", "params": {
+        "id": req.id, "result": CONFIRMED}})["error"]["code"] == 4033
+    assert _answer(server, outsider, req.id, CONFIRMED) is None
+    assert thread.is_alive()
+    _answer(server, alice, req.id, {"decision": "declined", "method": "tap"})
+    thread.join(5)
+    assert box["r"].outcome == "declined"
+
+
+def test_another_signed_in_person_cannot_replay_the_session(server):
+    alice, bob = _Peer("alice", "self_hosted:alice"), _Peer("bob", "self_hosted:bob")
+    _session(server, "s1", alice, creator="self_hosted:alice")
+    _advertise(server, bob, confirm=["plain"])
+    replay = _as(bob, server.handle_request, {"id": 1, "method": "session.events.since",
+                                              "params": {"session_id": "s1", "last_seen": 0}})
+    assert replay["error"]["code"] == 4001
+
+
+# ── edge cases ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_readvertising_without_plain_then_answering_is_refused(server):
+    app = _Peer("app")
+    _session(server, "s1", app)
+    _advertise(server, app, confirm=["plain"])
+    thread, box = _ask("s1")
+    req = _wait_open()
+    _advertise(server, app)  # the same connection now says it has no confirm levels
+    assert _as(app, server.handle_request, {"id": 2, "method": "request.answer", "params": {
+        "id": req.id, "result": CONFIRMED}})["error"]["code"] == 4033
+    from tui_gateway import server_requests
+    server_requests.cancel("s1")
+    thread.join(5)
+
+
+@pytest.mark.parametrize("end", ["timeout", "cancel"])
+def test_late_answer_after_the_request_ended_is_expired(server, end):
+    from tui_gateway import confirm, server_requests
+    app = _Peer("app")
+    _session(server, "s1", app)
+    _advertise(server, app, confirm=["plain"])
+    if end == "timeout":
+        confirm.request("s1", confirm.build_params(summary="Pay."), timeout=0.01)
+    else:
+        thread, _box = _ask("s1")
+        _wait_open()
+        server_requests.cancel("s1")
+        thread.join(5)
+    rid = app.requests()[-1]["id"]
+    assert _as(app, server.handle_request, {"id": 2, "method": "request.answer", "params": {
+        "id": rid, "result": CONFIRMED}})["result"] == {"status": "expired"}
+
+
+def test_two_answers_at_once_settle_once(server):
+    phone, desk = _Peer("phone"), _Peer("desk")
+    _session(server, "s1", phone, desk)
+    _advertise(server, phone, confirm=["plain"])
+    _advertise(server, desk, confirm=["plain"])
+    thread, box = _ask("s1")
+    req = _wait_open()
+    statuses: list = []
+    barrier = threading.Barrier(2)
+
+    def answer(peer, decision):
+        barrier.wait()
+        statuses.append(_as(peer, server.handle_request, {"id": 1, "method": "request.answer", "params": {
+            "id": req.id, "result": {"decision": decision, "method": "tap"}}})["result"]["status"])
+
+    workers = [threading.Thread(target=answer, args=(phone, "confirmed")),
+               threading.Thread(target=answer, args=(desk, "declined"))]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(5)
+    thread.join(5)
+    assert sorted(statuses) == ["expired", "ok"]
+    assert box["r"].outcome in ("confirmed", "declined")
+
+
+def test_disconnect_forgets_the_advertisement(server):
+    app = _Peer("app")
+    _session(server, "s1", app)
+    _advertise(server, app, confirm=["plain"])
+    thread, box = _ask("s1")
+    req = _wait_open()
+    server.unregister_live_transport(app)
+    assert _as(app, server.handle_request, {"id": 2, "method": "request.answer", "params": {
+        "id": req.id, "result": CONFIRMED}})["error"]["code"] == 4033
+    from tui_gateway import server_requests
+    server_requests.cancel("s1")
+    thread.join(5)
+
+
+def test_a_write_that_reaches_nobody_is_unavailable_and_leaves_nothing_open(server):
+    from tui_gateway import confirm, server_requests
+    app = _Peer("app", write_ok=False)
+    _session(server, "s1", app)
+    _advertise(server, app, confirm=["plain"])
+    outcome = confirm.request("s1", confirm.build_params(summary="Pay."), timeout=5)
+    assert outcome.reason == "write_failed" and not server_requests._open
+    # Nothing reached a person, so the window is not charged.
+    assert not confirm._sent
+
+
+def test_parallel_tool_calls_send_one_request(server):
+    from tui_gateway import confirm, server_requests
+    app = _Peer("app")
+    _session(server, "s1", app)
+    _advertise(server, app, confirm=["plain"])
+    results: list = []
+    barrier = threading.Barrier(5)
+
+    def ask():
+        barrier.wait()
+        results.append(confirm.request("s1", confirm.build_params(summary="Pay."), timeout=1))
+
+    workers = [threading.Thread(target=ask) for _ in range(5)]
+    for w in workers:
+        w.start()
+    _wait_open()
+    deadline = time.monotonic() + 5
+    while len(results) < 4 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert [r.reason for r in results] == ["already_pending"] * 4 and len(app.requests()) == 1
+    server_requests.cancel("s1")
+    for w in workers:
+        w.join(5)
 
 
 # ── the tool ────────────────────────────────────────────────────────────────────────────────
@@ -461,7 +648,7 @@ def test_tool_is_withheld_without_the_gateway_bridge_and_off_by_default():
         assert confirm_tool.available() is False
         result = json.loads(confirm_tool.confirm_action_tool(summary="Pay."))
         assert result["outcome"] == "unavailable" and result["reason"] == "no_session"
-        assert result["message"].startswith("No connected app can confirm this right now")
+        assert result["message"].startswith("Confirmations are not available in this conversation")
     finally:
         confirm_tool.set_bridge(saved)
     assert TOOLSETS["confirm"]["tools"] == ["confirm_action"]
@@ -515,11 +702,20 @@ def test_tool_round_trip_and_messages(server):
     finally:
         release()
     result = json.loads(box["r"])
-    assert result == {"outcome": "confirmed", "method": "tap", "verified": False,
-                      "message": "The person tapped Confirm in a connected app."}
+    assert result["outcome"] == "confirmed" and result["verified"] is False
+    assert result["message"].startswith("Someone confirmed in a connected app")
     assert "error" in json.loads(confirm_tool.confirm_action_tool(summary="Pay.", level="passkey"))
-    assert confirm_tool._sentence({"outcome": "declined"}) == "The person declined."
-    assert confirm_tool._sentence({"outcome": "timeout"}) == "No answer within 120 seconds."
+    not_consent = "This is not consent: do not perform the action."
+    assert confirm_tool._sentence({"outcome": "declined"}).startswith("Declined in a connected app.")
+    assert not_consent in confirm_tool._sentence({"outcome": "timeout"})
+    for reason in ("no_capable_client", "write_failed", "error_response", "no_session", "already_pending",
+                   "rate_limited", "level_not_implemented", "turn_isolation", "cancelled:interrupted",
+                   "cancelled:session_closed", "cancelled:shutdown", "something_new"):
+        sentence = confirm_tool._sentence({"outcome": "unavailable", "reason": reason})
+        assert not_consent in sentence, reason
+    stopped = confirm_tool._sentence({"outcome": "unavailable", "reason": "cancelled:interrupted"})
+    assert "stopped" in stopped and "open" not in stopped
+    assert "open" not in confirm_tool._sentence({"outcome": "unavailable", "reason": "error_response"})
 
 
 def test_rate_limit_one_pending_and_six_per_window(server, monkeypatch):

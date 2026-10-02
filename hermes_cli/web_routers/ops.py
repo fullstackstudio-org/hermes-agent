@@ -34,6 +34,7 @@ from hermes_cli.web_routers._common import (
     spawn_profile_action,
 )
 from hermes_cli.web_routers.files import stream_upload_to_path
+from hermes_cli.dashboard_auth.passkeys import paths as _passkey_paths
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
@@ -575,6 +576,8 @@ async def run_backup(body: BackupRequest, profile: Optional[str] = None):
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Could not create backup directory: {exc}")
         output = str(archive)
+    elif _passkey_paths.inside_store_dir(Path(output)):  # never beside the passkey store (any case, any link)
+        raise HTTPException(status_code=403, detail="A backup cannot be written into dashboard_auth")
     response = _spawn_action(["backup", "-o", output], "backup", log_msg="Failed to spawn backup",
                              prefix="Failed to run backup", profile=profile)
     if archive is not None:

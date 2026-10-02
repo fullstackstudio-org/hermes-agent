@@ -95,6 +95,11 @@ _PLACEHOLDER_ENV = (
 )
 
 
+def _is_passkey_store_name(directory_name: str, entry: str) -> bool:
+    from hermes_cli.dashboard_auth.passkeys.paths import is_store_name
+    return is_store_name(directory_name, entry)  # case-folded: one file on macOS/Windows
+
+
 def _non_exportable_entries(directory: str, contents: list) -> set:
     """Entries under *directory* that must never be copied out of a profile: bytecode caches,
     ``*.sock``/``*.tmp`` names, and anything that is not a regular file, directory, or symlink.
@@ -105,6 +110,9 @@ def _non_exportable_entries(directory: str, contents: list) -> set:
     for entry in contents:
         if entry == "__pycache__" or entry.endswith((".sock", ".tmp", ".pyc", ".pyo")):
             ignored.add(entry)
+            continue
+        if _is_passkey_store_name(os.path.basename(directory), entry):
+            ignored.add(entry)  # the passkey store: a copy would share this gateway's gateway_id and handle_key
             continue
         try:
             mode = os.lstat(os.path.join(directory, entry)).st_mode
@@ -2239,6 +2247,8 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
             final_source = staging_root / canon
             extracted.rename(final_source)
         drop_profile_role(final_source)
+        from hermes_cli.dashboard_auth.passkeys.paths import drop_store_copies
+        drop_store_copies(final_source)  # a passkey store in any letter case: credentials nobody enrolled here
         # An archive is a copy: the identity it carries is the exported profile's (or, from an
         # install that predates per-profile identities, the shared fallback), never this one's.
         give_memory_identity(final_source, canon)

@@ -656,6 +656,15 @@ class TestSecurity:
         if (plan.target_dir / ".env").exists():
             assert "LEAKED" not in (plan.target_dir / ".env").read_text()
 
+    def test_install_never_ships_a_passkey_store(self, profile_env):
+        """dashboard_auth (the passkey store: gateway identity and credentials) is user-owned, in any case."""
+        staged = _make_staging_dir(profile_env, "src")
+        for folder in ("dashboard_auth", "Dashboard_Auth"):
+            (staged / folder).mkdir(exist_ok=True)
+            (staged / folder / "passkeys.db").write_text("foreign rows")
+        plan = install_distribution(str(staged), name="clean")
+        assert not [p for p in plan.target_dir.iterdir() if p.name.casefold() == "dashboard_auth"]
+
     def test_install_rejects_symlinked_distribution_files(self, profile_env, tmp_path):
         """Distribution install must not follow symlinks to local files."""
         staged = _make_staging_dir(profile_env, "src")

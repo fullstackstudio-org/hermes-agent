@@ -127,6 +127,13 @@ _EXCLUDED_PREFIXES = (
 # backup-side exclusions.
 _IMPORT_SKIP_NAMES = {"gateway_state.json", "gateway.pid", "cron.pid", "gateway.lock", "processes.json"}
 
+
+def _is_passkey_store(rel_path: Path) -> bool:
+    """``dashboard_auth/passkeys.db*`` (root or profile): never backed up or restored. A copy elsewhere would
+    give two gateways one ``gateway_id`` and ``handle_key``; an imported one, credentials nobody enrolled."""
+    from hermes_cli.dashboard_auth.passkeys.paths import is_store_member
+    return is_store_member(rel_path)  # case-folded: Dashboard_Auth/Passkeys.db IS the store on macOS/Windows
+
 # zipfile.open() drops Unix mode bits on extract; restore tightens these to 0600.
 # vault.key / vault.json.enc: the local credential vault (agent/vault_store.py)
 # IS included in backups (user-entered secrets, not regenerable — unlike the
@@ -276,6 +283,8 @@ def _should_exclude(rel_path: Path) -> bool:
     if any(p in _EXCLUDED_DIRS and (p != "hermes-agent" or p == parts[0]) for p in parts):
         return True
     name = rel_path.name
+    if _is_passkey_store(rel_path):  # see ``_is_passkey_store``
+        return True
     return name in _EXCLUDED_NAMES or name.startswith(_EXCLUDED_PREFIXES) or name.endswith(_EXCLUDED_SUFFIXES)
 
 
@@ -942,7 +951,7 @@ def _import_members(
             tighten = target.suffix in {".json", ".env", ".conf"} or target.name in _SECRET_FILE_NAMES
         else:
             rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
-            if rel and Path(rel).name in _IMPORT_SKIP_NAMES:  # see ``_IMPORT_SKIP_NAMES``
+            if rel and (Path(rel).name in _IMPORT_SKIP_NAMES or _is_passkey_store(Path(rel))):  # see both
                 skipped_runtime.append(rel)
                 continue
             # A ``.db`` member is page-restored into the live file; an archived WAL/SHM/journal

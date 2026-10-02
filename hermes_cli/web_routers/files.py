@@ -102,6 +102,15 @@ def _refuse_passkey_store_write(target: Path) -> None:
         raise HTTPException(status_code=403, detail="The passkey store cannot be changed from the dashboard")
 
 
+def _refuse_passkey_store_parent_delete(target: Path) -> None:
+    """Deleting a directory that holds a passkey store (this home's, the default root's, a profile's) takes
+    the store with it: the gateway would start over with a new identity and no credentials. Compared by file
+    identity, so a case variant (macOS, Windows) or a symbolic link to such a directory is refused too."""
+    from hermes_cli.dashboard_auth.passkeys.paths import holds_store
+    if holds_store(target):
+        raise HTTPException(status_code=403, detail="This folder holds the passkey store")
+
+
 def _is_sensitive_path(path: Path) -> bool:
     """True when the basename is sensitive OR any path component (case-
     insensitive) is a credential directory. Read-side guard (list/read/
@@ -602,6 +611,7 @@ async def create_managed_directory(payload: ManagedDirectoryCreate, request: Req
 async def delete_managed_file(payload: ManagedFileDelete, request: Request):
     policy, target, display_path = _resolve_managed_path(payload.path, request)
     _refuse_passkey_store_write(target)
+    _refuse_passkey_store_parent_delete(target)  # the store's directory or any parent of it
     if policy.locked_root is not None and target == policy.locked_root:
         raise HTTPException(status_code=400, detail="Cannot delete the managed files root")
     if target.parent == target:

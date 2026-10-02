@@ -53,6 +53,8 @@ USER_OWNED_EXCLUDE: frozenset = frozenset({
     "hermes-agent", ".worktrees", "profiles", "bin", "node_modules",
     # User customization namespace
     "local",
+    # The passkey store (gateway identity and credentials): never shipped, never replaced
+    "dashboard_auth",
 })
 
 # Profile distributions own cron definitions, not scheduler state. The runtime has
@@ -359,13 +361,13 @@ def _owned_entries(staged: Path, manifest: DistributionManifest):
         # Do NOT narrow to DEFAULT_DIST_OWNED — existing distributions ship arbitrary extra
         # top-level paths without declaring them.
         for entry in staged.iterdir():
-            if entry.name not in USER_OWNED_EXCLUDE:
+            if entry.name.casefold() not in USER_OWNED_EXCLUDE:  # case-folded: one name on macOS/Windows
                 yield entry, (entry.name,)
         return
     # Path-aware allowlist: copy exactly the declared paths.
     for rel in explicit_owned:
         rel_parts = PurePosixPath(rel).parts
-        if not rel_parts or rel_parts[0] in USER_OWNED_EXCLUDE or _is_distribution_runtime_path(rel_parts):
+        if not rel_parts or rel_parts[0].casefold() in USER_OWNED_EXCLUDE or _is_distribution_runtime_path(rel_parts):
             continue
         if ".." in rel_parts or PurePosixPath(rel).is_absolute():
             continue

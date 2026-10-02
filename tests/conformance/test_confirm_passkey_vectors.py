@@ -87,3 +87,13 @@ def test_test_keys_are_the_derived_ones(gen, vectors):
     for name, key in vectors["keys"].items():
         derived = gen.Key(name)
         assert key["x"] == gen.b64u(derived.x) and key["y"] == gen.b64u(derived.y)
+
+
+def test_the_gateways_own_verifier_gives_every_labelled_result(vectors):
+    """The production verifier (``hermes_cli/dashboard_auth/passkeys``), not the generator's reference
+    evaluator, against every assertion and registration vector."""
+    from tests.hermes_cli.test_passkeys_webauthn import _assertion_verdict, _registration_verdict
+    for vector in vectors["assertion_vectors"]:
+        assert _assertion_verdict(vector) == vector["expect"], vector["name"]
+    for vector in vectors["registration_vectors"]:
+        assert _registration_verdict(vector) == vector["expect"], vector["name"]

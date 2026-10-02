@@ -11,6 +11,8 @@ Covers:
     feature — a desktop authenticates REST with ``Authorization: Bearer`` and
     sets/needs no cookie).
   * ``/auth/native/refresh`` token rotation and terminal-expiry semantics.
+  * ``/auth/native/revoke``: which provider a token is handed to, the uniform
+    answer, and what it leaves in the audit log.
 
 Run: pytest tests/hermes_cli/test_dashboard_auth_native_flow.py
 """
@@ -20,10 +22,15 @@ from __future__ import annotations
 import hashlib
 import base64
 import html
+import json
+import logging
 import re
+import secrets
 import time
+from unittest.mock import MagicMock
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -33,7 +40,8 @@ from hermes_cli.dashboard_auth import (
     register_provider,
 )
 from hermes_cli.dashboard_auth import native_flow
-from hermes_cli.dashboard_auth.base import Session
+from hermes_cli.dashboard_auth.base import RefreshExpiredError, Session
+from hermes_cli.dashboard_auth.routes import _reset_native_revoke_rate_limit
 from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
 
 
@@ -87,6 +95,7 @@ class _SecondStubProvider(StubAuthProvider):
 @pytest.fixture(autouse=True)
 def _reset_broker():
     native_flow._reset_for_tests()
+    _reset_native_revoke_rate_limit()
     # Snapshot the shared app.state auth fields + provider registry so a test
     # that flips auth_required / registers a stub provider can't leak into a
     # later test file (e.g. the MCP dashboard-oauth suite shares web_server.app).
@@ -614,3 +623,196 @@ def test_native_refresh_dead_token_returns_401(gated_client):
     )
     assert r.status_code == 401
     assert r.json()["error"] == "session_expired"
+
+
+# ---------------------------------------------------------------------------
+# Native revoke
+# ---------------------------------------------------------------------------
+
+_OIDC_ISSUER = "https://auth.example.com/application/o/hermes"
+
+
+def _oidc_provider():
+    """The bundled self-hosted OIDC provider with discovery pre-seeded (no network); its
+    discovery advertises an RFC 7009 revocation endpoint."""
+    import plugins.dashboard_auth.self_hosted as oidc_plugin
+
+    p = oidc_plugin.SelfHostedOIDCProvider(issuer=_OIDC_ISSUER, client_id="hermes-dashboard")
+    p._discovery = {
+        "issuer": _OIDC_ISSUER,
+        "authorization_endpoint": f"{_OIDC_ISSUER}/authorize",
+        "token_endpoint": f"{_OIDC_ISSUER}/token",
+        "jwks_uri": f"{_OIDC_ISSUER}/jwks",
+        "revocation_endpoint": f"{_OIDC_ISSUER}/revoke",
+    }
+    p._discovery_fetched_at = time.time()
+    return p
+
+
+def _basic_provider():
+    import plugins.dashboard_auth.basic as basic_plugin
+
+    return basic_plugin.BasicAuthProvider(
+        username="admin", password_hash=basic_plugin.hash_password("hunter2"),
+        secret=secrets.token_bytes(32))
+
+
+def _nous_provider():
+    import plugins.dashboard_auth.nous as nous_plugin
+
+    return nous_plugin.NousDashboardAuthProvider(
+        client_id="agent:inst123", portal_url="https://portal.example.com")
+
+
+@pytest.fixture
+def outbound(monkeypatch):
+    """Every outbound HTTP call a provider could make, recorded instead of sent."""
+    calls = {"post": MagicMock(return_value=MagicMock(spec=httpx.Response, status_code=200)),
+             "get": MagicMock(side_effect=AssertionError("no discovery fetch expected"))}
+    monkeypatch.setattr(httpx, "post", calls["post"])
+    monkeypatch.setattr(httpx, "get", calls["get"])
+    return calls
+
+
+def _gated(*providers) -> TestClient:
+    """A gated app with exactly ``providers`` registered; ``_reset_broker`` restores state."""
+    clear_providers()
+    for provider in providers:
+        register_provider(provider)
+    web_server.app.state.bound_host = "fly-app.fly.dev"
+    web_server.app.state.bound_port = 443
+    web_server.app.state.auth_required = True
+    return TestClient(web_server.app, base_url="https://fly-app.fly.dev", follow_redirects=False)
+
+
+def test_native_revoke_hands_the_token_to_the_oidc_revocation_endpoint_once(outbound):
+    client = _gated(_basic_provider(), _oidc_provider())
+    # No cookie and no bearer: the gate is engaged and turns this client away elsewhere.
+    assert client.get("/api/auth/me").status_code == 401
+
+    r = client.post("/auth/native/revoke",
+                    json={"refresh_token": "oidc-rt-live", "provider": "self-hosted"})
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": True}
+    outbound["post"].assert_called_once()
+    args, kwargs = outbound["post"].call_args
+    assert args[0] == f"{_OIDC_ISSUER}/revoke"
+    assert kwargs["data"]["token"] == "oidc-rt-live"
+    assert kwargs["data"]["token_type_hint"] == "refresh_token"
+    assert kwargs["data"]["client_id"] == "hermes-dashboard"
+
+
+@pytest.mark.parametrize("make_provider", [_basic_provider, _nous_provider],
+                         ids=["basic", "nous"])
+def test_native_revoke_at_a_provider_without_revocation_is_ok_and_sends_nothing(
+        outbound, make_provider):
+    """``basic`` (stateless) and Nous (no revocation grant) revoke nothing, and their token is
+    not handed to the OIDC provider registered beside them: that would disclose a live
+    credential to another identity provider."""
+    provider = make_provider()
+    client = _gated(_oidc_provider(), provider)
+
+    r = client.post("/auth/native/revoke",
+                    json={"refresh_token": f"{provider.name}-rt", "provider": provider.name})
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": True}
+    outbound["post"].assert_not_called()
+
+
+def test_native_revoke_answers_an_unknown_token_like_a_live_one(gated_client):
+    verifier, challenge = _make_pkce()
+    code, _state = _walk_native_login(
+        gated_client, redirect_uri="http://127.0.0.1:53999/cb", challenge=challenge)
+    live = gated_client.post(
+        "/auth/native/token", json={"code": code, "code_verifier": verifier}).json()
+
+    answers = [gated_client.post("/auth/native/revoke", json=body)
+               for body in ({"refresh_token": live["refresh_token"], "provider": "stub"},
+                            {"refresh_token": "never-issued", "provider": "stub"},
+                            {"refresh_token": "never-issued"})]
+
+    assert {(r.status_code, r.text) for r in answers} == {(200, json.dumps({"ok": True}, separators=(",", ":")))}
+
+
+class _RevocableStub(StubAuthProvider):
+    """A stub whose revoke really ends the refresh token, like an RFC 7009 identity provider."""
+
+    def __init__(self):
+        super().__init__()
+        self.revoked: set[str] = set()
+
+    def refresh_session(self, *, refresh_token):
+        if refresh_token in self.revoked:
+            raise RefreshExpiredError("revoked")
+        return super().refresh_session(refresh_token=refresh_token)
+
+    def revoke_session(self, *, refresh_token):
+        self.revoked.add(refresh_token)
+
+
+def test_native_refresh_after_revoke_is_not_served_from_the_replay_cache():
+    """A refresh is cached for its burst; a revoke must end that too, or the revoked token keeps
+    minting sessions for the rest of the window."""
+    client = _gated(_RevocableStub())
+    verifier, challenge = _make_pkce()
+    code, _state = _walk_native_login(
+        client, redirect_uri="http://127.0.0.1:53999/cb", challenge=challenge)
+    rt = client.post("/auth/native/token", json={"code": code, "code_verifier": verifier}
+                     ).json()["refresh_token"]
+    assert client.post("/auth/native/refresh",
+                       json={"refresh_token": rt, "provider": "stub"}).status_code == 200
+
+    assert client.post("/auth/native/revoke",
+                       json={"refresh_token": rt, "provider": "stub"}).status_code == 200
+
+    r = client.post("/auth/native/refresh", json={"refresh_token": rt, "provider": "stub"})
+    assert r.status_code == 401, r.text
+    assert r.json()["error"] == "session_expired"
+
+
+def test_native_revoke_audit_and_log_never_carry_the_token(gated_client, caplog):
+    import os
+    from pathlib import Path
+
+    token = "secret-refresh-token-value-0123456789"
+    with caplog.at_level(logging.DEBUG):
+        r = gated_client.post("/auth/native/revoke",
+                              json={"refresh_token": token, "provider": "stub"})
+    assert r.status_code == 200
+
+    log_path = Path(os.environ["HERMES_HOME"]) / "logs" / "dashboard-auth.log"
+    text = log_path.read_text()
+    events = [json.loads(line) for line in text.splitlines()]
+    assert [e for e in events if e["event"] == "revoke"] == [
+        {**events[-1], "event": "revoke", "flow": "native", "providers": ["stub"]}]
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    for haystack in (text, caplog.text):
+        assert token not in haystack
+        assert digest[:8] not in haystack
+
+
+def test_native_revoke_refuses_oversized_bodies_and_other_methods(gated_client):
+    big = {"refresh_token": "x" * (64 * 1024), "provider": "stub"}
+    assert gated_client.post("/auth/native/revoke", json=big).status_code == 413
+    # Only POST reaches the handler (a GET falls through to the SPA's 404, as for refresh).
+    for method in ("get", "put", "delete"):
+        assert getattr(gated_client, method)("/auth/native/revoke").status_code in (404, 405)
+    assert gated_client.post("/auth/native/revoke", json={"provider": "stub"}).status_code == 400
+
+
+def test_native_revoke_is_rate_limited_per_address(gated_client):
+    from hermes_cli.dashboard_auth.routes import _REVOKE_RATE_MAX
+
+    body = {"refresh_token": "rt-burst", "provider": "stub"}
+    codes = [gated_client.post("/auth/native/revoke", json=body).status_code
+             for _ in range(_REVOKE_RATE_MAX + 1)]
+    assert set(codes[:-1]) == {200}
+    assert codes[-1] == 429
+
+
+def test_status_advertises_native_revoke_only_when_gated(gated_client):
+    assert "native_revoke" in gated_client.get("/api/status").json()["auth_flows"]
+    web_server.app.state.auth_required = False
+    assert "native_revoke" not in gated_client.get("/api/status").json()["auth_flows"]

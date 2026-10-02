@@ -11,6 +11,7 @@ allowlists the public ones.
   POST /auth/logout            clears cookies, best-effort revoke
   POST /auth/native/token      loopback code -> bearer tokens
   POST /auth/native/refresh    desktop-held refresh token rotation
+  POST /auth/native/revoke     a native client ends its own grant (best effort, always ok)
   GET  /api/auth/providers     list registered providers (login bootstrap)
   GET  /api/auth/me            current Session as JSON (auth-required)
   GET  /api/auth/picture?id=   a signed-in user's stored profile picture (auth-required)
@@ -18,6 +19,7 @@ allowlists the public ones.
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -43,7 +45,8 @@ from hermes_cli.dashboard_auth.cookies import (
     set_session_cookies)
 from hermes_cli.dashboard_auth.login_page import (
     render_login_html, render_native_provider_choice_html)
-from hermes_cli.dashboard_auth.refresh_singleflight import refresh_session_coalesced
+from hermes_cli.dashboard_auth.refresh_singleflight import (
+    refresh_session_coalesced, revoke_session_coalesced)
 from hermes_cli.dashboard_auth.request_utils import (
     access_token_max_age, client_ip as _client_ip, is_safe_next_path)
 
@@ -573,3 +576,91 @@ async def auth_native_refresh(request: Request, body: _NativeRefreshBody):
     return JSONResponse(
         {"error": "session_expired",
          "detail": "Refresh token expired or invalid; start a new sign-in."}, status_code=401)
+
+
+# --- Public: native-app revoke ----------------------------------------------
+# A native client ending its own grant, the counterpart of ``/auth/logout`` for a client that holds
+# its refresh token itself instead of in a cookie. The refresh token in the body is the whole
+# authority: nothing ambient (cookie, session) is read, so a cross-site page that makes a browser
+# POST here can revoke only a token it already holds. Every accepted request answers the same
+# ``200 {"ok": true}`` whether the token was live, dead or never issued, so the route is no
+# validity oracle; the provider's own answer is never read back.
+_REVOKE_MAX_BODY_BYTES = 16 * 1024
+_REVOKE_RATE_MAX = 30
+_REVOKE_RATE_WINDOW_SEC = 60.0
+_revoke_attempts: Dict[str, Deque[float]] = defaultdict(deque)
+_revoke_attempts_lock = threading.Lock()
+
+
+def _native_revoke_rate_limited(ip: str) -> bool:
+    """Per-IP sliding window, the same shape as the password throttle. Each accepted revoke can
+    cost an outbound call to the identity provider, so an unauthenticated caller must not be able
+    to turn this route into an unbounded request pump."""
+    now = time.monotonic()
+    cutoff = now - _REVOKE_RATE_WINDOW_SEC
+    with _revoke_attempts_lock:
+        bucket = _revoke_attempts[ip or "_unknown_"]
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if len(bucket) >= _REVOKE_RATE_MAX:
+            return True
+        bucket.append(now)
+        return False
+
+
+def _reset_native_revoke_rate_limit() -> None:
+    """Test-only: clear all revoke rate-limit buckets."""
+    with _revoke_attempts_lock:
+        _revoke_attempts.clear()
+
+
+async def _read_small_json_object(request: Request, limit: int) -> dict:
+    """The request body as a JSON object, refusing more than ``limit`` bytes before reading them
+    (declared length) and while reading them (chunked bodies). 413 too large, 400 not an object."""
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        raise _http(400, "Invalid Content-Length")
+    if declared > limit:
+        raise _http(413, "Request body too large")
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > limit:
+            raise _http(413, "Request body too large")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        raise _http(400, "Body must be a JSON object")
+    return body
+
+
+@router.post("/auth/native/revoke", name="auth_native_revoke")
+async def auth_native_revoke(request: Request):
+    """End a native client's grant: body ``{"refresh_token": "...", "provider": "<name>"}``.
+
+    ``provider`` is the name ``/auth/native/token`` and ``/auth/native/refresh`` returned with the
+    token. It selects which provider the token is handed to (see
+    ``refresh_singleflight.revoke_targets``): only that one when it names a registered session
+    provider, otherwise each in turn. Revocation is the provider's: RFC 7009 at an OIDC provider
+    that advertises a revocation endpoint, nothing at the stateless password provider or the Nous
+    Portal, whose tokens run out on their own. Best effort and never an error once the request is
+    well formed: ``200 {"ok": true}`` for every token. A missing token 400, an oversized body 413,
+    more than ``_REVOKE_RATE_MAX`` a minute from one address 429."""
+    if _native_revoke_rate_limited(_client_ip(request)):
+        _audit(request, AuditEvent.REVOKE, flow="native", reason="rate_limited")
+        raise _http(429, "Too many revoke requests. Try again shortly.")
+    body = await _read_small_json_object(request, _REVOKE_MAX_BODY_BYTES)
+    token, hint = body.get("refresh_token"), body.get("provider", "")
+    if not isinstance(token, str) or not token:
+        raise _http(400, "refresh_token required")
+    if not isinstance(hint, str):
+        raise _http(400, "provider must be a string")
+    # Off the event loop: an OIDC revoke is synchronous network I/O.
+    targets = await run_in_threadpool(revoke_session_coalesced, token, hint, log=_log)
+    # Only registered provider names are written, never the caller's hint as sent, and never the
+    # token: there is no user id to record, because nothing here verified whose token it was.
+    _audit(request, AuditEvent.REVOKE, flow="native", providers=[p.name for p in targets])
+    return JSONResponse({"ok": True}, headers=_NO_STORE)

@@ -77,9 +77,14 @@ an `auth_flows` array:
 
 | `auth_flows` value | Meaning |
 |--------------------|---------|
-| `["cookie", "native_pkce"]` | Gateway supports native sign-in → the app uses it |
+| `["cookie", "native_pkce", "native_revoke"]` | Gateway supports native sign-in → the app uses it, and can revoke its grant on sign-out |
+| `["cookie", "native_pkce"]` | Gateway supports native sign-in, without the revoke endpoint |
 | `["cookie"]` | Gateway supports only the legacy flow → the app uses the embedded webview |
 | *(field absent)* | Older gateway → the app uses the embedded webview |
+
+Read `auth_flows` as a set and test for the member you need: a gateway may
+advertise members a client does not know, and the order carries no meaning.
+`native_revoke` is advertised on every gated gateway that has the endpoint.
 
 If native sign-in is advertised but fails for a local reason — e.g. a security
 tool blocks the loopback listener, or you close the browser tab — the app
@@ -96,7 +101,43 @@ tool blocks the loopback listener, or you close the browser tab — the app
   reuse-detected), the app clears its stored tokens and prompts a fresh
   sign-in.
 - **Sign out**: clears both the stored native tokens and any legacy session
-  cookie for that gateway.
+  cookie for that gateway. When the gateway advertises `native_revoke`, the
+  app first hands its refresh token to `/auth/native/revoke` so the gateway can
+  end the grant at the identity provider (see below).
+
+## Revoking a native grant
+
+`POST /auth/native/revoke` is the native counterpart of `/auth/logout`, for a
+client that holds its refresh token itself rather than in a cookie:
+
+```http
+POST /auth/native/revoke
+Content-Type: application/json
+
+{"refresh_token": "<the client's refresh token>", "provider": "<provider name>"}
+```
+
+- `provider` is the `provider` value `/auth/native/token` and
+  `/auth/native/refresh` returned with the token. When it names a registered
+  provider, the token is handed to that provider only; without it, or with a
+  name the gateway does not know, every interactive provider is tried in turn.
+  Always send it: a token is then never shown to an identity provider that did
+  not issue it.
+- The answer is `200 {"ok": true}` for every well-formed request, whether the
+  token was live, already dead or never issued, so the endpoint cannot be used
+  to test a token. A missing `refresh_token` is `400`, a body over 16 KiB `413`,
+  and more than 30 requests a minute from one address `429`.
+- What "revoked" means is the provider's: an OIDC provider whose discovery
+  document advertises a `revocation_endpoint` gets an RFC 7009 revocation
+  request, and a refresh with that token then fails. The bundled password
+  provider (`basic`) has stateless tokens and the Nous Portal offers no
+  revocation grant: for those nothing is revoked, and the refresh token keeps
+  working until it expires. A client must delete its own copy either way.
+- An access token already issued stays valid until it expires; the gateway
+  verifies access tokens without asking the provider.
+- No session is needed (the refresh token is the authority, and no cookie is
+  read), and the request is recorded in the dashboard-auth audit log as a
+  `revoke` event that names the providers it went to and never the token.
 
 ## For gateway operators
 
@@ -117,6 +158,7 @@ The relevant endpoints (all public, pre-auth bootstrap, same as the existing
 - `GET /auth/native/authorize` — starts the brokered PKCE login
 - `POST /auth/native/token` — exchanges the loopback code + verifier for tokens
 - `POST /auth/native/refresh` — rotates tokens from the app's refresh token
+- `POST /auth/native/revoke` — ends the app's grant (best effort, always `{"ok": true}`)
 
 ## See also
 

@@ -38,7 +38,8 @@ _log = logging.getLogger(__name__)
 # the trailing slash matches ``/assets/foo.css`` but not ``/assetsleak``.
 _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/auth/login", "/auth/callback", "/auth/native/authorize", "/auth/native/token",
-    "/auth/native/refresh", "/auth/password-login", "/auth/logout", "/login",
+    "/auth/native/refresh", "/auth/native/revoke", "/auth/password-login", "/auth/logout",
+    "/login",
     "/api/auth/providers", "/api/mcp/oauth/callback/",
     "/assets/", "/favicon.ico", "/ds-assets/", "/fonts/", "/fonts-terminal/")
 

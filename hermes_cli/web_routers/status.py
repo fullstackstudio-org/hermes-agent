@@ -360,7 +360,9 @@ def _auth_gate_status() -> Dict[str, Any]:
     system-browser + loopback + PKCE flow over the embedded-webview cookie flow. "cookie" is
     always available in gated mode; "native_pkce" when at least one interactive session
     provider is registered (token-only credentials such as drain don't count). Missing
-    "native_pkce" ⇒ older gateway ⇒ desktop falls back automatically."""
+    "native_pkce" ⇒ older gateway ⇒ desktop falls back automatically. "native_revoke" (always in
+    gated mode): ``POST /auth/native/revoke`` exists, so a native client can end its own grant;
+    readers test membership, so a client that does not know it ignores it."""
     auth_required = bool(getattr(app.state, "auth_required", False))
     auth_providers: list[str] = []
     auth_flows: list[str] = []
@@ -372,6 +374,7 @@ def _auth_gate_status() -> Dict[str, Any]:
             auth_flows.append("cookie")
             if _list_session_providers():
                 auth_flows.append("native_pkce")
+            auth_flows.append("native_revoke")
     except Exception:
         # Module not importable yet (early startup) — leave as [].
         pass

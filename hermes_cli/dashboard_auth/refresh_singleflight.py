@@ -11,8 +11,9 @@ A provider hint only orders discovery: it must neither split one rotating creden
 nor let an unrelated provider reuse its result. Raw refresh tokens are never keys.
 
 A native revoke (``routes.auth_native_revoke``) takes the same flight, so it waits out a rotation
-of the token already under way, and then drops the token's cached result: otherwise a refresh
-arriving within the replay window would still be handed the session the revoked token produced.
+of the token already under way, and then drops every cached result that holds the token, as key
+or as the rotated token handed out: otherwise a refresh arriving within the replay window would
+still be handed a session the revoked token produced, or the revoked token itself.
 """
 from __future__ import annotations
 
@@ -130,9 +131,9 @@ def revoke_targets(provider_hint: str) -> list[DashboardAuthProvider]:
     reaches for a correct hint (the hinted provider goes first and rotates the token), and here it
     is also what keeps a token away from every other provider: a revoke cannot tell which provider
     owns an opaque token, and handing a password provider's live refresh token to an OIDC
-    provider's revocation endpoint would disclose it to that identity provider. Without a hint, or
-    with one that names no registered provider, every session provider in registration order, as
-    refresh and ``/auth/logout`` do."""
+    provider's revocation endpoint would disclose it to that identity provider. With a hint that
+    names no registered provider (the route refuses a missing one), every session provider in
+    registration order, as refresh and ``/auth/logout`` do."""
     providers = list_session_providers()
     hinted = [p for p in providers if provider_hint and p.name == provider_hint]
     return hinted[:1] or providers
@@ -144,7 +145,9 @@ def revoke_session_coalesced(
     handed to. Never raises.
 
     Each provider's revoke runs under that token's refresh flight, so it waits for a rotation
-    already under way, and every cached refresh result for the token is dropped afterwards.
+    already under way. Afterwards every cached refresh result for the token is dropped, and so is
+    every cached result that handed the token out: a client revoking its current token RT2 must
+    not leave the burst cache for its previous RT1 returning a session that carries RT2.
     A provider's failure is logged by exception class only: neither the token nor anything a
     provider sent back reaches the log. Synchronous and network-bound: async callers run it in a
     threadpool."""
@@ -159,6 +162,8 @@ def revoke_session_coalesced(
                             type(e).__name__)
             # Still inside the flight, so no refresh of this token can read the entry in between.
             with _guard:
-                for key in [key for key in _cache if key[1] == digest]:
+                for key in [key for key, (_, _, session) in _cache.items()
+                            if key[1] == digest
+                            or (session is not None and session.refresh_token == token)]:
                     del _cache[key]
     return targets

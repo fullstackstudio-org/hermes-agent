@@ -17,9 +17,18 @@ _NEXT_DENY_PREFIXES = ("/login", "/auth/", "/api/auth/")
 
 
 def client_ip(request: Request) -> str:
-    """First ``X-Forwarded-For`` hop, else the peer address."""
-    fwd = request.headers.get("x-forwarded-for", "")
-    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
+    """The client's address as the server settled it, never a header read here.
+
+    In gated mode uvicorn runs ``ProxyHeadersMiddleware`` with ``forwarded_allow_ips`` = loopback
+    plus ``dashboard.trusted_proxies`` (``web_server_lifecycle._dashboard_forwarded_allow_ips``):
+    when the socket peer is one of those proxies it has already replaced ``request.client`` with
+    the rightmost ``X-Forwarded-For`` hop that is not itself a trusted proxy, and from any other
+    peer it leaves the peer. The same peers decide ``X-Forwarded-Proto`` and, through
+    ``origins.ForwardedPeerMarker``, ``X-Forwarded-Host``. Reading ``X-Forwarded-For`` again here
+    would let any caller choose its own address (its first hop is whatever the client sent), which
+    the per-address throttles and the audit log both rely on not being possible. Behind a proxy
+    that is not trusted every client shares the proxy's address, which fails toward throttling."""
+    return request.client.host if request.client else ""
 
 
 def extract_bearer(request: Request) -> str:

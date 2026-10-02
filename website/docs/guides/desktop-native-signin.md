@@ -117,16 +117,23 @@ Content-Type: application/json
 {"refresh_token": "<the client's refresh token>", "provider": "<provider name>"}
 ```
 
-- `provider` is the `provider` value `/auth/native/token` and
+- `provider` is required: the `provider` value `/auth/native/token` and
   `/auth/native/refresh` returned with the token. When it names a registered
-  provider, the token is handed to that provider only; without it, or with a
-  name the gateway does not know, every interactive provider is tried in turn.
-  Always send it: a token is then never shown to an identity provider that did
-  not issue it.
+  provider, the token is handed to that provider only, so it is never shown
+  to an identity provider that did not issue it. A name the gateway does not
+  know (a provider removed since sign-in) sends the token to every interactive
+  provider in turn.
 - The answer is `200 {"ok": true}` for every well-formed request, whether the
   token was live, already dead or never issued, so the endpoint cannot be used
-  to test a token. A missing `refresh_token` is `400`, a body over 16 KiB `413`,
-  and more than 30 requests a minute from one address `429`.
+  to test a token. A body that is not a JSON object, or a missing, `null` or
+  empty `refresh_token` or `provider`, is `400`; a body over 16 KiB `413`; more
+  than 30 requests a minute from one address `429`.
+- The address is the one the server settled: the socket peer, or, when that
+  peer is loopback or listed in `dashboard.trusted_proxies`, the rightmost
+  `X-Forwarded-For` hop that is not itself a trusted proxy. A client cannot
+  choose it. Behind a proxy that is not listed, every client shares the
+  proxy's address and its budget, so list the proxy. The same address keys the
+  password-login throttle and the audit log.
 - What "revoked" means is the provider's: an OIDC provider whose discovery
   document advertises a `revocation_endpoint` gets an RFC 7009 revocation
   request, and a refresh with that token then fails. The bundled password

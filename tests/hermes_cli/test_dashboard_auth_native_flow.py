@@ -731,13 +731,14 @@ def test_native_revoke_answers_an_unknown_token_like_a_live_one(gated_client):
     answers = [gated_client.post("/auth/native/revoke", json=body)
                for body in ({"refresh_token": live["refresh_token"], "provider": "stub"},
                             {"refresh_token": "never-issued", "provider": "stub"},
-                            {"refresh_token": "never-issued"})]
+                            {"refresh_token": "never-issued", "provider": "no-such-provider"})]
 
     assert {(r.status_code, r.text) for r in answers} == {(200, json.dumps({"ok": True}, separators=(",", ":")))}
 
 
 class _RevocableStub(StubAuthProvider):
-    """A stub whose revoke really ends the refresh token, like an RFC 7009 identity provider."""
+    """A rotating identity provider with RFC 7009 revocation: a refresh token is spent by the
+    refresh that rotates it, and a revoke ends it."""
 
     def __init__(self):
         super().__init__()
@@ -746,7 +747,11 @@ class _RevocableStub(StubAuthProvider):
     def refresh_session(self, *, refresh_token):
         if refresh_token in self.revoked:
             raise RefreshExpiredError("revoked")
-        return super().refresh_session(refresh_token=refresh_token)
+        self.revoked.add(refresh_token)
+        session = super().refresh_session(refresh_token=refresh_token)
+        # The stub's tokens carry only second-resolution claims; make each rotation unique.
+        import dataclasses
+        return dataclasses.replace(session, refresh_token=f"{session.refresh_token}.{secrets.token_hex(4)}")
 
     def revoke_session(self, *, refresh_token):
         self.revoked.add(refresh_token)
@@ -796,20 +801,163 @@ def test_native_revoke_audit_and_log_never_carry_the_token(gated_client, caplog)
 def test_native_revoke_refuses_oversized_bodies_and_other_methods(gated_client):
     big = {"refresh_token": "x" * (64 * 1024), "provider": "stub"}
     assert gated_client.post("/auth/native/revoke", json=big).status_code == 413
+    # Chunked, so no Content-Length announces the size: refused while reading.
+    chunked = gated_client.post(
+        "/auth/native/revoke", headers={"Content-Type": "application/json"},
+        content=iter([json.dumps(big).encode()[i:i + 4096] for i in range(0, 70 * 1024, 4096)]))
+    assert chunked.status_code == 413
     # Only POST reaches the handler (a GET falls through to the SPA's 404, as for refresh).
     for method in ("get", "put", "delete"):
         assert getattr(gated_client, method)("/auth/native/revoke").status_code in (404, 405)
     assert gated_client.post("/auth/native/revoke", json={"provider": "stub"}).status_code == 400
 
 
-def test_native_revoke_is_rate_limited_per_address(gated_client):
+@pytest.mark.parametrize("raw", [
+    b"{not json", b"[]", b'"rt"', b"[" * 5000, b'{"a":' * 3000,
+    b'{"refresh_token": "rt-x", "provider": 7}',
+    b'{"refresh_token": "rt-x"}', b'{"refresh_token": "rt-x", "provider": null}',
+    b'{"refresh_token": "rt-x", "provider": ""}',
+], ids=["malformed", "array", "string", "deep-array", "deep-object", "provider-number",
+        "provider-missing", "provider-null", "provider-empty"])
+def test_native_revoke_answers_a_malformed_body_400(gated_client, raw):
+    """Never a 500: an unhandled error would flip /api/status to degraded for anyone."""
+    r = gated_client.post("/auth/native/revoke", content=raw,
+                          headers={"Content-Type": "application/json"})
+    assert r.status_code == 400, r.text
+
+
+def test_native_revoke_with_an_unknown_provider_name_reaches_every_provider():
+    class _Recording(StubAuthProvider):
+        def __init__(self, name):
+            super().__init__()
+            self.name, self.seen = name, []
+
+        def revoke_session(self, *, refresh_token):
+            self.seen.append(refresh_token)
+
+    first, second = _Recording("one"), _Recording("two")
+    client = _gated(first, second)
+
+    r = client.post("/auth/native/revoke", json={"refresh_token": "rt-u", "provider": "gone"})
+
+    assert r.json() == {"ok": True}
+    assert first.seen == second.seen == ["rt-u"]
+
+
+def test_native_revoke_survives_a_provider_that_raises_and_logs_only_its_class(caplog):
+    class _Exploding(StubAuthProvider):
+        def revoke_session(self, *, refresh_token):
+            raise RuntimeError(f"upstream said no to {refresh_token} body=<secret>")
+
+    client = _gated(_Exploding())
+    with caplog.at_level(logging.DEBUG):
+        r = client.post("/auth/native/revoke", json={"refresh_token": "rt-boom", "provider": "stub"})
+
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert "RuntimeError" in caplog.text
+    assert "rt-boom" not in caplog.text and "<secret>" not in caplog.text
+
+
+def test_native_revoke_drops_the_cached_burst_that_handed_out_the_revoked_token():
+    """The client revokes its CURRENT token RT2. The burst cache keyed by the previous RT1 holds
+    the session carrying RT2 and must not keep handing it out."""
+    client = _gated(_RevocableStub())
+    verifier, challenge = _make_pkce()
+    code, _state = _walk_native_login(
+        client, redirect_uri="http://127.0.0.1:53999/cb", challenge=challenge)
+    rt1 = client.post("/auth/native/token", json={"code": code, "code_verifier": verifier}
+                      ).json()["refresh_token"]
+    rotated = client.post("/auth/native/refresh", json={"refresh_token": rt1, "provider": "stub"})
+    rt2 = rotated.json()["refresh_token"]
+    assert rt2 != rt1
+
+    assert client.post("/auth/native/revoke",
+                       json={"refresh_token": rt2, "provider": "stub"}).status_code == 200
+
+    replay = client.post("/auth/native/refresh", json={"refresh_token": rt1, "provider": "stub"})
+    assert replay.status_code == 401, replay.text
+
+
+def test_native_revoke_from_a_foreign_web_origin_is_refused_when_the_check_is_on(monkeypatch):
+    primary, other = "https://hermes.example.test", "https://app.example.test"
+    monkeypatch.delenv("HERMES_DASHBOARD_PUBLIC_URL", raising=False)
+    monkeypatch.setattr("hermes_cli.config.load_config",
+                        lambda: {"dashboard": {"public_url": primary, "public_urls": [other]}})
+    for name in ("trusted_public_hosts", "public_origins", "write_origin_check"):
+        monkeypatch.setattr(web_server.app.state, name,
+                            getattr(web_server.app.state, name, None), raising=False)
+    clear_providers()
+    register_provider(StubAuthProvider())
+    web_server.app.state.bound_host = "127.0.0.1"
+    web_server._configure_auth_gate("127.0.0.1", False, None, None)
+    assert web_server.app.state.write_origin_check and web_server.app.state.auth_required
+    client = TestClient(web_server.app, base_url=primary)
+    body = {"refresh_token": "rt-o", "provider": "stub"}
+
+    foreign = client.post("/auth/native/revoke", json=body,
+                          headers={"Origin": "https://evil.example.test"})
+    native = client.post("/auth/native/revoke", json=body)  # a native client sends no Origin
+
+    assert foreign.status_code == 403
+    assert native.status_code == 200 and native.json() == {"ok": True}
+
+
+def test_paths_that_merely_start_like_the_revoke_route_expose_nothing(gated_client):
+    """The gate's public list is prefix-matched; nothing may live behind the revoke prefix."""
+    for path in ("/auth/native/revoke-x", "/auth/native/revoke/x", "/auth/native/revokeall"):
+        assert gated_client.post(path, json={"refresh_token": "rt", "provider": "stub"}
+                                 ).status_code in (404, 405), path
+        r = gated_client.get(path)
+        assert r.status_code == 404 or "refresh_token" not in r.text, path
+
+
+def _behind_uvicorn(peer: str) -> TestClient:
+    """The gated app as uvicorn serves it, with socket peer ``peer`` and loopback as the only
+    trusted proxy (the default ``forwarded_allow_ips``)."""
+    import uvicorn
+
+    config = uvicorn.Config(web_server.app, proxy_headers=True, log_config=None,
+                            forwarded_allow_ips=["127.0.0.1", "::1"])
+    config.load()
+    return TestClient(config.loaded_app, base_url="https://fly-app.fly.dev", client=(peer, 50000))
+
+
+def _revoke_codes(client, count, **headers):
+    body = {"refresh_token": "rt-burst", "provider": "stub"}
+    return [client.post("/auth/native/revoke", json=body, headers=headers).status_code
+            for _ in range(count)]
+
+
+def test_native_revoke_is_rate_limited_per_address(gated_client, caplog):
     from hermes_cli.dashboard_auth.routes import _REVOKE_RATE_MAX
 
-    body = {"refresh_token": "rt-burst", "provider": "stub"}
-    codes = [gated_client.post("/auth/native/revoke", json=body).status_code
-             for _ in range(_REVOKE_RATE_MAX + 1)]
-    assert set(codes[:-1]) == {200}
+    codes = _revoke_codes(gated_client, _REVOKE_RATE_MAX + 3)
+
+    assert set(codes[:_REVOKE_RATE_MAX]) == {200}
+    assert set(codes[_REVOKE_RATE_MAX:]) == {429}
+    import os
+    from pathlib import Path
+    events = [json.loads(line) for line in
+              (Path(os.environ["HERMES_HOME"]) / "logs" / "dashboard-auth.log").read_text().splitlines()]
+    assert len([e for e in events if e.get("reason") == "rate_limited"]) == 1
+
+
+def test_a_forged_forwarded_for_neither_escapes_nor_spends_another_address_budget(gated_client):
+    from hermes_cli.dashboard_auth.routes import _REVOKE_RATE_MAX
+
+    attacker = _behind_uvicorn("203.0.113.66")
+    # (a) a fresh X-Forwarded-For per request from an untrusted peer is ignored: one bucket.
+    codes = [attacker.post("/auth/native/revoke",
+                           json={"refresh_token": "rt-burst", "provider": "stub"},
+                           headers={"X-Forwarded-For": f"10.0.{i // 250}.{i % 250}"}).status_code
+             for i in range(_REVOKE_RATE_MAX + 1)]
     assert codes[-1] == 429
+    # (c) naming the victim does not spend the victim's budget, directly or through the proxy,
+    # which appends the attacker's real address that uvicorn then takes as the client.
+    via_proxy = _behind_uvicorn("127.0.0.1")
+    _revoke_codes(via_proxy, _REVOKE_RATE_MAX + 1, **{"X-Forwarded-For": "198.51.100.7, 203.0.113.77"})
+    assert _revoke_codes(_behind_uvicorn("198.51.100.7"), 1) == [200]
+    assert _revoke_codes(via_proxy, 1, **{"X-Forwarded-For": "198.51.100.7"}) == [200]
 
 
 def test_status_advertises_native_revoke_only_when_gated(gated_client):

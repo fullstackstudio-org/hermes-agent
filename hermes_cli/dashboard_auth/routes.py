@@ -21,10 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
-import time
-from collections import defaultdict, deque
-from typing import Any, Deque, Dict
+from typing import Any
 from urllib.parse import quote, unquote, urlencode, urlparse, urlunparse
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -39,6 +36,7 @@ from hermes_cli.dashboard_auth import prefix as _prefix_mod
 from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
 from hermes_cli.dashboard_auth.base import (
     InvalidCodeError, InvalidCredentialsError, ProviderError, Session)
+from hermes_cli.dashboard_auth.rate_limit import SlidingWindowLimiter, Verdict
 from hermes_cli.dashboard_auth.cookies import (
     clear_pkce_cookie, clear_session_cookies, clear_sso_attempt_cookie, detect_https,
     parse_pkce_payload, read_pkce_cookie, read_session_cookies, set_pkce_cookie,
@@ -363,32 +361,21 @@ async def auth_callback(
 # --- Public: password (non-redirect) login ---------------------------------
 # Brute-force throttle: a process-local sliding window per client IP. Best-effort
 # defence-in-depth on top of the provider's constant-time verify (resets on restart; behind a
-# proxy the IP is the proxy's unless X-Forwarded-For).
+# proxy that is not in dashboard.trusted_proxies the IP is the proxy's; see client_ip).
 _PW_RATE_MAX_ATTEMPTS = 10
 _PW_RATE_WINDOW_SEC = 60.0
-_pw_attempts: Dict[str, Deque[float]] = defaultdict(deque)
-_pw_attempts_lock = threading.Lock()
+_pw_limiter = SlidingWindowLimiter(_PW_RATE_MAX_ATTEMPTS, _PW_RATE_WINDOW_SEC)
 
 
 def _password_rate_limited(ip: str) -> bool:
     """True if ``ip`` exceeded the budget; records the attempt when allowed. An empty IP shares
     one bucket — fail-safe toward throttling."""
-    now = time.monotonic()
-    cutoff = now - _PW_RATE_WINDOW_SEC
-    with _pw_attempts_lock:
-        bucket = _pw_attempts[ip or "_unknown_"]
-        while bucket and bucket[0] < cutoff:
-            bucket.popleft()
-        if len(bucket) >= _PW_RATE_MAX_ATTEMPTS:
-            return True
-        bucket.append(now)
-        return False
+    return _pw_limiter.check(ip) is not Verdict.ALLOWED
 
 
 def _reset_password_rate_limit() -> None:
     """Test-only: clear all rate-limit buckets."""
-    with _pw_attempts_lock:
-        _pw_attempts.clear()
+    _pw_limiter.reset()
 
 
 class _PasswordLoginBody(BaseModel):
@@ -588,30 +575,15 @@ async def auth_native_refresh(request: Request, body: _NativeRefreshBody):
 _REVOKE_MAX_BODY_BYTES = 16 * 1024
 _REVOKE_RATE_MAX = 30
 _REVOKE_RATE_WINDOW_SEC = 60.0
-_revoke_attempts: Dict[str, Deque[float]] = defaultdict(deque)
-_revoke_attempts_lock = threading.Lock()
-
-
-def _native_revoke_rate_limited(ip: str) -> bool:
-    """Per-IP sliding window, the same shape as the password throttle. Each accepted revoke can
-    cost an outbound call to the identity provider, so an unauthenticated caller must not be able
-    to turn this route into an unbounded request pump."""
-    now = time.monotonic()
-    cutoff = now - _REVOKE_RATE_WINDOW_SEC
-    with _revoke_attempts_lock:
-        bucket = _revoke_attempts[ip or "_unknown_"]
-        while bucket and bucket[0] < cutoff:
-            bucket.popleft()
-        if len(bucket) >= _REVOKE_RATE_MAX:
-            return True
-        bucket.append(now)
-        return False
+# Per client address, like the password throttle. Each accepted revoke can cost an outbound call
+# to the identity provider that holds a threadpool worker until it answers or times out, so an
+# unauthenticated caller must not be able to turn this route into an unbounded request pump.
+_revoke_limiter = SlidingWindowLimiter(_REVOKE_RATE_MAX, _REVOKE_RATE_WINDOW_SEC)
 
 
 def _reset_native_revoke_rate_limit() -> None:
     """Test-only: clear all revoke rate-limit buckets."""
-    with _revoke_attempts_lock:
-        _revoke_attempts.clear()
+    _revoke_limiter.reset()
 
 
 async def _read_small_json_object(request: Request, limit: int) -> dict:
@@ -630,7 +602,7 @@ async def _read_small_json_object(request: Request, limit: int) -> dict:
             raise _http(413, "Request body too large")
     try:
         body = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):  # RecursionError: deeply nested arrays or objects
         body = None
     if not isinstance(body, dict):
         raise _http(400, "Body must be a JSON object")
@@ -641,21 +613,26 @@ async def _read_small_json_object(request: Request, limit: int) -> dict:
 async def auth_native_revoke(request: Request):
     """End a native client's grant: body ``{"refresh_token": "...", "provider": "<name>"}``.
 
-    ``provider`` is the name ``/auth/native/token`` and ``/auth/native/refresh`` returned with the
-    token. It selects which provider the token is handed to (see
+    ``provider`` is required: the name ``/auth/native/token`` and ``/auth/native/refresh``
+    returned with the token. It selects which provider the token is handed to (see
     ``refresh_singleflight.revoke_targets``): only that one when it names a registered session
-    provider, otherwise each in turn. Revocation is the provider's: RFC 7009 at an OIDC provider
-    that advertises a revocation endpoint, nothing at the stateless password provider or the Nous
-    Portal, whose tokens run out on their own. Best effort and never an error once the request is
-    well formed: ``200 {"ok": true}`` for every token. A missing token 400, an oversized body 413,
-    more than ``_REVOKE_RATE_MAX`` a minute from one address 429."""
-    if _native_revoke_rate_limited(_client_ip(request)):
-        _audit(request, AuditEvent.REVOKE, flow="native", reason="rate_limited")
+    provider, each in turn when it names none. Revocation is the provider's: RFC 7009 at an OIDC
+    provider that advertises a revocation endpoint, nothing at the stateless password provider or
+    the Nous Portal, whose tokens run out on their own. Best effort and never an error once the
+    request is well formed: ``200 {"ok": true}`` for every token. A missing token or provider
+    (``null`` and ``""`` count as missing; whether they are missing never depends on the token)
+    400, an oversized body 413, more than ``_REVOKE_RATE_MAX`` a minute from one address 429."""
+    verdict = _revoke_limiter.check(_client_ip(request))
+    if verdict is not Verdict.ALLOWED:
+        if verdict is Verdict.REFUSED:  # one audit line per address per window, not per request
+            _audit(request, AuditEvent.REVOKE, flow="native", reason="rate_limited")
         raise _http(429, "Too many revoke requests. Try again shortly.")
     body = await _read_small_json_object(request, _REVOKE_MAX_BODY_BYTES)
-    token, hint = body.get("refresh_token"), body.get("provider", "")
+    token, hint = body.get("refresh_token"), body.get("provider")
     if not isinstance(token, str) or not token:
         raise _http(400, "refresh_token required")
+    if hint is None or hint == "":
+        raise _http(400, "provider required: send the provider name returned with the token")
     if not isinstance(hint, str):
         raise _http(400, "provider must be a string")
     # Off the event loop: an OIDC revoke is synchronous network I/O.

@@ -212,3 +212,76 @@ def test_cookie_gate_burst_with_stale_rt_rotates_once(gated_web_app):
         statuses = sorted(f.result(timeout=10).status_code for f in futures)
     assert statuses == [200, 200, 200, 200]
     assert provider.calls == 1
+
+
+class _RevokingProvider(Provider):
+    """Records the order of refresh and revoke calls; each can be held open by the test."""
+
+    def __init__(self):
+        super().__init__("owner")
+        self.order: list[str] = []
+        self.revoke_entered = threading.Event()
+        self.revoke_release = threading.Event()
+        self.revoke_release.set()
+
+    def refresh_session(self, *, refresh_token):
+        session = super().refresh_session(refresh_token=refresh_token)
+        self.order.append("refresh")
+        return session
+
+    def revoke_session(self, *, refresh_token):
+        self.revoke_entered.set()
+        assert self.revoke_release.wait(5), "test provider timed out"
+        self.order.append("revoke")
+
+
+def _refresh(token="shared-token"):
+    return replay.refresh_session_coalesced(token, "owner", phase="test",
+                                            log=logging.getLogger(__name__))
+
+
+def _revoke(token="shared-token"):
+    return replay.revoke_session_coalesced(token, "owner", log=logging.getLogger(__name__))
+
+
+def test_revoke_waits_for_a_refresh_of_the_same_token_and_then_ends_its_cached_result():
+    provider = _RevokingProvider()
+    provider.release.clear()
+    register_provider(provider)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        refreshing = pool.submit(_refresh)
+        assert provider.entered.wait(3)
+        revoking = pool.submit(_revoke)
+        try:
+            assert not provider.revoke_entered.wait(0.2), "revoke ran beside an in-flight refresh"
+        finally:
+            provider.release.set()
+        assert refreshing.result(timeout=3) is not None
+        assert [p.name for p in revoking.result(timeout=3)] == ["owner"]
+
+    _refresh()  # not served from the cache the first refresh filled
+
+    assert provider.order == ["refresh", "revoke", "refresh"]
+    assert not replay._flights
+
+
+def test_refresh_waits_for_a_revoke_of_the_same_token_and_is_not_answered_from_the_cache():
+    provider = _RevokingProvider()
+    register_provider(provider)
+    _refresh()  # fills the burst cache for the token
+    provider.revoke_release.clear()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        revoking = pool.submit(_revoke)
+        assert provider.revoke_entered.wait(3)
+        refreshing = pool.submit(_refresh)
+        try:
+            time.sleep(0.2)
+            assert provider.order == ["refresh"], "refresh ran or hit the cache during a revoke"
+            assert not refreshing.done()
+        finally:
+            provider.revoke_release.set()
+        revoking.result(timeout=3)
+        refreshing.result(timeout=3)
+
+    assert provider.order == ["refresh", "revoke", "refresh"]
+    assert not replay._flights

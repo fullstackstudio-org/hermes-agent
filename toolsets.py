@@ -157,6 +157,10 @@ TOOLSETS = {
         role="setup",
     ),
     "clarify": _ts("Ask the user clarifying questions (multiple-choice or open-ended)", ["clarify"]),
+    # Off by default (hermes_cli/tools_config.py::_DEFAULT_OFF_TOOLSETS); the tool is withheld outside
+    # the interactive gateway and answers "unavailable" when no connected app can confirm.
+    "confirm": _ts("Ask the person to confirm a sensitive action in their connected app before doing it",
+                   ["confirm_action"]),
     "code_execution": _ts("Run Python scripts that call tools programmatically (reduces LLM round trips)", ["execute_code"]),
     "delegation": _ts("Spawn subagents with isolated context for complex subtasks", ["delegate_task"]),
     "homeassistant": _ts("Home Assistant smart home control and monitoring", _HA_TOOLS),

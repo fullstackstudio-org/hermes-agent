@@ -193,6 +193,31 @@ describe('JsonRpcRequestChannel', () => {
     expect(sent).toHaveLength(1)
   })
 
+  it('advertises confirm levels in a second call, only to a backend that may send confirm', async () => {
+    const channel = new JsonRpcRequestChannel({ confirmLevels: ['plain'], requestIdPrefix: 'c' })
+    const { sent, transport, last } = spyTransport()
+    const settle = () => new Promise(resolve => setTimeout(resolve, 0))
+
+    channel.attach(transport)
+    channel.handleFrame(JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: {} } }))
+    // The first call never carries `confirm`: an older backend would reject the unknown key (4000).
+    expect(JSON.parse(sent[0]).params).toEqual({ server_requests: true })
+
+    channel.handleFrame(JSON.stringify({ id: last().id, jsonrpc: '2.0', result: { server_requests: ['clarify', 'confirm'] } }))
+    await settle()
+    expect(sent).toHaveLength(2)
+    expect(JSON.parse(sent[1])).toMatchObject({
+      method: 'client.capabilities',
+      params: { confirm: ['plain'], server_requests: true }
+    })
+
+    // A backend without confirm gets no second call.
+    channel.handleFrame(JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: {} } }))
+    channel.handleFrame(JSON.stringify({ id: last().id, jsonrpc: '2.0', result: { server_requests: ['clarify'] } }))
+    await settle()
+    expect(sent).toHaveLength(3)
+  })
+
   it('routes a server request to the first accepting handler and answers -32601 when nobody accepts', () => {
     const unhandled: string[] = []
     const channel = new JsonRpcRequestChannel({ onUnhandledRequest: req => void unhandled.push(req.method) })

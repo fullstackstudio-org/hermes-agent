@@ -92,6 +92,13 @@ export interface JsonRpcTransport {
 }
 
 export interface JsonRpcRequestChannelOptions {
+  /**
+   * The `confirm` levels this client answers (today only `'plain'`), advertised
+   * in `client.capabilities`. Omit (the default) to advertise none: the
+   * backend then never sends `confirm` to this connection. List a level only
+   * when a request handler answers it.
+   */
+  confirmLevels?: readonly string[]
   createRequestId?: (nextId: number) => GatewayRequestId
   heartbeatDeadlineMs?: number
   heartbeatIntervalMs?: number
@@ -190,6 +197,7 @@ export class JsonRpcRequestChannel {
 
   constructor(options: JsonRpcRequestChannelOptions = {}) {
     this.options = {
+      confirmLevels: options.confirmLevels ?? [],
       createRequestId: options.createRequestId ?? ((nextId: number) => `${options.requestIdPrefix ?? 'r'}${nextId}`),
       heartbeatDeadlineMs: options.heartbeatDeadlineMs ?? DEFAULT_HEARTBEAT_DEADLINE_MS,
       heartbeatIntervalMs: options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
@@ -485,9 +493,26 @@ export class JsonRpcRequestChannel {
    * and fails every clarify/approval/… for it immediately instead of stalling
    * the agent for the full deadline. An older backend answers `-32601` here;
    * that is ignored.
+   *
+   * `confirmLevels` go out in a SECOND call, and only when the first one's
+   * answer lists `confirm` among the methods the backend may send: a backend
+   * older than `confirm` rejects the unknown key with `4000`, and folding it
+   * into the first call would cost this connection `server_requests` itself.
    */
   private advertiseCapabilities(): void {
-    this.request('client.capabilities', { server_requests: true }).catch(() => undefined)
+    const confirm = this.options.confirmLevels
+
+    this.request<{ server_requests?: unknown }>('client.capabilities', { server_requests: true })
+      .then(result => {
+        const methods = Array.isArray(result?.server_requests) ? result.server_requests : []
+
+        if (confirm.length && methods.includes('confirm')) {
+          return this.request('client.capabilities', { confirm: [...confirm], server_requests: true })
+        }
+
+        return undefined
+      })
+      .catch(() => undefined)
   }
 
   /**

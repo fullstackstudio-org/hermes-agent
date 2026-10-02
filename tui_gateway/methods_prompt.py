@@ -1248,13 +1248,16 @@ def _(rid, params: dict) -> dict:
     """Answer an open server→client request from a client that did not receive it (a Bot Mode room
     window answering a member's prompt mirrored from its resume snapshot). The response-frame path is
     the norm; this is the proxy for it. ``expired`` when the request already ended; 4033 for a connection
-    that may not act on the request's session (``_transport_may_access_session``)."""
+    that may not act on the request's session (``_transport_may_access_session``). A gated request
+    (``confirm``) answers 4033 to a connection that did not advertise its level and 4034 to a result that
+    is not a valid answer; the request stays open for one that is."""
     request_id = str(params.get("id") or "")
     result = params.get("result")
     if not request_id or not isinstance(result, dict):
         return _err(rid, 4002, "id and an object result required")
     from tui_gateway import server_requests
-    if (refusal := server_requests.answer_problem(request_id, result)) is not None:
+    if (refusal := (server_requests.answer_problem(request_id, result)
+                    or server_requests.gated_answer_problem(request_id, result))) is not None:
         return _err(rid, *refusal)
     frame = {"jsonrpc": "2.0", "id": request_id, "result": result}
     if server_requests.resolve_response(frame) or _relay_compute_host_response(frame):

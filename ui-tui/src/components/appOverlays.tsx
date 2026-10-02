@@ -133,7 +133,10 @@ export function PromptZone({
       req.onConfirm()
     }
 
-    const onCancel = () => patchOverlayState({ confirm: null })
+    const onCancel = () => {
+      patchOverlayState({ confirm: null })
+      req.onCancel?.()
+    }
 
     return (
       <PromptCell cols={cols} id="confirm">

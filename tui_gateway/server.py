@@ -663,7 +663,19 @@ from tui_gateway import server_requests as _server_requests  # noqa: E402
 _server_requests.bind_sinks(lambda frame: write_json(frame), lambda event, sid, payload: _emit(event, sid, payload),
                             lambda sid: _session_client_answers_requests(sid),
                             access=lambda sid, transport: _transport_may_access_session(
-                                _sessions.get(sid), transport, sid=sid))
+                                _sessions.get(sid), transport, sid=sid),
+                            peers=lambda sid: _session_client_peers(sid))
+
+# The confirm_action tool reaches the turn's clients through this bridge; without it (CLI, messaging
+# gateway, any process that does not host these sessions) the tool is withheld from the schema.
+with contextlib.suppress(Exception):
+    from tools import confirm_tool as _confirm_tool
+
+    def _confirm_bridge(sid: str, **kwargs):
+        from tui_gateway import confirm as _confirm
+        return _confirm.request_from_tool(sid, **kwargs)
+
+    _confirm_tool.set_bridge(_confirm_bridge)
 
 
 # Live WS peer transports (maintained by tui_gateway.ws): the only route for session-less background

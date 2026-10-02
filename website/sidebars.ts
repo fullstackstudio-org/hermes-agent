@@ -765,6 +765,7 @@ const sidebars: SidebarsConfig = {
         'guides/work-with-skills',
         'guides/delegation-patterns',
         'guides/agent-email-address',
+        'guides/confirm-sensitive-actions',
         'guides/github-pr-review-agent',
         'guides/webhook-github-pr-review',
         'guides/migrate-from-openclaw',

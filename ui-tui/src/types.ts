@@ -111,8 +111,14 @@ export interface ConfirmReq {
   confirmLabel?: string
   danger?: boolean
   detail?: string
+  /** Esc / N / "No": a local confirm just closes; a backend `confirm` request answers `declined`. */
+  onCancel?: () => void
   onConfirm: () => void
+  /** Set for a backend `confirm` request, so `request.cancel` can tear the card down. */
+  requestId?: string
   title: string
+  /** Show `detail` whole (wrapped) instead of one truncated line: the backend's text must be read in full. */
+  wrapDetail?: boolean
 }
 
 export interface ClarifyBatchQuestion {

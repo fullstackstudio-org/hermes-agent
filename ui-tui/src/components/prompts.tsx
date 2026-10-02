@@ -456,7 +456,7 @@ export function ConfirmPrompt({ onCancel, onConfirm, req, t }: ConfirmPromptProp
 
       {req.detail ? (
         <Box paddingLeft={1}>
-          <Text color={t.color.text} wrap="truncate-end">
+          <Text color={t.color.text} wrap={req.wrapDetail ? 'wrap' : 'truncate-end'}>
             {req.detail}
           </Text>
         </Box>

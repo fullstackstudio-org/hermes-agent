@@ -50,6 +50,18 @@ def _session_client_answers_requests(sid: str) -> bool:
     return not clients or any(server_requests.answers_requests(peer) for peer in clients)
 
 
+def _session_client_peers(sid: str) -> list:
+    """Each client connection attached to *sid* right now, unwrapped from the fan-out: the targets a gated
+    server→client request (``confirm``) is written to one by one. Unlike :func:`_session_live_transports`
+    this keeps the stdio TUI's transport (it is the session's only client in ``hermes --tui``); the detached
+    sentinel, drop sinks and closed peers are left out."""
+    existing = (_sessions.get(sid) or {}).get("transport")
+    peers = existing.transports() if isinstance(existing, FanoutTransport) else [existing]
+    return [peer for peer in peers
+            if peer is not None and peer is not _detached_ws_transport
+            and not isinstance(peer, _DropTransport) and not _transport_is_dead(peer)]
+
+
 #: Set while the gateway itself dispatches an RPC handler in process on a caller's behalf after that caller
 #: was authorized for the outer action (a relayed bot DM landing in a Bot Chat, a hosted room driving its
 #: member sessions). Never settable from the wire: underscore params can be, so they are no marker.

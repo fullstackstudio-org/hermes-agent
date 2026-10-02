@@ -1670,10 +1670,14 @@ export interface GatewayCapabilitiesResult {
 }
 export interface ClientCapabilitiesParams {
   server_requests?: boolean
+  confirm?: string[] | null
 }
 export interface ClientCapabilitiesResult {
   server_requests: string[]
+  confirm?: ConfirmLevel[]
 }
+/** What a confirmation proves. ``plain``: someone tapped Confirm in a connected client; nothing more, and the gateway cannot check even that. ``passkey``: RESERVED for a verified level the gateway will check itself; not implemented yet — a ``passkey`` request is ``unavailable`` without being sent, and no client can advertise it. The set is open: a later level is one more value here. */
+export type ConfirmLevel = 'plain' | 'passkey'
 /** ``word`` is the token under the cursor (``@`` prefix = context reference); ``cwd`` / ``session_id`` pick the directory the listing resolves against. */
 export interface CompletePathParams {
   profile?: string | null
@@ -4239,6 +4243,23 @@ export interface TourStep {
   side?: string | null
   [key: string]: unknown
 }
+/** Built and bounded by the gateway (``tui_gateway/confirm.py``), never passed through from the agent: control and format characters are stripped, lengths are capped, and every string is PLAIN TEXT — a client renders it verbatim, never as markdown or HTML. Button wording is the client's own, not the agent's. Sent only to connections whose ``client.capabilities`` listed ``level`` under ``confirm``. */
+export interface ConfirmRequestParams {
+  session_id: string
+  title: string
+  summary: string
+  detail?: string | null
+  level: ConfirmLevel
+}
+/** The person's decision. A client that cannot answer right now answers a JSON-RPC ERROR, never a made-up ``declined``: the gateway reports that as ``unavailable``. ``verified`` is not the client's to set: the gateway decides it from the level (always false for ``plain``) and ignores whatever a client sends here. Clients should omit it. */
+export interface ConfirmResult {
+  decision: ConfirmDecision
+  method: ConfirmMethod
+  verified?: boolean | null
+}
+export type ConfirmDecision = 'confirmed' | 'declined'
+/** How the client obtained the decision. ``tap``: a button, nothing proven. Further values arrive with the levels that need them. */
+export type ConfirmMethod = 'tap'
 export interface DisplayInstallSudoParams {
   session_id: string
   profile_key: string
@@ -5390,6 +5411,8 @@ export interface ServerRequestMap {
   approval: { params: ApprovalRequestParams; result: ApprovalResult }
   /** The clarify tool: ask the user one question or a batch. */
   clarify: { params: ClarifyRequestParams; result: ClarifyResult }
+  /** The agent asks the person to confirm one sensitive action. 120 s. Level plain: a tap in a connected client, nothing verified; a verified level is planned. */
+  confirm: { params: ConfirmRequestParams; result: ConfirmResult }
   /** Masked sudo password for the Bot Screen package install; app-level (empty session). */
   'display.install.sudo': { params: DisplayInstallSudoParams; result: ValueResult }
   /** Click / type / scroll / annotate inside the in-app browser preview. */
@@ -5417,6 +5440,7 @@ export type ServerRequestMethod = keyof ServerRequestMap
 export const SERVER_REQUEST_METHODS = [
   'approval',
   'clarify',
+  'confirm',
   'display.install.sudo',
   'preview.act',
   'preview.read',

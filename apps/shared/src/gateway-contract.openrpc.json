@@ -7583,6 +7583,21 @@
             "default": false,
             "title": "Server Requests",
             "type": "boolean"
+          },
+          "confirm": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Confirm"
           }
         },
         "title": "ClientCapabilitiesParams",
@@ -7596,6 +7611,13 @@
               "type": "string"
             },
             "title": "Server Requests",
+            "type": "array"
+          },
+          "confirm": {
+            "items": {
+              "$ref": "#/components/schemas/ConfirmLevel"
+            },
+            "title": "Confirm",
             "type": "array"
           }
         },
@@ -8729,6 +8751,107 @@
           }
         },
         "title": "ConfigShowResult",
+        "type": "object"
+      },
+      "ConfirmDecision": {
+        "enum": [
+          "confirmed",
+          "declined"
+        ],
+        "title": "ConfirmDecision",
+        "type": "string"
+      },
+      "ConfirmLevel": {
+        "description": "What a confirmation proves. ``plain``: someone tapped Confirm in a connected client; nothing more,\nand the gateway cannot check even that. ``passkey``: RESERVED for a verified level the gateway will\ncheck itself; not implemented yet \u2014 a ``passkey`` request is ``unavailable`` without being sent, and\nno client can advertise it. The set is open: a later level is one more value here.",
+        "enum": [
+          "plain",
+          "passkey"
+        ],
+        "title": "ConfirmLevel",
+        "type": "string"
+      },
+      "ConfirmMethod": {
+        "description": "How the client obtained the decision. ``tap``: a button, nothing proven. Further values arrive with\nthe levels that need them.",
+        "enum": [
+          "tap"
+        ],
+        "title": "ConfirmMethod",
+        "type": "string"
+      },
+      "ConfirmRequestParams": {
+        "additionalProperties": false,
+        "description": "Built and bounded by the gateway (``tui_gateway/confirm.py``), never passed through from the agent:\ncontrol and format characters are stripped, lengths are capped, and every string is PLAIN TEXT \u2014 a\nclient renders it verbatim, never as markdown or HTML. Button wording is the client's own, not the\nagent's. Sent only to connections whose ``client.capabilities`` listed ``level`` under ``confirm``.",
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Detail"
+          },
+          "level": {
+            "$ref": "#/components/schemas/ConfirmLevel"
+          }
+        },
+        "required": [
+          "session_id",
+          "title",
+          "summary",
+          "level"
+        ],
+        "title": "ConfirmRequestParams",
+        "type": "object"
+      },
+      "ConfirmResult": {
+        "additionalProperties": false,
+        "description": "The person's decision. A client that cannot answer right now answers a JSON-RPC ERROR, never a\nmade-up ``declined``: the gateway reports that as ``unavailable``.\n``verified`` is not the client's to set: the gateway decides it from the level (always false for\n``plain``) and ignores whatever a client sends here. Clients should omit it.",
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/ConfirmDecision"
+          },
+          "method": {
+            "$ref": "#/components/schemas/ConfirmMethod"
+          },
+          "verified": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Verified"
+          }
+        },
+        "required": [
+          "decision",
+          "method"
+        ],
+        "title": "ConfirmResult",
         "type": "object"
       },
       "ConnectionActor": {
@@ -37452,6 +37575,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/ClarifyResult"
+        }
+      }
+    },
+    {
+      "name": "confirm",
+      "summary": "The agent asks the person to confirm one sensitive action. 120 s. Level plain: a tap in a connected client, nothing verified; a verified level is planned.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/ConfirmRequestParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/ConfirmResult"
         }
       }
     },

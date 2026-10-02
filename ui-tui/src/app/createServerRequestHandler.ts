@@ -3,7 +3,7 @@ import type { ServerRequest } from '@hermes/shared/json-rpc-channel'
 import type { ClarifyBatchQuestion } from '../types.js'
 
 import { patchOverlayState } from './overlayStore.js'
-import { rememberServerRequest } from './serverRequestStore.js'
+import { rememberServerRequest, respondToServerRequest } from './serverRequestStore.js'
 
 export interface ServerRequestHandlerContext {
   ringPromptBell: () => void
@@ -98,6 +98,37 @@ export function createServerRequestHandler(ctx: ServerRequestHandlerContext): (r
         open(request, 'secret input needed')
 
         return true
+
+      // Level `plain` only (a keypress, nothing proven), which is all the terminal advertises. Any other
+      // level never reaches it; if one does, decline to handle it (-32601) rather than answer a level it
+      // cannot satisfy. `verified` is the gateway's to decide, so it is not sent.
+      case 'confirm': {
+        if (p.level !== 'plain') {
+          return false
+        }
+
+        const answer = (decision: 'confirmed' | 'declined') =>
+          respondToServerRequest(request.id, { decision, method: 'tap' })
+
+        const detail = str(p.detail)
+
+        patchOverlayState({
+          confirm: {
+            cancelLabel: 'Decline',
+            confirmLabel: 'Confirm',
+            danger: true,
+            detail: detail ? `${str(p.summary)}\n\n${detail}` : str(p.summary),
+            onCancel: () => void answer('declined'),
+            onConfirm: () => void answer('confirmed'),
+            requestId: request.id,
+            title: `Agent asks: ${str(p.title)}`,
+            wrapDetail: true
+          }
+        })
+        open(request, 'confirmation needed')
+
+        return true
+      }
 
       case 'vault.unlock_prompt':
         patchOverlayState({

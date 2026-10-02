@@ -209,6 +209,63 @@ server_request("tour", params=TourRequestParams, result=ValueResult,
                doc="Drive a guided tour highlight in the desktop renderer.")
 
 
+# ── confirm ───────────────────────────────────────────────────────────────────────────────────
+
+CONFIRM_TITLE_MAX = 80
+CONFIRM_SUMMARY_MAX = 500
+CONFIRM_DETAIL_MAX = 2_000
+
+
+class ConfirmLevel(WireEnum):
+    """What a confirmation proves. ``plain``: someone tapped Confirm in a connected client; nothing more,
+    and the gateway cannot check even that. ``passkey``: RESERVED for a verified level the gateway will
+    check itself; not implemented yet — a ``passkey`` request is ``unavailable`` without being sent, and
+    no client can advertise it. The set is open: a later level is one more value here."""
+
+    plain = "plain"
+    passkey = "passkey"
+
+
+class ConfirmDecision(WireEnum):
+    confirmed = "confirmed"
+    declined = "declined"
+
+
+class ConfirmMethod(WireEnum):
+    """How the client obtained the decision. ``tap``: a button, nothing proven. Further values arrive with
+    the levels that need them."""
+
+    tap = "tap"
+
+
+class ConfirmRequestParams(ServerRequestParams):
+    """Built and bounded by the gateway (``tui_gateway/confirm.py``), never passed through from the agent:
+    control and format characters are stripped, lengths are capped, and every string is PLAIN TEXT — a
+    client renders it verbatim, never as markdown or HTML. Button wording is the client's own, not the
+    agent's. Sent only to connections whose ``client.capabilities`` listed ``level`` under ``confirm``."""
+
+    title: str = Field(min_length=1, max_length=CONFIRM_TITLE_MAX)
+    summary: str = Field(min_length=1, max_length=CONFIRM_SUMMARY_MAX)
+    detail: str | None = Field(default=None, max_length=CONFIRM_DETAIL_MAX)
+    level: ConfirmLevel
+
+
+class ConfirmResult(Result):
+    """The person's decision. A client that cannot answer right now answers a JSON-RPC ERROR, never a
+    made-up ``declined``: the gateway reports that as ``unavailable``.
+    ``verified`` is not the client's to set: the gateway decides it from the level (always false for
+    ``plain``) and ignores whatever a client sends here. Clients should omit it."""
+
+    decision: ConfirmDecision
+    method: ConfirmMethod
+    verified: bool | None = None
+
+
+server_request("confirm", params=ConfirmRequestParams, result=ConfirmResult,
+               doc="The agent asks the person to confirm one sensitive action. 120 s. Level plain: a tap in a "
+                   "connected client, nothing verified; a verified level is planned.")
+
+
 # ── withdrawal ────────────────────────────────────────────────────────────────────────────────
 
 

@@ -133,6 +133,8 @@ export class GatewayClient extends EventEmitter {
   // only owns the two transports (child stdio, attached socket) and the
   // buffered-event replay that Ink's mount order needs.
   private readonly channel = new JsonRpcRequestChannel({
+    // `confirm` at level `plain` only: a keypress, nothing proven (createServerRequestHandler.ts).
+    confirmLevels: ['plain'],
     // A mid-turn socket streams deltas every second; killing the only
     // transport that carried live traffic split sessions that completed
     // server-side (#115251). Count any inbound frame as liveness, exactly

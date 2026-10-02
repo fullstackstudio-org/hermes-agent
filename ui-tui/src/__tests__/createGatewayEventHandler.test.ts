@@ -1683,6 +1683,33 @@ describe('createGatewayEventHandler', () => {
     expect(getOverlayState().sudo).toBeNull()
   })
 
+  it('answers a plain confirm with a tap, declines on cancel, and refuses any other level', () => {
+    const onEvent = createGatewayEventHandler(buildCtx([]))
+    const params = { level: 'plain', summary: 'Delete the old backups.', title: 'Cleanup' }
+
+    const first = serverRequest('confirm', params, 'confirm-1')
+    const card = getOverlayState().confirm
+
+    expect(first.handled).toBe(true)
+    expect(card?.requestId).toBe('confirm-1')
+    expect(card?.detail).toBe('Delete the old backups.')
+    card?.onConfirm()
+    expect(first.respond).toHaveBeenCalledWith({ decision: 'confirmed', method: 'tap' })
+
+    const second = serverRequest('confirm', { ...params, detail: 'rm -rf old/' }, 'confirm-2')
+
+    expect(getOverlayState().confirm?.detail).toBe('Delete the old backups.\n\nrm -rf old/')
+    getOverlayState().confirm?.onCancel?.()
+    expect(second.respond).toHaveBeenCalledWith({ decision: 'declined', method: 'tap' })
+
+    // A level the terminal did not advertise (the reserved passkey): -32601, never a tap confirmation.
+    expect(serverRequest('confirm', { ...params, level: 'passkey' }, 'confirm-3').handled).toBe(false)
+
+    serverRequest('confirm', params, 'confirm-4')
+    onEvent({ payload: { id: 'confirm-4', method: 'confirm', reason: 'resolved' }, type: 'request.cancel' } as any)
+    expect(getOverlayState().confirm).toBeNull()
+  })
+
   it('tells the user a timed-out password prompt was withdrawn and the step skipped', () => {
     const ctx = buildCtx([])
     const onEvent = createGatewayEventHandler(ctx)

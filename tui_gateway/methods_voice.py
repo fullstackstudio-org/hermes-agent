@@ -445,11 +445,13 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """What the calling client handles. ``server_requests: true`` marks this connection as one that answers
     server→client requests; a WebSocket client that never sends it gets every such request failed fast
-    instead of stalling the agent for the deadline (#112548)."""
+    instead of stalling the agent for the deadline (#112548). ``confirm: [levels]`` (optional) lists the
+    ``confirm`` levels this connection can perform; the result echoes the ones accepted."""
     from tui_gateway import server_requests
     from tui_gateway.contracts import registry as contracts
-    server_requests.advertise(_caller_transport(), bool(params.get("server_requests")))
-    return _ok(rid, {"server_requests": sorted(contracts.SERVER_REQUESTS)})
+    levels = server_requests.advertise(_caller_transport(), bool(params.get("server_requests")),
+                                       params.get("confirm"))
+    return _ok(rid, {"server_requests": sorted(contracts.SERVER_REQUESTS), "confirm": levels})
 
 
 @method("ping")

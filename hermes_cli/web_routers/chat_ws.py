@@ -136,6 +136,35 @@ async def _ws_gate(ws: WebSocket, kind: str) -> Optional[tuple[str, str, str]]:
     return peer, mode, cred
 
 
+class _PtySocketTracking:
+    """Close this socket when the per-PTY credential it authenticated with is revoked (the terminal ended)."""
+
+    def __init__(self, ws: WebSocket) -> None:
+        self.ws, self.value = ws, getattr(ws, "_hermes_pty_credential", None)
+        self.closer = None
+
+    async def __aenter__(self) -> bool:
+        if not self.value:
+            return True
+        from hermes_cli.dashboard_auth.ws_tickets import track_pty_socket
+        loop, ws = asyncio.get_running_loop(), self.ws
+
+        def closer() -> None:
+            loop.call_soon_threadsafe(lambda: asyncio.ensure_future(ws.close(code=4401, reason="pty ended")))
+
+        self.closer = closer
+        if not track_pty_socket(self.value, closer):
+            self.closer = None
+            await ws.close(code=4401, reason="pty ended")
+            return False
+        return True
+
+    async def __aexit__(self, *exc) -> None:
+        if self.value and self.closer is not None:
+            from hermes_cli.dashboard_auth.ws_tickets import untrack_pty_socket
+            untrack_pty_socket(self.value, self.closer)
+
+
 async def _close_unless_sidecar_allowed(ws: WebSocket) -> bool:
     """Pre-accept gates for the /api/ws, /api/pub and /api/events sidecars:
     4403 when chat is disabled or the request isn't allowed, 4401 on bad auth."""
@@ -478,74 +507,74 @@ async def pty_ws(ws: WebSocket) -> None:
     # Gated: this PTY's child talks to the gateway as the person who opened it (a credential of its own,
     # revoked when the PTY ends), never as a process-wide identity that names nobody.
     pty_credential, login = _mint_pty_credential_for(ws)
-    channel = _channel_or_close_code(ws)
-    sidecar_url = _build_sidecar_url(channel, pty_credential) if channel else None
-    force_fresh = (ws.query_params.get("fresh") or "").strip().lower() in {"1", "true", "yes", "on"}
-    active_session_file: Optional[Path] = None
+    # Every exit before a kept-alive terminal takes the credential over revokes it: an error, a cancel during
+    # the spawn thread, a reattach to a terminal that runs with its own credential, the one-shot path ending.
+    handoff = {"kept": False}
+    try:
+        channel = _channel_or_close_code(ws)
+        sidecar_url = _build_sidecar_url(channel, pty_credential) if channel else None
+        force_fresh = (ws.query_params.get("fresh") or "").strip().lower() in {"1", "true", "yes", "on"}
+        active_session_file: Optional[Path] = None
 
-    if channel:
-        active_session_file = _active_session_file_for_channel(ws.app, channel)
-        if force_fresh:
-            resume = None
+        if channel:
+            active_session_file = _active_session_file_for_channel(ws.app, channel)
+            if force_fresh:
+                resume = None
+                try:
+                    active_session_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            elif not resume:
+                resume = _read_active_session_file(active_session_file)
+                if resume:
+                    # The client only pins the viewport to the bottom when it asked
+                    # for `?resume=`; announce the implicit active-session replay so
+                    # it gets the same follow-scroll treatment.
+                    # See #93518.
+                    await ws.send_json({"type": "resume", "id": resume})
+
+        resolve_kwargs = {"resume": resume, "sidecar_url": sidecar_url, "profile": profile}
+        if pty_credential is not None:
+            resolve_kwargs["pty_credential"] = pty_credential
+        if active_session_file is not None:
+            resolve_kwargs["active_session_file"] = str(active_session_file)
+        # A picked workspace only applies to a FRESH chat; a resumed session keeps its own cwd.
+        if not resume:
+            from hermes_cli.web_routers.chat_workspaces import resolve_chat_cwd
             try:
-                active_session_file.unlink(missing_ok=True)
-            except OSError:
-                pass
-        elif not resume:
-            resume = _read_active_session_file(active_session_file)
-            if resume:
-                # The client only pins the viewport to the bottom when it asked
-                # for `?resume=`; announce the implicit active-session replay so
-                # it gets the same follow-scroll treatment.
-                # See #93518.
-                await ws.send_json({"type": "resume", "id": resume})
+                workspace_cwd = resolve_chat_cwd(ws.query_params.get("cwd"))
+            except HTTPException as exc:  # dead/relative path: fail closed, never the launch dir
+                await _pty_fail(ws, exc)
+                return
+            if workspace_cwd:
+                resolve_kwargs["workspace_cwd"] = workspace_cwd
 
-    resolve_kwargs = {"resume": resume, "sidecar_url": sidecar_url, "profile": profile}
-    if pty_credential is not None:
-        resolve_kwargs["pty_credential"] = pty_credential
-    if active_session_file is not None:
-        resolve_kwargs["active_session_file"] = str(active_session_file)
-    # A picked workspace only applies to a FRESH chat; a resumed session keeps its own cwd.
-    if not resume:
-        from hermes_cli.web_routers.chat_workspaces import resolve_chat_cwd
         try:
-            workspace_cwd = resolve_chat_cwd(ws.query_params.get("cwd"))
-        except HTTPException as exc:  # dead/relative path: fail closed, never the launch dir
-            _revoke(pty_credential)
+            argv, cwd, env = await _resolve_chat_argv_async(**resolve_kwargs)
+        except HTTPException as exc:  # unknown/invalid profile
             await _pty_fail(ws, exc)
             return
-        if workspace_cwd:
-            resolve_kwargs["workspace_cwd"] = workspace_cwd
+        except SystemExit as exc:  # _make_tui_argv sys.exit(1)s when node/npm is missing
+            await _pty_fail(ws, exc)
+            return
 
-    try:
-        argv, cwd, env = await _resolve_chat_argv_async(**resolve_kwargs)
-    except HTTPException as exc:  # unknown/invalid profile
-        _revoke(pty_credential)
-        await _pty_fail(ws, exc)
-        return
-    except SystemExit as exc:  # _make_tui_argv sys.exit(1)s when node/npm is missing
-        _revoke(pty_credential)
-        await _pty_fail(ws, exc)
-        return
+        attach_token = ws.query_params.get("attach") or None
+        registry_resume = raw_resume
+        if raw_resume and env:
+            registry_resume = env.get("HERMES_TUI_RESUME") or raw_resume
+        if attach_token is not None and (registry_resume or profile):
+            # Key explicit resumes on their canonical target, never the active-session fallback.
+            attach_token = f"{attach_token}\0{profile or ''}\0{registry_resume or ''}"
+        if attach_token is not None and login:
+            # A kept-alive PTY talks to the gateway as the login that spawned it: another login presenting the
+            # same attach token gets a PTY of its own, never that one.
+            attach_token = f"{login}\0{attach_token}"
 
-    attach_token = ws.query_params.get("attach") or None
-    registry_resume = raw_resume
-    if raw_resume and env:
-        registry_resume = env.get("HERMES_TUI_RESUME") or raw_resume
-    if attach_token is not None and (registry_resume or profile):
-        # Key explicit resumes on their canonical target, never the active-session fallback.
-        attach_token = f"{attach_token}\0{profile or ''}\0{registry_resume or ''}"
-    if attach_token is not None and login:
-        # A kept-alive PTY talks to the gateway as the login that spawned it: another login presenting the
-        # same attach token gets a PTY of its own, never that one.
-        attach_token = f"{login}\0{attach_token}"
+        def _spawn():
+            return PtyBridge.spawn(argv, cwd=cwd, env=env)
 
-    def _spawn():
-        return PtyBridge.spawn(argv, cwd=cwd, env=env)
-
-    if attach_token is None:
-        # Legacy path: 1:1 socket<->PTY, killed on disconnect; the credential ends with it.
-        try:
+        if attach_token is None:
+            # Legacy path: 1:1 socket<->PTY, killed on disconnect; the credential ends with it.
             try:
                 bridge = _spawn()
             except PtyUnavailableError as exc:
@@ -555,65 +584,65 @@ async def pty_ws(ws: WebSocket) -> None:
                 await _pty_fail(ws, exc)
                 return
             await _legacy_pump(ws, bridge)
+            return
+
+        # Keep-alive path: the PTY outlives this socket; reattach by token.
+        try:
+            session, _created = await PTY_REGISTRY.attach_or_spawn(attach_token, spawn=_spawn)
+        except (PtyUnavailableError, FileNotFoundError, OSError, RegistryFull) as exc:
+            await _pty_fail(ws, exc)
+            return
+        if _created:
+            # From here the kept-alive terminal owns the credential: it is revoked when that terminal ends.
+            session.on_end.append(lambda: _revoke(pty_credential))
+            handoff["kept"] = True
+
+        # A fresh xterm can't rebuild the TUI from an arbitrary tail of alternate-
+        # screen differential output; reused PTYs emit a full frame after replay.
+        if not await session.attach(ws, force_redraw=not _created):
+            # attach() detaches itself when the client dropped mid-replay, and a socket
+            # superseded during replay is already closed by its replacement; only a
+            # stalled redraw write leaves THIS socket attached and worth closing.
+            if session._ws is ws:
+                await _close_stalled_pty_input(ws, path="keepalive-redraw")
+            PTY_REGISTRY.detach(attach_token, ws)
+            return
+
+        # Writer loop only: the session's drain task (one per PTY, inside the
+        # registry) forwards output to whichever socket is attached and ring-buffers
+        # it while detached. On child EOF it closes the attached socket with 4410,
+        # which unparks ws.receive() — same half-open protection as the legacy pump.
+        try:
+            while True:
+                try:
+                    msg = await ws.receive()
+                except RuntimeError:  # receive() after the drain task already closed us
+                    break
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                raw = msg.get("bytes")
+                if raw is None:
+                    text = msg.get("text")
+                    raw = text.encode("utf-8") if isinstance(text, str) else b""
+                if not raw:
+                    continue
+                # Resize escape is consumed locally, never written to the PTY.
+                match = _RESIZE_RE.match(raw)
+                if match and match.end() == len(raw):
+                    session.bridge.resize(cols=int(match.group(1)), rows=int(match.group(2)))
+                    continue
+                if not await session.write(ws, raw):
+                    await _close_stalled_pty_input(ws, path="keepalive")
+                    break
+        except WebSocketDisconnect:
+            pass
         finally:
-            _revoke(pty_credential)
-        return
-
-    # Keep-alive path: the PTY outlives this socket; reattach by token.
-    try:
-        session, _created = await PTY_REGISTRY.attach_or_spawn(attach_token, spawn=_spawn)
-    except (PtyUnavailableError, FileNotFoundError, OSError, RegistryFull) as exc:
-        _revoke(pty_credential)
-        await _pty_fail(ws, exc)
-        return
-    if _created:
-        session.on_end.append(lambda: _revoke(pty_credential))
-    else:
-        _revoke(pty_credential)  # reattached to a PTY that already runs with its own credential
-
-    # A fresh xterm can't rebuild the TUI from an arbitrary tail of alternate-
-    # screen differential output; reused PTYs emit a full frame after replay.
-    if not await session.attach(ws, force_redraw=not _created):
-        # attach() detaches itself when the client dropped mid-replay, and a socket
-        # superseded during replay is already closed by its replacement; only a
-        # stalled redraw write leaves THIS socket attached and worth closing.
-        if session._ws is ws:
-            await _close_stalled_pty_input(ws, path="keepalive-redraw")
-        PTY_REGISTRY.detach(attach_token, ws)
-        return
-
-    # Writer loop only: the session's drain task (one per PTY, inside the
-    # registry) forwards output to whichever socket is attached and ring-buffers
-    # it while detached. On child EOF it closes the attached socket with 4410,
-    # which unparks ws.receive() — same half-open protection as the legacy pump.
-    try:
-        while True:
-            try:
-                msg = await ws.receive()
-            except RuntimeError:  # receive() after the drain task already closed us
-                break
-            if msg.get("type") == "websocket.disconnect":
-                break
-            raw = msg.get("bytes")
-            if raw is None:
-                text = msg.get("text")
-                raw = text.encode("utf-8") if isinstance(text, str) else b""
-            if not raw:
-                continue
-            # Resize escape is consumed locally, never written to the PTY.
-            match = _RESIZE_RE.match(raw)
-            if match and match.end() == len(raw):
-                session.bridge.resize(cols=int(match.group(1)), rows=int(match.group(2)))
-                continue
-            if not await session.write(ws, raw):
-                await _close_stalled_pty_input(ws, path="keepalive")
-                break
-    except WebSocketDisconnect:
-        pass
+            # Detach only — the PTY keeps running for a reattach; the registry
+            # reaper closes it after the TTL (or immediately on process exit).
+            PTY_REGISTRY.detach(attach_token, ws)
     finally:
-        # Detach only — the PTY keeps running for a reattach; the registry
-        # reaper closes it after the TTL (or immediately on process exit).
-        PTY_REGISTRY.detach(attach_token, ws)
+        if not handoff["kept"]:
+            _revoke(pty_credential)
 
 
 # --- /api/ws: JSON-RPC sidecar for the Chat tab. Drives the same
@@ -636,11 +665,13 @@ async def gateway_ws(ws: WebSocket) -> None:
     # The authenticated identity (ticket / internal credential) stamped by
     # _ws_auth_reason becomes the identity authority for privileged RPCs
     # (browser.controller.register). None on the legacy token path.
-    await handle_ws(
-        ws,
-        auth_identity=getattr(ws, "_hermes_auth_identity", None),
-        subprotocol=getattr(ws, "_hermes_ws_subprotocol", None),
-    )
+    async with _PtySocketTracking(ws) as live:
+        if live:
+            await handle_ws(
+                ws,
+                auth_identity=getattr(ws, "_hermes_auth_identity", None),
+                subprotocol=getattr(ws, "_hermes_ws_subprotocol", None),
+            )
 
 
 # --- /api/pub + /api/events: the PTY-side tui_gateway.entry opens /api/pub
@@ -666,11 +697,14 @@ async def pub_ws(ws: WebSocket) -> None:
     channel = await _accept_channel_ws(ws)
     if channel is None:
         return
-    try:
-        while True:
-            await _broadcast_event(ws.app, channel, await ws.receive_text())
-    except WebSocketDisconnect:
-        pass
+    async with _PtySocketTracking(ws) as live:
+        if not live:
+            return
+        try:
+            while True:
+                await _broadcast_event(ws.app, channel, await ws.receive_text())
+        except (WebSocketDisconnect, RuntimeError):
+            pass
 
 
 @router.websocket("/api/events")

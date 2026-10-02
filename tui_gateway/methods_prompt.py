@@ -686,7 +686,13 @@ def _(rid, params: dict) -> dict:
     with _session_resume_lock:
         if (refusal := _reattach_refusal(rid, sid, session)) is not None:
             return refusal
-        if (t := current_transport()) is not None:
+        t = current_transport()
+        if _INTERNAL_DISPATCH.get() and t is not None and _transport_is_live_peer(t):
+            # The gateway's own dispatch (a relayed bot DM, a hosted room) runs on whichever client connection
+            # it started from. That connection did not submit this: never rebind to it, pin it to a busy turn
+            # or store it in a queued envelope that attaches it when the queue drains.
+            t = None
+        if t is not None:
             _rebind_live_transport(sid, session, t)
     # Claim the turn against a possibly-running session (busy/queued reply, else fall
     # through once ``running`` is observed False).  The provider interrupt happens after

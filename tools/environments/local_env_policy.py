@@ -186,6 +186,12 @@ def _is_terminal_first_party_env(name: str) -> bool:
 _ACTIVE_VENV_MARKER_VARS = ("VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONHOME")
 
 
+#: The dashboard Chat tab's terminal child receives these URLs carrying a credential that acts as the
+#: person who opened that tab (gated) or the dashboard's session token (ungated). No spawned child of the
+#: gateway (an agent's terminal tool above all) may inherit them, on any spawn path.
+_CHAT_TERMINAL_CREDENTIAL_ENV = frozenset({"HERMES_TUI_GATEWAY_URL", "HERMES_TUI_SIDECAR_URL"})
+
+
 def _is_hermes_internal_secret(key: str) -> bool:
     """True for Hermes-internal secrets injected under *dynamic* names the static
     blocklist cannot enumerate: ``AUXILIARY_<TASK>_API_KEY``/``_BASE_URL`` (per-task
@@ -193,6 +199,8 @@ def _is_hermes_internal_secret(key: str) -> bool:
     auth; non-secret routing hints stay visible). Stripped on every spawn path
     regardless of env_passthrough registration or ``inherit_credentials``."""
     upper = key.upper()
+    if upper in _CHAT_TERMINAL_CREDENTIAL_ENV:
+        return True
     if upper.startswith("AUXILIARY_") and upper.endswith(("_API_KEY", "_BASE_URL")):
         return True
     return upper.startswith("GATEWAY_RELAY_") and upper.endswith(("_SECRET", "_KEY", "_TOKEN"))
@@ -296,6 +304,8 @@ _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     # enumerated here to stay stripped on the inherit_credentials=True path.
     "GATEWAY_RELAY_ID", "GATEWAY_RELAY_SECRET", "GATEWAY_RELAY_DELIVERY_KEY",
     "HASS_TOKEN", "EMAIL_PASSWORD", "HERMES_DASHBOARD_SESSION_TOKEN",
+    # Chat-tab terminal credentials (also matched by _is_hermes_internal_secret, which every path applies).
+    "HERMES_TUI_GATEWAY_URL", "HERMES_TUI_SIDECAR_URL",
     # Dashboard login credentials (container deployments pass them as env vars): an agent child
     # holding them could sign in to, or mint sessions for, the dashboard that controls it.
     "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH",

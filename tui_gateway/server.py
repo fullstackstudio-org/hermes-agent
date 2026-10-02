@@ -1301,7 +1301,7 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
             # WHO ASKED — resolved per connection, not per session record, so a tool attributing work to a
             # user (kanban, send_message, cron job args, background-watcher fields) and a per-person
             # authorisation check name the human who submitted this turn rather than the one who opened the
-            # conversation. An ungated gateway (and the PTY child's server-internal credential) names no
+            # conversation. An ungated gateway (and a server-internal caller) names no
             # login, and neither does a session more than one signed-in person could be behind: both bind
             # "" rather than a name nothing can question. See :func:`_acting_auth_user`.
             user_id, display_name = _acting_auth_user(sess)
@@ -2426,7 +2426,7 @@ def _startup_system_prompt(cfg: dict, task_id: str) -> str:
 def _transport_auth_user(transport) -> tuple[str | None, str]:
     """``(<provider>:<user id>, display name)`` the WS-upgrade credential authenticated for ``transport``: ONE
     pair out of ONE minted identity, so a name can never end up labelling a different login. ``(None, "")`` for
-    the legacy token, stdio and the PTY child's server-internal credential. The prefix keeps a basic-auth
+    the legacy token, stdio and a server-internal caller. The prefix keeps a basic-auth
     ``alice`` and an OIDC ``alice`` apart; the name is "" unless the credential carried one."""
     identity = getattr(transport, "auth_identity", None)
     if not _methods_browser_control._is_authenticated_identity(identity):
@@ -2483,7 +2483,7 @@ _turn_auth_user: contextvars.ContextVar[tuple[str | None, str] | None] = context
 
 def _submitting_auth_user() -> tuple[str, str] | None:
     """The signed-in identity of the connection handling THIS request, or None when it names no login
-    (stdio, the legacy token, the PTY child's server-internal credential, an internal caller with no
+    (stdio, the legacy token, a server-internal caller, an internal caller with no
     transport bound). Only meaningful on a request thread — a turn thread's bound transport is the
     session's slot, not the submitter's socket."""
     user_id, user_name = _transport_auth_user(current_transport())
@@ -2613,6 +2613,7 @@ def _init_session(
     session_db=None, source: str | None = None, profile_home: str | None = None,
     explicit_cwd: bool = False):
     now = time.time()
+    _forget_dropped_session(sid)
     with _sessions_lock:
         _sessions[sid] = {
             "agent": agent, "session_key": key, "history": history, "history_lock": threading.Lock(),
@@ -2722,6 +2723,7 @@ def _claim_or_reuse_live(sid: str, session_key: str, record: dict, lease) -> tup
             # The reap is cancelled by the guarded reuse (_reattach_refusal), not here: a rejected
             # reattach must leave an in-flight orphan interrupt polling.
             return live
+        _forget_dropped_session(sid)
         with _sessions_lock:
             _sessions[sid] = record
             _register_session_cwd(_sessions[sid])

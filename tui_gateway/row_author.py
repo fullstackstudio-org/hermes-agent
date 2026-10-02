@@ -40,7 +40,7 @@ def row_author(auth_user: tuple[str | None, str] | None) -> dict | None:
     ``auth_user`` is the identity of the connection that SUBMITTED the turn, minted at the WS
     upgrade from a verified ticket and carried into the turn by ``prompt.submit`` -- never a value
     any RPC parameter can reach. None where that connection names no login (stdio, the legacy
-    token, the PTY child's server-internal credential), and the unattributed-turn sentinel a crash
+    token, a server-internal caller), and the unattributed-turn sentinel a crash
     continuation, a wake-up, a cron run, a bot delivery or an internally dispatched submit binds is
     refused explicitly: it is a distinct object rather than a pair, so it cannot be unpacked, and
     "nobody submitted this" must never read as a person.

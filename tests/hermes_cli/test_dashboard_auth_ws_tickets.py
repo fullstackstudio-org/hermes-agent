@@ -141,35 +141,36 @@ class TestConcurrency:
 
 
 # ---------------------------------------------------------------------------
-# Process-lifetime internal credential (server-spawned PTY child auth).
-# Direct unit coverage for internal_ws_credential / consume_internal_credential
-# — _ws_auth_ok exercises these indirectly, but the mint-once, unminted, and
-# empty-value branches are only reachable via direct calls.
+# Per-PTY credentials (the Chat tab's terminal child). There is no process-wide credential.
 # ---------------------------------------------------------------------------
 
 
-class TestInternalCredential:
+class TestPtyCredential:
 
+    def test_no_process_wide_credential_exists(self):
+        assert not hasattr(ws_tickets, "internal_ws_credential")
+        assert not hasattr(ws_tickets, "consume_internal_credential")
 
-
-    def test_reset_clears_and_remints(self):
-        first = ws_tickets.internal_ws_credential()
-        _reset_for_tests()
-        # The old value no longer validates after reset.
+    def test_mint_consume_revoke(self):
+        cred = ws_tickets.mint_pty_credential(user_id="u1", provider="nous")
+        assert ws_tickets.consume_pty_credential(cred) == {"user_id": "u1", "provider": "nous"}
+        assert ws_tickets.consume_pty_credential(cred)["user_id"] == "u1"  # multi-use for that terminal
+        ws_tickets.revoke_pty_credential(cred)
         with pytest.raises(TicketInvalid):
-            ws_tickets.consume_internal_credential(first)
-        # A fresh mint produces a different value.
-        second = ws_tickets.internal_ws_credential()
-        assert second != first
-        assert ws_tickets.consume_internal_credential(second)["user_id"] == (
-            ws_tickets.INTERNAL_USER_ID
-        )
+            ws_tickets.consume_pty_credential(cred)
+
+    def test_revoke_closes_every_socket_still_open_with_it(self):
+        cred = ws_tickets.mint_pty_credential(user_id="u1", provider="nous")
+        closed: list[str] = []
+        assert ws_tickets.track_pty_socket(cred, lambda: closed.append("ws"))
+        assert ws_tickets.track_pty_socket(cred, lambda: closed.append("pub"))
+        ws_tickets.revoke_pty_credential(cred)
+        assert sorted(closed) == ["pub", "ws"]
+        # A socket that opens after the revoke is refused at once.
+        assert ws_tickets.track_pty_socket(cred, lambda: closed.append("late")) is False
 
     def test_independent_of_ticket_store(self):
-        """The internal credential is not a ticket — minting tickets doesn't
-        touch it, and consuming the credential doesn't consume tickets."""
-        cred = ws_tickets.internal_ws_credential()
+        cred = ws_tickets.mint_pty_credential(user_id="u2", provider="nous")
         ticket = mint_ticket(user_id="u1", provider="nous")
-        # Consuming the internal credential leaves the ticket intact.
-        ws_tickets.consume_internal_credential(cred)
+        ws_tickets.consume_pty_credential(cred)
         assert consume_ticket(ticket)["user_id"] == "u1"

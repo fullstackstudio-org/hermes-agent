@@ -650,3 +650,51 @@ def test_wake_start_never_routes_into_another_persons_session(server, monkeypatc
         captured.clear()
         _rpc(server, transport, "wake.start", {"surface": "gui", "session_id": "s1"})
         assert captured == [expected], (transport, captured)
+
+
+def test_a_relayed_dm_into_a_busy_chat_never_attaches_the_relayer_when_the_queue_drains(server, audits, monkeypatch):
+    bot_chat = _session(server, "live-ops", _WS("alice-phone", ALICE))
+    bot_chat.update(running=True, agent=None)
+    bob = _WS("bob-desktop", BOB)
+    assert "error" not in _relayed_submit(server, bob, "live-ops")
+    queued = bot_chat.get("queued_prompt") or {}
+    assert queued and queued.get("transport") is not bob
+    # The running turn ends; its epilogue drains the queue (the turn itself is stubbed out).
+    bot_chat["running"] = False
+    monkeypatch.setattr(server, "_run_prompt_submit", lambda *a, **k: None, raising=False)
+    try:
+        server._drain_queued_prompt("r", "live-ops", bot_chat)
+    except Exception:
+        pass  # only the attach decision before the stubbed turn matters here
+    assert not server._session_transport_contains(bot_chat, bob)
+    assert BOB not in (bot_chat.get("attached_logins") or set())
+    assert not [a for a in audits if a[0] == "session_foreign_attach"]
+    fresh = _WS("bob-new", BOB)
+    assert _rpc(server, fresh, "session.events.since", {"session_id": "live-ops", "last_seen": 0})["error"]["code"] == 4001
+    req = _open_sudo("live-ops")
+    assert _rpc(server, fresh, "request.answer", {"id": req.id, "result": {"value": "x"}})["error"]["code"] == 4033
+
+
+def test_a_reused_runtime_id_does_not_let_an_earlier_sessions_people_replay(server):
+    from tui_gateway import event_replay
+    first = _session(server, "reused", _WS("alice-phone", ALICE))
+    server._attach_session_transport(first, _WS("bob-phone", BOB))
+    server._pop_session_by_id("reused")
+    # The id comes back for someone else's session (token mode: nobody signed in), which is then dropped too.
+    _session(server, "reused", _WS("token-peer", None), creator=None)
+    event_replay.reset_replay_state()
+    server._emit("message.delta", "reused", {"text": "new session"})
+    server._pop_session_by_id("reused")
+    for who in (ALICE, BOB):
+        replay = _rpc(server, _WS("old", who), "session.events.since", {"session_id": "reused", "last_seen": 0})
+        assert replay["error"]["code"] == 4001, who
+
+
+def test_a_runtime_id_coming_back_live_forgets_its_earlier_people(server):
+    first = _session(server, "again", _WS("alice-phone", ALICE))
+    server._pop_session_by_id("again")
+    assert "result" in _rpc(server, _WS("alice-new", ALICE), "session.events.since", {"session_id": "again", "last_seen": 0})
+    server._forget_dropped_session("again")  # what every live registration does
+    assert _rpc(server, _WS("alice-new", ALICE), "session.events.since",
+                {"session_id": "again", "last_seen": 0})["error"]["code"] == 4001
+    assert first

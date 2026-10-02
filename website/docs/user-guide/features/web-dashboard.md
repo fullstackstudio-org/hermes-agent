@@ -182,7 +182,11 @@ and a status.
 - join any conversation by resuming it with that id. That is how shared chats work: it marks the
   conversation as shared and writes `session_foreign_attach` to the dashboard auth audit log
   (`$HERMES_HOME/logs/dashboard-auth.log`), but it is not refused;
-- delete, hide, rename or move stored conversations by id, and stop every background process.
+- delete, hide, rename or move stored conversations by id, and stop every background process;
+- through an agent tool that runs commands on the gateway host (the terminal tool), act as any other
+  person whose Chat tab is open: each Chat-tab terminal receives its login's credential in its process
+  environment, which other processes of the same OS user can read while that terminal runs. What is done
+  that way is attributed and audited as that other person.
 
 Nothing removes a person from a conversation they have joined.
 

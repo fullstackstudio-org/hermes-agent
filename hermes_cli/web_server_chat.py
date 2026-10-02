@@ -249,8 +249,7 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
         # Lazy import — keeps this function importable in test harnesses
         # that don't bring in the dashboard_auth layer.
         from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
-        from hermes_cli.dashboard_auth.ws_tickets import (
-            TicketInvalid, consume_internal_credential, consume_pty_credential, consume_ticket)
+        from hermes_cli.dashboard_auth.ws_tickets import TicketInvalid, consume_pty_credential, consume_ticket
 
         def _reject(reason: str) -> None:
             audit_log(
@@ -272,22 +271,19 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
 
         pty = ws.query_params.get("pty", "")
         if pty:
-            # The embedded Chat tab's PTY child: the login that opened that PTY, for its lifetime.
+            # The embedded Chat tab's terminal child: the login that opened that terminal, for its lifetime,
+            # and only where the child itself connects (its two sidecar routes, from this host, not through
+            # a proxy). Anywhere else the value would let its holder mint fresh terminals for that login.
+            if not _pty_peer_allowed(ws):
+                _reject("pty: refused on this route or from this peer")
+                return "pty_refused", "pty"
             try:
                 _stamp_identity(consume_pty_credential(pty))
+                setattr(ws, "_hermes_pty_credential", pty)
                 return None, "pty"
             except TicketInvalid as exc:
                 _reject(f"pty: {exc}")
                 return "pty_invalid", "pty"
-
-        internal = ws.query_params.get("internal", "")
-        if internal:
-            try:
-                _stamp_identity(consume_internal_credential(internal))
-                return None, "internal"
-            except TicketInvalid as exc:
-                _reject(f"internal: {exc}")
-                return "internal_invalid", "internal"
 
         protocol_ticket, protocol_reason = _gateway_ws_ticket_from_subprotocol(ws)
         if protocol_reason == "invalid":
@@ -459,6 +455,32 @@ def _server_internal_ws_url(path: str, pty_credential: Optional[str] = None, **e
     else:
         auth = {"token": _SESSION_TOKEN}
     return f"ws://{netloc}{path}?{urllib.parse.urlencode({**auth, **extra_qs})}"
+
+
+#: The only routes a terminal child dials with its credential.
+_PTY_CREDENTIAL_PATHS = frozenset({"/api/ws", "/api/pub"})
+#: Headers a proxy adds: a request carrying any of them did not come straight from the gateway host.
+_FORWARDING_HEADERS = ("x-forwarded-for", "forwarded", "x-real-ip", "cf-connecting-ip", "true-client-ip")
+
+
+def _pty_peer_allowed(ws) -> bool:
+    """Whether a per-PTY credential may be presented on *ws*: on ``/api/ws`` or ``/api/pub`` only, from a
+    loopback peer or the exact address the child is told to dial, with no forwarding header."""
+    import ipaddress
+    path = str(getattr(getattr(ws, "url", None), "path", "") or "")
+    if path not in _PTY_CREDENTIAL_PATHS:
+        return False
+    headers = getattr(ws, "headers", {}) or {}
+    if any(headers.get(name) for name in _FORWARDING_HEADERS):
+        return False
+    peer = str(getattr(getattr(ws, "client", None), "host", "") or "")
+    try:
+        if ipaddress.ip_address(peer).is_loopback:
+            return True
+    except ValueError:
+        pass
+    dial = _resolve_client_ws_host()
+    return bool(peer) and peer == (dial or "").strip("[]")
 
 
 def _build_gateway_ws_url(pty_credential: Optional[str] = None) -> Optional[str]:

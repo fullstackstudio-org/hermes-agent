@@ -160,3 +160,83 @@ def test_gated_without_a_login_hands_out_no_gateway_url(harness):
         ws.send_bytes(b"x")
     assert "pty_credential" not in seen[-1]
     assert _web_server_chat._build_gateway_ws_url(None) is None
+
+
+@pytest.mark.asyncio
+async def test_revoking_closes_a_sidecar_socket_that_is_still_open():
+    """A /api/ws or /api/pub socket opened with a PTY credential is closed when that credential is revoked
+    (the terminal ended), so the stamped identity never outlives the terminal."""
+    from types import SimpleNamespace
+    from hermes_cli.web_routers.chat_ws import _PtySocketTracking
+    from hermes_cli.dashboard_auth.ws_tickets import revoke_pty_credential
+    _reset_for_tests()
+    closed: list[int] = []
+
+    async def close(code=1000, reason=""):
+        closed.append(code)
+
+    credential = mint_pty_credential(user_id="alice", provider="stub")
+    ws = SimpleNamespace(_hermes_pty_credential=credential, close=close)
+    async with _PtySocketTracking(ws) as live:
+        assert live is True
+        revoke_pty_credential(credential)
+        for _ in range(50):
+            if closed:
+                break
+            await asyncio.sleep(0.01)
+    assert closed == [4401]
+    # A socket opening after the revoke is closed at once.
+    late = SimpleNamespace(_hermes_pty_credential=credential, close=close)
+    async with _PtySocketTracking(late) as live:
+        assert live is False
+    assert closed == [4401, 4401]
+
+
+def test_a_revoked_credential_cannot_reopen_a_sidecar(monkeypatch):
+    from starlette.websockets import WebSocketDisconnect
+    from hermes_cli.dashboard_auth.ws_tickets import revoke_pty_credential
+    _reset_for_tests()
+    monkeypatch.setattr(_web_server_chat, "_pty_peer_allowed", lambda ws: True)  # the test client is no loopback
+    monkeypatch.setattr(_web_server_chat, "_ws_host_origin_reason", lambda ws: None)
+    monkeypatch.setattr(_web_server_chat, "_ws_client_reason", lambda ws: None)
+    prev = getattr(web_server.app.state, "auth_required", None)
+    web_server.app.state.auth_required = True
+    try:
+        credential = mint_pty_credential(user_id="alice", provider="stub")
+        revoke_pty_credential(credential)
+        with pytest.raises(WebSocketDisconnect):
+            with _client().websocket_connect(f"/api/pub?pty={credential}&channel=ch1") as ws:
+                ws.receive_text()
+    finally:
+        web_server.app.state.auth_required = prev
+        _reset_for_tests()
+
+
+def test_no_spawned_child_of_the_gateway_inherits_the_terminal_credential(monkeypatch):
+    """An agent tool in a Chat tab (the profile path's gateway inherits these from the terminal child)
+    must not read the credential with plain ``env``."""
+    from tools.environments.local import _sanitize_subprocess_env, build_subprocess_env, hermes_subprocess_env
+    monkeypatch.setenv("HERMES_TUI_GATEWAY_URL", "ws://127.0.0.1:1/api/ws?pty=secret")
+    monkeypatch.setenv("HERMES_TUI_SIDECAR_URL", "ws://127.0.0.1:1/api/pub?pty=secret")
+    for env in (build_subprocess_env(), hermes_subprocess_env(inherit_credentials=True),
+                _sanitize_subprocess_env({"HERMES_TUI_GATEWAY_URL": "x", "HERMES_TUI_SIDECAR_URL": "y"},
+                                         {"_HERMES_FORCE_HERMES_TUI_GATEWAY_URL": "z"})):
+        assert "HERMES_TUI_GATEWAY_URL" not in env and "HERMES_TUI_SIDECAR_URL" not in env
+
+
+@pytest.mark.parametrize("failure", [OSError("spawn failed"), asyncio.CancelledError()])
+def test_a_failed_or_cancelled_spawn_revokes_the_credential(harness, monkeypatch, failure):
+    seen, _bridges = harness
+
+    async def boom(key, *, spawn):
+        raise failure
+
+    monkeypatch.setattr(_web_server_chat.PTY_REGISTRY, "attach_or_spawn", boom)
+    try:
+        with _client().websocket_connect("/api/pty?as=stub:alice&attach=TOK9") as ws:
+            ws.receive_text()
+    except Exception:
+        pass
+    credential = seen[-1]["pty_credential"]
+    with pytest.raises(TicketInvalid):
+        consume_pty_credential(credential)

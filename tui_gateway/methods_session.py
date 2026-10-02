@@ -369,6 +369,7 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
     _enable_gateway_prompts()
     session_model_override, create_reasoning_override, create_service_tier_override = _create_overrides(params)
     now = time.time()
+    _forget_dropped_session(sid)
     with _sessions_lock:
         _sessions[sid] = {
             "agent": None, "agent_error": None, "agent_ready": threading.Event(), "attached_images": [],

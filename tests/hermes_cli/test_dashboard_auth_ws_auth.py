@@ -24,9 +24,7 @@ import hermes_cli.web_server_chat as _web_server_chat
 from hermes_cli.dashboard_auth import clear_providers, register_provider
 from hermes_cli.dashboard_auth.ws_tickets import (
     _reset_for_tests,
-    consume_internal_credential,
     consume_pty_credential,
-    internal_ws_credential,
     mint_pty_credential,
     mint_ticket,
 )
@@ -508,11 +506,40 @@ class TestWsIdentityCarriesTheDisplayName:
         assert _web_server_chat._ws_auth_ok(_fake_ws(query={"pty": cred}, path="/api/ws")) is False
         assert _web_server_chat._ws_auth_ok(_fake_ws(query={"pty": "made-up"}, path="/api/ws")) is False
 
-    def test_the_internal_credential_names_no_person(self, gated_app):
-        """The PTY child's server-internal credential is not a login; it must not
-        acquire a display name either."""
-        ws = _fake_ws(query={"internal": internal_ws_credential()}, path="/api/ws")
+    def test_the_process_wide_internal_credential_is_gone(self, gated_app):
+        """``?internal=`` no longer authenticates anything: nothing can bring back an identity-less
+        credential that the session-access rule would trust."""
+        assert _web_server_chat._ws_auth_ok(_fake_ws(query={"internal": "anything"}, path="/api/ws")) is False
 
-        assert _web_server_chat._ws_auth_ok(ws) is True
-        assert ws._hermes_auth_identity == {
-            "user_id": "server-internal", "provider": "server-internal"}
+
+class TestPtyCredentialIsBoundToTheTerminalChild:
+    """A per-PTY credential is accepted only where the terminal child dials (``/api/ws``, ``/api/pub``),
+    from the gateway host itself, never through a proxy: anywhere else its holder could mint fresh
+    terminals for that login and keep it alive."""
+
+    def _ws(self, path, *, host="127.0.0.1", headers=None):
+        cred = mint_pty_credential(user_id="u1", provider="stub")
+        ws = _fake_ws(query={"pty": cred}, path=path, client_host=host)
+        ws.headers = dict(headers or {})
+        return ws
+
+    @pytest.mark.parametrize("path", ["/api/pty", "/api/console", "/api/audio", "/api/events"])
+    def test_refused_on_routes_the_child_never_dials(self, gated_app, path):
+        assert _web_server_chat._ws_auth_ok(self._ws(path)) is False
+
+    @pytest.mark.parametrize("path", ["/api/ws", "/api/pub"])
+    def test_accepted_where_the_child_dials_from_loopback(self, gated_app, path):
+        assert _web_server_chat._ws_auth_ok(self._ws(path)) is True
+        assert _web_server_chat._ws_auth_ok(self._ws(path, host="::1")) is True
+
+    @pytest.mark.parametrize("header", ["x-forwarded-for", "forwarded", "x-real-ip", "cf-connecting-ip"])
+    def test_refused_through_a_proxy(self, gated_app, header):
+        assert _web_server_chat._ws_auth_ok(self._ws("/api/ws", headers={header: "203.0.113.9"})) is False
+
+    def test_refused_from_another_host(self, gated_app):
+        assert _web_server_chat._ws_auth_ok(self._ws("/api/ws", host="203.0.113.9")) is False
+
+    def test_accepted_from_the_address_the_child_is_told_to_dial(self, gated_app, monkeypatch):
+        monkeypatch.setenv("HERMES_DASHBOARD_WS_HOST", "10.0.0.5")
+        assert _web_server_chat._ws_auth_ok(self._ws("/api/ws", host="10.0.0.5")) is True
+        assert _web_server_chat._ws_auth_ok(self._ws("/api/ws", host="10.0.0.6")) is False

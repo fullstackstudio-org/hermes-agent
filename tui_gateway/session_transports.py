@@ -74,16 +74,24 @@ _dropped_access: OrderedDict = OrderedDict()
 _dropped_access_lock = threading.Lock()
 
 
-def _remember_dropped_session(sid: str, session: dict | None) -> None:
-    """Called when *sid* leaves the live registry."""
-    if not sid or not session:
-        return
-    logins = set(session.get("attached_logins") or ())
-    if (creator := _session_auth_user_id(session)) is not None:
-        logins.add(creator)
-    if not logins:
-        return
+def _forget_dropped_session(sid: str) -> None:
+    """Called when *sid* becomes live (again): a reused runtime id must not let the people of an earlier
+    session under that id replay the new one."""
     with _dropped_access_lock:
+        _dropped_access.pop(str(sid or ""), None)
+
+
+def _remember_dropped_session(sid: str, session: dict | None) -> None:
+    """Called when *sid* leaves the live registry. Replaces whatever an earlier session under the same id left."""
+    if not sid:
+        return
+    logins = set((session or {}).get("attached_logins") or ())
+    if session and (creator := _session_auth_user_id(session)) is not None:
+        logins.add(creator)
+    with _dropped_access_lock:
+        _dropped_access.pop(sid, None)
+        if not logins:
+            return
         _dropped_access[sid] = frozenset(logins)
         _dropped_access.move_to_end(sid)
         while len(_dropped_access) > DROPPED_ACCESS_MAX:
@@ -102,8 +110,8 @@ def _transport_may_access_session(session: dict | None, transport, *, sid: str =
     """Whether *transport* may read *session*'s event ring and settle its server→client requests.
 
     Allowed: in-process callers (no transport); a connection attached to the session now (a peer of its slot
-    or a viewer); a connection with no per-person identity (session-token / loopback mode, stdio, the
-    server-internal credential: one trust domain, as before); and a signed-in connection whose login created
+    or a viewer); a connection with no per-person identity (session-token / loopback mode, stdio: one
+    trust domain, as before; the dashboard Chat tab carries the login that opened it); and a signed-in connection whose login created
     the session or has attached to it before. The last rule keeps a reconnecting client working: it replays
     (``session.events.since``) before its new socket resumes. A different signed-in person has to attach
     first, through resume, which is logged and marks the session shared (``_note_foreign_login``).

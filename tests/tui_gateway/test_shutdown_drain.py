@@ -61,7 +61,9 @@ class _ModelWaitAgent:
     ``release`` set -> the model answered: a normal completion. A hard interrupt -> the turn
     returns the way the real loop does when a stop lands during the provider call."""
 
-    def __init__(self):
+    def __init__(self, *, honor_interrupt=True, interrupted_text=None):
+        self.honor_interrupt = honor_interrupt
+        self.interrupted_text = SENTINEL if interrupted_text is None else interrupted_text
         self.session_id = "session-key"
         self.release = threading.Event()
         self.entered = threading.Event()
@@ -73,10 +75,10 @@ class _ModelWaitAgent:
         self.entered.set()
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
-            if self.release.is_set():
+            if self.release.is_set() and not self._interrupted.is_set():
                 return {"final_response": "the real answer", "messages": []}
-            if self._interrupted.is_set():
-                return {"final_response": SENTINEL, "interrupted": True, "messages": []}
+            if self._interrupted.is_set() and (self.honor_interrupt or self.release.is_set()):
+                return {"final_response": self.interrupted_text, "interrupted": True, "messages": []}
             time.sleep(0.01)
         raise AssertionError("fake turn was never released nor interrupted")
 
@@ -127,16 +129,20 @@ def turn_env(monkeypatch, tmp_path, marker_home):
     monkeypatch.setattr(server, "_routing_provenance_db", lambda session: contextlib.nullcontext(None))
     monkeypatch.setattr(server, "_run_post_turn_followups", lambda *a, **k: None)
     monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda sid, session: None)
     from tools.environments import base as env_base
     monkeypatch.setattr(env_base, "kill_live_foreground_processes", lambda now=False: None)
 
 
 @pytest.fixture(autouse=True)
 def _fresh_drain_state():
+    """Every test starts in a dashboard-like process (restarts are resumable) that is not draining."""
     server._shutdown_draining.clear()
+    server._resumable_shutdown.set()
     registered = dict(server._sessions)
     yield
     server._shutdown_draining.clear()
+    server._resumable_shutdown.clear()
     with server._sessions_lock:
         server._sessions.clear()
         server._sessions.update(registered)
@@ -151,7 +157,7 @@ def _register(sid, session):
 def _start_turn(sid, session, text="do the long thing"):
     session["running"] = True
     server._run_prompt_submit("rid", sid, session, text)
-    assert session["agent"].entered.wait(5), "fake turn never started"
+    assert session["agent"].entered.wait(5), f"fake turn never started: {session.get('running')} {session.get('_run_thread')}"
 
 
 def _completes(emits, sid):
@@ -218,7 +224,7 @@ def test_long_turn_is_interrupted_for_shutdown_and_keeps_its_marker(emits, turn_
     marker = read_turn_marker(marker_home, "session-key")
     assert marker is not None, "a shutdown-interrupted turn must stay resumable"
     assert marker["prompt"] == "do the long thing"
-    assert marker["attempts"] == 1
+    assert marker["attempts"] == 0  # the continuation counts itself; the restart does not count twice
     assert marker["interrupted_by"] == "shutdown"
     assert marker["queued"] == [{"text": "and then this", "turn_auth_user": ["oidc", "user-1"]}]
 
@@ -246,7 +252,7 @@ def test_next_resume_continues_the_turn_and_restores_its_queue(emits, turn_env, 
     while not submitted and time.monotonic() < deadline:
         time.sleep(0.01)
 
-    assert descriptor["attempt"] == 2  # the shutdown counted as one attempt
+    assert descriptor["attempt"] == 1
     assert descriptor["interrupted_by"] == "shutdown"
     assert descriptor["queued_prompts"] == 1
     (text, kwargs, queued_at_dispatch), = submitted
@@ -256,15 +262,68 @@ def test_next_resume_continues_the_turn_and_restores_its_queue(emits, turn_env, 
     assert queued_at_dispatch["transport"] is None
 
 
-def test_breaker_still_stops_a_turn_every_restart_interrupts(marker_home, monkeypatch):
-    """Attempts are bumped per shutdown, so the default 2-attempt breaker gives up on a turn that
-    every restart cuts off instead of resubmitting it forever."""
+def test_breaker_hands_the_queue_back_instead_of_dropping_it(emits, marker_home, monkeypatch):
+    """The breaker still gives up on a turn every restart cuts off, but the prompts queued behind it go
+    back in the session's queue (they run after the next turn) and the client is told."""
     monkeypatch.setattr(server, "_load_cfg", lambda: {})
-    record_turn_start(marker_home, "session-key", "endless", attempts=1)
-    mark_turn_shutdown_interrupted(marker_home, "session-key")
+    record_turn_start(marker_home, "session-key", "endless", attempts=2)
+    mark_turn_shutdown_interrupted(marker_home, "session-key", [{"text": "then deploy"}], token="t")
+    session = _session()
 
-    assert server._maybe_schedule_auto_continue("sid", _session(), "session-key") is None
+    assert server._maybe_schedule_auto_continue("sid", session, "session-key") is None
+
     assert read_turn_marker(marker_home, "session-key") is None
+    assert session["queued_prompt"] == {"text": "then deploy", "transport": None}
+    (notice,) = [p for e, s, p in emits if e == "status.update" and s == "sid"]
+    assert notice["kind"] == "restart"
+    assert "not resumed" in notice["text"] and "1 message(s)" in notice["text"]
+
+
+def test_stale_marker_hands_the_queue_back(emits, marker_home, monkeypatch):
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    mark_turn_shutdown_interrupted(marker_home, "session-key", [{"text": "old follow-up"}], token="t")
+    monkeypatch.setattr(server, "time", types.SimpleNamespace(time=lambda: time.time() + 3600,
+                                                              monotonic=time.monotonic))
+    session = _session()
+
+    assert server._maybe_schedule_auto_continue("sid", session, "session-key") is None
+    assert read_turn_marker(marker_home, "session-key") is None
+    assert session["queued_prompt"]["text"] == "old follow-up"
+    assert any(e == "status.update" and "queued before the restart" in p["text"] for e, _s, p in emits)
+
+
+@pytest.mark.parametrize("extra, auto_continue", [({"source": "bot_room"}, True), ({}, False)])
+def test_queue_behind_a_turn_auto_continue_never_owns_comes_back(emits, marker_home, monkeypatch, extra,
+                                                               auto_continue):
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    record_turn_start(marker_home, "session-key", "room or mailbox turn", auto_continue=auto_continue)
+    mark_turn_shutdown_interrupted(marker_home, "session-key", [{"text": "queued"}], token="t")
+    session = _session(**extra)
+
+    assert server._maybe_schedule_auto_continue("sid", session, "session-key") is None
+
+    assert session["queued_prompt"]["text"] == "queued"
+    marker = read_turn_marker(marker_home, "session-key")
+    assert marker is not None and "queued" not in marker  # the owner's entry stays, the queue is handed back
+
+
+def test_missing_attachments_are_dropped_with_a_notice(emits, marker_home, monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    kept = tmp_path / "kept.png"
+    kept.write_bytes(b"png")
+    mark_turn_shutdown_interrupted(marker_home, "session-key", [
+        {"text": "look", "image_paths": [str(kept), str(tmp_path / "gone.png")]},
+        {"image_paths": [str(tmp_path / "also-gone.png")]},
+    ], token="t")
+    monkeypatch.setattr(server, "time", types.SimpleNamespace(time=lambda: time.time() + 3600,
+                                                              monotonic=time.monotonic))
+    session = _session()
+
+    server._maybe_schedule_auto_continue("sid", session, "session-key")
+
+    assert session["queued_prompt"] == {"text": "look", "image_paths": [str(kept)], "transport": None}
+    assert not session.get("queued_prompts")  # the image-only envelope had nothing left
+    assert any("2 attachment(s)" in p["text"] for e, _s, p in emits if e == "status.update")
 
 
 def test_freshness_counts_from_the_shutdown_not_the_turn_start(emits, marker_home, monkeypatch):
@@ -489,23 +548,32 @@ def test_exit_path_interrupts_with_the_shutdown_reason(emits, turn_env, marker_h
 
     assert agent.interrupts == [("Dashboard restarting", "dashboard shutdown")]
     marker = read_turn_marker(marker_home, "session-key")
-    assert marker is not None and marker["attempts"] == 1
+    assert marker is not None and marker["attempts"] == 0 and marker["interrupted_by"] == "shutdown"
 
 
-def test_drain_then_exit_path_counts_one_shutdown_once(emits, turn_env, marker_home, monkeypatch):
-    """The drain interrupts, then the re-raised SIGTERM's handler runs ``_stop_turns_before_exit``:
-    the marker must be bumped once, not twice (a second bump would trip the breaker on one restart)."""
-    agent = _ModelWaitAgent()
-    agent.hard_interrupt = lambda message=None, *, tool_reason=None: agent.interrupts.append((message, tool_reason))
+def test_drain_then_exit_path_marks_and_interrupts_once(emits, turn_env, marker_home, monkeypatch):
+    """The drain interrupts, then the re-raised SIGTERM's handler runs ``_stop_turns_before_exit``: one
+    mark (queue journaled once), one interrupt, one agent_loop_stopped hook."""
+    from hermes_cli import plugins
+
+    hooks: list = []
+    monkeypatch.setattr(plugins, "invoke_hook", lambda name, **kw: hooks.append((name, kw.get("reason"))))
+    agent = _ModelWaitAgent(honor_interrupt=False)  # still running when the exit path comes by
     session = _register("twice", _session(agent=agent))
     _start_turn("twice", session)
-    monkeypatch.setattr(server, "_SHUTDOWN_INTERRUPT_SETTLE_S", 0.2)  # this agent ignores the interrupt
+    with session["history_lock"]:
+        session["queued_prompt"] = {"text": "then deploy", "transport": None}
+    monkeypatch.setattr(server, "_SHUTDOWN_INTERRUPT_SETTLE_S", 0.2)
 
     asyncio.run(server.drain_turns_for_shutdown(timeout=0.0))
     server._stop_turns_before_exit(budget_s=0.1)
 
-    assert read_turn_marker(marker_home, "session-key")["attempts"] == 1
-    agent._interrupted.set()
+    marker = read_turn_marker(marker_home, "session-key")
+    assert marker["attempts"] == 0
+    assert marker["queued"] == [{"text": "then deploy"}]
+    assert agent.interrupts == [("Dashboard restarting", "dashboard shutdown")]
+    assert hooks == [("agent_loop_stopped", "shutdown")]
+    agent.release.set()
     _wait_settled(session)
 
 
@@ -523,3 +591,250 @@ def test_handing_the_queue_back_never_drops_a_newer_turns_marker(marker_home):
     drop_journaled_queue(marker_home, "idle-key")
     assert read_turn_marker(marker_home, "idle-key") is None
     assert read_turn_marker(marker_home, "other") is not None
+
+
+# ── Review round: races, stop ordering, repeated restarts, replay ──────
+
+
+def test_shutdown_landing_between_marker_write_and_flag_read_marks_once(emits, turn_env, marker_home, monkeypatch):
+    """The turn writes its marker; the shutdown marks that entry; the turn then reads the flag and re-applies.
+    Exactly one mark: attempts untouched, the queue journaled once (it used to come out doubled)."""
+    agent = _ModelWaitAgent()
+    session = _register("race", _session(agent=agent))
+    with session["history_lock"]:
+        session["queued_prompt"] = {"text": "then deploy", "transport": None}
+    real_record = server.record_turn_start
+
+    def record_then_shutdown(home, key, prompt, **kwargs):
+        real_record(home, key, prompt, **kwargs)
+        assert server._shutdown_mark_session(session) is True
+
+    monkeypatch.setattr(server, "record_turn_start", record_then_shutdown)
+    _start_turn("race", session)
+    agent._interrupted.set()
+    _wait_settled(session)
+
+    marker = read_turn_marker(marker_home, "session-key")
+    assert marker["attempts"] == 0
+    assert marker["queued"] == [{"text": "then deploy"}]
+
+
+def test_shutdown_before_the_marker_write_is_reapplied_to_the_new_entry(emits, turn_env, marker_home,
+                                                                        monkeypatch):
+    agent = _ModelWaitAgent()
+    session = _register("early", _session(agent=agent))
+    with session["history_lock"]:
+        session["queued_prompt"] = {"text": "queued", "transport": None}
+    real_record = server.record_turn_start
+    marked: list = []
+
+    def shutdown_then_record(home, key, prompt, **kwargs):
+        if not marked:
+            marked.append(server._shutdown_mark_session(session))
+        real_record(home, key, prompt, **kwargs)  # replaces the entry the shutdown marked
+
+    monkeypatch.setattr(server, "record_turn_start", shutdown_then_record)
+    _start_turn("early", session)
+    agent._interrupted.set()
+    _wait_settled(session)
+
+    marker = read_turn_marker(marker_home, "session-key")
+    assert marked == [True]
+    assert marker["prompt"] == "do the long thing" and marker["interrupted_by"] == "shutdown"
+    assert marker["queued"] == [{"text": "queued"}]
+
+
+def _stop_payload(emits, sid):
+    (complete,) = _completes(emits, sid)
+    return {k: v for k, v in complete.items() if k != "usage"}
+
+
+@pytest.mark.parametrize("exit_path", ["drain", "signal"])
+def test_user_stop_first_then_shutdown_leaves_the_stop_untouched(emits, turn_env, marker_home, monkeypatch,
+                                                                 exit_path):
+    """/stop lands first; the turn is still unwinding when the shutdown comes by. The shutdown must not
+    mark it, re-interrupt it or change its reason: same frame, marker retired, as a plain /stop."""
+    # Baseline: a plain /stop.
+    baseline_agent = _ModelWaitAgent()
+    baseline = _register("baseline", _session(agent=baseline_agent))
+    _start_turn("baseline", baseline)
+    _patch_rpc_session(monkeypatch, baseline)
+    server._methods["session.interrupt"]("stop", {"session_id": "baseline"})
+    _wait_settled(baseline)
+    expected = _stop_payload(emits, "baseline")
+
+    agent = _ModelWaitAgent(honor_interrupt=False)
+    session = _register("stopped", _session(agent=agent))
+    _start_turn("stopped", session)
+    _patch_rpc_session(monkeypatch, session)
+    server._methods["session.interrupt"]("stop", {"session_id": "stopped"})
+    monkeypatch.setattr(server, "_SHUTDOWN_INTERRUPT_SETTLE_S", 0.2)
+    if exit_path == "drain":
+        asyncio.run(server.drain_turns_for_shutdown(timeout=0.0))
+    else:
+        server._stop_turns_before_exit(budget_s=0.1)
+    agent.release.set()
+    _wait_settled(session)
+
+    assert agent.interrupts == [(None, None)]
+    assert "_shutdown_interrupt" not in session
+    assert read_turn_marker(marker_home, "session-key") is None
+    assert _stop_payload(emits, "stopped") == expected
+    assert "interrupt_reason" not in expected
+
+
+def test_second_restart_during_the_continuation_keeps_the_queue_and_the_breaker_holds(
+        emits, turn_env, marker_home, monkeypatch):
+    """Restart 1 interrupts a turn with a queue; the continuation runs (queue restored in memory) and
+    restart 2 interrupts it too. The queue is journaled again -- once -- and the breaker still ends the
+    loop: continuation attempts 1, 2, then the queue is handed back instead of a third continuation."""
+    first = _ModelWaitAgent()
+    session = _register("one", _session(agent=first))
+    _start_turn("one", session)
+    with session["history_lock"]:
+        session["queued_prompt"] = {"text": "then deploy", "transport": None}
+    asyncio.run(server.drain_turns_for_shutdown(timeout=0.0))
+    _wait_settled(session)
+
+    monkeypatch.setattr(server, "_wait_agent", lambda s, rid, timeout=30.0: None)
+    monkeypatch.setattr(server, "_ensure_active_session_slot", lambda sid, s: None)
+
+    def restart_and_resume(sid, expected_attempt):
+        server._shutdown_draining.clear()  # the next process
+        agent = _ModelWaitAgent()
+        resumed = _register(sid, _session())
+        monkeypatch.setattr(server, "_start_agent_build", lambda s_id, s: s.update(agent=agent))
+        descriptor = server._maybe_schedule_auto_continue(sid, resumed, "session-key")
+        assert descriptor["attempt"] == expected_attempt
+        assert agent.entered.wait(5), "continuation never ran"
+        assert resumed["queued_prompt"]["text"] == "then deploy"
+        asyncio.run(server.drain_turns_for_shutdown(timeout=0.0))  # the restart during the continuation
+        _wait_settled(resumed)
+        marker = read_turn_marker(marker_home, "session-key")
+        assert marker["attempts"] == expected_attempt
+        assert marker["queued"] == [{"text": "then deploy"}]
+        return resumed
+
+    restart_and_resume("two", 1)
+    restart_and_resume("three", 2)
+
+    server._shutdown_draining.clear()
+    last = _session()
+    assert server._maybe_schedule_auto_continue("four", last, "session-key") is None
+    assert read_turn_marker(marker_home, "session-key") is None
+    assert last["queued_prompt"]["text"] == "then deploy"
+
+
+def test_shutdown_closing_row_round_trips_through_the_store_and_replay(tmp_path):
+    """Persist a shutdown-interrupted tool block, read it back, canonicalize it for replay and build the
+    request: the hidden row sends its neutral api_content, the call/result pairing is intact, and the
+    side-effecting interrupted result is still rewritten to the UNKNOWN orphan notice."""
+    import json
+
+    from agent.message_sanitization import SHUTDOWN_CLOSING_API_CONTENT, close_interrupted_tool_sequence
+    from agent.replay_cleanup import canonicalize_replay_history
+    from agent.turn_context import build_api_messages
+    from hermes_state import SessionDB
+
+    call = {"id": "c1", "type": "function", "function": {"name": "terminal", "arguments": '{"command": "make deploy"}'}}
+    interrupted = json.dumps({"output": "deploying...\n[Command interrupted]", "exit_code": 130})
+    messages = [{"role": "user", "content": "deploy it"},
+                {"role": "assistant", "content": "", "tool_calls": [call]},
+                {"role": "tool", "tool_call_id": "c1", "content": interrupted}]
+    close_interrupted_tool_sequence(messages, SENTINEL, interrupt_reason="shutdown")
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session(session_id="s1", source="tui")
+    for m in messages:
+        db.append_message("s1", role=m["role"], content=m.get("content"), tool_calls=m.get("tool_calls"),
+                          tool_call_id=m.get("tool_call_id"), api_content=m.get("api_content"),
+                          display_kind=m.get("display_kind"), display_metadata=m.get("display_metadata"),
+                          timestamp=9_000.0)
+    stored = db.get_messages_as_conversation("s1")
+    assert all(SENTINEL not in str(m) for m in stored)
+    closing = stored[-1]
+    assert closing["role"] == "assistant" and closing["display_kind"] == "hidden"
+    assert closing["api_content"] == SHUTDOWN_CLOSING_API_CONTENT
+    assert closing["display_metadata"] == {"interrupt_reason": "shutdown"}
+
+    replay = canonicalize_replay_history(stored, now=10_000.0)
+    tool_result = next(m for m in replay if m.get("role") == "tool")
+    assert tool_result["effect_disposition"] == "unknown" and "UNKNOWN" in tool_result["content"]
+
+    class _SendAgent:
+        api_mode = "chat_completions"
+        ephemeral_system_prompt = None
+        _compression_warning = None
+        _current_turn_timestamp = 10_000.0
+
+        @staticmethod
+        def _copy_reasoning_content_for_api(_source, _target):
+            return None
+
+        @staticmethod
+        def _should_sanitize_tool_calls():
+            return False
+
+    history = [*stored, {"role": "user", "content": "[System note: Your previous turn was interrupted]"}]
+    request, _ = build_api_messages(
+        _SendAgent(), history, current_turn_user_idx=len(history) - 1, ext_prefetch_cache="",
+        plugin_user_context="", moa_config=None, active_system_prompt="")
+    roles = [m["role"] for m in request]
+    assert roles == ["user", "assistant", "tool", "assistant", "user"]
+    assert request[1]["tool_calls"][0]["id"] == request[2]["tool_call_id"] == "c1"
+    assert "UNKNOWN" in request[2]["content"]
+    assert request[3]["content"] == SHUTDOWN_CLOSING_API_CONTENT
+    assert all("display_" not in key for m in request for key in m)
+
+
+def test_non_resumable_exit_stops_turns_the_old_way(emits, turn_env, marker_home):
+    """stdio TUI quit / Desktop quit: no resumable switch. The turn is stopped as before and its marker is
+    retired, so quitting to stop a runaway turn does not bring it back."""
+    server._resumable_shutdown.clear()
+    agent = _ModelWaitAgent()
+    session = _register("quit", _session(agent=agent))
+    _start_turn("quit", session)
+    with session["history_lock"]:
+        session["queued_prompt"] = {"text": "queued", "transport": None}
+
+    server._stop_turns_before_exit(budget_s=5.0)
+    _wait_settled(session)
+
+    assert agent.interrupts == [(None, None)]
+    assert read_turn_marker(marker_home, "session-key") is None
+    (complete,) = _completes(emits, "quit")
+    assert "interrupt_reason" not in complete
+
+
+def test_shutdown_keeps_text_the_model_already_streamed(emits, turn_env, marker_home):
+    agent = _ModelWaitAgent(interrupted_text="Here is the first half of")
+    session = _register("partial", _session(agent=agent))
+    _start_turn("partial", session)
+
+    asyncio.run(server.drain_turns_for_shutdown(timeout=0.0))
+    _wait_settled(session)
+
+    (complete,) = _completes(emits, "partial")
+    assert complete["interrupt_reason"] == "shutdown"
+    assert complete["text"] == "Here is the first half of"
+
+
+def test_repeated_signal_also_cuts_the_settle_short(emits, turn_env, marker_home):
+    agent = _ModelWaitAgent(honor_interrupt=False)
+    session = _register("stuck", _session(agent=agent))
+    _start_turn("stuck", session)
+
+    started = time.monotonic()
+    asyncio.run(server.drain_turns_for_shutdown(timeout=30.0, should_abort=lambda: True))
+    assert time.monotonic() - started < 2.0  # neither the 30 s drain nor the 5 s settle
+    agent.release.set()
+    _wait_settled(session)
+
+
+def test_a_new_turn_drops_the_previous_turns_shutdown_mark():
+    session = _session(_shutdown_interrupt=True, _shutdown_queued=[{"text": "x"}], _shutdown_token="t",
+                       _turn_cancel_requested=True)
+    err, _fields = server._lock_in_submit_turn("rid", "sid", session, "hello", {}, False, set(), None, None)
+    assert err is None
+    assert not any(k in session for k in ("_shutdown_interrupt", "_shutdown_queued", "_shutdown_token"))
+    assert session["_turn_cancel_requested"] is False

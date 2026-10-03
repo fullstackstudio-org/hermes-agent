@@ -60,29 +60,43 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     """Kick off a continuation turn for a crash-interrupted session (session.resume cold paths). Returns a descriptor
     for the resume payload when scheduled, else None. The turn runs on a background thread after the deferred agent
     build via _run_prompt_submit, so the client that just resumed streams it."""
-    # Hosted room turns are recovered by their durable task/lease state machine; generic auto-continue would bypass
-    # its execution generation and duplicate work.
-    if session.get("source") == "bot_room":
-        return None
     from tui_gateway.shutdown_drain import _shutdown_drain_active
     if _shutdown_drain_active():
         return None  # this process is on its way out: the marker is the next process's to act on
     home = _session_home(session)
+    # Hosted room turns are recovered by their durable task/lease state machine; generic auto-continue would bypass
+    # its execution generation and duplicate work. A queue a shutdown journaled beside the room's marker still
+    # comes back (below), and the room's own entry stays for its driver.
+    if session.get("source") == "bot_room":
+        if (marker := read_turn_marker(home, session_key)) is not None and marker.get("queued"):
+            _hand_back_journaled_queue(sid, session, marker, turn_not_resumed=False)
+            drop_journaled_queue(home, session_key)
+        return None
     if (marker := read_turn_marker(home, session_key)) is None:
         return None
     if not marker.get("auto_continue", True):
-        return None  # The mailbox owns recovery and receipt identity for imported turns.
+        # The mailbox owns recovery and receipt identity for imported turns; their queue is the session's.
+        if marker.get("queued"):
+            _hand_back_journaled_queue(sid, session, marker, turn_not_resumed=False)
+            drop_journaled_queue(home, session_key)
+        return None
     enabled, freshness_secs, max_attempts = _auto_continue_config()
     # A shutdown records when it interrupted the turn; a crash only left the turn's start.
     interrupted_at = float(marker.get("interrupted_at") or marker["started_at"])
     age = time.time() - interrupted_at
     if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
         clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
+        # Never silently: prompts queued behind the turn go back in the session's queue (they run after the next
+        # turn, as they would have), and the client hears that the interrupted turn itself was not resumed.
+        _hand_back_journaled_queue(sid, session, marker, turn_not_resumed=(
+            marker.get("interrupted_by") == "shutdown" and bool(marker["prompt"])))
         return None
     if session.get("_auto_continue_scheduled"):
         return None
     session["_auto_continue_scheduled"] = True
-    queued = [_restore_queue_envelope(e) for e in marker.get("queued") or ()]
+    queued, dropped_attachments = _restore_journaled_queue(marker.get("queued"))
+    if dropped_attachments:
+        _emit_restart_notice(sid, _dropped_attachments_text(dropped_attachments))
     descriptor = {"attempt": marker["attempts"] + 1 if marker["prompt"] else 0, "interrupted_at": interrupted_at,
                   **({"interrupted_by": "shutdown"} if marker.get("interrupted_by") == "shutdown" else {}),
                   **({"queued_prompts": len(queued)} if queued else {})}
@@ -149,6 +163,34 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     logger.info("auto-continue scheduled for session %s (attempt %d, interrupted %.0fs ago%s)", session_key, attempt,
                 age, ", by a shutdown" if marker.get("interrupted_by") == "shutdown" else "")
     return descriptor
+
+
+def _dropped_attachments_text(count: int) -> str:
+    return f"{count} attachment(s) of queued messages were gone after the restart and were dropped."
+
+
+def _emit_restart_notice(sid: str, text: str) -> None:
+    with contextlib.suppress(Exception):
+        _emit("status.update", sid, {"kind": "restart", "text": text})
+
+
+def _hand_back_journaled_queue(sid: str, session: dict, marker: dict, *, turn_not_resumed: bool) -> None:
+    """A marker that will not be continued: put its journaled queue back in the session's queue, where it runs
+    after the next turn, and tell the client what happened (English; clients localise from ``kind``)."""
+    queued, dropped = _restore_journaled_queue(marker.get("queued"))
+    if queued:
+        with session["history_lock"]:
+            _restore_queued_after_restart(session, queued)
+    parts = []
+    if turn_not_resumed:
+        parts.append("The turn the restart interrupted was not resumed.")
+    if queued:
+        parts.append(f"{len(queued)} message(s) queued before the restart run after your next message.")
+    if dropped:
+        parts.append(_dropped_attachments_text(dropped))
+    if parts:
+        logger.info("restart recovery for %s: %s", session.get("session_key") or sid, " ".join(parts))
+        _emit_restart_notice(sid, " ".join(parts))
 
 
 def _restore_queued_after_restart(session: dict, queued: list[dict]) -> None:

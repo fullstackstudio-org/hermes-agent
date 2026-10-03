@@ -7,8 +7,8 @@ function is best-effort — marker bookkeeping must never break a turn — so I/
 marker" instead of raising.
 
 A shutdown (``tui_gateway.shutdown_drain``) is the one deliberate exception to "cleared on any
-conclusion": a turn the process interrupts on its way out keeps its marker, with ``attempts`` bumped
-and ``interrupted_by: "shutdown"``, so the next ``session.resume`` continues it. Prompts queued behind
+conclusion": a turn the process interrupts on its way out keeps its marker (``attempts`` unchanged,
+``interrupted_by: "shutdown"``), so the next ``session.resume`` continues it. Prompts queued behind
 that turn ride along as ``queued`` (the envelope minus its transport), and a session that was idle with
 a queue at exit gets a queue-only entry (``prompt`` empty). ``retire_turn_marker`` keeps such a queue
 when the turn concludes after all; ``clear_turn_marker`` drops everything."""
@@ -166,11 +166,16 @@ def drop_journaled_queue(home: Path | str, session_key: str) -> None:
 
 
 def mark_turn_shutdown_interrupted(home: Path | str, session_key: str, queued: list[dict] | None = None, *,
-                                   bump_attempts: bool = True) -> None:
+                                   token: str = "") -> None:
     """The process is stopping this session's turn on its way out: keep the marker so the next resume
-    continues it, count the interruption against the crash-loop breaker (``bump_attempts``), and journal
-    ``queued`` -- JSON-safe envelopes of the prompts waiting behind it. With no marker (an idle session,
-    or a turn that had not written one yet) and a non-empty queue, a queue-only entry is written."""
+    continues it, and journal ``queued`` -- JSON-safe envelopes of the prompts waiting behind it. With no
+    marker (an idle session, or a turn that had not written one yet) and a non-empty queue, a queue-only
+    entry is written.
+
+    ``attempts`` is NOT bumped: the continuation already records attempts+1, so counting the restart too
+    would spend the crash-loop breaker twice on one interruption. ``token`` identifies one shutdown of one
+    session: an entry already carrying it is left alone (the turn thread and the shutdown path can both get
+    here), and a re-mark replaces ``queued`` instead of appending to it."""
     if not session_key:
         return
     queued = [e for e in (queued or []) if isinstance(e, dict)]
@@ -178,19 +183,24 @@ def mark_turn_shutdown_interrupted(home: Path | str, session_key: str, queued: l
 
     def mutate(entries: dict[str, dict]) -> dict[str, dict] | None:
         entry = entries.get(session_key)
+        if entry is not None and token and entry.get("shutdown_token") == token:
+            return None
         if entry is None:
             if not queued:
                 return None
             entry = {"attempts": 0, "prompt": "", "started_at": now, "auto_continue": True}
         else:
             entry = dict(entry)
-            if bump_attempts and str(entry.get("prompt") or "").strip():
-                entry["attempts"] = max(0, int(entry.get("attempts") or 0)) + 1
         # Freshness counts from the interruption, not from the turn's start: a turn that ran for
         # twenty minutes before a restart is still fresh the moment the restart ends.
         entry["interrupted_by"], entry["interrupted_at"] = "shutdown", now
+        if token:
+            entry["shutdown_token"] = token
+        entry.pop("queued", None)
         if queued:
-            entry["queued"] = [*_queued_envelopes(entry), *queued]
+            entry["queued"] = list(queued)
+        if not str(entry.get("prompt") or "").strip() and not queued:
+            return {k: v for k, v in entries.items() if k != session_key}
         return {**_prune(entries, now), session_key: entry}
 
     _update(home, session_key, mutate, "mark shutdown on")

@@ -111,3 +111,37 @@ def test_failed_drain_does_not_stop_the_shutdown(monkeypatch):
     monkeypatch.setattr(gateway, "drain_turns_for_shutdown", broken)
     monkeypatch.setattr(web_server, "is_desktop_owned_backend", lambda: False)
     asyncio.run(web_server._drain_turns_before_shutdown(object()))  # logged, not raised
+
+
+def test_stop_grace_reads_the_backends_own_home(monkeypatch, tmp_path):
+    """``hermes update`` / ``dashboard --stop`` may run from another profile than the backend it stops:
+    the drain budget comes from the backend's own config.yaml, the longest one when several stop."""
+    from hermes_cli import dashboard_procs
+
+    quick, slow = tmp_path / "quick", tmp_path / "slow"
+    for home, drain in ((quick, 0), (slow, 60)):
+        home.mkdir()
+        (home / "config.yaml").write_text(f"dashboard:\n  shutdown_drain_timeout: {drain}\n", encoding="utf-8")
+    homes = {101: str(quick), 102: str(slow), 103: None}
+    monkeypatch.setattr(dashboard_procs, "_hermes_home_for_pid", lambda pid: homes[pid])
+    floor, settle = dashboard_procs._POSIX_TERM_GRACE_SECONDS, dashboard_procs._SHUTDOWN_DRAIN_SETTLE_SECONDS
+
+    assert dashboard_procs._posix_term_grace_seconds([101]) == floor + settle
+    assert dashboard_procs._posix_term_grace_seconds([101, 102]) == floor + 60 + settle
+    assert dashboard_procs._posix_term_grace_seconds([103]) == floor + 20 + settle  # unreadable: the default
+
+
+def test_only_a_non_desktop_backend_makes_its_stops_resumable(monkeypatch):
+    from hermes_cli import web_server
+    import tui_gateway.server as gateway
+
+    gateway._resumable_shutdown.clear()
+    try:
+        monkeypatch.setattr(web_server, "is_desktop_owned_backend", lambda: True)
+        web_server._enable_resumable_shutdown_unless_desktop()
+        assert not gateway._resumable_shutdown.is_set()
+        monkeypatch.setattr(web_server, "is_desktop_owned_backend", lambda: False)
+        web_server._enable_resumable_shutdown_unless_desktop()
+        assert gateway._resumable_shutdown.is_set()
+    finally:
+        gateway._resumable_shutdown.clear()

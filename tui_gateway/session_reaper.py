@@ -124,9 +124,11 @@ def _stop_turns_before_exit(budget_s: float | None = None) -> None:
     ignored the interrupt's SIGTERM: SIGKILL it then, early enough for its result to land as well (the
     interrupt's own TERM, 1s, KILL outlasts the SIGTERM path's ~1s grace).
 
-    The interrupt is a SHUTDOWN, not a stop (``shutdown_drain._shutdown_interrupt_turns``): the turn keeps its
-    crash marker and its queue, so the next ``session.resume`` continues it -- the same state the dashboard's
-    drain leaves, whichever exit path got here first. A turn the drain already interrupted is not marked twice."""
+    In a backend whose stops are restarts (``shutdown_drain.enable_resumable_shutdown``) the interrupt is a
+    SHUTDOWN, not a stop: the turn keeps its crash marker and its queue, so the next ``session.resume`` continues
+    it -- the same state the dashboard's drain leaves, whichever exit path got here first, and a turn the drain
+    already interrupted is not marked or interrupted twice. Elsewhere (stdio TUI, Desktop quit) turns are
+    stopped and their markers retired (``shutdown_drain._shutdown_interrupt_turns``)."""
     threads = _shutdown_interrupt_turns()
     budget = _EXIT_TURN_SETTLE_S if budget_s is None else max(0.0, budget_s)
     deadline = time.monotonic() + budget

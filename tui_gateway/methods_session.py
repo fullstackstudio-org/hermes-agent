@@ -2222,8 +2222,8 @@ def _(rid, params: dict) -> dict:
         active_marker_key = str(session.pop("_active_turn_marker_key", "") or "")
         # A stop that lands while a shutdown is interrupting the same turn wins: the person asked for the turn to
         # end, so it must not be resumed after the restart, and the queue the stop dropped must not come back.
-        session.pop("_shutdown_interrupt", None)
-        session.pop("_shutdown_queued", None)
+        for key in ("_shutdown_interrupt", "_shutdown_queued", "_shutdown_token"):
+            session.pop(key, None)
     _retire_turn_marker(session, active_marker_key, keep_queued=False)
     return _ok(rid, {"status": "interrupted"})
 

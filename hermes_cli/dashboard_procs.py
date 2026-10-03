@@ -448,21 +448,30 @@ _POSIX_TERM_GRACE_SECONDS = 10.0
 _SHUTDOWN_DRAIN_SETTLE_SECONDS = 5.0
 
 
-def _shutdown_drain_grace_seconds() -> float:
-    """``dashboard.shutdown_drain_timeout`` (default 20) plus the interrupt settle; 0 when the drain is off."""
+def _shutdown_drain_grace_seconds(home: str | None = None) -> float:
+    """``dashboard.shutdown_drain_timeout`` (default 20) of the backend running on *home* -- read from that
+    home's own ``config.yaml``, not the calling CLI's profile -- plus the interrupt settle."""
+    drain = 20.0
     try:
-        from hermes_cli.config import load_config
+        if home:
+            import yaml
 
-        dashboard = load_config().get("dashboard") or {}
-        raw = dashboard.get("shutdown_drain_timeout", 20.0) if isinstance(dashboard, dict) else 20.0
-        drain = max(0.0, float(20.0 if raw is None else raw))
+            config_path = Path(home) / "config.yaml"
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8")) if config_path.is_file() else None
+            dashboard = data.get("dashboard") if isinstance(data, dict) else None
+            raw = dashboard.get("shutdown_drain_timeout") if isinstance(dashboard, dict) else None
+            if raw is not None:
+                drain = max(0.0, float(raw))
     except Exception:
         drain = 20.0
     return drain + _SHUTDOWN_DRAIN_SETTLE_SECONDS
 
 
-def _posix_term_grace_seconds() -> float:
-    return _POSIX_TERM_GRACE_SECONDS + _shutdown_drain_grace_seconds()
+def _posix_term_grace_seconds(pids: list[int] = ()) -> float:
+    """The teardown floor plus the longest drain budget among *pids* (each read from its own home; an
+    unreadable home counts as the default)."""
+    homes = [_hermes_home_for_pid(pid) for pid in pids] or [None]
+    return _POSIX_TERM_GRACE_SECONDS + max(_shutdown_drain_grace_seconds(home) for home in homes)
 # Grace for a descendant that outlived the backend's own teardown. It already got the backend's
 # SIGTERM forwarded (or SIGHUP from its PTY master closing); anything still up is wedged, and a
 # wedged ui-tui keeps the deleted state.db-wal inode open until the next start refuses with
@@ -572,10 +581,11 @@ def _kill_pids_posix(pids: list[int], killed: list[int], failed: list[tuple[int,
         except (PermissionError, OSError) as e:
             failed.append((pid, str(e)))
 
+    grace = _posix_term_grace_seconds(pids)  # before the SIGTERM: each home is read off a live process
     for pid in pids:
         _send(pid, _signal.SIGTERM)
     pending = [p for p in pids if p not in killed and p not in {f[0] for f in failed}]
-    alive = _wait_gone(pending, _posix_term_grace_seconds())
+    alive = _wait_gone(pending, grace)
     killed.extend(p for p in pending if p not in alive)
     for pid in alive:
         _send(pid, _signal.SIGKILL)

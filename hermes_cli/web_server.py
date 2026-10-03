@@ -1412,12 +1412,26 @@ def _shutdown_drain_should_abort(server) -> bool:
     return bool(getattr(server, "force_exit", False)) or len(getattr(server, "_captured_signals", ()) or ()) > 1
 
 
+def _enable_resumable_shutdown_unless_desktop() -> None:
+    """A SIGTERM/SIGINT of a dashboard / ``serve`` backend is a restart, so turns it has to interrupt
+    resume afterwards. A Desktop-owned backend is stopped because the person quit the app -- often to
+    stop a runaway turn -- so there the old behaviour stays: turns stop and their markers retire."""
+    if is_desktop_owned_backend():
+        return
+    try:
+        from tui_gateway.server import enable_resumable_shutdown
+
+        enable_resumable_shutdown()
+    except Exception as exc:
+        _log.debug("resumable shutdown not enabled: %s", exc)
+
+
 async def _drain_turns_before_shutdown(server) -> None:
     """``tui_gateway.shutdown_drain.drain_turns_for_shutdown`` between uvicorn's main loop and its
     ``shutdown()``. A Desktop-owned backend skips the wait (timeout 0): the app quitting is its only
-    client going away, and it should not hang for the drain -- running turns are still interrupted
-    with the shutdown reason, so they resume when the app comes back. Never raises: a failed drain
-    must not stop the rest of the shutdown."""
+    client going away, and it should not hang for the drain; its turns stop the old way (see
+    :func:`_enable_resumable_shutdown_unless_desktop`). Never raises: a failed drain must not stop the
+    rest of the shutdown."""
     try:
         from tui_gateway.server import drain_turns_for_shutdown
 
@@ -1532,6 +1546,7 @@ def start_server(
         install_exit_flush_signal_handlers()
     except Exception as exc:
         _log.debug("exit-flush signal handlers not installed: %s", exc)
+    _enable_resumable_shutdown_unless_desktop()
 
     # #93608: uvicorn's bind_socket() would exit 1 with a bare ERROR line,
     # indistinguishable from "backend broken". Probe first so a conflict

@@ -193,10 +193,12 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
             marker_cancelled = bool(session.get("_turn_cancel_requested"))
             shutdown = bool(session.get("_shutdown_interrupt"))
             shutdown_queued = list(session.get("_shutdown_queued") or [])
+            shutdown_token = str(session.get("_shutdown_token") or "")
         if shutdown:
-            # A shutdown landed before this write and was applied to the entry this write just replaced:
-            # apply it again, so the turn stays resumable and its queue journaled.
-            mark_turn_shutdown_interrupted(marker_home, marker_key, shutdown_queued)
+            # A shutdown landed around this write. If it was applied to the entry this write replaced, apply it
+            # again so the turn stays resumable and its queue journaled; if it already landed on THIS entry, the
+            # token makes this a no-op (never a second copy of the queue).
+            mark_turn_shutdown_interrupted(marker_home, marker_key, shutdown_queued, token=shutdown_token)
         elif marker_cancelled:
             clear_turn_marker(marker_home, marker_key)
     return marker_key
@@ -884,9 +886,9 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
             _error_surface = None
     raw, status, last_reasoning = _turn_outcome(result, _error_surface)
     shutdown_interrupted = _turn_keeps_marker_for_shutdown(session, status)
-    if shutdown_interrupted:
-        # Whatever the exit path put in final_response ("Operation interrupted…", a backoff abort) is
-        # cancellation metadata; the turn continues after the restart.
+    if shutdown_interrupted and isinstance(raw, str) and raw.strip().startswith("Operation interrupted"):
+        # An exit path's "Operation interrupted…" (a backoff or retry abort) is cancellation metadata; the turn
+        # continues after the restart. Real text the model streamed before the stop is kept.
         raw = ""
     if _is_bot_mode_session(session):
         raw = _bot_mode_delivery_text(raw, successful=status == "complete")

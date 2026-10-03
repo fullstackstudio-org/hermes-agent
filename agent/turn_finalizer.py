@@ -248,8 +248,10 @@ def _close_transcript_tail(agent, messages, final_response, interrupted, _recove
     # An interrupt can leave a tool result as the tail; close the sequence so strict
     # providers don't see ``tool → user`` (placeholder: final_response is usually empty).
     if interrupted:
+        from agent.interrupt_compat import shutdown_interrupt_reason
         from agent.message_sanitization import close_interrupted_tool_sequence
-        close_interrupted_tool_sequence(messages, final_response)
+        close_interrupted_tool_sequence(
+            messages, final_response, interrupt_reason=shutdown_interrupt_reason(agent))
 
     # Recovery ``break`` sites can return a final_response with no closing assistant
     # row; enforce "delivered final_response ⇒ assistant row" here. Compare content,

@@ -14,11 +14,13 @@ from .method_ctx import bind_module
 
 @contextlib.contextmanager
 def _session_turn_admission(session: dict):
-    """Hold process admission until the history-locked running claim is visible to idle probes."""
+    """Hold process admission until the history-locked running claim is visible to idle probes. A
+    shutdown drain (``shutdown_drain``) refuses every new turn through this same gate."""
     from hermes_cli.backend_retirement import retirement
+    from tui_gateway.shutdown_drain import _shutdown_drain_active
 
     with retirement.work() as admitted, session["history_lock"]:
-        yield admitted
+        yield admitted and not _shutdown_drain_active()
 
 
 def _start_session_work(target, *, name: str, session: dict | None = None):
@@ -589,9 +591,12 @@ def _ws_session_is_orphaned(session: dict | None) -> bool:
     return bool(_ws_session_is_detached(session) and not session.get("running"))
 
 
-def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None = None) -> bool:
+def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None = None, reason: str = "user_stop") -> bool:
     """Apply the shared ``session.interrupt`` contract to one claimed session; returns whether the compute-host control
-    channel was used. The WS orphan reaper reuses this so a dead client gets the same partial-history/queue semantics."""
+    channel was used. The WS orphan reaper reuses this so a dead client gets the same partial-history/queue semantics.
+    ``reason="shutdown"`` (``shutdown_drain``): the process stops the turn on its way out -- the agent gets the
+    shutdown message/tool reason, which keeps the turn's marker and shapes its closing row; everything else (queue
+    cleared, pending prompts denied, delegations ended) is the same as a stop."""
     use_compute_host = _session_uses_compute_host(session)
     should_interrupt = bool(session.get("running"))
     run_thread_alive = False
@@ -615,21 +620,25 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _invoke_hook(
                 "agent_loop_stopped", session_key=session.get("session_key", ""), platform="tui",
-                reason="user_stop", invalidation_reason="session_interrupt",
+                reason=reason, invalidation_reason="session_interrupt",
             )
         except Exception:
             logger.debug("agent_loop_stopped hook dispatch failed", exc_info=True)
     if not use_compute_host:
         if should_interrupt:
-            from agent.interrupt_compat import request_hard_interrupt
-            request_hard_interrupt(session.get("agent"))
+            from agent.interrupt_compat import DASHBOARD_SHUTDOWN_TOOL_REASON, request_hard_interrupt
+            if reason == "shutdown":
+                request_hard_interrupt(session.get("agent"), SHUTDOWN_INTERRUPT_MESSAGE,
+                                       tool_reason=DASHBOARD_SHUTDOWN_TOOL_REASON)
+            else:
+                request_hard_interrupt(session.get("agent"))
         # Background delegations are detached from the turn's interrupt fan-out; a stop ends them too
         # (own UI sid + spawner id only — a viewer tab must not kill gateway work). Each returns as an
         # interrupted completion with its partial output.
         with contextlib.suppress(Exception):
             from tools.async_delegation import interrupt_for_session
             interrupt_for_session(
-                origin_ui_session_id=_lifecycle_own_sid(session, sid), reason="user_stop",
+                origin_ui_session_id=_lifecycle_own_sid(session, sid), reason=reason,
                 parent_session_id=str(getattr(session.get("agent"), "session_id", "") or ""))
         if not run_thread_alive:
             from tui_gateway.row_identity import release_turn_identity

@@ -223,7 +223,17 @@ RestartSec=10
 # Exit 78 (EX_CONFIG) is a deliberate refusal ("this host is already served by PID … on
 # another port"); parking on it beats an infinite restart loop with nothing listening.
 RestartPreventExitStatus=78
+# A restart lets running turns finish first (dashboard.shutdown_drain_timeout, 20 s), then
+# interrupts the rest so they resume after it, then flushes transcripts (5 s). Give the stop
+# room for all of that, and SIGTERM only the dashboard itself: its children (commands a turn
+# is running) are left to finish, and only what is still alive at the timeout is killed.
+TimeoutStopSec=45
+KillMode=mixed
 ```
+
+`TimeoutStopSec` must be at least `dashboard.shutdown_drain_timeout` plus about 15 seconds; raise
+both together. See [`shutdown_drain_timeout`](../configuration.md) for what clients see during a
+restart.
 
 One backend serves a whole host, so when `hermes dashboard` finds a live backend it cannot
 serve your typed `--host`/`--port` with, it refuses with exit 78 and names the owner. Stop that

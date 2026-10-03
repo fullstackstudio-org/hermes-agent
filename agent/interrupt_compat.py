@@ -53,3 +53,20 @@ def request_hard_interrupt(
     else:
         interrupt(message, **kwargs)
     return True
+
+
+# A stop the process asks for on its way out, not a person. Producers pass it as ``tool_reason`` to
+# ``request_hard_interrupt``; the finalizer then closes an interrupted tool tail with a structured row
+# (``display_metadata.interrupt_reason = "shutdown"``) instead of the "Operation interrupted" sentinel,
+# because the turn is going to be continued after the restart, not abandoned.
+DASHBOARD_SHUTDOWN_TOOL_REASON = "dashboard shutdown"
+SHUTDOWN_TOOL_REASONS = frozenset({DASHBOARD_SHUTDOWN_TOOL_REASON})
+SHUTDOWN_INTERRUPT_REASON = "shutdown"
+
+
+def shutdown_interrupt_reason(agent: Any) -> str | None:
+    """``"shutdown"`` when the pending interrupt came from a process shutdown, else None.
+
+    Read before ``clear_interrupt()``: the reason lives only as long as the interrupt does."""
+    reason = getattr(agent, "_tool_interrupt_reason", None)
+    return SHUTDOWN_INTERRUPT_REASON if reason in SHUTDOWN_TOOL_REASONS else None

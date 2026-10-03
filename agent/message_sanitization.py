@@ -282,17 +282,37 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     return "{}"
 
 
-def close_interrupted_tool_sequence(messages: list, final_response: Any = None) -> bool:
+# What the model reads for a tool tail a shutdown cut off. The row itself is hidden from every
+# timeline (the turn is continued after the restart; there is nothing for a person to read here).
+SHUTDOWN_CLOSING_API_CONTENT = "[turn interrupted: the gateway restarted]"
+
+
+def close_interrupted_tool_sequence(
+    messages: list, final_response: Any = None, *, interrupt_reason: str | None = None,
+) -> bool:
     """Append a synthetic assistant turn when an interrupted tail is a tool result: a transcript
     ending on a raw ``tool`` message makes the next user message land as ``tool → user``, an
     alternation violation strict providers (Gemini, Claude) answer by hallucinating a
-    continuation. Mutates in place; True if a closing turn was appended."""
+    continuation. Mutates in place; True if a closing turn was appended.
+
+    ``interrupt_reason="shutdown"`` (``agent.interrupt_compat.shutdown_interrupt_reason``): the
+    process stopped the turn on its way out and it will be continued after the restart. The
+    closing row then carries no text of its own -- the "Operation interrupted: waiting for model
+    response (…)" sentinel is cancellation metadata, and stored as content it replays as the
+    assistant's words -- but a structured marker (``display_metadata.interrupt_reason``), a hidden
+    ``display_kind`` and a neutral ``api_content`` so the model still sees a closed sequence."""
     last = messages[-1] if messages else None
     if not isinstance(last, dict) or last.get("role") != "tool":
         return False
-    text = final_response if isinstance(final_response, str) else ""
     from agent.message_metadata import append_message
 
+    if interrupt_reason == "shutdown":
+        append_message(messages, {
+            "role": "assistant", "content": "", "api_content": SHUTDOWN_CLOSING_API_CONTENT,
+            "display_kind": "hidden", "display_metadata": {"interrupt_reason": "shutdown"},
+        })
+        return True
+    text = final_response if isinstance(final_response, str) else ""
     append_message(messages, {"role": "assistant", "content": text.strip() or "Operation interrupted."})
     return True
 

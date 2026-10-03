@@ -36,14 +36,16 @@ def _session_home(session: dict) -> Path:
     return Path(session.get("profile_home") or _hermes_home)
 
 
-def _retire_turn_marker(session: dict, *keys: str) -> None:
+def _retire_turn_marker(session: dict, *keys: str, keep_queued: bool = True) -> None:
     """Drop the crash marker right before the terminal frame (not at turn-thread end: post-turn work outlives the
     client's answer, and quitting in that window would leave a marker that re-runs a finished turn). Extra ``keys``
-    cover a session_key that compression rotated mid-turn."""
+    cover a session_key that compression rotated mid-turn. Prompts a shutdown journaled beside the marker never ran
+    and survive as a queue-only entry unless ``keep_queued=False`` (a user /stop, which drops the queue)."""
     home = _session_home(session)
+    retire = retire_turn_marker if keep_queued else clear_turn_marker
     for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):
         if key:
-            clear_turn_marker(home, key)
+            retire(home, key)
 
 
 def _auto_continue_note(prompt: str) -> str:
@@ -62,19 +64,30 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     # its execution generation and duplicate work.
     if session.get("source") == "bot_room":
         return None
+    from tui_gateway.shutdown_drain import _shutdown_drain_active
+    if _shutdown_drain_active():
+        return None  # this process is on its way out: the marker is the next process's to act on
     home = _session_home(session)
     if (marker := read_turn_marker(home, session_key)) is None:
         return None
     if not marker.get("auto_continue", True):
         return None  # The mailbox owns recovery and receipt identity for imported turns.
     enabled, freshness_secs, max_attempts = _auto_continue_config()
-    age = time.time() - marker["started_at"]
+    # A shutdown records when it interrupted the turn; a crash only left the turn's start.
+    interrupted_at = float(marker.get("interrupted_at") or marker["started_at"])
+    age = time.time() - interrupted_at
     if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
         clear_turn_marker(home, session_key)  # stale/disabled/crash-looping: a manual message continues
         return None
     if session.get("_auto_continue_scheduled"):
         return None
     session["_auto_continue_scheduled"] = True
+    queued = [_restore_queue_envelope(e) for e in marker.get("queued") or ()]
+    descriptor = {"attempt": marker["attempts"] + 1 if marker["prompt"] else 0, "interrupted_at": interrupted_at,
+                  **({"interrupted_by": "shutdown"} if marker.get("interrupted_by") == "shutdown" else {}),
+                  **({"queued_prompts": len(queued)} if queued else {})}
+    if not marker["prompt"]:
+        return _schedule_queued_prompts_after_restart(sid, session, session_key, queued, descriptor)
     attempt, text = marker["attempts"] + 1, _auto_continue_note(marker["prompt"])
 
     def kickoff() -> None:
@@ -91,6 +104,10 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         with session["history_lock"]:
             if session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized"):
                 session["_auto_continue_scheduled"] = False  # a real user prompt beat us; it clears the marker
+                if session.get("running") and not session.get("_finalized"):
+                    # ... and replaces the marker entry the shutdown's queue was journaled in: keep that queue
+                    # in memory, where it drains after the user's turn like any queued prompt.
+                    _restore_queued_after_restart(session, queued)
                 return
             session["running"] = True
             session["last_active"] = time.time()
@@ -108,6 +125,9 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             # Marker inputs read back by _run_prompt_submit: attempt count (crash breaker) and the ORIGINAL prompt (no
             # nested notes). Set here, not at schedule time, so a bail above leaves nothing for a racing user turn.
             session["_auto_continue_attempt"], session["_auto_continue_prompt"] = attempt, marker["prompt"]
+            # Prompts that were queued behind the interrupted turn drain after the continuation, as they would have
+            # after the turn itself. The continuation's own marker write drops them from disk.
+            _restore_queued_after_restart(session, queued)
         try:
             from gateway.warning_notifications import render_notification
             from tui_gateway.row_identity import begin_turn_id
@@ -126,8 +146,59 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     if _start_session_work(kickoff, name=f"auto-continue-{sid}") is None:
         session["_auto_continue_scheduled"] = False
         return None
-    logger.info("auto-continue scheduled for session %s (attempt %d, interrupted %.0fs ago)", session_key, attempt, age)
-    return {"attempt": attempt, "interrupted_at": marker["started_at"]}
+    logger.info("auto-continue scheduled for session %s (attempt %d, interrupted %.0fs ago%s)", session_key, attempt,
+                age, ", by a shutdown" if marker.get("interrupted_by") == "shutdown" else "")
+    return descriptor
+
+
+def _restore_queued_after_restart(session: dict, queued: list[dict]) -> None:
+    """Put prompts journaled by a shutdown back in front of the session's queue. Caller holds ``history_lock``."""
+    if queued:
+        _ac_set_queue(session, [*queued, *([session["queued_prompt"]] if session.get("queued_prompt") else []),
+                                *(session.get("queued_prompts") or [])])
+
+
+def _schedule_queued_prompts_after_restart(sid: str, session: dict, session_key: str, queued: list[dict],
+                                           descriptor: dict) -> dict | None:
+    """A shutdown found this session idle with prompts queued (its turn ended during the drain, which refused the
+    follow-up): run them now, in order, as the queue would have. Same build / race / ownership gates as the
+    continuation kickoff above."""
+    home = _session_home(session)
+
+    def kickoff() -> None:
+        rid = f"__restart_queue__{int(time.time() * 1000)}"
+        try:
+            _start_agent_build(sid, session)
+            err = _wait_agent(session, rid, timeout=120.0)
+        except Exception:
+            logger.warning("restart queue drain: agent build failed for %s", sid, exc_info=True)
+            err = {"error": {"message": "agent build failed"}}
+        if err:  # leave the entry: the next resume retries
+            session["_auto_continue_scheduled"] = False
+            return
+        with session["history_lock"]:
+            if session.get("_finalized"):
+                session["_auto_continue_scheduled"] = False
+                return
+            running = bool(session.get("running"))
+        if not running and _ensure_active_session_slot(sid, session) is not None:
+            logger.info("restart queue drain for %s refused: session has another live owner", session_key)
+            session["_auto_continue_scheduled"] = False
+            return
+        with session["history_lock"]:
+            _restore_queued_after_restart(session, queued)
+        # Not clear_turn_marker: a user turn that started meanwhile has replaced the entry with its own marker.
+        drop_journaled_queue(home, session_key)
+        session["_auto_continue_scheduled"] = False
+        # A turn that is already running drains the queue when it ends; otherwise start the head now.
+        if not running:
+            _drain_queued_prompt(rid, sid, session)
+
+    if _start_session_work(kickoff, name=f"restart-queue-{sid}") is None:
+        session["_auto_continue_scheduled"] = False
+        return None
+    logger.info("restart queue scheduled for session %s (%d prompt(s))", session_key, len(queued))
+    return descriptor
 
 
 def _ac_inflight_original(session: dict) -> str:

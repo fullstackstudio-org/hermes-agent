@@ -1386,6 +1386,47 @@ def _windows_serve_loop_factory(config):
     return factory
 
 
+async def _serve_with_drain(server, config, on_started) -> None:
+    """uvicorn's serve sequence with the turn drain between its main loop and its ``shutdown()``.
+
+    Startup is split from the main loop so the bound (ephemeral) port is readable in ``on_started``.
+    The caller wraps this in ``server.capture_signals()``: SIGTERM only sets ``should_exit``, the main
+    loop returns, and the drain runs while every WebSocket is still open -- uvicorn's ``shutdown()``
+    is what closes them -- so clients get the real answer, or a turn that resumes after the restart.
+    """
+    if not config.loaded:
+        config.load()
+    server.lifespan = config.lifespan_class(config)
+    await server.startup()
+    if server.should_exit:
+        return
+    on_started()
+    await server.main_loop()
+    if server.started:
+        await _drain_turns_before_shutdown(server)
+        await server.shutdown()
+
+
+def _shutdown_drain_should_abort(server) -> bool:
+    """A second Ctrl+C (uvicorn's ``force_exit``) or any repeated signal ends the drain wait."""
+    return bool(getattr(server, "force_exit", False)) or len(getattr(server, "_captured_signals", ()) or ()) > 1
+
+
+async def _drain_turns_before_shutdown(server) -> None:
+    """``tui_gateway.shutdown_drain.drain_turns_for_shutdown`` between uvicorn's main loop and its
+    ``shutdown()``. A Desktop-owned backend skips the wait (timeout 0): the app quitting is its only
+    client going away, and it should not hang for the drain -- running turns are still interrupted
+    with the shutdown reason, so they resume when the app comes back. Never raises: a failed drain
+    must not stop the rest of the shutdown."""
+    try:
+        from tui_gateway.server import drain_turns_for_shutdown
+
+        timeout = 0.0 if is_desktop_owned_backend() else None
+        await drain_turns_for_shutdown(timeout, lambda: _shutdown_drain_should_abort(server))
+    except Exception:
+        _log.warning("shutdown drain failed; continuing the shutdown", exc_info=True)
+
+
 def _run_serve(serve, config, host: str, port: int) -> None:
     """Drive ``serve()`` on the loop uvicorn expects.
 
@@ -1517,16 +1558,8 @@ def start_server(
         _log.warning("eager multi-profile activation failed", exc_info=True)
 
     async def _serve():
-        # startup split from main_loop so the bound (ephemeral) port is readable.
-        if not config.loaded:
-            config.load()
-        server.lifespan = config.lifespan_class(config)
         with server.capture_signals():
-            await server.startup()
-            if server.should_exit:
-                return
-
-            _on_server_started(
+            await _serve_with_drain(server, config, lambda: _on_server_started(
                 server,
                 host=host,
                 port=port,
@@ -1534,11 +1567,7 @@ def start_server(
                 open_browser=open_browser,
                 initial_profile=initial_profile,
                 start_mcp_discovery_after_bind=start_mcp_discovery_after_bind,
-            )
-
-            await server.main_loop()
-            if server.started:
-                await server.shutdown()
+            ))
 
     _run_serve(_serve, config, host, port)
 

@@ -61,6 +61,11 @@ class AutoContinue(Result):
 
     attempt: int
     interrupted_at: float
+    # ``"shutdown"`` when the gateway interrupted the turn on its way out (a restart), absent for a crash.
+    interrupted_by: str | None = None
+    # Prompts that were queued behind the turn when the gateway stopped; they run after it, in order. A resume
+    # with only queued prompts to run (the turn itself had finished) reports ``attempt`` 0.
+    queued_prompts: int | None = None
 
 
 class LiveSessionStatus(WireEnum):

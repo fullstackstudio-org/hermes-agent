@@ -1007,6 +1007,11 @@ DEFAULT_CONFIG = {
         # completion. Default = agent.turn_liveness.timeout_s. 0 = interrupt at grace.
         # See #100325, #98028.
         "ws_orphan_activity_stale_s": 600.0,
+        # On SIGTERM (systemctl restart, update relaunch) running turns get this many seconds to finish
+        # before the WebSockets close; turns still running then are interrupted so they resume after
+        # the restart. 0 = interrupt at once. A systemd unit needs TimeoutStopSec of at least this plus
+        # ~15s (interrupt settle + transcript flush) and KillMode=mixed. Desktop-owned backends skip it.
+        "shutdown_drain_timeout": 20.0,
         # On gateway boot, close tui/desktop/subagent rows orphaned by a dead gateway (start AND
         # newest message older than HERMES_TUI_SESSION_TTL_S, default 6h) with
         # end_reason='startup_orphan_reap'; otherwise they stay phantom "active" forever.

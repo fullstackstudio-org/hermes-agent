@@ -59,6 +59,18 @@ class GatewayReadyPayload(Payload):
 
 event("gateway.ready", GatewayReadyPayload,
       doc="First frame of a connection: the resolved skin, the change-event capability and the replay epoch.")
+
+
+class GatewayRestartingPayload(Payload):
+    """``shutdown_drain._announce_shutdown_drain``: sent to every connected client when the dashboard starts
+    shutting down, before running turns are drained."""
+
+    # How long running turns are given to finish before they are interrupted to resume after the restart.
+    drain_timeout_s: float
+
+
+event("gateway.restarting", GatewayRestartingPayload,
+      doc="The gateway is shutting down: new turns are refused, running turns finish or resume after the restart.")
 event("skin.changed", SkinPayload,
       doc="The active skin moved (name switch or live colour edit); repaint from this palette.")
 
@@ -203,6 +215,9 @@ class MessageCompletePayload(Payload):
     persisted_turn: PersistedTurn | None = None
     # The final assistant row; the same id as ``persisted_turn.final_assistant_row_id``.
     row_id: int | None = None
+    # ``"shutdown"``: the gateway interrupted this turn on its way out; it continues after the restart
+    # (``session.resume`` reports ``auto_continue``). Absent for every other outcome, a user stop included.
+    interrupt_reason: str | None = None
 
 
 event("message.complete", MessageCompletePayload, doc="The turn ended: final text, usage and outcome.")

@@ -122,15 +122,12 @@ def _stop_turns_before_exit(budget_s: float | None = None) -> None:
     with a result the teardown's final persist records. A foreground command runs in its own process
     group and would outlive the gateway, reparented to init. One still alive halfway through the budget
     ignored the interrupt's SIGTERM: SIGKILL it then, early enough for its result to land as well (the
-    interrupt's own TERM, 1s, KILL outlasts the SIGTERM path's ~1s grace)."""
-    with _sessions_lock:
-        running = [(sid, s) for sid, s in _sessions.items() if s.get("running")]
-    threads = []
-    for sid, session in running:
-        with contextlib.suppress(Exception):
-            _interrupt_session_turn(sid, session)
-        if (t := session.get("_run_thread")) is not None and t is not threading.current_thread():
-            threads.append(t)
+    interrupt's own TERM, 1s, KILL outlasts the SIGTERM path's ~1s grace).
+
+    The interrupt is a SHUTDOWN, not a stop (``shutdown_drain._shutdown_interrupt_turns``): the turn keeps its
+    crash marker and its queue, so the next ``session.resume`` continues it -- the same state the dashboard's
+    drain leaves, whichever exit path got here first. A turn the drain already interrupted is not marked twice."""
+    threads = _shutdown_interrupt_turns()
     budget = _EXIT_TURN_SETTLE_S if budget_s is None else max(0.0, budget_s)
     deadline = time.monotonic() + budget
 

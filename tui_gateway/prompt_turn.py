@@ -191,9 +191,22 @@ def _record_turn_marker(session: dict, text: Any, *, auto_continue: bool = True,
                              if notification_category == "diagnostic" else {}))
         with session["history_lock"]:
             marker_cancelled = bool(session.get("_turn_cancel_requested"))
-        if marker_cancelled:
+            shutdown = bool(session.get("_shutdown_interrupt"))
+            shutdown_queued = list(session.get("_shutdown_queued") or [])
+        if shutdown:
+            # A shutdown landed before this write and was applied to the entry this write just replaced:
+            # apply it again, so the turn stays resumable and its queue journaled.
+            mark_turn_shutdown_interrupted(marker_home, marker_key, shutdown_queued)
+        elif marker_cancelled:
             clear_turn_marker(marker_home, marker_key)
     return marker_key
+
+
+def _turn_keeps_marker_for_shutdown(session: dict, status: str | None) -> bool:
+    """The process interrupted this turn on its way out (``shutdown_drain``): the marker stays so the next
+    ``session.resume`` continues the turn. Only an INTERRUPTED outcome -- a turn that finished, or failed,
+    while the shutdown was landing concluded like any other and retires its marker."""
+    return status == "interrupted" and bool(session.get("_shutdown_interrupt"))
 
 
 @dataclasses.dataclass(slots=True)
@@ -870,9 +883,16 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
         except Exception:
             _error_surface = None
     raw, status, last_reasoning = _turn_outcome(result, _error_surface)
+    shutdown_interrupted = _turn_keeps_marker_for_shutdown(session, status)
+    if shutdown_interrupted:
+        # Whatever the exit path put in final_response ("Operation interrupted…", a backoff abort) is
+        # cancellation metadata; the turn continues after the restart.
+        raw = ""
     if _is_bot_mode_session(session):
         raw = _bot_mode_delivery_text(raw, successful=status == "complete")
     payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+    if shutdown_interrupted:
+        payload["interrupt_reason"] = "shutdown"
     if receipt := _persisted_turn_receipt(st, raw, status):
         payload["persisted_turn"] = receipt
         # Taken from the receipt, never recomputed: the frame and its receipt cannot disagree on the row.
@@ -923,7 +943,7 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
             "text": raw if isinstance(raw, str) else str(raw),
             **({"error": str(error_value or raw)} if status == "error" else {})})
         st.receipt_committed = True
-    if st.receipt_committed:
+    if st.receipt_committed and not shutdown_interrupted:
         _retire_turn_marker(session, st.marker_key)
     return payload, raw, status
 
@@ -1194,8 +1214,9 @@ def _run_prompt_submit(
                 sid, session.get("session_key") or "", getattr(st.agent, "session_id", "") or "",
                 status, st.error_retained, time.monotonic() - _turn_started_monotonic,
                 st.error_detail)
-            # Backstop for turns that never reached a terminal frame.
-            if st.receipt_committed:
+            # Backstop for turns that never reached a terminal frame. A turn a shutdown interrupted keeps its
+            # marker (``_turn_keeps_marker_for_shutdown``; ``status`` is the same outcome, computed above).
+            if st.receipt_committed and not (status == "interrupted" and session.get("_shutdown_interrupt")):
                 _retire_turn_marker(session, st.marker_key)
                 with session["history_lock"]:
                     if session.get("_active_turn_marker_key") == st.marker_key:

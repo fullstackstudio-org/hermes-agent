@@ -576,6 +576,9 @@ def _lock_in_submit_turn(
     fields = {}
     with _session_turn_admission(session) as admitted:
         if not admitted:
+            from tui_gateway.shutdown_drain import _shutdown_drain_active
+            if _shutdown_drain_active():
+                return _err(rid, 5035, "the gateway is restarting; send this again once it is back"), fields
             return _err(rid, 5035, "backend is retiring; reconnect to continue"), fields
         # A watch session's run lives in the PARENT turn (own running flag False); typing
         # mid-run would build a second agent racing the child on the same stored session.

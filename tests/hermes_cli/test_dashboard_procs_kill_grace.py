@@ -118,6 +118,7 @@ def _pid_running(pid: int) -> bool:
 def test_sigterm_ignoring_process_is_still_sigkilled(tmp_path, monkeypatch):
     """The grace is a ceiling, not a wait: a process that ignores SIGTERM is force-killed."""
     monkeypatch.setattr(dashboard_procs, "_POSIX_TERM_GRACE_SECONDS", 0.6)
+    monkeypatch.setattr(dashboard_procs, "_shutdown_drain_grace_seconds", lambda: 0.0)
     ready = tmp_path / "ready"
     child = _spawn_ready(_IGNORING_CHILD, ready, str(ready))
 
@@ -135,6 +136,7 @@ def test_wedged_pty_descendant_is_gone_but_detached_bot_survives(tmp_path, monke
     started with ``start_new_session`` is untouched."""
     pytest.importorskip("ptyprocess")
     monkeypatch.setattr(dashboard_procs, "_POSIX_TERM_GRACE_SECONDS", 0.6)
+    monkeypatch.setattr(dashboard_procs, "_shutdown_drain_grace_seconds", lambda: 0.0)
     tui_pid_file, bot_pid_file, ready = tmp_path / "tui.pid", tmp_path / "bot.pid", tmp_path / "ready"
     backend = _spawn_ready(_WEDGED_BACKEND, ready, str(tui_pid_file), str(bot_pid_file), str(ready))
     tui_pid, bot_pid = int(tui_pid_file.read_text()), int(bot_pid_file.read_text())

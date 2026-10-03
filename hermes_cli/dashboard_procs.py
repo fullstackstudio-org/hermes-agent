@@ -442,6 +442,27 @@ def _kill_pids_windows(pids: list[int], killed: list[int], failed: list[tuple[in
 # DeletedWalGenerationError (#111912). The orphan reaper's 1.5s (`_reap_orphaned_desktop_local_serves`)
 # is deliberately shorter: it runs on the Desktop boot path under a 10s ready-probe.
 _POSIX_TERM_GRACE_SECONDS = 10.0
+# The backend lets running turns finish before that teardown even starts (``dashboard.shutdown_drain_timeout``,
+# then up to 5s for the turns it had to interrupt). A SIGKILL inside the drain skips the same close_all(), so the
+# grace grows by the drain's budget; an idle backend still exits at once (the wait polls, it does not sleep).
+_SHUTDOWN_DRAIN_SETTLE_SECONDS = 5.0
+
+
+def _shutdown_drain_grace_seconds() -> float:
+    """``dashboard.shutdown_drain_timeout`` (default 20) plus the interrupt settle; 0 when the drain is off."""
+    try:
+        from hermes_cli.config import load_config
+
+        dashboard = load_config().get("dashboard") or {}
+        raw = dashboard.get("shutdown_drain_timeout", 20.0) if isinstance(dashboard, dict) else 20.0
+        drain = max(0.0, float(20.0 if raw is None else raw))
+    except Exception:
+        drain = 20.0
+    return drain + _SHUTDOWN_DRAIN_SETTLE_SECONDS
+
+
+def _posix_term_grace_seconds() -> float:
+    return _POSIX_TERM_GRACE_SECONDS + _shutdown_drain_grace_seconds()
 # Grace for a descendant that outlived the backend's own teardown. It already got the backend's
 # SIGTERM forwarded (or SIGHUP from its PTY master closing); anything still up is wedged, and a
 # wedged ui-tui keeps the deleted state.db-wal inode open until the next start refuses with
@@ -528,7 +549,7 @@ def _wait_gone(pids: list[int], seconds: float) -> list[int]:
 
 
 def _kill_pids_posix(pids: list[int], killed: list[int], failed: list[tuple[int, str]]) -> None:
-    """SIGTERM, wait up to ``_POSIX_TERM_GRACE_SECONDS`` for graceful exit, SIGKILL survivors, then
+    """SIGTERM, wait up to ``_posix_term_grace_seconds()`` for graceful exit, SIGKILL survivors, then
     sweep the dashboard-owned descendants that outlived the root and wait for the tree to be gone.
 
     *killed* reports the roots only; swept descendants are the roots' own teardown debt. A descendant
@@ -554,7 +575,7 @@ def _kill_pids_posix(pids: list[int], killed: list[int], failed: list[tuple[int,
     for pid in pids:
         _send(pid, _signal.SIGTERM)
     pending = [p for p in pids if p not in killed and p not in {f[0] for f in failed}]
-    alive = _wait_gone(pending, _POSIX_TERM_GRACE_SECONDS)
+    alive = _wait_gone(pending, _posix_term_grace_seconds())
     killed.extend(p for p in pending if p not in alive)
     for pid in alive:
         _send(pid, _signal.SIGKILL)

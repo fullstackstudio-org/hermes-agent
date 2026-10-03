@@ -2936,6 +2936,8 @@ export interface TodoState {
 export interface AutoContinue {
   attempt: number
   interrupted_at: number
+  interrupted_by?: string | null
+  queued_prompts?: number | null
 }
 export interface SessionActivateParams {
   session_id: string
@@ -4398,6 +4400,10 @@ export interface SkinPayload {
   help_header?: string
   [key: string]: unknown
 }
+/** ``shutdown_drain._announce_shutdown_drain``: sent to every connected client when the dashboard starts shutting down, before running turns are drained. */
+export interface GatewayRestartingPayload {
+  drain_timeout_s: number
+}
 /** ``hermes_cli/free_tier_bootstrap.py::SetupRecord.as_payload``. */
 export interface SetupReadyPayload {
   provider_configured: boolean
@@ -4449,6 +4455,7 @@ export interface MessageCompletePayload {
   partial?: boolean | null
   persisted_turn?: PersistedTurn | null
   row_id?: number | null
+  interrupt_reason?: string | null
 }
 /** ``prompt_turn._result_status``. */
 export type TurnStatus = 'complete' | 'error' | 'interrupted'
@@ -5571,6 +5578,8 @@ export interface BackendGatewayEventMap {
   error: ErrorPayload
   /** First frame of a connection: the resolved skin, the change-event capability and the replay epoch. */
   'gateway.ready': GatewayReadyPayload
+  /** The gateway is shutting down: new turns are refused, running turns finish or resume after the restart. */
+  'gateway.restarting': GatewayRestartingPayload
   /** Apply a named desktop layout preset. */
   'layout.apply': LayoutApplyPayload
   /** The turn ended: final text, usage and outcome. */
@@ -5705,6 +5714,7 @@ export const GATEWAY_EVENT_TYPES = [
   'display.status',
   'error',
   'gateway.ready',
+  'gateway.restarting',
   'layout.apply',
   'message.complete',
   'message.delta',

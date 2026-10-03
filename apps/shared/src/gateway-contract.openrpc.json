@@ -5108,6 +5108,30 @@
           "interrupted_at": {
             "title": "Interrupted At",
             "type": "number"
+          },
+          "interrupted_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Interrupted By"
+          },
+          "queued_prompts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Queued Prompts"
           }
         },
         "required": [
@@ -13830,6 +13854,21 @@
         "title": "GatewayReadyPayload",
         "type": "object"
       },
+      "GatewayRestartingPayload": {
+        "additionalProperties": false,
+        "description": "``shutdown_drain._announce_shutdown_drain``: sent to every connected client when the dashboard starts\nshutting down, before running turns are drained.",
+        "properties": {
+          "drain_timeout_s": {
+            "title": "Drain Timeout S",
+            "type": "number"
+          }
+        },
+        "required": [
+          "drain_timeout_s"
+        ],
+        "title": "GatewayRestartingPayload",
+        "type": "object"
+      },
       "GoalContractSnapshot": {
         "additionalProperties": false,
         "description": "``hermes_cli/goals.py::GoalContract.to_dict``.",
@@ -18130,6 +18169,18 @@
             ],
             "default": null,
             "title": "Row Id"
+          },
+          "interrupt_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Interrupt Reason"
           }
         },
         "title": "MessageCompletePayload",
@@ -38491,6 +38542,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/GatewayReadyPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "gateway.restarting",
+      "summary": "The gateway is shutting down: new turns are refused, running turns finish or resume after the restart.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/GatewayRestartingPayload"
           }
         }
       ]

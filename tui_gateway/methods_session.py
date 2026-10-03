@@ -2220,7 +2220,11 @@ def _(rid, params: dict) -> dict:
     # rotating session_key mid-turn).
     with session["history_lock"]:
         active_marker_key = str(session.pop("_active_turn_marker_key", "") or "")
-    _retire_turn_marker(session, active_marker_key)
+        # A stop that lands while a shutdown is interrupting the same turn wins: the person asked for the turn to
+        # end, so it must not be resumed after the restart, and the queue the stop dropped must not come back.
+        session.pop("_shutdown_interrupt", None)
+        session.pop("_shutdown_queued", None)
+    _retire_turn_marker(session, active_marker_key, keep_queued=False)
     return _ok(rid, {"status": "interrupted"})
 
 

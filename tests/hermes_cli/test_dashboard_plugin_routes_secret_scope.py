@@ -99,3 +99,26 @@ def test_failure_and_request_shape_errors_are_unchanged(client, multiplexed, mon
     malformed = client.post("/api/dashboard/agent-plugins/install", json={"identifier": ""})
     assert malformed.status_code == 400
     assert "catalog_name" in malformed.json()["detail"]
+
+
+def test_update_route_passes_caution_consent_and_reports_a_blocked_update(client, multiplexed, monkeypatch):
+    """``{"accept_caution": true}`` reaches the update core; a rescan that disabled the plugin is a
+    400 carrying the reason (HERM-192)."""
+    import hermes_cli.plugins_cmd as plugins_cmd
+
+    calls: list = []
+
+    def _update(name, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("accept_caution"):
+            return {"ok": True, "name": name}
+        return {"ok": False, "disabled": True, "scan_blocked": True, "caution_consent_required": True,
+                "error": f"The updated plugin '{name}' was disabled: caution."}
+
+    monkeypatch.setattr(plugins_cmd, "dashboard_update_user_plugin", _update)
+
+    blocked = client.post("/api/dashboard/agent-plugins/probe/update")
+    assert blocked.status_code == 400 and "was disabled" in blocked.json()["detail"]
+    kept = client.post("/api/dashboard/agent-plugins/probe/update", json={"accept_caution": True})
+    assert kept.status_code == 200, kept.text
+    assert [c.get("accept_caution") for c in calls] == [False, True]

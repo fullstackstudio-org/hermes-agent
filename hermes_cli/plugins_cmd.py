@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import json
 import logging
@@ -1071,7 +1072,7 @@ def cmd_update(name: str) -> None:
     except PluginOperationError as exc:
         _fail(console, f"[red]Error:[/red] {exc}")
     if not _rescan_after_update(target, name, console):
-        _fail(console, f"[red]Update of '{escape(name)}' stopped:[/red] the pulled tree was not scanned.")
+        _fail(console, f"[red]Update of '{escape(name)}' stopped:[/red] the pulled tree did not pass the security scan.")
     _post_pull_housekeeping(target, console)
 
     # Re-consent when the new version declares capabilities the granted set lacks or the
@@ -1093,41 +1094,80 @@ def cmd_update(name: str) -> None:
         console.print(f"[dim]{out}[/dim]")
 
 
-def _rescan_after_update(target: Path, name: str, console) -> bool:
-    """Re-scan after ``git pull``: the tree is already mutated, so a dangerous verdict disables
-    the plugin rather than leaving it active. A scan that cannot finish (any exception, from the
-    scanner or from reading the tree) fails closed: the plugin is disabled, the reason printed,
-    and ``False`` returned so the caller stops before installing the new tree's dependencies.
-    Returns ``True`` when the update may go on."""
+@dataclasses.dataclass(frozen=True)
+class PulledTreeScan:
+    """What the post-pull rescan decided. ``proceed`` False means the plugin has been disabled and
+    nothing more may happen to the new tree (no dependency install, no activation)."""
+    proceed: bool
+    verdict: str            # safe | caution | dangerous | error | unscanned
+    reason: str
+    result: object = None   # the ScanResult, when the scan finished
+
+
+def _rescan_pulled_tree(target: Path, name: str, *, accept_caution) -> PulledTreeScan:
+    """The one post-pull gate every update path runs: the tree on disk is already the new one.
+
+    - scanning switched off (``plugins.scan_on_install: false``) → proceed, verdict ``unscanned``;
+    - the scan raises, for any reason → disable, stop (fail closed);
+    - ``safe`` → proceed;
+    - ``caution`` → proceed only when ``accept_caution(result)`` says yes (an interactive prompt
+      on the CLI, an explicit flag on the dashboard), the same consent an install needs;
+      otherwise disable, pending that consent;
+    - ``dangerous`` → disable, stop.
+    """
     if not _scan_on_install_enabled():
-        return True
+        return PulledTreeScan(True, "unscanned", "scanning is switched off (plugins.scan_on_install: false)")
     try:
-        from tools.plugin_guard import format_scan_report, scan_plugin, should_allow_plugin_install
-        scan_result = scan_plugin(target, source=name)
-        allowed, reason = should_allow_plugin_install(scan_result)
+        from tools.plugin_guard import scan_plugin, should_allow_plugin_install
+        result = scan_plugin(target, source=name)
+        allowed, reason = should_allow_plugin_install(result)
     except Exception as exc:    # noqa: BLE001 - fail closed on anything
         logger.exception("security rescan of updated plugin %s failed", name)
         _set_plugin_enabled(name, enable=False)
-        console.print()
-        console.print(
-            f"[red]The security scan of the updated plugin '{name}' failed ({type(exc).__name__}); "
-            f"the plugin has been disabled.[/red] The new code is on disk but will not load. "
-            f"Review the tree, then re-enable it with "
-            f"`hermes plugins enable {name}` if you trust it.")
-        return False
+        return PulledTreeScan(False, "error", f"the security scan failed ({type(exc).__name__})")
     if allowed is True:
+        return PulledTreeScan(True, str(result.verdict), str(reason), result)
+    if allowed is None:    # caution
+        try:
+            consented = bool(accept_caution(result))
+        except Exception:    # noqa: BLE001 - a broken prompt is a "no"
+            logger.exception("caution consent for updated plugin %s failed", name)
+            consented = False
+        if consented:
+            return PulledTreeScan(True, "caution", "Caution verdict accepted", result)
+    _set_plugin_enabled(name, enable=False)
+    return PulledTreeScan(False, str(result.verdict), str(reason), result)
+
+
+def _rescan_after_update(target: Path, name: str, console) -> bool:
+    """CLI side of :func:`_rescan_pulled_tree`. A caution verdict asks, on a terminal, whether to
+    keep the update (as ``hermes plugins install`` asks); without a terminal (a timer, a script)
+    the answer is no and the plugin is disabled pending that consent. Returns ``True`` when the
+    update may go on to its housekeeping (dependencies)."""
+    from tools.plugin_guard import format_scan_report
+
+    def _ask(result) -> bool:
+        console.print()
+        console.print("[yellow]⚠ Security scan flagged the updated plugin:[/yellow]")
+        console.print(format_scan_report(result))
+        if not _is_tty():
+            console.print("[yellow]Non-interactive session: a caution verdict is not accepted without "
+                          "a person (fail closed).[/yellow]")
+            return False
+        return _ask_yes("  Keep the update? Only continue if you trust the source. [y/N]: ")
+
+    outcome = _rescan_pulled_tree(target, name, accept_caution=_ask)
+    if outcome.proceed:
         return True
     console.print()
-    console.print(f"[yellow]⚠ Security scan flagged the updated plugin:[/yellow] {reason}")
-    console.print(format_scan_report(scan_result))
-    if scan_result.verdict == "dangerous":
-        if name in _get_enabled_set() or name not in _get_disabled_set():
-            _set_plugin_enabled(name, enable=False)
-        console.print(
-            f"[red]Plugin '{name}' has been disabled.[/red] Review the "
-            f"findings, then re-enable with `hermes plugins enable {name}` "
-            f"if you trust them.")
-    return True
+    if outcome.verdict == "dangerous":
+        console.print(f"[yellow]⚠ Security scan flagged the updated plugin:[/yellow] {outcome.reason}")
+        console.print(format_scan_report(outcome.result))
+    console.print(
+        f"[red]Plugin '{name}' has been disabled[/red] ({outcome.reason}). The new code is on disk but "
+        f"will not load and its dependencies were not installed. Review it, then run "
+        f"`hermes plugins update {name}` in a terminal or `hermes plugins enable {name}` if you trust it.")
+    return False
 
 
 def _post_pull_housekeeping(target: Path, console) -> None:
@@ -2233,10 +2273,17 @@ def _user_installed_plugin_dir(name: str) -> Optional[Path]:
     return target if target.is_dir() else None
 
 
-def dashboard_update_user_plugin(name: str, *, accept_capabilities: bool = False) -> dict[str, Any]:
+def dashboard_update_user_plugin(name: str, *, accept_capabilities: bool = False,
+                                 accept_caution: bool = False) -> dict[str, Any]:
     """``git pull`` inside ``~/.hermes/plugins/<name>``; catalog installs re-pin instead. A re-pin that
     widens the plugin returns ``{"ok": False, "consent_required": True, "delta": {...}}`` with nothing
-    changed — the surface shows the delta and retries with *accept_capabilities*."""
+    changed — the surface shows the delta and retries with *accept_capabilities*.
+
+    A pulled tree is rescanned before anything else happens to it (:func:`_rescan_pulled_tree`): a
+    ``dangerous`` verdict or a scan that fails disables the plugin and answers ``ok: False`` with
+    ``scan_blocked``, the verdict, the findings and ``disabled: True``; no dependency is installed. A
+    ``caution`` verdict needs *accept_caution* (the explicit consent an install needs); without it the
+    plugin is disabled pending that consent and the answer carries ``caution_consent_required``."""
     from hermes_cli import plugins_cmd_catalog as catalog
     target = _user_installed_plugin_dir(name)
     if target is None:
@@ -2265,8 +2312,22 @@ def dashboard_update_user_plugin(name: str, *, accept_capabilities: bool = False
                 "delta": exc.delta, "delta_lines": catalog.surface_delta_lines(exc.delta)}
     except PluginOperationError as exc:
         return {"ok": False, "error": str(exc)}
+    outcome = _rescan_pulled_tree(target, name, accept_caution=lambda _result: accept_caution)
+    if not outcome.proceed:
+        fields = ("pattern_id", "severity", "category", "file", "line", "description")
+        findings = getattr(outcome.result, "findings", None) or ()
+        return {
+            "ok": False, "name": name, "scan_blocked": True, "disabled": True, "scan_verdict": outcome.verdict,
+            "caution_consent_required": outcome.verdict == "caution",
+            "error": (f"The updated plugin '{name}' was disabled: {outcome.reason}. Its new code is on disk "
+                      "but will not load and its dependencies were not installed."
+                      + (" Review the findings and retry with accept_caution to keep it."
+                         if outcome.verdict == "caution" else "")),
+            "scan_findings": [{k: getattr(f, k, None) for k in fields} for f in findings],
+        }
     _post_pull_housekeeping(target, _console())
-    return {"ok": True, "name": name, "output": msg, "unchanged": "Already up to date" in msg}
+    return {"ok": True, "name": name, "output": msg, "unchanged": "Already up to date" in msg,
+            "scan_verdict": outcome.verdict}
 
 
 def _clear_plugin_bytecode(target: Path) -> int:

@@ -170,6 +170,8 @@ def _plugin_action(result: dict, fallback_error: str, *, rescan: bool) -> dict:
     nothing changed, the client shows the delta and retries with consent."""
     if result.get("consent_required"):
         return result
+    if result.get("disabled"):    # the update rescan disabled the plugin: the list must say so
+        _invalidate_plugins_hub_cache()
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error") or fallback_error)
     if rescan:
@@ -276,9 +278,13 @@ async def post_agent_plugin_update(request: Request, name: str):
     except Exception:
         body = {}
     accept = isinstance(body, dict) and body.get("accept_capabilities") is True
+    # ``{"accept_caution": true}`` keeps an update whose rescan said ``caution`` (the consent an install
+    # needs); without it such an update leaves the plugin disabled.
+    caution = isinstance(body, dict) and body.get("accept_caution") is True
     return await _named_plugin_action(
-        request, name, lambda n: dashboard_update_user_plugin(n, accept_capabilities=accept), "Update failed.",
-        rescan=True)
+        request, name,
+        lambda n: dashboard_update_user_plugin(n, accept_capabilities=accept, accept_caution=caution),
+        "Update failed.", rescan=True)
 
 
 @router.delete("/api/dashboard/agent-plugins/{name:path}")

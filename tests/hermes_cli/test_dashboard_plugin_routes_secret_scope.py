@@ -101,24 +101,29 @@ def test_failure_and_request_shape_errors_are_unchanged(client, multiplexed, mon
     assert "catalog_name" in malformed.json()["detail"]
 
 
-def test_update_route_passes_caution_consent_and_reports_a_blocked_update(client, multiplexed, monkeypatch):
-    """``{"accept_caution": true}`` reaches the update core; a rescan that disabled the plugin is a
-    400 carrying the reason (HERM-192)."""
+def test_update_route_passes_caution_consent_and_answers_a_refused_update_as_json(client, multiplexed, monkeypatch):
+    """``{"accept_caution": true}`` reaches the update core, and an update the security scan refused
+    (nothing applied) answers with its structured result, not a plain-text 400 (HERM-192)."""
     import hermes_cli.plugins_cmd as plugins_cmd
 
     calls: list = []
+    refused = {"ok": False, "name": "probe", "update_refused": True, "scan_blocked": True,
+               "scan_verdict": "caution", "caution_consent_required": True, "revision": "a" * 40,
+               "scan_findings": [{"pattern_id": "sudo_usage", "severity": "high", "category": "privilege_escalation",
+                                  "file": "run.py", "line": 2, "description": "uses sudo"}],
+               "error": "the security scan of the new version needs your consent"}
 
     def _update(name, **kwargs):
         calls.append(kwargs)
-        if kwargs.get("accept_caution"):
-            return {"ok": True, "name": name}
-        return {"ok": False, "disabled": True, "scan_blocked": True, "caution_consent_required": True,
-                "error": f"The updated plugin '{name}' was disabled: caution."}
+        return {"ok": True, "name": name} if kwargs.get("accept_caution") else refused
 
     monkeypatch.setattr(plugins_cmd, "dashboard_update_user_plugin", _update)
 
-    blocked = client.post("/api/dashboard/agent-plugins/probe/update")
-    assert blocked.status_code == 400 and "was disabled" in blocked.json()["detail"]
+    answer = client.post("/api/dashboard/agent-plugins/probe/update")
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert body["caution_consent_required"] is True and body["scan_verdict"] == "caution"
+    assert body["scan_findings"][0]["pattern_id"] == "sudo_usage"
     kept = client.post("/api/dashboard/agent-plugins/probe/update", json={"accept_caution": True})
-    assert kept.status_code == 200, kept.text
+    assert kept.status_code == 200 and kept.json()["ok"] is True
     assert [c.get("accept_caution") for c in calls] == [False, True]

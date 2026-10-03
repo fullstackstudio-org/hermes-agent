@@ -118,11 +118,11 @@ def test_public_clone_attempts_anonymously_when_credential_resolves(tmp_path, mo
     assert "ghp_fake" not in str(clone_calls)
 
 
-@pytest.mark.parametrize("verb", ["fetch", "pull"])
+@pytest.mark.parametrize("verb", ["fetch", "update"])
 @pytest.mark.parametrize("outcome", ["ok", "refused", "not_found"])
 def test_ref_fetch_and_update_pull_attach_credential_only_after_anonymous_refusal(
         tmp_path, monkeypatch, verb, outcome):
-    """The pinned-ref fetch (``--ref`` install) and ``hermes plugins update``'s pull are the
+    """The pinned-ref fetch (``--ref`` install) and ``hermes plugins update``'s fetch are the
     clone's siblings: with a stored GitHub credential resolvable they still run anonymously
     against a public remote, attach the credential only after the remote refuses, and surface a
     failure that is not about credentials (missing repo, bad commit, network) as-is — the stored
@@ -139,7 +139,7 @@ def test_ref_fetch_and_update_pull_attach_credential_only_after_anonymous_refusa
     real_run = subprocess.run
 
     def spy_run(argv, *a, **kw):
-        if verb not in argv:
+        if "fetch" not in argv:    # both the ref fetch and the update talk to the remote by `git fetch`
             return real_run(argv, *a, **kw)
         attempts.append(_auth_headers_for(kw.get("env") or {}, "https://github.com"))
         if outcome == "refused" and len(attempts) == 1:
@@ -164,7 +164,7 @@ def test_ref_fetch_and_update_pull_attach_credential_only_after_anonymous_refusa
     elif verb == "fetch":
         plugins_cmd._checkout_exact_revision(repo, "git", revision, source_url=public_url)
     else:
-        ok, message = plugins_cmd._git_pull_plugin_dir(repo)
+        ok, message = plugins_cmd._git_update_plugin_dir(repo, name="public-plugin", accept_caution=lambda _r: False)
         assert ok is (outcome != "not_found"), message
         assert ("not found" in message) is (outcome == "not_found")
 

@@ -168,10 +168,11 @@ def _plugin_action(result: dict, fallback_error: str, *, rescan: bool) -> dict:
     """Common tail of agent-plugin mutations: 400 on ``ok=False``, then invalidate caches
     (rescanning discovery when files changed on disk). A ``consent_required`` answer is not a failure:
     nothing changed, the client shows the delta and retries with consent."""
-    if result.get("consent_required"):
+    if result.get("consent_required") or result.get("update_refused"):
+        # Nothing changed: a widened re-pin awaits consent, or the update's security scan refused the
+        # new version (``scan_verdict``/``scan_findings``; ``caution_consent_required`` when consent can
+        # still apply it). The client shows the answer and may retry with consent.
         return result
-    if result.get("disabled"):    # the update rescan disabled the plugin: the list must say so
-        _invalidate_plugins_hub_cache()
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error") or fallback_error)
     if rescan:
@@ -278,8 +279,8 @@ async def post_agent_plugin_update(request: Request, name: str):
     except Exception:
         body = {}
     accept = isinstance(body, dict) and body.get("accept_capabilities") is True
-    # ``{"accept_caution": true}`` keeps an update whose rescan said ``caution`` (the consent an install
-    # needs); without it such an update leaves the plugin disabled.
+    # ``{"accept_caution": true}`` applies an update whose security scan said ``caution`` (the consent an
+    # install needs); without it nothing is applied and the answer says why.
     caution = isinstance(body, dict) and body.get("accept_caution") is True
     return await _named_plugin_action(
         request, name,

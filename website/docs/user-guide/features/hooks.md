@@ -393,7 +393,7 @@ def register(ctx):
 
 - Callbacks receive **keyword arguments**. Always accept `**kwargs` for forward compatibility.
 - Callback exceptions are logged and skipped; later callbacks continue. A callback that fails the same way on every call (typically a signature naming a field the hook does not send, e.g. `tool_data` instead of `tool_name`/`args`) is reported **once** at WARNING — the message lists the fields the hook provides — and identical repeats go to DEBUG, so a mis-declared plugin cannot flood the log.
-- If a Python plugin callback on a **timeout-bounded** hook (hot-path observers such as `post_tool_call` / `pre_llm_call`, `on_passkey_change`, `pre_confirm_request`, plus the policy hook `pre_tool_call`) **blocks** longer than `plugins.hook_callback_timeout` (default 30s, set `0` to disable, max 600), it is abandoned without joining the worker so the agent loop continues. Timed-out or still-running `pre_tool_call` callbacks **fail closed** (block the tool); other bounded hooks fail open (skip). Hooks with a documented caller-thread contract (`subagent_stop`) are never moved onto a timeout worker. Shell hooks keep their own per-entry `timeout`.
+- If a Python plugin callback on a **timeout-bounded** hook (hot-path observers such as `post_tool_call` / `pre_llm_call`, `on_passkey_change`, `pre_confirm_request`, `pre_server_request`, `post_server_request`, `on_background_complete`, plus the policy hook `pre_tool_call`) **blocks** longer than `plugins.hook_callback_timeout` (default 30s, set `0` to disable, max 600), it is abandoned without joining the worker so the agent loop continues. Timed-out or still-running `pre_tool_call` callbacks **fail closed** (block the tool); other bounded hooks fail open (skip). Hooks with a documented caller-thread contract (`subagent_stop`) are never moved onto a timeout worker. Shell hooks keep their own per-entry `timeout`.
 - The catalog below is descriptive: **observers** ignore returns, **transforms** accept the first valid string replacement, and **directive/control** hooks consume documented return shapes. Plugin middleware is a separate registry and surface, not another hook category.
 - Correlation fields such as `turn_id`, `api_request_id`, `task_id`, `session_id`, and `api_call_count` are hook-specific and may be absent. Treat IDs as opaque.
 - Runtime event-name validity comes from `hermes_cli.plugins.VALID_HOOKS`. `hermes hooks list` lists configured shell/outbound hooks, not every available event; `hermes hooks test <event>` reports the valid set only when an invalid event is supplied.
@@ -482,6 +482,9 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `post_approval_response` | Observer | After a decision, timeout, or gateway notification failure; return ignored. | `command`, `description`, `pattern_key`, `pattern_keys`, `session_key`, `surface`, `turn_id`, `tool_call_id`, `choice`; smart path may add `decided_by` | Same command sensitivity plus decision metadata. |
 | `on_passkey_change` | Observer | After a passkey of a signed-in user was added or revoked through the dashboard's passkey routes and the store committed it (fork; confirm level `passkey`); return ignored. | `change`, `user_id`, `credential`, `at`, `via` | Names the user and the credential (id, name, RP); never a code, key, assertion or token. |
 | `pre_confirm_request` | Observer | A `confirm` request (the `confirm_action` tool) was just written to the person's connected apps (fork); fired on its own thread, return ignored. | `session_id`, `session_key`, `request_id`, `level`, `user_id`, `expires_at`, `reached` | Ids, the level and the user the request is for; never the title, summary or detail. |
+| `pre_server_request` | Observer | A `clarify`, `secret`, `sudo` or `vault.*` request was just written to the session's clients (fork); every server request except `confirm`, which has `pre_confirm_request`. Fired on its own thread, return ignored. | `session_id`, `session_key`, `request_id`, `method`, `user_id`, `expires_at`, `reached` | Ids, the method, the user and the deadline; never the question, choices, prompt, command, site or answer. |
+| `post_server_request` | Observer | A request announced by `pre_server_request` or `pre_confirm_request` stopped being open: answered, timed out, or withdrawn (fork); fired on its own thread, return ignored. | `session_id`, `session_key`, `request_id`, `method`, `user_id`, `reason` | Ids, the method, the user and a one-word reason; never the answer or its text. |
+| `on_background_complete` | Observer | A `/background` task finished, after its `background.complete` event went out, also when it failed (fork); fired on its own thread, return ignored. | `session_id`, `session_key`, `task_id`, `user_id` | Ids and the user; never the task's result or error text. |
 | `on_room_member_activity` | Observer | While a hosted Group Chat member turn runs on the Bot Mode gateway, once per runtime event the member session emits (tool start/complete, approval request, message/reasoning deltas, errors); queued per consumer off the token path; return ignored. | `room_id`, `thread_id`, `member_id`, `turn_id`, `task_id`, `execution_generation`, `kind`, `seq`, `payload` | `payload` is the client-safe session event body: tool args and results, redacted approval commands, streamed member text. |
 | `kanban_task_claimed` | Observer | After claim commit, in dispatcher process before worker spawn; return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id` | Board/task/profile/assignee identifiers. |
 | `kanban_task_completed` | Observer | After completion and cleanup, usually in worker process; return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `summary` | Summary may contain project/user content. |
@@ -1464,6 +1467,101 @@ def my_callback(session_id: str, session_key: str, request_id: str, level: str, 
 
 Never the title, summary or detail: the app shows the request itself once the notification opens it. At
 level `passkey` a notification must not offer a Confirm action: only the app can run the passkey ceremony.
+
+**Return value:** ignored. A callback that raises is logged. Callbacks are bounded by
+`plugins.hook_callback_timeout` (default 30 s).
+
+---
+
+### `pre_server_request`
+
+Fires once a `clarify`, `secret`, `sudo` or `vault.*` (`vault.unlock_prompt`, `vault.code`, `vault.save_login`)
+server request has been written to the session's clients, before the gateway waits for the answer. It is the
+hook for a push that opens the question or the secure input in the app. `confirm` is not announced here: it
+keeps `pre_confirm_request`, which also says the level and whom the request is bound to. Every other server
+request (desktop reads, MCP setup, the tour) has no hook. The hook runs on its own thread, so a slow plugin
+never shortens the wait.
+
+**Callback signature:**
+
+```python
+def my_callback(session_id: str, session_key: str, request_id: str, method: str, user_id: str,
+                expires_at: int | None, reached: int, **kwargs):
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `session_id` | `str` | The interactive session the request belongs to |
+| `session_key` | `str` | The conversation it belongs to |
+| `request_id` | `str` | The request's id (`srq-…`), as the app receives it |
+| `method` | `str` | `"clarify"`, `"secret"`, `"sudo"`, `"vault.unlock_prompt"`, `"vault.code"` or `"vault.save_login"` |
+| `user_id` | `str` | `"<provider>:<user id>"` of the login the turn works for, or `""` when the gateway cannot name one |
+| `expires_at` | `int \| None` | Unix seconds when the request times out; `None` when it has no deadline (`clarify` with an unlimited wait) |
+| `reached` | `int` | How many clients were attached when the frame was written. `0` means none: the request stays open and the app gets it on reconnect, which is when a push is most useful |
+
+Never the question, its choices, the secure-input prompt, the command a `sudo` request is for, the site a
+`vault.*` request names, or the answer: the app shows the request itself once the notification opens it.
+
+**Return value:** ignored. A callback that raises is logged. Callbacks are bounded by
+`plugins.hook_callback_timeout` (default 30 s).
+
+---
+
+### `post_server_request`
+
+Fires once a request announced by `pre_server_request` (or `pre_confirm_request`, so `method` can also be
+`"confirm"`) stopped being open. It is meant for clearing what the first hook raised, such as a notification
+that is still showing. It runs on its own thread, and not before the hook that announced the same request has
+returned (or 5 seconds passed), so a plugin never sees the clear before the push.
+
+**Callback signature:**
+
+```python
+def my_callback(session_id: str, session_key: str, request_id: str, method: str, user_id: str,
+                reason: str, **kwargs):
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `session_id` | `str` | The interactive session the request belonged to |
+| `session_key` | `str` | The conversation it belonged to |
+| `request_id` | `str` | The request's id, the same one `pre_server_request` or `pre_confirm_request` carried |
+| `method` | `str` | As in `pre_server_request`, or `"confirm"` |
+| `user_id` | `str` | As in the hook that announced it |
+| `reason` | `str` | `"answered"`, `"timeout"`, the reason it was withdrawn (`"interrupted"`, for example, when the turn is stopped or the session closes), or why it never got an answer (`"error_response"`: the client answered an error; `"too_many_attempts"`) |
+
+`"answered"` says a client answered, not what it answered: a `confirm` that was declined, and a clarify
+question that was skipped, are `"answered"` as well. It fires once per request, also when the wait ends with
+an exception.
+
+**Return value:** ignored. A callback that raises is logged. Callbacks are bounded by
+`plugins.hook_callback_timeout` (default 30 s).
+
+---
+
+### `on_background_complete`
+
+Fires when a `/background` task (the `prompt.background` call) has finished, right after its
+`background.complete` event went out to the session's clients, and also when the task failed. It runs on its
+own thread, off the task's own, so cleanup of the task never waits for a plugin. A task that stops because the
+backend is shutting down fires nothing.
+
+**Callback signature:**
+
+```python
+def my_callback(session_id: str, session_key: str, task_id: str, user_id: str, **kwargs):
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `session_id` | `str` | The interactive session the task was started from |
+| `session_key` | `str` | The conversation it belongs to |
+| `task_id` | `str` | The task's id (`bg_…`), the `task_id` of the `background.complete` event |
+| `user_id` | `str` | `"<provider>:<user id>"` of the login that started the task, or `""` |
+
+Never the task's result or error text: the app shows them from the `background.complete` event itself. This
+is the one place a background task completion is reported. Tasks run by other means (a terminal process started
+in the background, a delegated subagent, a cron job) do not fire it.
 
 **Return value:** ignored. A callback that raises is logged. Callbacks are bounded by
 `plugins.hook_callback_timeout` (default 30 s).

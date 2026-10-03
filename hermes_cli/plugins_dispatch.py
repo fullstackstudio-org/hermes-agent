@@ -49,6 +49,9 @@ _HOOK_TIMEOUT_BOUNDED_HOOKS: Set[str] = {
     # Fork: fired for a confirm request once its frame is out, on its own thread; a stuck push plugin must
     # not pile up threads (observer only, the request does not wait for it).
     "pre_confirm_request",
+    # Fork: the same for the other server requests (clarify, secret, sudo, vault.*), their end, and a
+    # /background task finishing: each fires from its own thread and nothing waits for a plugin's answer.
+    "pre_server_request", "post_server_request", "on_background_complete",
 }
 
 # Policy hooks: timeout / still-running must fail closed (block the tool).

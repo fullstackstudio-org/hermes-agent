@@ -666,6 +666,12 @@ _server_requests.bind_sinks(lambda frame: write_json(frame), lambda event, sid, 
                                 _sessions.get(sid), transport, sid=sid),
                             peers=lambda sid: _session_client_peers(sid))
 
+# ``pre_server_request`` / ``post_server_request`` / ``on_background_complete`` (``request_hooks``) name the
+# conversation and the login a turn acts for; both are read here, on the calling thread.
+from tui_gateway import request_hooks as _request_hooks  # noqa: E402
+
+_request_hooks.bind_identity(lambda sid: _request_hook_identity(sid))
+
 # The confirm_action tool reaches the turn's clients through this bridge; without it (CLI, messaging
 # gateway, any process that does not host these sessions) the tool is withheld from the schema.
 with contextlib.suppress(Exception):
@@ -2543,6 +2549,21 @@ def _acting_auth_user(session: dict | None) -> tuple[str | None, str]:
     if _session_identity_is_ambiguous(session):
         return None, ""
     return _session_auth_user(session)
+
+
+def _request_hook_identity(sid: str) -> tuple[str, str]:
+    """``(conversation key, login)`` the request hooks (``tui_gateway/request_hooks.py``) carry for session
+    *sid*: the stored key (the session id when there is none) and the login this gateway may attribute the work
+    to right now (``_acting_auth_user``), ``""`` when it names none. Meaningful on the thread of the turn or
+    request, which is where the hooks read it."""
+    session = _sessions.get(sid)
+    key = str((session or {}).get("session_key") or sid)
+    try:
+        login = _acting_auth_user(session)[0] or ""
+    except Exception:  # noqa: BLE001 - a hook payload must never fail a request
+        logger.debug("request hook identity: acting user unresolved", exc_info=True)
+        login = ""
+    return key, login
 
 
 def _make_agent(

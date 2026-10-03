@@ -159,6 +159,22 @@ VALID_HOOKS: Set[str] = {
     # written to). Never the title, summary or detail. Meant for a push that opens the request in the app.
     # Bounded by plugins.hook_callback_timeout (plugins_dispatch._HOOK_TIMEOUT_BOUNDED_HOOKS).
     "pre_confirm_request",
+    # pre_server_request / post_server_request (fork): the other requests the gateway asks of a person
+    # (tui_gateway/request_hooks.py, from server_requests.send_detailed): ``clarify``, ``secret``, ``sudo``
+    # and ``vault.*`` (``confirm`` keeps pre_confirm_request). Observers fired off the request's thread,
+    # returns ignored. pre kwargs: session_id, session_key, request_id, method, user_id ("<provider>:<user
+    # id>" the turn acts for, "" when none), expires_at (Unix seconds, None without a deadline), reached
+    # (clients attached when the frame was written; 0 = none, the request waits for a reconnect). post kwargs:
+    # session_id, session_key, request_id, method, user_id, reason ("answered", "timeout", a cancel reason such
+    # as "interrupted", or "error_response"/"too_many_attempts"); post also fires for ``confirm``. Never the
+    # question, choices, prompt, command, site or answer. Bounded by plugins.hook_callback_timeout
+    # (plugins_dispatch._HOOK_TIMEOUT_BOUNDED_HOOKS).
+    "pre_server_request", "post_server_request",
+    # on_background_complete (fork): a /background task finished (tui_gateway/methods_prompt.py,
+    # _spawn_side_agent, after its ``background.complete`` event); fires for a failed task too. Observer off the
+    # task's thread, returns ignored. Kwargs: session_id, session_key, task_id, user_id. Never the result.
+    # Bounded by plugins.hook_callback_timeout.
+    "on_background_complete",
     # on_room_member_activity: a hosted Group Chat member's live runtime events (tool.started/completed,
     # request.opened, message.delta, reasoning.delta, turn.error, ...) stamped with room_id, thread_id,
     # member_id, turn_id, task_id, execution_generation. Observer, queued per consumer off the token

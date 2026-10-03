@@ -1055,6 +1055,9 @@ def _spawn_side_agent(
     doesn't propagate across threads) and cwd; its text — or ``error: <exc>`` — lands on
     ``parent`` as ``event`` with ``task_id`` (+ ``extra``).  Replies ``{task_id}``."""
     extra = extra or {}
+    # ``on_background_complete``: who and which conversation, read here on the request's thread (the acting
+    # login lives in its context, the side agent's thread has none).
+    hook_identity = _request_hooks.identity(parent) if event == "background.complete" else None
 
     def run():
         session_tokens = _set_session_context(task_id, cwd=(cwd or _session_cwd(session)))
@@ -1073,6 +1076,9 @@ def _spawn_side_agent(
         except Exception as e:
             _emit(event, parent, {"task_id": task_id, **extra, "text": f"error: {e}"})
         finally:
+            if hook_identity is not None:
+                _request_hooks.background_complete(parent, task_id, session_key=hook_identity[0],
+                                                   user_id=hook_identity[1])
             if cleanup is not None:
                 cleanup()
             _clear_session_context(session_tokens)

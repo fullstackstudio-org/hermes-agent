@@ -57,6 +57,8 @@ import time
 import uuid
 from typing import Any, Callable, NamedTuple
 
+from tui_gateway import request_hooks
+
 logger = logging.getLogger(__name__)
 
 
@@ -284,7 +286,10 @@ def _contract(method: str):
     return contract
 
 
-def _register(req: ServerRequest) -> None:
+def _register(req: ServerRequest) -> int:
+    """Validate and write the frame; the number of connections it went to (0 when the write failed, e.g. nobody
+    is attached: the request stays open for the reconnect replay). The session's own fan-out takes the frame, so
+    this counts the clients attached to it, not individual writes."""
     from tui_gateway.contracts import registry as contracts
 
     contract = _contract(req.method)
@@ -293,7 +298,8 @@ def _register(req: ServerRequest) -> None:
         raise ValueError(problem)  # a key the renderer's typed handler would never read: our bug
     with _lock:
         _open[req.id] = req
-    _write(req.frame())
+    written = _write(req.frame())
+    return 0 if written is False else max(1, len(_peers(req.sid)))
 
 
 def send(method: str, sid: str, params: dict, *, timeout: float | None,
@@ -322,8 +328,22 @@ def send_detailed(method: str, sid: str, params: dict, *, timeout: float | None,
     if _unanswerable(method, sid):
         return RequestOutcome("unavailable", None, "no_answering_client")
     req = ServerRequest(sid, method, params, qids=qids)
-    _register(req)
-    return _await(req, timeout)
+    reached = _register(req)
+    tracked = None
+    if request_hooks.covers(method):
+        # ``pre_server_request`` / ``post_server_request`` (``request_hooks``): a plugin push for a question or
+        # secure input. Off this thread, never the text, never able to change what the wait returns.
+        tracked = request_hooks.opened(method, sid, req.id, reached=reached,
+                                       expires_at=None if timeout is None else int(time.time() + timeout))
+    try:
+        outcome = _await(req, timeout)
+    except BaseException:
+        if tracked is not None:
+            tracked.settled("interrupted")
+        raise
+    if tracked is not None:
+        tracked.settled(request_hooks.settle_reason(outcome))
+    return outcome
 
 
 def _await(req: ServerRequest, timeout: float | None) -> RequestOutcome:

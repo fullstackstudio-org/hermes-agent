@@ -302,8 +302,11 @@ def test_send_returns_an_answer_committed_after_the_deadline_expired(capture, mo
     def answered_during_the_gap(event, timeout=None):
         # Deadline expires, then the response frame lands before send() re-enters the lock.
         expired = real_wait(event, timeout)
-        rid = next(iter(server_requests._open))
-        assert server_requests.resolve_response({"id": rid, "result": {"value": "yes"}})
+        # Only the request's own wait: any other thread that waits on an Event meanwhile (a plugin hook
+        # thread starting, for one) must not answer it.
+        rid = next((rid for rid, req in list(server_requests._open.items()) if req.event is event), None)
+        if rid is not None:
+            assert server_requests.resolve_response({"id": rid, "result": {"value": "yes"}})
         return expired
 
     monkeypatch.setattr(server_requests.threading.Event, "wait", answered_during_the_gap)

@@ -47,7 +47,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 
-from tui_gateway import server_requests
+from tui_gateway import request_hooks, server_requests
 from tui_gateway.contracts.server_requests import (CONFIRM_DETAIL_MAX, CONFIRM_SUMMARY_MAX, CONFIRM_TITLE_MAX,
                                                    ConfirmDecision, ConfirmMethod)
 
@@ -387,17 +387,23 @@ class _Audit:
         return outcome
 
 
-def _fire_pre_confirm_request(**kwargs) -> None:
+def _fire_pre_confirm_request(**kwargs) -> threading.Event:
     """The ``pre_confirm_request`` plugin hook (a push for the request), off the request's own thread so a
-    slow plugin never eats into the person's 120 seconds. Never the text: ids, level, user, expiry."""
+    slow plugin never eats into the person's 120 seconds. Never the text: ids, level, user, expiry. The event
+    is set once the hook returned: ``post_server_request`` for the request is not delivered before it."""
+    done = threading.Event()
+
     def fire() -> None:
         try:
             from hermes_cli.plugins import invoke_hook
             invoke_hook("pre_confirm_request", **kwargs)
         except Exception:  # noqa: BLE001 - a plugin must not affect the request
             logger.debug("pre_confirm_request hook failed", exc_info=True)
+        finally:
+            done.set()
 
     threading.Thread(target=fire, name="confirm-hook", daemon=True).start()
+    return done
 
 
 def forced_rate_key(key: str) -> str:
@@ -455,10 +461,18 @@ def _request(sid: str, params: dict, *, timeout: float, forced: bool = False) ->
         gated = {"validate": result_problem(outgoing)}
         hook_user, expires_at = ("" if log.acting == "-" else log.acting), int(time.time() + timeout)
 
+    tracked: list[request_hooks.Tracked] = []
+
     def opened(request_id: str, reached: int) -> None:
         log.opened(request_id, reached)
-        _fire_pre_confirm_request(session_id=sid, session_key=key, request_id=request_id, level=level_name,
-                                  user_id=hook_user, expires_at=expires_at, reached=reached)
+        announced = _fire_pre_confirm_request(session_id=sid, session_key=key, request_id=request_id,
+                                              level=level_name, user_id=hook_user, expires_at=expires_at,
+                                              reached=reached)
+        # ``post_server_request`` for the same request once it settles (``pre_confirm_request`` is its pre).
+        handle = request_hooks.opened("confirm", sid, request_id, announce=False, session_key=key,
+                                      user_id=hook_user, announced=announced)
+        if handle is not None:
+            tracked.append(handle)
 
     sent_at: float | None = None
     try:
@@ -469,8 +483,12 @@ def _request(sid: str, params: dict, *, timeout: float, forced: bool = False) ->
             sent_at = None  # nothing reached a person: it does not count against the window
     except BaseException:
         _release(forced_rate_key(key) if forced else key, sent_at=sent_at)
+        for handle in tracked:
+            handle.settled("interrupted")
         raise
     _release(forced_rate_key(key) if forced else key, sent_at=sent_at)
+    for handle in tracked:
+        handle.settled(request_hooks.settle_reason(result))
     rid = result.request_id
     if result.status == "answered":
         answer = result.result or {}

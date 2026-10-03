@@ -223,6 +223,106 @@ def is_regex_alternation_token(finding: Finding, line: str) -> bool:
     return bool(hits) and all(inert(h) for h in hits)
 
 
+# ── (5b) a protocol name in JavaScript, judged where it sits ────────────────────────────────
+# A client that relays Hermes' secure prompts names the gateway's ``sudo`` server request (the
+# masked sudo-password prompt) as data: ``{secret:"secret",sudo:"sudo"}``, ``{sudo:12e4}``,
+# ``case"sudo":``, ``kind!=="sudo"``. Built and minified, that code sits on lines kilobytes long
+# that always hold a template literal or a ``.call(``, so the whole-line "executes nothing"
+# test of (5)/(6) can never hold there and every such bundle scored ``caution``. In JS the
+# question is asked of the token itself: it is data when it is the WHOLE content of a quoted
+# string (not a template: zx runs ``$`sudo …```) or an object key (``{sudo:`` / ``,sudo:``), and
+# nothing hands it on to a process, a module load or a command:
+#   - no enclosing call on the line runs or loads code (``spawn(``, ``execFile(``, ``run(``,
+#     ``.call(``, ``require(``, ``import(``, a ``$`` tag …), at any bracket depth, so an argv
+#     array or an options object passed to one never qualifies;
+#   - neither it nor any enclosing array/object is bound to a command-shaped name
+#     (``cmd=``, ``command:``, ``args:[``, ``shell:``, ``bin:``, ``args.push(`` …);
+#   - it is not a module specifier (``from"sudo"``, ``require("sudo")``: the npm ``sudo``).
+# ``sudo.exec(…)``, ``x.sudo(…)`` and ``sudo(…)`` are identifiers in use, not keys, and keep
+# their severity. Every hit on the line must qualify. Like every rule here it lowers one step
+# (high → medium, still reported) and is a lexical heuristic: string and regex literals are
+# found by ``_LITERAL_SPANS``, not by a parser.
+JS_DATA_PATTERN_IDS = {"sudo_usage"}
+_JS_SUFFIXES = {".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx"}
+_JS_CALLEE = re.compile(r"([\w$]+(?:\s*\??\.\s*[\w$]+)*)\s*$")
+_JS_RUNS = re.compile(
+    r"^(?:system|popen|run\w*|call|apply|bind|check_output|check_call|exec\w*|spawn\w*|eval|fork|child_process"
+    r"|source|startfile|open|require|import|Function|Worker|\$)$", re.IGNORECASE)
+_JS_COMMAND_NAME = re.compile(
+    r"cmd|command|script|exec|run|shell|install|hook|arg|entry|bin|start|setup|prog|file", re.IGNORECASE)
+_JS_SLOT = re.compile(r"""(?:([\w$]+)|"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')\s*(?:\+|\|\||\?\?|&&)?[:=]\s*$""")
+_JS_MODULE_LOAD = re.compile(r"\b(?:from|import|require)\s*\(?\s*$")
+_JS_LOOKBACK = 200
+
+
+def _bound_to_command(before: str) -> bool:
+    """``before`` ends with ``<command-shaped name> =`` / ``:`` (``cmd=``, ``args:``, ``"shell":``)."""
+    m = _JS_SLOT.search(before[-_JS_LOOKBACK:])
+    return m is not None and _JS_COMMAND_NAME.search(next(g for g in m.groups() if g is not None)) is not None
+
+
+def _call_runs(before: str) -> bool:
+    """``before`` (the text up to a ``(``) ends with a callee that runs or loads code, or a callee
+    on a command-shaped receiver (``args.push``)."""
+    m = _JS_CALLEE.search(before[-_JS_LOOKBACK:])
+    if m is None:
+        return before.rstrip().endswith("`")    # a tagged template's result being called: be strict
+    parts = [p.strip().rstrip("?") for p in m.group(1).split(".")]
+    return _JS_RUNS.match(parts[-1]) is not None or any(_JS_COMMAND_NAME.search(p) for p in parts[:-1])
+
+
+def _handed_on(line: str, span_by_end: dict, pos: int) -> bool:
+    """Something at or around ``pos`` hands the value on: a command-shaped binding at ``pos``, or
+    an enclosing ``(`` whose callee runs code, or an enclosing bracket bound to a command name."""
+    if _bound_to_command(line[:pos]):
+        return True
+    depth = 0
+    i = pos - 1
+    while i >= 0:
+        if i in span_by_end:          # skip a whole string/regex literal
+            i = span_by_end[i] - 1
+            continue
+        c = line[i]
+        if c in ")]}":
+            depth += 1
+        elif c in "([{":
+            if depth:
+                depth -= 1
+            else:
+                before = line[max(0, i - _JS_LOOKBACK):i]
+                if (c == "(" and _call_runs(before)) or _bound_to_command(before):
+                    return True
+        i -= 1
+    return False
+
+
+def is_js_data_token(finding: Finding, line: str, rel_path: str) -> bool:
+    """In a JS/TS file, every hit of the finding's pattern on the line is a whole quoted string
+    or an object key that nothing on the line hands to a process, a module load or a command."""
+    if finding.pattern_id not in JS_DATA_PATTERN_IDS or Path(rel_path).suffix.lower() not in _JS_SUFFIXES:
+        return False
+    rx = _PATTERN_BY_ID.get(finding.pattern_id)
+    hits = list(rx.finditer(line)) if rx else []
+    spans = [m.span() for m in _LITERAL_SPANS.finditer(line)]
+    span_by_end = {b - 1: a for a, b in spans}
+
+    def data(h: "re.Match[str]") -> bool:
+        span = next(((a, b) for a, b in spans if a <= h.start() and h.end() <= b), None)
+        if span is not None:
+            a, b = span
+            if line[a] not in "\"'" or (a + 1, b - 1) != h.span() or _JS_MODULE_LOAD.search(line[max(0, a - 20):a]):
+                return False
+            start = a
+        else:
+            before, after = line[:h.start()].rstrip(), line[h.end():].lstrip()
+            if not before.endswith(("{", ",")) or not after.startswith(":"):
+                return False
+            start = h.start()
+        return not _handed_on(line, span_by_end, start)
+
+    return bool(hits) and all(data(h) for h in hits)
+
+
 # ── (6) base64 decode piped to a non-interpreter ────────────────────────────────────────────
 # ``base64_decode_pipe`` describes "decodes and pipes to execution". ``gh api … | base64 -d |
 # grep '^sha:'`` decodes data for a text filter; the shape is only execution when the consumer
@@ -284,8 +384,8 @@ def is_pip_install_in_prose_literal(finding: Finding, line: str) -> bool:
 
 
 __all__ = [
-    "STEP_DOWN", "DOC_PROSE_EXTENSIONS", "TEST_TREE_DIRS", "LITERAL_INERT_PATTERN_IDS",
+    "STEP_DOWN", "DOC_PROSE_EXTENSIONS", "TEST_TREE_DIRS", "LITERAL_INERT_PATTERN_IDS", "JS_DATA_PATTERN_IDS",
     "is_doc_prose", "is_ci_workflow", "is_agent_facing", "prose_cap", "is_self_uninstall_doc", "is_test_tree",
     "is_inert_fixture_line", "is_base64_media",
-    "is_regex_alternation_token", "is_data_decode", "is_loopback_only", "is_pip_install_in_prose_literal",
+    "is_regex_alternation_token", "is_js_data_token", "is_data_decode", "is_loopback_only", "is_pip_install_in_prose_literal",
 ]

@@ -666,3 +666,74 @@ class TestIntakeFalsePositiveClasses:
         result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
         sev = {f.file: f.severity for f in result.findings if f.pattern_id == "hardcoded_ip_port"}
         assert sev == {"README.md": "medium", "__init__.py": "medium"}
+
+
+class TestMinifiedBundleSudoData:
+    """A built web client relays Hermes' own ``sudo`` server request (the masked sudo-password
+    prompt): its minified bundle names the method as an object key and compares it in a
+    ``switch``. Minified lines are kilobytes long and carry template literals and ``.call(``, so
+    the whole-line "executes nothing" test never held there and every such bundle scored
+    ``caution``. In JS the context is judged where the token sits: a whole ``"sudo"`` string or a
+    ``sudo:`` key that nothing on the line hands to a process, a module load or a command slot is
+    data (a note). Every way of running or loading ``sudo`` keeps ``high``."""
+
+    # Noise a minified line always carries: a template literal and a `.call(`.
+    NOISE = "const lm=t=>`not supported by this client: ${t}`;fn.call(this,lm);"
+
+    def _sev(self, tmp_path, lines):
+        files = dict(BASE_FILES)
+        files["dashboard/app/assets/index-abc123.js"] = "".join(f"{self.NOISE}{line}\n" for line in lines)
+        result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
+        sev = {f.line: f.severity for f in result.findings if f.pattern_id == "sudo_usage"}
+        return sev, result
+
+    def test_protocol_names_in_a_minified_bundle_are_notes(self, tmp_path):
+        sev, result = self._sev(tmp_path, [
+            'const dm=Object.freeze({secret:"secret",sudo:"sudo","vault.code":"vault_code"}),'
+            'pm=Object.freeze({secret:3e5,sudo:12e4});',
+            'function ask(t,e){switch(t){case"secret":return{kind:"secret"};'
+            'case"sudo":return{kind:"sudo",command:P(e.command,fm)}}}',
+            'function Te(s){const{ask:t}=s.prompt;if(t.kind!=="sudo")return null;return u.jsx(P,{...s})}',
+            "const k={ 'sudo' : 1 };if('sudo'===m)go();",
+        ])
+        assert sev == {1: "medium", 2: "medium", 3: "medium", 4: "medium"}
+        assert result.verdict == "safe"
+
+    @pytest.mark.parametrize("line", [
+        'require("child_process").execSync(`sudo ${cmd}`);',      # a shell string
+        'cp.spawn("sudo",["-n","true"]);',                       # argv of a spawn
+        'cp.execFile("sudo",args,cb);',
+        'cp.spawnSync(bin,{shell:"sudo"});',                     # a shell option
+        'const cmd="sudo";cp.spawn(cmd,a);',                     # bound to a command name
+        'run({args:["sudo","rm","-rf","/"]});',                  # a command array handed to run(
+        'const job={argv:["sudo","true"]};',                     # a command array under a command key
+        'const s=require("sudo");',                              # the `sudo` npm package
+        'import("sudo").then(m=>m.exec(c));',
+        'import x from"sudo";x.exec(c);',
+        'sudo.exec(cmd,{name:"app"},cb);',                       # sudo-prompt's API
+        'x.sudo(cmd);',
+        "$`sudo rm -rf /`;",                                    # zx runs tagged templates
+        "await $`sudo`;",
+        'const m={sudo:"sudo"};cp.spawn("sudo",[]);',            # one executed hit taints the line
+        'cp.exec(["x",{sudo:true}]);',                           # an option of an exec call
+    ])
+    def test_running_or_loading_sudo_keeps_high(self, tmp_path, line):
+        sev, result = self._sev(tmp_path, [line])
+        assert sev == {1: "high"}, line
+        assert result.verdict != "safe"
+
+    @pytest.mark.xfail(strict=True, reason="literals are lexed per line: a line that begins inside a "
+                       "multi-line template literal pairs the wrong backticks (what a real bundle does)")
+    def test_line_that_begins_inside_a_template(self, tmp_path):
+        files = dict(BASE_FILES)
+        files["dashboard/app/assets/index-abc123.js"] = 'const a=`first\n`;const dm={sudo:"sudo"};const b=`x`;\n'
+        result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
+        sev = {f.line: f.severity for f in result.findings if f.pattern_id == "sudo_usage"}
+        assert sev == {2: "medium"}
+
+    def test_python_keeps_the_whole_line_rule(self, tmp_path):
+        files = dict(BASE_FILES)
+        files["run.py"] = 'KINDS = {"sudo": "sudo"}; os.system(cmd)\n'
+        result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
+        sev = {f.file: f.severity for f in result.findings if f.pattern_id == "sudo_usage"}
+        assert sev == {"run.py": "high"}

@@ -17,13 +17,13 @@ from typing import Iterator, List, Optional, Tuple
 
 from tools.plugin_guard_context import (
     STEP_DOWN, is_agent_facing, is_base64_media, is_ci_workflow, is_data_decode, is_doc_prose,
-    is_inert_fixture_line, is_loopback_only, is_pip_install_in_prose_literal, is_regex_alternation_token,
-    is_self_uninstall_doc, is_test_tree, prose_cap)
+    is_inert_fixture_line, is_js_data_token, is_loopback_only, is_pip_install_in_prose_literal,
+    is_regex_alternation_token, is_self_uninstall_doc, is_test_tree, prose_cap)
 from tools.skills_guard import (
     Finding, ScanResult, SUSPICIOUS_BINARY_EXTENSIONS, _determine_verdict, format_scan_report,
     scan_file)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-v8"
+PLUGIN_SCANNER_VERSION = "plugin-guard-v8.1"
 
 # Never scanned: VCS internals, caches, vendored envs.
 EXCLUDED_DIRS = {
@@ -228,8 +228,8 @@ def _context_severity(f: Finding, rel_path: str, line: str, doc_prose: bool, is_
         sev = _at_most(sev, "medium") if inert else STEP_DOWN.get(sev, sev)
     if f.pattern_id == "encoded_exfil" and is_base64_media(line):
         sev = "low"
-    if is_code and is_regex_alternation_token(f, line):
-        sev = STEP_DOWN.get(sev, sev)
+    if is_code and (is_regex_alternation_token(f, line) or is_js_data_token(f, line, rel_path)):
+        sev = STEP_DOWN.get(sev, sev)    # `|sudo|` in a pattern; `case"sudo":` / `{sudo:12e4}` in JS
     if f.pattern_id == "base64_decode_pipe" and is_data_decode(line):
         sev = STEP_DOWN.get(sev, sev)
     if is_loopback_only(f, line):

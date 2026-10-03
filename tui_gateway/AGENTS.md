@@ -48,6 +48,11 @@ New question for the user = `_ask("<method>", sid, params, timeout)` in the emit
 `apps/desktop/.../gateway-event/server-requests.ts` and `ui-tui/src/app/createServerRequestHandler.ts`,
 and a `server_request(...)` in `contracts/server_requests.py`.
 New event = `event("<type>", Payload)` in `contracts/events.py`; the emitter is checked against it.
+A frame of a turn's stream (`message.*`, `reasoning.*`, `thinking.delta`, `tool.*`, `error`) carries the turn's
+`turn_id` on its ENVELOPE (`params.turn_id`, stamped by `_event_frame` from the running turn), never in its payload, and
+names the persisted rows it becomes (`row_id`, `call_row_id` + `call_index`); a new frame of that stream goes into
+`tui_gateway/row_identity.py` `TURN_STREAM_EVENTS`. `tests/tui_gateway/test_transcript_row_identity_e2e.py` is the wire
+truth for all of it.
 
 ## Profile scope in RPC methods
 

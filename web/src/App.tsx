@@ -552,9 +552,14 @@ export default function App() {
           <Menu />
         </Button>
 
-        <Typography className="font-bold text-[0.95rem] leading-[0.95] tracking-[0.05em] text-midground">
-          {t.app.brand}
-        </Typography>
+        <div className="flex flex-col gap-0.5">
+          <Typography className="font-bold text-[0.95rem] leading-[0.95] tracking-[0.05em] text-midground">
+            {t.app.brand}
+          </Typography>
+          <Typography className="text-[0.6875rem] leading-none text-text-secondary">
+            Hermie edition
+          </Typography>
+        </div>
       </header>
 
       {mobileOpen && (
@@ -616,11 +621,16 @@ export default function App() {
               >
                 <PluginSlot name="header-left" />
 
-                <Typography className="font-bold text-[1.125rem] leading-[0.95] tracking-[0.0525rem] text-midground uppercase">
-                  Hermes
-                  <br />
-                  Agent
-                </Typography>
+                <div className="flex flex-col gap-1">
+                  <Typography className="font-bold text-[1.125rem] leading-[0.95] tracking-[0.0525rem] text-midground uppercase">
+                    Hermes
+                    <br />
+                    Agent
+                  </Typography>
+                  <Typography className="text-[0.6875rem] leading-none tracking-[0.02em] text-text-secondary">
+                    Hermie edition
+                  </Typography>
+                </div>
               </div>
 
               <Button

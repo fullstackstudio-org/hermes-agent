@@ -27,3 +27,33 @@ describe("dashboard presets derive from the shared palette table", () => {
     expect(contrastRatio(palette.midground.hex, palette.background.hex)).toBeGreaterThanOrEqual(3);
   });
 });
+
+// The calm preset is the quiet one: muted, but body text and the accent
+// still have to clear WCAG AA against the canvas, and it must not carry any
+// of the loud chrome the other presets use.
+describe("calm preset", () => {
+  const calm = BUILTIN_THEMES.calm;
+
+  it("is registered and leaves the default theme alone", () => {
+    expect(calm.name).toBe("calm");
+    expect(BUILTIN_THEMES.default.name).toBe("default");
+  });
+
+  it("keeps body text and the accent at AA contrast on the canvas", () => {
+    const bg = calm.palette.background.hex;
+    expect(contrastRatio(calm.palette.midground.hex, bg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(calm.colorOverrides?.primary ?? "", bg)).toBeGreaterThanOrEqual(4.5);
+    expect(
+      contrastRatio(calm.colorOverrides?.primaryForeground ?? "", calm.colorOverrides?.primary ?? ""),
+    ).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(calm.colorOverrides?.destructive ?? "", bg)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("uses a soft canvas, no grain and no border-image or glow chrome", () => {
+    expect(calm.palette.background.hex).not.toMatch(/^#(000000|ffffff)$/i);
+    expect(calm.palette.noiseOpacity).toBe(0);
+    expect(calm.componentStyles).toBeUndefined();
+    expect(calm.assets).toBeUndefined();
+    expect(calm.customCSS ?? "").not.toMatch(/border-image|box-shadow|animation|scanline/i);
+  });
+});

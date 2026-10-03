@@ -199,6 +199,51 @@ export const roseTheme: DashboardTheme = {
   },
 };
 
+/**
+ * Quiet dark theme: a soft sage-slate canvas with muted, low-contrast text
+ * that still clears WCAG AA, a single calm sage accent, system fonts, and no
+ * grain, glow, scanline or border-image chrome. Dark rather than light so it
+ * sits next to the other presets; the palette model has one variant per theme.
+ */
+export const calmTheme: DashboardTheme = {
+  name: "calm",
+  label: "Calm",
+  description: "Soft sage-slate with muted text — quiet and easy on the eyes",
+  palette: {
+    background: { hex: "#232a28", alpha: 1 },
+    midground: { hex: "#c9d1cb", alpha: 1 },
+    foreground: { hex: "#ffffff", alpha: 0 },
+    warmGlow: "rgba(150, 184, 165, 0.12)",
+    noiseOpacity: 0,
+  },
+  typography: {
+    ...DEFAULT_TYPOGRAPHY,
+    lineHeight: "1.6",
+  },
+  layout: {
+    ...DEFAULT_LAYOUT,
+    radius: "0.625rem",
+  },
+  // The default grain overlay on badges is texture, not calm.
+  customCSS: ".grain::after { display: none; }",
+  colorOverrides: {
+    primary: "#96b8a5",
+    primaryForeground: "#1b211f",
+    ring: "#7f9d8d",
+    success: "#8fbf9f",
+    warning: "#d1b27e",
+    destructive: "#d98a82",
+    destructiveForeground: "#1b211f",
+  },
+  seriesColors: {
+    inputTokenAccent: "#b3beb7",
+    outputTokenAccent: "#96b8a5",
+  },
+  swatchColors: ["#232a28", "#c9d1cb", "#96b8a5"],
+  terminalBackground: "#1d2321",
+  terminalForeground: "#c9d1cb",
+};
+
 /** Light mode — vivid Nous-blue accents on a cream canvas. */
 export const nousBlueTheme: DashboardTheme = {
   name: "nous-blue",
@@ -252,4 +297,5 @@ export const BUILTIN_THEMES: Record<string, DashboardTheme> = {
   mono: monoTheme,
   cyberpunk: cyberpunkTheme,
   rose: roseTheme,
+  calm: calmTheme,
 };

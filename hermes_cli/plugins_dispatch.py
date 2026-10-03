@@ -43,6 +43,9 @@ _HOOK_TIMEOUT_BOUNDED_HOOKS: Set[str] = {
     "post_tool_call", "transform_terminal_output", "transform_tool_result", "transform_llm_output",
     "pre_llm_call", "post_llm_call", "pre_api_request", "post_api_request", "api_request_error",
     "pre_auxiliary_call", "post_auxiliary_call", "pre_verify", "on_session_start", "on_session_end",
+    # Fork: fired from a dashboard request after the passkey store committed; a stuck push plugin must not
+    # hold the response (observer only, the change is already made).
+    "on_passkey_change",
 }
 
 # Policy hooks: timeout / still-running must fail closed (block the tool).

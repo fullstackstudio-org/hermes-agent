@@ -969,6 +969,10 @@ _mount_plugin_api_routes()
 from hermes_cli.dashboard_auth.routes import router as _dashboard_auth_router  # noqa: E402
 
 app.include_router(_dashboard_auth_router)
+# Fork: the confirm-passkey routes (/api/auth/passkeys*). Never public: the gate runs first.
+from hermes_cli.dashboard_auth.passkeys.routes import router as _passkey_router  # noqa: E402
+
+app.include_router(_passkey_router)
 mount_spa(app)
 
 

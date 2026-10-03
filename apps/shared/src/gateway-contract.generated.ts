@@ -4514,6 +4514,19 @@ export interface SessionReclaimedPayload {
   stored_session_id: string
   reason: string
 }
+/** ``tui_gateway/user_events.py::announce_passkey_changed``, from the passkey routes (``hermes_cli/dashboard_auth/passkeys/routes.py``). Sent only to connections signed in as the user whose credential changed. */
+export interface PasskeyChangedPayload {
+  change: PasskeyChange
+  credential: PasskeyCredentialRef
+  at: number
+}
+export type PasskeyChange = 'added' | 'revoked'
+/** One credential as ``passkey.changed`` names it: never its key, counter or AAGUID. */
+export interface PasskeyCredentialRef {
+  id: string
+  name: string
+  rp_id: string
+}
 export interface SessionControlUpdatePayload {
   control: SessionControlSnapshot
 }
@@ -5520,6 +5533,8 @@ export interface BackendGatewayEventMap {
   'pairing.changed': ChangeSignalPayload
   /** Focus / reveal a named desktop pane. */
   'pane.reveal': PaneRevealPayload
+  /** A passkey of the signed-in user was added or revoked; refetch GET /api/auth/passkeys. */
+  'passkey.changed': PasskeyChangedPayload
   /** The active pet / its spritesheet changed (watcher). */
   'pet.changed': PetChangedPayload
   /** Pet base-draft generation progress. */
@@ -5637,6 +5652,7 @@ export const GATEWAY_EVENT_TYPES = [
   'notification.show',
   'pairing.changed',
   'pane.reveal',
+  'passkey.changed',
   'pet.changed',
   'pet.generate.progress',
   'pet.hatch.progress',

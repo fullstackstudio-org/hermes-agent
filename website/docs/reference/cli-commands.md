@@ -1893,6 +1893,23 @@ That is a narrow guarantee. A stolen dashboard session can still run code on the
 | `revoke <credential id prefix>` / `revoke --user ID --all` | Revoke one credential, or all of one user's. |
 | `receipts [--user ID] [--since YYYY-MM-DD] [--limit N]` | Receipts of verified answers (digests, never the text); older than `confirm.passkey.receipts_days` are pruned first. |
 
+What a signed-in person does in the app goes through the dashboard's passkey routes, which answer like
+an unknown path while `confirm.passkey.enabled` is false and are never reachable without a sign-in:
+
+| Route | What it does |
+|-------|--------------|
+| `GET /api/auth/passkeys` | The caller's own passkeys, this gateway's id, the accepted RPs and base URLs. |
+| `POST /api/auth/passkeys/register/begin` / `register/finish` | Enrol a passkey. Finishing always needs an enrolment code: one from `invite`, or one the person minted with a passkey they already have. A session alone never enrols. |
+| `POST /api/auth/passkeys/stepup/begin` | Open a passkey step-up (`invite` or `revoke`, 120 s, single use: a refused assertion spends it). |
+| `POST /api/auth/passkeys/invites` | With an `invite` step-up: a code for the caller's own next passkey (another provider or a browser). Off when `confirm.passkey.user_invites` is false. |
+| `POST /api/auth/passkeys/revoke` | With a `revoke` step-up for that credential: revoke one of the caller's own passkeys, the last one included. |
+
+Nobody sees, adds to or revokes another person's passkeys. A browser write must come from the origin of
+one of the passkey base URLs. Every enrolment-code failure gets the same answer, and failures are
+limited (5 per user and per address per 10 minutes, 20 per hour gateway-wide). Each added or revoked
+passkey is written to `dashboard-auth.log`, sent to that person's open connections (`passkey.changed`)
+and given to plugins (`on_passkey_change`), so a passkey nobody expected does not go unnoticed.
+
 ```bash
 # Default — opens browser to http://127.0.0.1:9119
 hermes dashboard

@@ -64,6 +64,15 @@ class SlidingWindowLimiter:
                 self._buckets.popitem(last=False)
             return Verdict.ALLOWED
 
+    def exhausted(self, key: str) -> bool:
+        """True when ``key`` has no budget left in the current window. Records nothing: a throttle
+        that counts failures asks this first and records a failure with :meth:`check` afterwards."""
+        key = key or "_unknown_"
+        cutoff = time.monotonic() - self.window_sec
+        with self._lock:
+            bucket = self._buckets.get(key)
+            return bucket is not None and sum(1 for t in bucket.events if t >= cutoff) >= self.max_events
+
     def _sweep(self, cutoff: float, now: float) -> None:
         """Drop buckets from the front whose last event left the window and that hold no note."""
         while self._buckets:

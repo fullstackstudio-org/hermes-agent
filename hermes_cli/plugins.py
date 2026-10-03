@@ -145,6 +145,13 @@ VALID_HOOKS: Set[str] = {
     # surface: "cli"|"gateway"|"smart"; post_approval_response adds choice ("once"|"session"|
     # "always"|"deny"|"timeout"|"smart_approve"|"smart_deny") and decided_by.
     "pre_approval_request", "post_approval_response",
+    # on_passkey_change (fork): a passkey of a signed-in user was added or revoked through the dashboard's
+    # passkey routes (hermes_cli/dashboard_auth/passkeys/routes.py), fired after the store committed it;
+    # returns ignored. Kwargs: change ("added"|"revoked"), user_id ("<provider>:<user id>"), credential
+    # ({id, name, rp_id}), at (Unix seconds), via ("operator"|"passkey": what authorised it). Never a
+    # code, key, assertion or token. Meant for a security notification that cannot be muted. Bounded by
+    # plugins.hook_callback_timeout (plugins_dispatch._HOOK_TIMEOUT_BOUNDED_HOOKS).
+    "on_passkey_change",
     # on_room_member_activity: a hosted Group Chat member's live runtime events (tool.started/completed,
     # request.opened, message.delta, reasoning.delta, turn.error, ...) stamped with room_id, thread_id,
     # member_id, turn_id, task_id, execution_generation. Observer, queued per consumer off the token

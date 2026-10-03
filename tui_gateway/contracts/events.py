@@ -395,6 +395,33 @@ class SessionReclaimedPayload(Payload):
 event("session.reclaimed", SessionReclaimedPayload, doc="The backend reclaimed a live session out from under its clients.")
 
 
+class PasskeyChange(WireEnum):
+    ADDED = "added"
+    REVOKED = "revoked"
+
+
+class PasskeyCredentialRef(Payload):
+    """One credential as ``passkey.changed`` names it: never its key, counter or AAGUID."""
+
+    id: str  # base64url credential id
+    name: str
+    rp_id: str
+
+
+class PasskeyChangedPayload(Payload):
+    """``tui_gateway/user_events.py::announce_passkey_changed``, from the passkey routes
+    (``hermes_cli/dashboard_auth/passkeys/routes.py``). Sent only to connections signed in as the user
+    whose credential changed."""
+
+    change: PasskeyChange
+    credential: PasskeyCredentialRef
+    at: int  # Unix seconds
+
+
+event("passkey.changed", PasskeyChangedPayload,
+      doc="A passkey of the signed-in user was added or revoked; refetch GET /api/auth/passkeys.")
+
+
 class SessionControlUpdatePayload(Payload):
     control: SessionControlSnapshot
 
@@ -716,7 +743,8 @@ __all__ = [
     "MessageInterimPayload", "MessageReaction", "MessageReactionPayload", "MoaAggregatingPayload",
     "MoaPhasePayload", "MoaProgressPayload", "MoaReferencePayload", "NoticePayload",
     "NotificationClearPayload", "NotificationShowPayload", "OpenPayload", "PaneRevealPayload",
-    "PetChangedPayload", "PetGenerateProgressPayload", "PetHatchProgressPayload", "PreviewClosePayload",
+    "PasskeyChange", "PasskeyChangedPayload", "PasskeyCredentialRef", "PetChangedPayload",
+    "PetGenerateProgressPayload", "PetHatchProgressPayload", "PreviewClosePayload",
     "PreviewOpenPayload", "PreviewRestartProgressPayload", "ReactionPayload", "ResumePhaseStatus",
     "ReviewSummaryPayload", "SessionControlSnapshot", "SessionControlUpdatePayload",
     "SessionReclaimedPayload", "SessionResumeProgressPayload", "SessionTitlePayload", "SessionUsagePayload",

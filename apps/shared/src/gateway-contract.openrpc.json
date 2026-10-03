@@ -19048,6 +19048,62 @@
         "title": "Params",
         "type": "object"
       },
+      "PasskeyChange": {
+        "enum": [
+          "added",
+          "revoked"
+        ],
+        "title": "PasskeyChange",
+        "type": "string"
+      },
+      "PasskeyChangedPayload": {
+        "additionalProperties": false,
+        "description": "``tui_gateway/user_events.py::announce_passkey_changed``, from the passkey routes\n(``hermes_cli/dashboard_auth/passkeys/routes.py``). Sent only to connections signed in as the user\nwhose credential changed.",
+        "properties": {
+          "change": {
+            "$ref": "#/components/schemas/PasskeyChange"
+          },
+          "credential": {
+            "$ref": "#/components/schemas/PasskeyCredentialRef"
+          },
+          "at": {
+            "title": "At",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "change",
+          "credential",
+          "at"
+        ],
+        "title": "PasskeyChangedPayload",
+        "type": "object"
+      },
+      "PasskeyCredentialRef": {
+        "additionalProperties": false,
+        "description": "One credential as ``passkey.changed`` names it: never its key, counter or AAGUID.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "rp_id": {
+            "title": "Rp Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "rp_id"
+        ],
+        "title": "PasskeyCredentialRef",
+        "type": "object"
+      },
       "PasteCollapseParams": {
         "additionalProperties": false,
         "properties": {
@@ -38177,6 +38233,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/PaneRevealPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "passkey.changed",
+      "summary": "A passkey of the signed-in user was added or revoked; refetch GET /api/auth/passkeys.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/PasskeyChangedPayload"
           }
         }
       ]

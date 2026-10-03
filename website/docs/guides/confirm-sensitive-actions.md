@@ -22,7 +22,9 @@ as the agent's description of what it is about to do, nothing more.
 
 The agent picks the level (`confirm_action(level="passkey")`). `passkey` is offered to the agent only
 while the operator has enabled it, and works only on a gateway with a sign-in provider (see
-[Set up the passkey level](#set-up-the-passkey-level)).
+[Set up the passkey level](#set-up-the-passkey-level)). The operator can also force a passkey
+confirmation for commands and tools, whatever the agent asks (see
+[Operator rules](#operator-rules-force-a-passkey)).
 
 ## What `plain` proves
 
@@ -84,8 +86,8 @@ What it does **not** prove:
    a local terminal running as the gateway's own user can still reach the store or run the CLI. The level
    is a real barrier where the agent's terminal is sandboxed (a container or remote backend without the
    gateway's home) or where the operator's rules cover the commands that matter (`confirm.passkey.require`,
-   read but not enforced yet); elsewhere it raises the
-   cost and leaves evidence (an audit line, a receipt, `passkey.changed`, a push) without being a wall.
+   see [Operator rules](#operator-rules-force-a-passkey)); elsewhere it raises the cost and leaves evidence
+   (an audit line, a receipt, `passkey.changed`, a push) without being a wall.
 7. In a browser, the page is the client. The browser enforces the origin, but what the page displayed is
    asserted by code the gateway served: a script injected into the gateway's origin, or a dashboard plugin
    page on the same origin, can show one text and request a signature for another. The native app does
@@ -143,6 +145,108 @@ On the gateway host, as the gateway's user:
    a browser) they can add with a code they mint themselves with a passkey they already have.
 5. `hermes dashboard passkey status` names every reason the level is unavailable and what to set.
 
+## Operator rules: force a passkey
+
+The agent asks for a confirmation only when it decides to. A prompt-injected agent does not. The operator
+can force one for the actions that matter, under `confirm.passkey.require` in `config.yaml` on the gateway
+host (a dashboard session cannot change this section):
+
+```yaml
+confirm:
+  passkey:
+    enabled: true
+    require:
+      # Shell commands, as globs. Matched like approvals.deny (case-insensitive, over the normalised
+      # and de-obfuscated forms of the command, each part of a compound command, sh -c unwrapped),
+      # plus what eval, a here-string (<<<) or xargs runs. See the limits below.
+      commands: ["git push*", "kubectl delete *", "*terraform apply*"]
+      # Tool names, as globs (case-insensitive). Every call of a matching tool.
+      tools: ["send_message", "home_*", "execute_code"]
+      # Every dangerous-command approval (see below).
+      approvals: false
+      # The owner's override of a smart-approval (guardian) DENY.
+      smart_denied: true
+```
+
+What each rule covers:
+
+| Rule | Covers | Skipped by yolo, `approvals.mode: off`, an isolated container, cron approve mode, the allowlist? |
+| --- | --- | --- |
+| `commands` | Every terminal command that matches a glob. | No. Decided at the floor of the approval gate, beside the hardline blocklist and `approvals.deny`. |
+| `tools` | Every call of a tool whose name matches a glob, after the plugin hooks (a plugin's block wins without asking). | No. |
+| `approvals` | Every command the dangerous-command detector flags, decided at the floor like `commands`; and every other approval the command and `execute_code` gates would ask (a security-scanner finding, an `execute_code` script), asked as a passkey confirmation instead. | The detector part: no. The rest: yes, with the approval it replaces (yolo and `mode: off` ask nothing). |
+| `smart_denied` | The owner's override of a guardian DENY (smart approval mode). | Only with smart approval itself. |
+
+A forced confirmation is a `confirm` request at level `passkey` that the gateway builds itself: title
+"Approve a command" ("Approve a script" for `execute_code`, "Approve a tool call" for a tool), the
+gateway's description as the summary, and the command exactly as it will run (or the tool's name and
+arguments) as the detail. It goes to the person the running turn works for, on their apps that can use
+their passkey, like any `passkey` request.
+
+The detail is never shortened, masked or cleaned up: what the person signs is what runs. A command with
+a secret in it (anything the gateway's secret redactor would mask: a key block, a token, a password) is
+therefore not shown at all; it is blocked, and the agent is told to reference secrets through environment
+variables or the vault, never inline. Masking would be worse than blocking: the redactor replaces whole
+regions, so a prompt-injected agent could hide a second command inside a fake key block. On a command
+match the security scanner still runs first: its findings are added to the summary, and a scanner
+`block` stays a block that no confirmation lifts. The summary also says where the command runs (in the
+desktop app's batch of commands, the call's own `workdir`, or that the directory is the session's when
+the command's turn comes). The detail travels verbatim: indentation, runs of spaces and line breaks are
+kept. Because no rendering shows them, a command with whitespace at the end of a line, or with tabs, is
+refused rather than shown.
+
+- It never enters the approval queue: `/approve`, `/approve all`, `approval.respond` and messaging
+  surfaces cannot answer it.
+- `confirmed` (verified) lets this one operation run. Nothing is remembered: the next identical command
+  asks again. There is no "session" or "always".
+- `declined` is a deny.
+- Anything else blocks the operation and tells the agent that a passkey confirmation in the Hermie app is
+  required: `timeout`, every `unavailable` reason (including `disabled`, `not_enrolled`,
+  `no_acting_user`), a conversation that cannot ask for one (the terminal CLI, a messaging platform, a
+  scheduled job), a command longer than the 2,000 characters a confirmation can show (counted on the
+  command as it runs), a command with invisible, control or tab characters or with whitespace at the end
+  of a line, a command with a secret in it (`redacted`), or a security-scanner block. It never falls back to an
+  ordinary approval.
+- In the desktop app's batch of terminal commands, the confirmation is asked once, while the batch
+  prepares its approvals, and its outcome holds for that command in that batch only: declined stays
+  declined when the command's turn comes, and a stopped batch takes a confirmation with it.
+
+Consequences to know before you turn a rule on:
+
+- Rules apply whether or not `confirm.passkey.enabled` is on. With the level off, every matched command
+  and tool call is blocked. Remove the rules to go back to ordinary approvals.
+- Cron jobs, messaging platforms and the classic CLI cannot ask, so a matched command or tool call never
+  runs there. With `approvals: true` that includes every dangerous command those contexts would otherwise
+  run under their approve modes.
+- A glob is a pattern over text, not an understanding of the shell. `commands` sees each part of a
+  compound command, `sh -c` strings, and what `eval`, a here-string or `xargs` runs, but not reordered
+  options (`git -C repo push` does not match `git push*`), aliases, functions, or variables that build a
+  command (`$CMD`). For a hard guarantee use `tools: ["terminal"]` (every command asks); `approvals: true`
+  adds every command the dangerous-command detector flags.
+- A rule matches what the gate sees. `commands` sees the command text the terminal gate is asked about.
+  It does not see:
+  - code run by `execute_code`, or a script the agent writes to a file and then runs under another name;
+  - input typed into a running process: `terminal(command="bash", background=true, pty=true)` followed
+    by `process(action="submit", data="git push --force")` reaches a shell without any command guard
+    (the gateway does not parse what is typed into a process);
+  - on the Codex app-server runtime, the commands Codex's own sandbox runs without asking: Hermes sees a
+    Codex command only when Codex sends an approval request, and then the floor (including these rules)
+    runs before any automatic approval.
+
+  Cover those with `tools`: `execute_code` for scripts, `process` for typing into processes (and
+  `terminal` itself if background shells must never start unconfirmed), and keep the agent's terminal
+  sandboxed (point 6 above).
+- A forced request counts under its own limit (one open and six per ten minutes per conversation,
+  separately from the agent's own `confirm_action` requests), so neither can use up the other. A forced
+  request that is declined, times out or fails once sent opens the no-downgrade window of the
+  conversation like any `passkey` request.
+- Each decision writes a `confirm_forced` record to `dashboard-auth.log`: the rule, your pattern, the
+  session, the user the session names, the outcome and the reason. Never the command text. The request
+  itself writes `confirm_request` and `confirm_outcome` with `forced: true`.
+
+`hermes approvals test -- <command>` reports `ask-passkey` (exit 2) for a command a rule covers, and
+`hermes dashboard passkey status` lists the rules in force.
+
 ## The four outcomes
 
 | Outcome | Meaning | What the agent should do |
@@ -171,13 +275,18 @@ On the gateway host, as the gateway's user:
 | `verification_failed` | `passkey` | Five answers were refused, or the passkey was revoked or the store failed when the gateway tried to accept the answer. |
 | `settings_unavailable`, `store_unavailable` | `passkey` | The gateway could not read its passkey settings or store. |
 
+A forced confirmation (an operator rule) can also end blocked for `no_callback` (the conversation cannot
+ask), `too_long`, `hidden_characters`, `trailing_whitespace`, `redacted` (the command holds a secret),
+`not_showable`, `scanner_block` or `error`.
+
 ## Limits
 
 - `title` at most 80 characters, `summary` at most 500, `detail` at most 2,000. Longer text is refused
   and goes back to the agent to shorten; it is never cut off silently. Control and invisible formatting
   characters are removed, and apps show the text as plain text, never as markdown or HTML.
 - One open confirmation per conversation, and at most six sent per ten minutes. Requests that reached
-  no app do not count.
+  no app do not count. Confirmations forced by an operator rule have their own count with the same
+  limits.
 - At `passkey`: five refused answers end the request (`verification_failed`).
 - Each request and each outcome writes one record to the dashboard auth audit log
   (`$HERMES_HOME/logs/dashboard-auth.log`, events `confirm_request` and `confirm_outcome`): the session,
@@ -232,5 +341,10 @@ checks, test vectors):
   gateway then commits it. If that fails (the passkey was revoked meanwhile, a store error), the connections
   get `request.cancel` with reason `verification_failed`; clear any "confirmed" state for that id.
 - At `plain` the method is always `tap`; an answer with `method: "passkey"` is refused (`4034`).
+- A confirmation forced by an operator rule is an ordinary `confirm` frame at level `passkey` (title
+  "Approve a command", "Approve a script" or "Approve a tool call"). It can be open at the same time as one
+  the agent asked for, so handle more than one open `confirm` per conversation, by request id. Its
+  `detail` is the command verbatim: render `detail` monospaced with whitespace preserved (`white-space:
+  pre` or the platform's equivalent; scroll long lines rather than reflow them), never collapsed or trimmed.
 - `confirm_passkey` in the second call is checked by the gateway, not by the contract: unknown extra keys
   are allowed, and a shape it does not accept only drops `passkey`.

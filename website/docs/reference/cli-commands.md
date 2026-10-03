@@ -1886,7 +1886,7 @@ That is a narrow guarantee. A stolen dashboard session can still run code on the
 
 | Command | Description |
 |---------|-------------|
-| `status` | Whether the level is enabled, the listed and accepted base URLs, the native and web RPs, the sign-in providers, the stored counts, and every reason the level is unavailable with what to set. It also compares the passkey base URLs with the dashboard's public URLs and prints a hint where they differ. |
+| `status` | Whether the level is enabled, the listed and accepted base URLs, the native and web RPs, the sign-in providers, the stored counts, the operator rules in force (`confirm.passkey.require`), and every reason the level is unavailable with what to set. It also compares the passkey base URLs with the dashboard's public URLs and prints a hint where they differ. |
 | `base-url list` / `base-url add URL` / `base-url remove URL` | The base URLs clients dial for this gateway (`confirm.passkey.base_urls`, serialised as origin plus path prefix). A confirmation that names any other base URL is refused. This list is kept apart from `dashboard.public_url(s)` on purpose: a dashboard session can change those. Empty means the level is unavailable (`no_base_url`). |
 | `list [--user ID] [--all]` | Stored credentials (`--all` includes revoked ones). |
 | `invite [--user ID] [--ttl 15m] [--print]` | Mint a one-time enrolment code (default 15 minutes, at most 24 hours). Bind it with `--user <provider>:<user id>` when you know the id. Refused when the output is not a terminal unless `--print` is given. |
@@ -1912,7 +1912,10 @@ and given to plugins (`on_passkey_change`), so a passkey nobody expected does no
 
 A `confirm` at level `passkey` (the agent's `confirm_action`) is verified against these passkeys: each
 accepted answer writes a receipt (`receipts` above) and the gateway prunes old ones at most once an hour.
-See [Confirm sensitive actions](../guides/confirm-sensitive-actions.md).
+The operator rules under `confirm.passkey.require` (`commands`, `tools`, `approvals`, `smart_denied`) force
+such a confirmation for matching commands and tool calls, whatever yolo or `approvals.mode` say;
+`hermes approvals test -- <command>` reports `ask-passkey` for a command they cover.
+See [Confirm sensitive actions](../guides/confirm-sensitive-actions.md#operator-rules-force-a-passkey).
 
 ```bash
 # Default — opens browser to http://127.0.0.1:9119

@@ -408,6 +408,59 @@ class TestCmdUpdate:
 
         assert exc_info.value.code == 1
 
+    @staticmethod
+    def _scanner_that_raises(monkeypatch):
+        import tools.plugin_guard as guard
+        from hermes_cli import plugins_cmd
+
+        def boom(*_args, **_kwargs):
+            raise AttributeError("'NoneType' object has no attribute 'end'")
+
+        monkeypatch.setattr(plugins_cmd, "_scan_on_install_enabled", lambda: True)
+        monkeypatch.setattr(guard, "scan_plugin", boom)
+        calls: list = []
+        monkeypatch.setattr(plugins_cmd, "_set_plugin_enabled",
+                            lambda name, *, enable: calls.append((name, enable)))
+        return calls
+
+    def test_a_rescan_that_raises_disables_the_plugin(self, monkeypatch, tmp_path):
+        """The pull already ran: a scan that cannot finish must not leave the new tree enabled."""
+        from hermes_cli.plugins_cmd import _rescan_after_update
+
+        calls = self._scanner_that_raises(monkeypatch)
+        console = MagicMock()
+        assert _rescan_after_update(tmp_path, "demo", console) is False
+        assert calls == [("demo", False)]
+        printed = " ".join(str(c.args[0]) for c in console.print.call_args_list if c.args)
+        assert "has been disabled" in printed and "AttributeError" in printed
+
+    def test_update_stops_before_housekeeping_when_the_rescan_raises(self, monkeypatch, tmp_path):
+        from hermes_cli import plugins_cmd
+        from hermes_cli import plugins_cmd_catalog as catalog
+
+        calls = self._scanner_that_raises(monkeypatch)
+        housekeeping = MagicMock()
+        monkeypatch.setattr(plugins_cmd, "_require_installed_plugin", lambda *_a, **_k: tmp_path)
+        monkeypatch.setattr(catalog, "read_catalog_sidecar", lambda _t: None)
+        monkeypatch.setattr(plugins_cmd, "_pull_plugin_update", lambda *_a, **_k: "Updating 1..2")
+        monkeypatch.setattr(plugins_cmd, "_post_pull_housekeeping", housekeeping)
+
+        with pytest.raises(SystemExit) as exc_info:
+            plugins_cmd.cmd_update("demo")
+
+        assert exc_info.value.code == 1
+        assert calls == [("demo", False)]
+        housekeeping.assert_not_called()
+
+    def test_a_clean_rescan_lets_the_update_go_on(self, monkeypatch, tmp_path):
+        import tools.plugin_guard as guard
+        from hermes_cli import plugins_cmd
+
+        monkeypatch.setattr(plugins_cmd, "_scan_on_install_enabled", lambda: True)
+        monkeypatch.setattr(guard, "scan_plugin", lambda *_a, **_k: MagicMock(verdict="safe"))
+        monkeypatch.setattr(guard, "should_allow_plugin_install", lambda _r: (True, "Allowed (clean scan)"))
+        assert plugins_cmd._rescan_after_update(tmp_path, "demo", MagicMock()) is True
+
 
 # ── cmd_remove tests ─────────────────────────────────────────────────────────
 

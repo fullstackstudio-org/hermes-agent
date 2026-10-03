@@ -1070,7 +1070,8 @@ def cmd_update(name: str) -> None:
             before_pull=lambda: console.print(f"[dim]Updating {name}...[/dim]"))
     except PluginOperationError as exc:
         _fail(console, f"[red]Error:[/red] {exc}")
-    _rescan_after_update(target, name, console)
+    if not _rescan_after_update(target, name, console):
+        _fail(console, f"[red]Update of '{escape(name)}' stopped:[/red] the pulled tree was not scanned.")
     _post_pull_housekeeping(target, console)
 
     # Re-consent when the new version declares capabilities the granted set lacks or the
@@ -1092,16 +1093,30 @@ def cmd_update(name: str) -> None:
         console.print(f"[dim]{out}[/dim]")
 
 
-def _rescan_after_update(target: Path, name: str, console) -> None:
+def _rescan_after_update(target: Path, name: str, console) -> bool:
     """Re-scan after ``git pull``: the tree is already mutated, so a dangerous verdict disables
-    the plugin rather than leaving it active."""
+    the plugin rather than leaving it active. A scan that cannot finish (any exception, from the
+    scanner or from reading the tree) fails closed: the plugin is disabled, the reason printed,
+    and ``False`` returned so the caller stops before installing the new tree's dependencies.
+    Returns ``True`` when the update may go on."""
     if not _scan_on_install_enabled():
-        return
-    from tools.plugin_guard import format_scan_report, scan_plugin, should_allow_plugin_install
-    scan_result = scan_plugin(target, source=name)
-    allowed, reason = should_allow_plugin_install(scan_result)
+        return True
+    try:
+        from tools.plugin_guard import format_scan_report, scan_plugin, should_allow_plugin_install
+        scan_result = scan_plugin(target, source=name)
+        allowed, reason = should_allow_plugin_install(scan_result)
+    except Exception as exc:    # noqa: BLE001 - fail closed on anything
+        logger.exception("security rescan of updated plugin %s failed", name)
+        _set_plugin_enabled(name, enable=False)
+        console.print()
+        console.print(
+            f"[red]The security scan of the updated plugin '{name}' failed ({type(exc).__name__}); "
+            f"the plugin has been disabled.[/red] The new code is on disk but will not load. "
+            f"Review the tree, then re-enable it with "
+            f"`hermes plugins enable {name}` if you trust it.")
+        return False
     if allowed is True:
-        return
+        return True
     console.print()
     console.print(f"[yellow]⚠ Security scan flagged the updated plugin:[/yellow] {reason}")
     console.print(format_scan_report(scan_result))
@@ -1112,6 +1127,7 @@ def _rescan_after_update(target: Path, name: str, console) -> None:
             f"[red]Plugin '{name}' has been disabled.[/red] Review the "
             f"findings, then re-enable with `hermes plugins enable {name}` "
             f"if you trust them.")
+    return True
 
 
 def _post_pull_housekeeping(target: Path, console) -> None:

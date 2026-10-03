@@ -1235,13 +1235,23 @@ function PluginRowCard(props: PluginRowCardProps) {
                       // The new pin widens the plugin; the backend changed nothing until confirmed.
                       const body = [
                         (t.pluginsPage.updateConsentBody ?? en.pluginsPage.updateConsentBody!)(
-                          row.name,
-                          (res.sha ?? "").slice(0, 8),
+                          plain(row.name),
+                          plain(res.sha, 12).slice(0, 8),
                         ),
-                        ...(res.delta_lines ?? []),
+                        ...(res.delta_lines ?? []).slice(0, 20).map((line) => plain(line, 200)),
                       ].join("\n");
                       if (!window.confirm(body)) return;
-                      await api.updateAgentPlugin(row.name, true);
+                      const retried = await api.updateAgentPlugin(row.name, true);
+                      if (!retried.ok) {
+                        // Nothing was applied: say why instead of reporting success.
+                        window.alert(
+                          (t.pluginsPage.updateScanRetryFailed ?? en.pluginsPage.updateScanRetryFailed!)(
+                            plain(row.name),
+                            plain(retried.error, 300),
+                          ),
+                        );
+                        return;
+                      }
                     }
                     showToast(t.pluginsPage.updateGit, "success");
                   });

@@ -16947,7 +16947,9 @@ def test_session_activate_returns_inflight_stream_before_completion(monkeypatch)
             }
         )
 
-        inflight = resp["result"].get("inflight")
+        inflight = dict(resp["result"].get("inflight"))
+        # The live turn names itself, so a resuming client can tell its prompt row from this turn.
+        assert inflight.pop("display_metadata") == {"turn_id": server._sessions["sid-live"]["turn_id"]}
         assert inflight == {
             "assistant": "partial answer",
             "streaming": True,

@@ -754,6 +754,12 @@ def _(rid, params: dict) -> dict:
     # overwritten: nothing a client sent is ever the id.
     from tui_gateway.row_identity import mint_turn_id, with_turn_id
     display_metadata = with_turn_id(display_metadata, mint_turn_id())
+    # The turn went in flight at the lock-in above, before this id existed: a client that resumes now must be
+    # able to tell its prompt row from this turn (``inflight.display_metadata.turn_id``), as one resuming a
+    # queued or continued turn already can.
+    with session["history_lock"]:
+        if isinstance(inflight := session.get("inflight_turn"), dict):
+            inflight["display_metadata"] = dict(display_metadata)
     if turn_isolation:
         if turn_author:
             logger.debug("isolated compute turns carry no author yet; the turn from %s runs unattributed",

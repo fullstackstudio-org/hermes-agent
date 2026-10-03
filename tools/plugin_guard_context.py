@@ -273,6 +273,18 @@ def is_regex_alternation_token(finding: Finding, line: str) -> bool:
 # escape there is a doubt. An unreadable file, a symlink or a lexing error anywhere is a doubt
 # too, and one doubt answers "yes".
 #
+# Reaching ``constructor`` or replacing ``exec`` indirectly is a doubt too: a ``"constructor"``
+# string anywhere, ``{constructor: F}``, ``.constructor`` on a call result, and a computed member
+# whose key is not a literal when it is indexed again, sits on a call result, a function or an
+# array, is called with a string, or is assigned on a ``prototype`` (``_computed_key_doubt``).
+#
+# The inventory is a DENYLIST with known gaps, not a proof that nothing can run. It only ever
+# decides whether ``sudo_usage`` and a member ``exec_string`` may drop to ``low``; every other
+# finding is untouched. Known gaps it does not try to close: the browser's own code-from-string
+# routes (a ``<script>`` element built and inserted, a ``javascript:`` URL, ``setAttribute("on…")``,
+# ``innerHTML``/``outerHTML``/``insertAdjacentHTML``, ``document.write``), which run in the page and
+# not on the host, and any route built without a name the list knows.
+#
 # Accepted limits (the rule only ever lowers, and only to a ``low`` that stays in the report):
 #   - The inventory reads JavaScript only. A Python or shell file of the plugin that hands JS
 #     data to a process is not counted; those files are judged by their own rules.
@@ -740,12 +752,62 @@ def _is_method_definition(toks: list, k: int, closer_of: dict) -> bool:
                  or (before is not None and before.kind == "id" and before.text in ("static", "async", "get", "set"))))
 
 
+# Words after which ``[`` opens an array literal or a destructuring pattern, not a computed member
+# (``this[`` and ``super[`` index a value and are not here).
+_JS_KEYWORDS = frozenset({
+    "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else",
+    "export", "extends", "finally", "for", "function", "if", "import", "in", "instanceof", "let", "new",
+    "of", "return", "static", "switch", "throw", "try", "typeof", "var", "void", "while", "with", "yield",
+    "await", "async"})
+
+
 def _computed_member(toks: list, k: int) -> bool:
     """The ``[`` at ``k`` indexes a value (``x["exec"]``), not an array literal."""
     b = toks[k - 1] if k else None
-    return b is not None and ((b.kind == "id" and (b.text not in (_JS_NOT_A_CALL | _RE_AFTER_KEYWORDS)
-                                                   or _is_member_name(toks, k - 1)))
+    return b is not None and ((b.kind == "id" and (b.text not in _JS_KEYWORDS or _is_member_name(toks, k - 1)))
                               or _is_p(b, ")", "]") or b.kind == "str")
+
+
+def _literal_value(tok: _Tok) -> Optional[str]:
+    """The value of a string, a template without substitutions, or a number; None otherwise."""
+    if tok.kind == "str":
+        return _decode_js_string(tok.text)
+    if tok.kind == "tpl" and tok.text.startswith("`") and tok.text.endswith("`") and len(tok.text) >= 2:
+        return _decode_js_string(tok.text)
+    if tok.kind == "num":
+        return tok.text
+    return None
+
+
+def _computed_key_doubt(toks: list, k: int, closer_of: dict) -> bool:
+    """The computed member ``[`` at *k* could reach ``constructor`` or replace ``exec``: its key is
+    ``"constructor"``/``"exec"`` (a string or a plain template), or its key is not a literal
+    (``"constr"+"uctor"``, ``k``, a template with substitutions) and the member is indexed again
+    (``x[a][b]``), sits on a call result, a function or an array (``f()[k]``, ``(()=>{})[k]``,
+    ``[][k]``; a plain parenthesised value ``(a ?? b)[k]`` does not count), is called with a string
+    (``x[k]("code")``), or is assigned on a ``prototype`` (``RegExp.prototype[k] = …``)."""
+    j = closer_of.get(k, -1)
+    if j < 0:
+        return True
+    inner = toks[k + 1:j]
+    value = _literal_value(inner[0]) if len(inner) == 1 else None
+    if value is not None:
+        return value in ("constructor", "exec")
+    after = toks[j + 1] if j + 1 < len(toks) else None
+    receiver = toks[k - 1]
+    if _is_p(after, "[") or _is_p(receiver, "]"):
+        return True
+    if _is_p(receiver, ")"):
+        o = receiver.match
+        callee = toks[o - 1] if o > 0 else None
+        is_call = callee is not None and ((callee.kind == "id" and callee.text not in _JS_KEYWORDS)
+                                          or _is_p(callee, ")", "]"))
+        holds_function = any((t.kind == "id" and t.text == "function") or _is_p(t, "=>") for t in toks[o + 1:k - 1])
+        if is_call or holds_function:
+            return True    # getPrototypeOf(f)[k], (()=>{})[k]
+    if _is_p(after, "(") and j + 2 < len(toks) and toks[j + 2].kind in ("str", "tpl"):
+        return True
+    return receiver.kind == "id" and receiver.text == "prototype" and _is_p(after, *_JS_BINDING)
 
 
 def _js_token_sink(toks: list) -> bool:
@@ -754,6 +816,8 @@ def _js_token_sink(toks: list) -> bool:
     for k, t in enumerate(toks):
         prev = toks[k - 1] if k else None
         nxt = toks[k + 1] if k + 1 < len(toks) else None
+        if _is_p(t, "[") and _computed_member(toks, k) and _computed_key_doubt(toks, k, closer_of):
+            return True
         if t.kind == "id":
             if t.text in _JS_SINK_IDS:
                 return True
@@ -785,12 +849,20 @@ def _js_token_sink(toks: list) -> bool:
             if t.text == "constructor" and member and _is_p(nxt, "(") and k + 2 < len(toks) and (
                     toks[k + 2].kind in ("str", "tpl")):
                 return True    # (()=>{}).constructor("code"): the Function constructor by another name
+            if t.text == "constructor" and member and k >= 2 and _is_p(toks[k - 2], ")", "]"):
+                return True    # Object.getPrototypeOf(function(){}).constructor
+            if t.text == "constructor" and not member and _is_p(prev, "{", ",") and _is_p(nxt, ":", ",", "}", "="):
+                return True    # const {constructor: F} = fn
             if nxt is not None and nxt.kind == "tpl" and nxt.text.startswith("`") and (
                     t.text not in (_JS_NOT_A_CALL | _RE_AFTER_KEYWORDS) or member) \
                     and _chain_runs(_member_chain(toks, k)):
                 return True    # a shell tag: zx's $`…`, Bun.$`…`, sh`…`
+        elif t.kind == "tpl" and _literal_value(t) == "constructor":
+            return True
         elif t.kind == "str":
             value = _decode_js_string(t.text)    # None: an escape this lexer will not guess at
+            if value == "constructor":
+                return True    # Reflect.get(fn, "constructor"), {"constructor": F} = fn
             computed = _is_p(prev, "[") and _computed_member(toks, k - 1)
             if computed and (value is None or value in ("constructor", "exec")):
                 return True

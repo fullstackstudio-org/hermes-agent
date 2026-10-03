@@ -678,8 +678,9 @@ class TestMinifiedBundleSudoData:
     inside a template a previous line opened, so the per-line tests never held and every such
     bundle scored ``caution``. ``.js`` files are now lexed whole and a ``sudo`` token is judged by
     its own context: a key, a comparison or a plain property value that nothing hands on, in a
-    plugin whose JavaScript cannot run anything, is ``low`` (still reported). Every way of
-    running, loading, building or smuggling ``sudo`` keeps ``high``."""
+    plugin whose JavaScript names none of the routes to a process, eval or module load the
+    inventory lists (a denylist with known gaps, see rule 5b), is ``low`` (still reported). Each
+    route below that the inventory names keeps ``high``; that is all these tests claim."""
 
     BUNDLE = "dashboard/app/assets/index-abc123.js"
     # Noise a minified line always carries: a template literal and a `.call(`.
@@ -705,8 +706,9 @@ class TestMinifiedBundleSudoData:
             "const k={ 'sudo' : 1 };if('sudo'===m)go();",
             'const v=a.return/2,w={sudo:"sudo"};',                      # `.return /` is a division
             'function n(u){var a=new u.constructor(u.type,u);return{kind:"sudo",a}}',   # React's event copy
+            'const v=(a??b)[t],w=n[i](r),{x}=y;for(const[r,i]of e)go(r,i);this[k]=1;return{kind:"sudo"};',
         ])
-        assert sev == {1: "low", 2: "low", 3: "low", 4: "low", 5: "low", 6: "low"}
+        assert sev == {1: "low", 2: "low", 3: "low", 4: "low", 5: "low", 6: "low", 7: "low"}
         assert result.verdict == "safe"
         assert should_allow_plugin_install(result)[0] is True
 
@@ -791,6 +793,17 @@ class TestMinifiedBundleSudoData:
         'const o={"c\\x6dd":"sudo"};',                                 # an escaped command-shaped key
         'const k={kind:"sudo"};process["bin"+"ding"]("spawn_sync");',
         'const k={kind:"sudo"};(()=>{}).constructor("return 1")();',
+        # review round 4: constructor and exec reached through computed members
+        'const k={kind:"sudo"};[]["constr"+"uctor"]["constr"+"uctor"](c)();',
+        'const k={kind:"sudo"};[][`constructor`][`constructor`](c)();',
+        'const k={kind:"sudo"};x[`exec`]=f;',
+        'const k={kind:"sudo"};Object.getPrototypeOf(function(){}).constructor(c)();',
+        'const k={kind:"sudo"};const{constructor:F}=function(){};F(c)();',
+        'const k={kind:"sudo"};Reflect.get(function(){},"constructor")(c)();',
+        'const k={kind:"sudo"};(()=>{})[n](c)();',
+        'const k={kind:"sudo"};RegExp.prototype[n]=f;',
+        'const k={kind:"sudo"};x[n]("return process")();',
+        'const k={kind:"sudo"};[][n](c);',
     ])
     def test_running_loading_or_smuggling_sudo_keeps_high(self, tmp_path, line):
         sev, result = self._scan(tmp_path, [line])
@@ -1028,7 +1041,8 @@ class TestMinifiedBundleRegexExec:
 
 class TestJsTokenRuleFuzz:
     """Random token streams: the scanner never crashes, the JS rule never raises a severity, and
-    whenever the stream holds anything that runs code it lowers nothing at all."""
+    whenever the stream holds one of the sinks the inventory names it lowers nothing at all. (The
+    inventory is a denylist; these tests do not claim more than its list.)"""
 
     DATA = ['{sudo:"sudo"}', "{sudo:12e4}", 'case"sudo":', 'x!=="sudo"', '{kind:"sudo"}', "'sudo'", "sudo",
             '"sudo"', "`sudo`", "${", "}", "{", "(", ")", "[", "]", ",", ":", ";", "/", "/x/", "`", "'", '"',

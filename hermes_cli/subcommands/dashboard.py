@@ -126,3 +126,5 @@ def build_dashboard_parser(
 
     from hermes_cli.dashboard_auth.passkeys.cli import add_passkey_parser
     add_passkey_parser(dashboard_subparsers)
+    from hermes_cli.dashboard_auth.mcp.cli import add_mcp_parser
+    add_mcp_parser(dashboard_subparsers)

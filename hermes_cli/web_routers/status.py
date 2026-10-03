@@ -362,7 +362,8 @@ def _auth_gate_status() -> Dict[str, Any]:
     provider is registered (token-only credentials such as drain don't count). Missing
     "native_pkce" ⇒ older gateway ⇒ desktop falls back automatically. "native_revoke" (always in
     gated mode): ``POST /auth/native/revoke`` exists, so a native client can end its own grant;
-    readers test membership, so a client that does not know it ignores it."""
+    readers test membership, so a client that does not know it ignores it. "mcp" (fork): the remote
+    MCP endpoint ``/mcp`` and its authorization server are on."""
     auth_required = bool(getattr(app.state, "auth_required", False))
     auth_providers: list[str] = []
     auth_flows: list[str] = []
@@ -375,6 +376,10 @@ def _auth_gate_status() -> Dict[str, Any]:
             if _list_session_providers():
                 auth_flows.append("native_pkce")
             auth_flows.append("native_revoke")
+            # Fork: the remote MCP endpoint and its authorization server are on (dashboard.mcp).
+            from hermes_cli.dashboard_auth.mcp.mount import current as _mcp_current
+            if _mcp_current() is not None:
+                auth_flows.append("mcp")
     except Exception:
         # Module not importable yet (early startup) — leave as [].
         pass

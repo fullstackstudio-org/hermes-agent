@@ -6,7 +6,7 @@ stays the single late-binding seam tests monkeypatch (``web_deps.late``).
 Usage: ``python -m hermes_cli.main web [--port 8080]``.
 """
 
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 import asyncio
 from collections import deque
@@ -263,9 +263,14 @@ async def _lifespan(app: "FastAPI"):
 
     start_background_bootstrap()
 
+    # Fork: what the MCP endpoint runs for the server's lifetime (dashboard_auth/mcp/mount.py).
+    mcp_lifespan = AsyncExitStack()
+    await mcp_lifespan.enter_async_context(_mcp_mount.lifespan(app))
+
     try:
         yield
     finally:
+        await mcp_lifespan.aclose()
         hosted_room_start_cancel.set()
         _hosted_groups.stop_hosted_room_service(timeout=5.0)
         hosted_room_start_thread.join(timeout=1.0)
@@ -402,7 +407,7 @@ app.add_middleware(
 # Endpoints that do NOT require the session token; everything else under /api/
 # is gated below. Shared with the OAuth gate so the two allowlists cannot
 # drift (/api/status once 401'd under the OAuth gate, breaking the portal probe).
-from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS as _PUBLIC_API_PATHS
+from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS as _PUBLIC_API_PATHS, is_registered_public as _is_registered_public
 
 
 def _has_valid_session_token(request: Request) -> bool:
@@ -627,6 +632,7 @@ async def auth_middleware(request: Request, call_next):
         and not getattr(request.app.state, "auth_required", False)
         and path.startswith("/api/")
         and path not in _PUBLIC_API_PATHS
+        and not _is_registered_public(path)
         and not path.startswith("/api/mcp/oauth/callback/")
         and not _has_valid_session_token(request)
         and not _has_valid_query_token(request, path)
@@ -973,6 +979,11 @@ app.include_router(_dashboard_auth_router)
 from hermes_cli.dashboard_auth.passkeys.routes import router as _passkey_router  # noqa: E402
 
 app.include_router(_passkey_router)
+# Fork: the MCP authorization server and endpoint (/mcp*, /.well-known/oauth-*): one route that matches only
+# while dashboard.mcp is on (decided at startup by _configure_auth_gate), so off is the same as absent.
+from hermes_cli.dashboard_auth.mcp import mount as _mcp_mount  # noqa: E402
+
+_mcp_mount.install(app)
 mount_spa(app)
 
 
@@ -1120,6 +1131,8 @@ def _configure_auth_gate(
             host,
             ", ".join(p.name for p in list_providers()),
         )
+    # Fork: dashboard.mcp needs the settled gate and public origins; it stays off (and says why) otherwise.
+    _mcp_mount.configure(app)
 
 
 def _build_uvicorn_server(host: str, port: int, *, ssh_isolated: bool = False):

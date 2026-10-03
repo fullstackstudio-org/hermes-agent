@@ -18,7 +18,8 @@ _write_lock = threading.Lock()
 # Field names that must never appear in the log raw; matching kwargs are dropped.
 _REDACTED_FIELDS: frozenset = frozenset({
     "access_token", "refresh_token", "code", "code_verifier",
-    "state", "ticket", "cookie", "Authorization", "authorization"})
+    "state", "ticket", "cookie", "Authorization", "authorization",
+    "client_secret", "token", "nonce"})
 
 
 class AuditEvent(enum.Enum):
@@ -65,6 +66,21 @@ class AuditEvent(enum.Enum):
     CONFIRM_FORCED = "confirm_forced"
     # A dashboard or RPC config write that would have changed a protected section (confirm.passkey).
     PROTECTED_SETTING_REFUSED = "protected_setting_refused"
+    # The remote MCP endpoint and its authorization server (hermes_cli/dashboard_auth/mcp): registrations,
+    # consents, token issue/refresh/refusal, grant revocations, tool calls, chats opened and throttles.
+    # Fields name the user, the grant, the client id and name, the address, the tool, the session, an
+    # outcome and a reason; never a prompt, a reply, a token, a code or a client secret.
+    MCP_CLIENT_REGISTERED = "mcp_client_registered"
+    MCP_AUTHORIZE_START = "mcp_authorize_start"
+    MCP_CONSENT_GRANTED = "mcp_consent_granted"
+    MCP_CONSENT_DENIED = "mcp_consent_denied"
+    MCP_TOKEN_ISSUED = "mcp_token_issued"
+    MCP_TOKEN_REFRESHED = "mcp_token_refreshed"
+    MCP_TOKEN_REJECTED = "mcp_token_rejected"
+    MCP_GRANT_REVOKED = "mcp_grant_revoked"
+    MCP_TOOL_CALL = "mcp_tool_call"
+    MCP_CHAT_OPENED = "mcp_chat_opened"
+    MCP_RATE_LIMITED = "mcp_rate_limited"
 
 
 def _resolve_log_path() -> Path:

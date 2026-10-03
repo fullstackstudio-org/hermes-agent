@@ -25,7 +25,7 @@ from hermes_cli.dashboard_auth.cookies import (
     read_session_provider, read_sso_attempt_cookie, set_session_cookies,
     set_session_provider_cookie, set_sso_attempt_cookie)
 from hermes_cli.dashboard_auth.prefix import prefix_from_request
-from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS
+from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS, is_registered_public
 from hermes_cli.dashboard_auth.refresh_singleflight import refresh_session_coalesced
 from hermes_cli.dashboard_auth.request_utils import (
     access_token_max_age as _expires_in_seconds, client_ip as _client_ip,
@@ -47,8 +47,8 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
 def _path_is_public(path: str) -> bool:
     """:data:`PUBLIC_API_PATHS` (shared with the legacy middleware) matched exactly so
     ``/api/status`` never exposes ``/api/status/extension``; :data:`_GATE_PUBLIC_PREFIXES`
-    prefix-matched."""
-    return path in PUBLIC_API_PATHS or any(
+    prefix-matched; fork: the exact paths an enabled feature registered (``public_paths``)."""
+    return path in PUBLIC_API_PATHS or is_registered_public(path) or any(
         path == p or path.startswith(p) for p in _GATE_PUBLIC_PREFIXES)
 
 

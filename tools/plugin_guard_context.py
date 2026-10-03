@@ -33,7 +33,7 @@ STEP_DOWN = {"critical": "high", "high": "medium"}
 # payload for them: every ``injection`` pattern, the Markdown exfil/context patterns, the
 # agent-config edits, ``curl | sh`` install one-liners (a README is where those live), an
 # ``authorized_keys`` append, and a leaked provider key (a real secret is a real leak anywhere).
-DOC_PROSE_EXTENSIONS = {".md", ".txt", ".rst", ".html"}
+DOC_PROSE_EXTENSIONS = {".md", ".txt", ".rst", ".html", ".htm", ".xhtml"}
 _PROSE_KEEPS_FULL_SEVERITY_CATEGORIES = {"injection", "credential_exposure"}
 _PROSE_KEEPS_FULL_SEVERITY_IDS = {
     "context_exfil", "send_to_url", "md_image_exfil", "md_link_exfil", "ssh_backdoor",

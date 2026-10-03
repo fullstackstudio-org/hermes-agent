@@ -286,9 +286,11 @@ class TestCautionPolicy:
         assert allowed is True
 
     def test_binary_file_is_caution_not_dangerous(self, tmp_path):
+        """A bundled binary Python cannot import stays a confirmable caution. (A ``.so`` beside
+        Python code is a native extension module and is ``dangerous``: HERM-196b.)"""
         files = dict(BASE_FILES)
         plugin = _mk_plugin(tmp_path, files)
-        (plugin / "vendored.so").write_bytes(b"\x7fELF binary")
+        (plugin / "vendored.dll").write_bytes(b"MZ binary")
         result = scan_plugin(plugin)
         binary = [f for f in result.findings if f.pattern_id == "binary_file"]
         assert binary and binary[0].severity == "high"

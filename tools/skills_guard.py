@@ -493,7 +493,9 @@ SCANNABLE_EXTENSIONS = {
     '.md', '.txt', '.py', '.sh', '.bash', '.js', '.ts', '.rb', '.yaml', '.yml', '.json', '.toml',
     '.cfg', '.ini', '.conf', '.html', '.css', '.xml', '.tex', '.r', '.jl', '.pl', '.php',
     # JavaScript and TypeScript modules by their other names (HERM-195): never read before.
-    '.mjs', '.cjs', '.jsx', '.tsx', '.mts', '.cts', '.vue'}
+    '.mjs', '.cjs', '.jsx', '.tsx', '.mts', '.cts', '.vue',
+    # Python's windowed scripts, and markup that can carry script (HERM-196b).
+    '.pyw', '.svelte', '.svg', '.htm', '.xhtml'}
 SUSPICIOUS_BINARY_EXTENSIONS = {
     '.exe', '.dll', '.so', '.dylib', '.bin', '.dat', '.com', '.msi', '.dmg', '.app', '.deb', '.rpm'}
 _SCRIPT_EXTENSIONS = {'.sh', '.bash', '.py', '.rb', '.pl'}

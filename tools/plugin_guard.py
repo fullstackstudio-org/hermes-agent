@@ -11,7 +11,9 @@ needs confirmation, ``dangerous`` is blocked and ``--force`` does NOT override.
 from __future__ import annotations
 
 import ast
+import importlib.machinery as _machinery
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +27,7 @@ from tools.skills_guard import (
     Finding, ScanResult, SUSPICIOUS_BINARY_EXTENSIONS, _determine_verdict, format_scan_report,
     scan_file)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-fork-2"
+PLUGIN_SCANNER_VERSION = "plugin-guard-fork-3"
 
 # Caches and vendored environments a checkout makes for itself. Skipped only when nothing in
 # them is tracked by git: a TRACKED ``venv/evil.py`` or ``__pycache__/x.pyc`` ships with the
@@ -41,9 +43,16 @@ EXCLUDED_DIRS = {
 # ``__pycache__/x.cpython-3XX.pyc`` is imported in place of a harmless ``x.py``: code that runs
 # and that no text scan can read. Any bytecode in a plugin tree is ``dangerous``.
 BYTECODE_EXTENSIONS = {".pyc", ".pyo"}
-# Native extension modules are imported like ``.so`` (already a binary finding); ``.pyd`` is
-# Windows' name for one.
-EXTRA_BINARY_EXTENSIONS = {".pyd"}
+# Native extension modules: a file Python imports as compiled code (``helper.cpython-311-darwin.so``,
+# ``helper.abi3.so``, ``helper.so``, ``helper.pyd``). In a plugin that holds Python source it is
+# importable and unreadable, so it is ``dangerous`` like bytecode. The suffixes of every platform
+# count, not only this interpreter's, so a scan on macOS judges a Linux or Windows tree the same.
+NATIVE_EXTENSION_SUFFIXES = tuple(sorted(set(_machinery.EXTENSION_SUFFIXES) | {".so", ".pyd"}, key=len, reverse=True))
+# Archives Python can import from (zipimport, a wheel or egg on sys.path, a zipapp): unreadable to
+# a text scan, so at least a binary finding.
+ARCHIVE_EXTENSIONS = {".zip", ".whl", ".egg", ".pyz"}
+EXTRA_BINARY_EXTENSIONS = {".pyd"} | ARCHIVE_EXTENSIONS
+PYTHON_SOURCE_EXTENSIONS = {".py", ".pyw"}
 
 # Test trees ARE scanned (``plugins_loader`` sets ``submodule_search_locations`` to the
 # plugin root, so ``from .tests import evil`` runs whatever lives there), but findings under
@@ -52,15 +61,15 @@ EXTRA_BINARY_EXTENSIONS = {".pyd"}
 # made such plugins uninstallable and taught authors to obfuscate their own tests (#89610).
 
 # Code files, where "reads an env secret" / "HTTP call with a key" is normal (requires_env).
-CODE_FILE_EXTENSIONS = {".py", ".js", ".ts", ".sh", ".bash", ".rb", ".pl", ".php",
-                        ".mjs", ".cjs", ".jsx", ".tsx", ".mts", ".cts", ".vue"}
+CODE_FILE_EXTENSIONS = {".py", ".pyw", ".js", ".ts", ".sh", ".bash", ".rb", ".pl", ".php",
+                        ".mjs", ".cjs", ".jsx", ".tsx", ".mts", ".cts", ".vue", ".svelte"}
 
 # Line-comment marker per code extension. Whole-line comments explain intent; hardening
 # notes like "# a symlink could point at /etc/passwd" are prose *about* a defense.
 COMMENT_PREFIXES_BY_EXTENSION = {
-    ".py": "#", ".sh": "#", ".bash": "#", ".rb": "#", ".pl": "#", ".r": "#", ".jl": "#",
+    ".py": "#", ".pyw": "#", ".sh": "#", ".bash": "#", ".rb": "#", ".pl": "#", ".r": "#", ".jl": "#",
     ".js": "//", ".ts": "//", ".php": "//", ".mjs": "//", ".cjs": "//", ".jsx": "//", ".tsx": "//",
-    ".mts": "//", ".cts": "//", ".vue": "//"}
+    ".mts": "//", ".cts": "//", ".vue": "//", ".svelte": "//"}
 
 # One severity step down from the pattern's default.
 _COMMENT_SEVERITY_CAP = {"critical": "high", "high": "medium"}
@@ -123,7 +132,8 @@ MAX_PLUGIN_SINGLE_FILE_KB = 1024       # 1MB single file
 
 def _tracked_paths(plugin_dir: Path) -> Optional[set]:
     """The paths under *plugin_dir* that git tracks, relative to it, or ``None`` when *plugin_dir*
-    is not inside a git work tree git will read (no git, not a checkout, a repository git refuses).
+    is not a checkout of the plugin: no git, not inside a work tree, a repository git refuses, or a
+    work tree that is not *plugin_dir* itself and tracks nothing under it.
     Run with no global/system config, no hooks and no fsmonitor, and without any inherited
     repository redirection, so the tree cannot make git do anything but list files."""
     import subprocess
@@ -135,9 +145,9 @@ def _tracked_paths(plugin_dir: Path) -> Optional[set]:
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
     base = [git, "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}", "-c", "core.quotePath=false"]
     try:
-        inside = subprocess.run(base + ["rev-parse", "--is-inside-work-tree"], cwd=str(plugin_dir), env=env,
-                                capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
-        if inside.returncode != 0 or inside.stdout.strip() != b"true":
+        top = subprocess.run(base + ["rev-parse", "--show-toplevel"], cwd=str(plugin_dir), env=env,
+                             capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+        if top.returncode != 0 or not top.stdout.strip():
             return None
         listed = subprocess.run(base + ["ls-files", "-z", "--cached"], cwd=str(plugin_dir), env=env,
                                 capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
@@ -145,7 +155,15 @@ def _tracked_paths(plugin_dir: Path) -> Optional[set]:
         return None
     if listed.returncode != 0:
         return None
-    return {os.fsdecode(p) for p in listed.stdout.split(b"\0") if p}
+    tracked = {os.fsdecode(p) for p in listed.stdout.split(b"\0") if p}
+    try:
+        is_top = Path(os.fsdecode(top.stdout.strip())).resolve() == plugin_dir.resolve()
+    except OSError:
+        is_top = False
+    # A plugin dir inside some other repository that tracks nothing of it (a home-directory
+    # dotfiles repo, a parent project) is not a checkout of the plugin: "untracked" would then
+    # hide everything in its venv/ or __pycache__/. Scan it fully instead.
+    return tracked if (is_top or tracked) else None
 
 
 def _walk(plugin_dir: Path, tracked: Optional[set] = None, *, know_tracked: bool = False) -> Iterator[Tuple[Path, str]]:
@@ -220,8 +238,10 @@ def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path,
     """Apply plugin-specific exemptions and severity remaps to raw findings. *js* is the scan's
     JavaScript inventory (``plugin_guard_context`` (5b)); without it no JS token rule applies."""
     is_code = Path(rel_path).suffix.lower() in CODE_FILE_EXTENSIONS
-    main_guard_lines = _main_guard_body_lines(file_path) if file_path.suffix.lower() == ".py" else set()
-    is_js = Path(rel_path).suffix.lower() in {".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx", ".mts", ".cts", ".vue"}
+    main_guard_lines = (_main_guard_body_lines(file_path) if file_path.suffix.lower() in PYTHON_SOURCE_EXTENSIONS
+                        else set())
+    is_js = Path(rel_path).suffix.lower() in {".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx", ".mts", ".cts", ".vue",
+                                              ".svelte"}
     # A CI workflow definition runs on the forge's runner, not the host: same cap as a README.
     doc_prose = is_doc_prose(rel_path) or is_ci_workflow(rel_path)
     lines = _file_lines(file_path) if findings else []
@@ -338,7 +358,10 @@ def _check_plugin_structure(plugin_dir: Path, tracked: Optional[set] = None) -> 
     file_count = 0
     total_size = 0
     resolved_root = plugin_dir.resolve()
-    for f, rel in _walk(plugin_dir, tracked, know_tracked=True):
+    entries = list(_walk(plugin_dir, tracked, know_tracked=True))
+    has_python = any(f.suffix.lower() in PYTHON_SOURCE_EXTENSIONS and f.is_file() and not f.is_symlink()
+                     for f, _rel in entries)
+    for f, rel in entries:
         if f.is_symlink():
             file_count += 1
             try:
@@ -363,10 +386,15 @@ def _check_plugin_structure(plugin_dir: Path, tracked: Optional[set] = None) -> 
             findings.append(_finding("oversized_file", "medium", "structural", rel, f"{size // 1024}KB",
                                      f"file is {size // 1024}KB (limit: {MAX_PLUGIN_SINGLE_FILE_KB}KB)"))
         ext = f.suffix.lower()
+        native = next((sfx for sfx in NATIVE_EXTENSION_SUFFIXES if f.name.lower().endswith(sfx)), None)
         if ext in BYTECODE_EXTENSIONS:
             findings.append(_finding("compiled_bytecode", "critical", "execution", rel, f"bytecode: {ext}",
                                      "compiled Python bytecode: imported in place of (or without) source "
                                      "and cannot be scanned"))
+        elif native and has_python:
+            findings.append(_finding("native_extension", "critical", "execution", rel, f"extension: {native}",
+                                     "native Python extension module beside Python code: importable, "
+                                     "cannot be scanned"))
         elif ext in SUSPICIOUS_BINARY_EXTENSIONS or ext in EXTRA_BINARY_EXTENSIONS:
             findings.append(_finding("binary_file", SEVERITY_REMAP["binary_file"], "structural", rel,
                                      f"binary: {ext}", f"binary/executable file ({ext}) bundled in plugin (cannot be scanned)"))
@@ -377,6 +405,44 @@ def _check_plugin_structure(plugin_dir: Path, tracked: Optional[set] = None) -> 
         findings.append(_finding("oversized_bundle", "medium", "structural", "(directory)", f"{total_size // 1024}KB",
                                  f"plugin is {total_size // 1024}KB total (limit: {MAX_PLUGIN_TOTAL_SIZE_KB}KB)"))
     return findings
+
+
+# Python that imports code from somewhere a text scan does not read: an archive on sys.path, the
+# zipimport machinery, a loader aimed at a file that is not ``.py``.
+_IMPORT_PATH_CALL = re.compile(r"\bsys\.path\s*\.\s*(?:insert|append|extend)\s*\(|\bsys\.path\s*(?:\+=|\[)|\bsite\.addsitedir\s*\(")
+_ARCHIVE_MENTION = re.compile(r"\.(?:zip|whl|egg|pyz)\b", re.IGNORECASE)
+_ZIPIMPORT = re.compile(r"\bzipimport\b|\bzipimporter\s*\(")
+_RAW_LOADERS = re.compile(r"\b(?:SourcelessFileLoader|ExtensionFileLoader)\b")
+_FILE_LOADER_CALL = re.compile(r"\b(?:SourceFileLoader|spec_from_file_location|load_source|load_compiled|run_path)\s*\(")
+_QUOTED_PATH = re.compile(r"""["']([^"'\n]*\.[A-Za-z0-9]{1,8})["']""")
+
+
+def _import_path_findings(file_path: Path, rel: str) -> List[Finding]:
+    """High findings for Python lines that import code a text scan cannot read (HERM-196b)."""
+    try:
+        lines = file_path.read_text(encoding="utf-8-sig").split("\n")
+    except (OSError, UnicodeDecodeError):
+        return []
+    out: List[Finding] = []
+    for number, line in enumerate(lines, start=1):
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        hits = []
+        if _IMPORT_PATH_CALL.search(line) and _ARCHIVE_MENTION.search(line):
+            hits.append(("archive_on_sys_path", "puts an archive on sys.path (imports code no scan reads)"))
+        if _ZIPIMPORT.search(line):
+            hits.append(("zipimport_use", "uses zipimport (imports code from an archive no scan reads)"))
+        if _RAW_LOADERS.search(line):
+            hits.append(("bytecode_or_native_loader", "loads bytecode or a native module directly"))
+        if _FILE_LOADER_CALL.search(line):
+            targets = [m.group(1) for m in _QUOTED_PATH.finditer(line)]
+            if any(Path(t).suffix.lower() not in PYTHON_SOURCE_EXTENSIONS for t in targets):
+                hits.append(("non_source_loader", "loads a file that is not .py source as a module"))
+        for pattern_id, description in hits:
+            out.append(Finding(pattern_id, "high", "execution", rel, number,
+                               text if len(text) <= 120 else text[:117] + "...", description))
+    return out
 
 
 def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
@@ -390,6 +456,8 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
         for f, rel in sorted(_walk(plugin_dir, tracked, know_tracked=True)):
             if f.is_file() and not f.is_symlink():
                 all_findings.extend(_filter_findings(scan_file(f, rel_path=rel), rel, f, js))
+                if f.suffix.lower() in PYTHON_SOURCE_EXTENSIONS:
+                    all_findings.extend(_filter_findings(_import_path_findings(f, rel), rel, f, js))
     verdict = _determine_verdict(all_findings)
     if all_findings:
         categories = sorted({f.category for f in all_findings})

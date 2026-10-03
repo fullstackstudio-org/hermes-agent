@@ -1,35 +1,37 @@
 """The ``confirm`` server→client request: the agent asks the person to confirm one sensitive action.
 
-Levels (:data:`LEVELS`): ``plain`` is the one that exists. It is a tap on Confirm in a connected client
-that advertised ``plain``; it proves nothing beyond that, and the gateway cannot check even that — any
-client that can attach to the session can advertise it and answer. ``passkey`` is reserved for a verified
-level the gateway will check itself; it is not implemented, and a request for it is ``unavailable`` at
-once with nothing sent.
+Levels (:data:`LEVELS`): ``plain`` is a tap on Confirm in a connected client that advertised ``plain``; it
+proves nothing beyond that, and the gateway cannot check even that — any client that can attach to the
+session can advertise it and answer. ``passkey`` is a confirmation the gateway verifies itself: a WebAuthn
+assertion by a passkey enrolled for the person the running turn acts for, over a challenge that commits to
+this gateway, session, request and text. Its verification lives in ``tui_gateway/confirm_passkey.py``;
+``verified: true`` is set there and nowhere else.
 
 What this module adds on top of ``server_requests.send_gated``:
 
 - the params are built here, never passed through: plain text only, control and format characters
   (bidi overrides, zero-width characters) stripped, lengths checked against the contract bounds;
 - four outcomes the caller can act on: ``confirmed``, ``declined``, ``unavailable`` (no connected client
-  can answer the level, a client answered an error, the request was withdrawn, a rate limit, a level that
-  is not implemented, or turn isolation), ``timeout`` (120 s, ``request.cancel {reason: timeout}``);
-- ``verified`` decided by the gateway from the level, never taken from the client;
+  can answer the level, a client answered an error, the request was withdrawn, a rate limit, turn
+  isolation, a ``plain`` request inside the no-downgrade window, or one of the ``passkey`` reasons),
+  ``timeout`` (120 s, ``request.cancel {reason: timeout}``);
+- ``verified`` decided by the gateway, never taken from the client;
 - a per-conversation rate limit: one open confirmation at a time and at most
   :data:`MAX_PER_WINDOW` sent per :data:`WINDOW_SECONDS`;
+- no downgrade: once a ``passkey`` request in a conversation ends in a failure a third party can cause
+  after sending (declined, timeout, verification failed, an error response, withdrawn, no capable client:
+  :func:`opens_downgrade_window`), ``plain`` requests in that conversation are ``unavailable
+  (downgrade_refused)`` for :data:`DOWNGRADE_WINDOW_SECONDS`, with nothing sent. A ``passkey`` request that
+  is ``unavailable`` before sending opens nothing;
+- the plugin hook ``pre_confirm_request`` once the frame is out, without the text;
 - one audit record per request and per outcome in the dashboard auth audit log
   (``$HERMES_HOME/logs/dashboard-auth.log``, events ``confirm_request`` / ``confirm_outcome``): session,
   request id, level, the login the turn acts for, the connections reached, outcome, method, reason, and the
   login and peer address of the connection whose answer settled it — never the title, summary or detail.
 
-Extension points for a verified level (each is one method on :class:`Level`):
-
-1. :meth:`Level.challenge` — level-specific fields added to the outgoing params (a fresh challenge bound
-   to this request); the contract's ``ConfirmRequestParams`` gains the matching optional field.
-2. :meth:`Level.check` — verifies a level-specific proof in the client's result before the answer may
-   settle the request, and says whether the outcome is ``verified``; ``ConfirmResult`` gains the field.
-3. Per-user credential registration — which connections may advertise the level at all:
-   ``server_requests.advertise`` (``CONFIRM_LEVELS``) is where an advertisement would be accepted only
-   for a signed-in user with a registered credential, and :attr:`Level.advertisable` flips on.
+A level that needs per-request state (``passkey``: the bound user, a nonce, a credential snapshot) builds it
+in its own module before the frame goes out; :class:`Level` covers the context-free part (the shape of a
+``plain`` answer).
 """
 
 from __future__ import annotations
@@ -53,10 +55,27 @@ TIMEOUT_SECONDS = 120.0
 MAX_PENDING = 1
 MAX_PER_WINDOW = 6
 WINDOW_SECONDS = 600.0
+#: After a ``passkey`` request ends other than ``confirmed``, ``plain`` is refused this long in that conversation.
+DOWNGRADE_WINDOW_SECONDS = 600.0
+#: The kwargs ``pre_confirm_request`` is fired with (kept in step with ``VALID_HOOKS`` and hooks.md by a test).
+HOOK_KWARGS = ("session_id", "session_key", "request_id", "level", "user_id", "expires_at", "reached")
 DEFAULT_TITLE = "Confirm an action"
 
 _DECISIONS = frozenset(decision.value for decision in ConfirmDecision)
 _METHODS = frozenset(method.value for method in ConfirmMethod)
+
+#: The outcomes after which a ``passkey`` request opens the no-downgrade window: the ones a third party can
+#: cause once a frame was (to be) sent. A ``passkey`` request that is ``unavailable`` before sending
+#: (the level is off, nobody to bind, not enrolled, turn isolation, a rate limit) opens nothing: there
+#: ``plain`` is the only level there is, and one stray ``passkey`` call must not deny every confirm.
+DOWNGRADE_OUTCOMES = frozenset({"declined", "timeout"})
+DOWNGRADE_REASONS = frozenset({"verification_failed", "error_response", "no_capable_client"})
+
+
+def opens_downgrade_window(outcome: "ConfirmOutcome") -> bool:
+    return (outcome.outcome in DOWNGRADE_OUTCOMES
+            or (outcome.outcome == "unavailable"
+                and (outcome.reason in DOWNGRADE_REASONS or outcome.reason.startswith("cancelled:"))))
 
 
 class Level:
@@ -66,6 +85,8 @@ class Level:
     name = ""
     implemented = True
     advertisable = True
+    #: The ``method`` values an answer at this level may carry (a subset of ``ConfirmMethod``).
+    methods: frozenset[str] = frozenset({"tap"})
 
     def challenge(self, sid: str, params: dict) -> dict:
         """Extension point 1: extra params for this request (e.g. a fresh challenge). ``plain``: none."""
@@ -78,8 +99,10 @@ class Level:
         decision, method = result.get("decision"), result.get("method")
         if decision not in _DECISIONS:
             return f"decision must be one of {sorted(_DECISIONS)}", False
-        if method not in _METHODS:
-            return f"method must be one of {sorted(_METHODS)}", False
+        if method not in self.methods or method not in _METHODS:
+            # ``bad_shape``: e.g. ``method: "passkey"`` on a plain request, so an unverified outcome never
+            # reads "passkey".
+            return f"bad_shape: method must be one of {sorted(self.methods)} at level {self.name}", False
         return None, False
 
 
@@ -87,21 +110,20 @@ class _Plain(Level):
     name = "plain"
 
 
-class _Reserved(Level):
-    """A level named in the contract whose design is not built yet: never sent, never advertisable."""
+class _Passkey(Level):
+    """Checked per request by ``confirm_passkey.Verification`` (it needs the request's nonce, user and
+    credential snapshot). Without that context no answer passes and nothing is ever verified here."""
 
-    implemented = False
-    advertisable = False
-
-    def __init__(self, name: str) -> None:
-        self.name = name
+    name = "passkey"
+    # ``tap`` only in the exact decline shape (``confirm_passkey.DECLINE``); checked per request.
+    methods = frozenset({"passkey", "tap"})
 
     def check(self, params: dict, result: dict) -> tuple[str | None, bool]:
-        return "level not implemented", False
+        return "a passkey answer is checked against its own request", False
 
 
-#: Every level in the contract. ``passkey`` is reserved for the verified level.
-LEVELS: dict[str, Level] = {"plain": _Plain(), "passkey": _Reserved("passkey")}
+#: Every level in the contract.
+LEVELS: dict[str, Level] = {"plain": _Plain(), "passkey": _Passkey()}
 
 
 @dataclass(frozen=True)
@@ -212,6 +234,8 @@ def result_problem(params: dict):
 _rate_lock = threading.Lock()
 _pending: dict[str, int] = {}
 _sent: dict[str, collections.deque] = {}
+# Conversation key → monotonic time the last ``passkey`` request there ended other than ``confirmed``.
+_passkey_failed: dict[str, float] = {}
 
 
 def _rate_key(sid: str) -> str:
@@ -250,10 +274,25 @@ def _release(key: str, *, sent_at: float | None) -> None:
             _sent.setdefault(key, collections.deque()).append(sent_at)
 
 
+def _downgrade_refused(key: str, now: float) -> bool:
+    with _rate_lock:
+        failed = _passkey_failed.get(key)
+        if failed is not None and now - failed >= DOWNGRADE_WINDOW_SECONDS:
+            _passkey_failed.pop(key, None)
+            failed = None
+        return failed is not None
+
+
+def _note_passkey_failed(key: str, now: float) -> None:
+    with _rate_lock:
+        _passkey_failed[key] = now
+
+
 def reset_for_tests() -> None:
     with _rate_lock:
         _pending.clear()
         _sent.clear()
+        _passkey_failed.clear()
 
 
 # ── request ───────────────────────────────────────────────────────────────────────────────────
@@ -308,10 +347,32 @@ class _Audit:
         return outcome
 
 
+def _fire_pre_confirm_request(**kwargs) -> None:
+    """The ``pre_confirm_request`` plugin hook (a push for the request), off the request's own thread so a
+    slow plugin never eats into the person's 120 seconds. Never the text: ids, level, user, expiry."""
+    def fire() -> None:
+        try:
+            from hermes_cli.plugins import invoke_hook
+            invoke_hook("pre_confirm_request", **kwargs)
+        except Exception:  # noqa: BLE001 - a plugin must not affect the request
+            logger.debug("pre_confirm_request hook failed", exc_info=True)
+
+    threading.Thread(target=fire, name="confirm-hook", daemon=True).start()
+
+
 def request(sid: str, params: dict, *, timeout: float = TIMEOUT_SECONDS) -> ConfirmOutcome:
     """Ask the clients of *sid* that advertised ``params["level"]`` to confirm, and block for the outcome.
     *params* come from :func:`build_params`. Never raises for a client-side failure: every way of not
-    getting a valid answer is ``unavailable`` or ``timeout``, never ``declined`` and never ``confirmed``."""
+    getting a valid answer is ``unavailable`` or ``timeout``, never ``declined`` and never ``confirmed``.
+    A ``passkey`` request that ends in one of the post-send failures (:func:`opens_downgrade_window`) opens
+    the no-downgrade window."""
+    outcome = _request(sid, params, timeout=timeout)
+    if params["level"] == "passkey" and opens_downgrade_window(outcome):
+        _note_passkey_failed(_rate_key(sid), time.monotonic())
+    return outcome
+
+
+def _request(sid: str, params: dict, *, timeout: float) -> ConfirmOutcome:
     level_name = params["level"]
     level = LEVELS[level_name]
     log = _Audit(sid, level_name)
@@ -322,15 +383,40 @@ def request(sid: str, params: dict, *, timeout: float = TIMEOUT_SECONDS) -> Conf
         # which connection advertised which level, so it cannot gate the frame. Fail closed.
         return log.outcome(ConfirmOutcome("unavailable", reason="turn_isolation"))
     key = _rate_key(sid)
+    if level_name == "plain" and _downgrade_refused(key, time.monotonic()):
+        return log.outcome(ConfirmOutcome("unavailable", reason="downgrade_refused"))
+    verification = None
+    if level_name == "passkey":
+        from tui_gateway import confirm_passkey
+        try:
+            verification = confirm_passkey.open(sid, params, timeout=timeout)
+        except confirm_passkey.Unavailable as exc:
+            return log.outcome(ConfirmOutcome("unavailable", reason=exc.reason))
+        log.acting = verification.user_id
     refused = _reserve(key, time.monotonic())
     if refused:
         return log.outcome(ConfirmOutcome("unavailable", reason=refused))
-    outgoing = {**params, **level.challenge(sid, params)}
+    if verification is not None:
+        outgoing = {**params, **verification.params()}
+        gated: dict = {"validate": verification.validate, "target": verification.target,
+                       "request_id": verification.request_id, "max_refusals": verification.max_refusals,
+                       "on_refusal": verification.on_refusal}
+        hook_user, expires_at = verification.user_id, verification.expires_at
+    else:
+        outgoing = {**params, **level.challenge(sid, params)}
+        gated = {"validate": result_problem(outgoing)}
+        hook_user, expires_at = ("" if log.acting == "-" else log.acting), int(time.time() + timeout)
+
+    def opened(request_id: str, reached: int) -> None:
+        log.opened(request_id, reached)
+        _fire_pre_confirm_request(session_id=sid, session_key=key, request_id=request_id, level=level_name,
+                                  user_id=hook_user, expires_at=expires_at, reached=reached)
+
     sent_at: float | None = None
     try:
         sent_at = time.monotonic()
         result = server_requests.send_gated("confirm", sid, outgoing, level=level_name, timeout=timeout,
-                                            validate=result_problem(outgoing), on_open=log.opened)
+                                            on_open=opened, **gated)
         if result.status == "unavailable" and result.reason in ("no_capable_client", "write_failed"):
             sent_at = None  # nothing reached a person: it does not count against the window
     except BaseException:
@@ -340,6 +426,11 @@ def request(sid: str, params: dict, *, timeout: float = TIMEOUT_SECONDS) -> Conf
     rid = result.request_id
     if result.status == "answered":
         answer = result.result or {}
+        if verification is not None:
+            # Commit, receipt and ``verified``: once, here, outside every lock.
+            outcome, method, verified, reason = verification.settle(answer, result.answered_by)
+            return log.outcome(ConfirmOutcome(outcome, method=method or None, verified=verified, reason=reason),
+                               request_id=rid, answered_by=result.answered_by)
         # The gateway decides ``verified`` (the level's check), never the client.
         _, verified = level.check(outgoing, answer)
         return log.outcome(ConfirmOutcome(str(answer["decision"]), method=str(answer["method"]), verified=verified),
@@ -348,6 +439,8 @@ def request(sid: str, params: dict, *, timeout: float = TIMEOUT_SECONDS) -> Conf
         return log.outcome(ConfirmOutcome("timeout", reason="timeout"), request_id=rid)
     if result.status == "cancelled":
         return log.outcome(ConfirmOutcome("unavailable", reason=f"cancelled:{result.reason}"), request_id=rid)
+    if result.reason == "too_many_attempts":
+        return log.outcome(ConfirmOutcome("unavailable", reason="verification_failed"), request_id=rid)
     return log.outcome(ConfirmOutcome("unavailable", reason=result.reason or "unavailable"), request_id=rid)
 
 

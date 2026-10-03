@@ -1910,6 +1910,10 @@ limited (5 per user and per address per 10 minutes, 20 per hour gateway-wide). E
 passkey is written to `dashboard-auth.log`, sent to that person's open connections (`passkey.changed`)
 and given to plugins (`on_passkey_change`), so a passkey nobody expected does not go unnoticed.
 
+A `confirm` at level `passkey` (the agent's `confirm_action`) is verified against these passkeys: each
+accepted answer writes a receipt (`receipts` above) and the gateway prunes old ones at most once an hour.
+See [Confirm sensitive actions](../guides/confirm-sensitive-actions.md).
+
 ```bash
 # Default — opens browser to http://127.0.0.1:9119
 hermes dashboard

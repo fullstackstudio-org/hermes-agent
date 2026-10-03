@@ -7598,6 +7598,17 @@
             ],
             "default": null,
             "title": "Confirm"
+          },
+          "confirm_passkey": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConfirmPasskeyAdvertisement"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "title": "ClientCapabilitiesParams",
@@ -7619,6 +7630,17 @@
             },
             "title": "Confirm",
             "type": "array"
+          },
+          "confirm_passkey": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConfirmPasskeyCapability"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
@@ -8762,7 +8784,7 @@
         "type": "string"
       },
       "ConfirmLevel": {
-        "description": "What a confirmation proves. ``plain``: someone tapped Confirm in a connected client; nothing more,\nand the gateway cannot check even that. ``passkey``: RESERVED for a verified level the gateway will\ncheck itself; not implemented yet \u2014 a ``passkey`` request is ``unavailable`` without being sent, and\nno client can advertise it. The set is open: a later level is one more value here.",
+        "description": "What a confirmation proves. ``plain``: someone tapped Confirm in a connected client; nothing more,\nand the gateway cannot check even that. ``passkey``: the gateway verified a WebAuthn assertion with\nuser verification, made by a passkey enrolled for the person the turn acts for, over a challenge that\ncommits to this gateway, session, request and text (``contract/confirm-passkey/README.md``). Sent only\nto connections signed in as that person that advertised the level with an accepted RP. The set is open:\na later level is one more value here.",
         "enum": [
           "plain",
           "passkey"
@@ -8771,16 +8793,243 @@
         "type": "string"
       },
       "ConfirmMethod": {
-        "description": "How the client obtained the decision. ``tap``: a button, nothing proven. Further values arrive with\nthe levels that need them.",
+        "description": "How the client obtained the decision. ``tap``: a button, nothing proven (every decline is a tap).\n``passkey``: a WebAuthn assertion, carried in ``ConfirmResult.passkey`` and verified by the gateway.",
         "enum": [
-          "tap"
+          "tap",
+          "passkey"
         ],
         "title": "ConfirmMethod",
         "type": "string"
       },
+      "ConfirmPasskeyAdvertisement": {
+        "additionalProperties": true,
+        "description": "Second ``client.capabilities`` call, with ``passkey`` in ``confirm``: how this client runs the\nceremony, ``{v: 1, kind, rp_id}``. ``kind``: ``native`` (an app under a native RP) or ``web`` (a browser;\n``rp_id`` is its host). Deliberately permissive here (any value, extra keys allowed) and checked in code\n(``confirm_passkey.accept_advertisement``): a shape this gateway does not accept, including a later\nclient's extra field, only drops ``passkey`` and never fails the call (and ``plain`` with it).",
+        "properties": {
+          "v": {
+            "default": null,
+            "title": "V"
+          },
+          "kind": {
+            "default": null,
+            "title": "Kind"
+          },
+          "rp_id": {
+            "default": null,
+            "title": "Rp Id"
+          }
+        },
+        "title": "ConfirmPasskeyAdvertisement",
+        "type": "object"
+      },
+      "ConfirmPasskeyAssertion": {
+        "additionalProperties": false,
+        "description": "The WebAuthn assertion of a ``passkey`` answer (contract \u00a78); binary fields are base64url. The\ngateway checks it in the order of contract \u00a79; a refusal is ``request.answer`` error 4034 with\n``data.reason``.",
+        "properties": {
+          "v": {
+            "title": "V",
+            "type": "integer"
+          },
+          "rp_id": {
+            "title": "Rp Id",
+            "type": "string"
+          },
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
+          "credential_id": {
+            "title": "Credential Id",
+            "type": "string"
+          },
+          "authenticator_data": {
+            "title": "Authenticator Data",
+            "type": "string"
+          },
+          "client_data_json": {
+            "title": "Client Data Json",
+            "type": "string"
+          },
+          "signature": {
+            "title": "Signature",
+            "type": "string"
+          },
+          "user_handle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "User Handle"
+          }
+        },
+        "required": [
+          "v",
+          "rp_id",
+          "base_url",
+          "credential_id",
+          "authenticator_data",
+          "client_data_json",
+          "signature"
+        ],
+        "title": "ConfirmPasskeyAssertion",
+        "type": "object"
+      },
+      "ConfirmPasskeyCapability": {
+        "additionalProperties": false,
+        "description": "Whether this connection may advertise ``passkey`` (contract \u00a78). ``reason`` is ``\"\"`` exactly when\n``enabled``; otherwise ``disabled``, ``no_base_url``, ``private_origin``, ``no_identity`` (this connection\nhas no signed-in user) or ``store_unavailable``. ``gateway_id`` (base64url, 16 bytes) is ``\"\"`` while the\nlevel is disabled.",
+        "properties": {
+          "v": {
+            "title": "V",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "gateway_id": {
+            "title": "Gateway Id",
+            "type": "string"
+          },
+          "rp": {
+            "$ref": "#/components/schemas/ConfirmPasskeyRps"
+          }
+        },
+        "required": [
+          "v",
+          "enabled",
+          "reason",
+          "gateway_id",
+          "rp"
+        ],
+        "title": "ConfirmPasskeyCapability",
+        "type": "object"
+      },
+      "ConfirmPasskeyCredentials": {
+        "additionalProperties": false,
+        "description": "The bound user's active credentials for one RP (base64url ids): a client passes the ones for its own\nRP as ``allowCredentials`` and refuses (4040) a request without any.",
+        "properties": {
+          "rp_id": {
+            "title": "Rp Id",
+            "type": "string"
+          },
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "rp_id",
+          "ids"
+        ],
+        "title": "ConfirmPasskeyCredentials",
+        "type": "object"
+      },
+      "ConfirmPasskeyParams": {
+        "additionalProperties": false,
+        "description": "Level ``passkey`` only (contract \u00a78). ``nonce`` (32 bytes) and ``gateway_id`` (16 bytes) are base64url;\n``base_url`` is informative (a client always hashes the base URL it dialed); ``expires_at`` is Unix\nseconds.",
+        "properties": {
+          "v": {
+            "title": "V",
+            "type": "integer"
+          },
+          "nonce": {
+            "title": "Nonce",
+            "type": "string"
+          },
+          "gateway_id": {
+            "title": "Gateway Id",
+            "type": "string"
+          },
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "user": {
+            "$ref": "#/components/schemas/ConfirmPasskeyUser"
+          },
+          "credentials": {
+            "items": {
+              "$ref": "#/components/schemas/ConfirmPasskeyCredentials"
+            },
+            "title": "Credentials",
+            "type": "array"
+          }
+        },
+        "required": [
+          "v",
+          "nonce",
+          "gateway_id",
+          "base_url",
+          "expires_at",
+          "user",
+          "credentials"
+        ],
+        "title": "ConfirmPasskeyParams",
+        "type": "object"
+      },
+      "ConfirmPasskeyRps": {
+        "additionalProperties": false,
+        "properties": {
+          "native": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Native",
+            "type": "array"
+          },
+          "web": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Web",
+            "type": "array"
+          }
+        },
+        "required": [
+          "native",
+          "web"
+        ],
+        "title": "ConfirmPasskeyRps",
+        "type": "object"
+      },
+      "ConfirmPasskeyUser": {
+        "additionalProperties": false,
+        "description": "The person the request is bound to: the turn's acting user, ``<provider>:<user id>``.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "ConfirmPasskeyUser",
+        "type": "object"
+      },
       "ConfirmRequestParams": {
         "additionalProperties": false,
-        "description": "Built and bounded by the gateway (``tui_gateway/confirm.py``), never passed through from the agent:\ncontrol and format characters are stripped, lengths are capped, and every string is PLAIN TEXT \u2014 a\nclient renders it verbatim, never as markdown or HTML. Button wording is the client's own, not the\nagent's. The text is the AGENT's own words: a client marks it as such and never lets it style its frame.\nSent only to connections attached to the session whose ``client.capabilities`` listed ``level`` under\n``confirm``; only such a connection, still attached, may answer.",
+        "description": "Built and bounded by the gateway (``tui_gateway/confirm.py``), never passed through from the agent:\ncontrol and format characters are stripped, lengths are capped, and every string is PLAIN TEXT \u2014 a\nclient renders it verbatim, never as markdown or HTML. Button wording is the client's own, not the\nagent's. The text is the AGENT's own words: a client marks it as such and never lets it style its frame.\nSent only to connections attached to the session whose ``client.capabilities`` listed ``level`` under\n``confirm``; only such a connection, still attached, may answer. At level ``passkey`` also only to\nconnections signed in as ``passkey.user`` that advertised an RP the user has a credential for.",
         "properties": {
           "session_id": {
             "title": "Session Id",
@@ -8813,6 +9062,17 @@
           },
           "level": {
             "$ref": "#/components/schemas/ConfirmLevel"
+          },
+          "passkey": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConfirmPasskeyParams"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
@@ -8826,7 +9086,7 @@
       },
       "ConfirmResult": {
         "additionalProperties": false,
-        "description": "The person's decision. A client that cannot answer right now answers a JSON-RPC ERROR, never a\nmade-up ``declined``: the gateway reports that as ``unavailable``.\n``verified`` is not the client's to set: the gateway decides it from the level (always false for\n``plain``) and ignores whatever a client sends here. Clients should omit it.",
+        "description": "The person's decision. A client that cannot answer right now answers a JSON-RPC ERROR, never a\nmade-up ``declined``: the gateway reports that as ``unavailable`` (at level ``passkey``: code 4040,\n``data.reason``).\n``verified`` is not the client's to set: the gateway decides it (always false for ``plain``; true only\nafter it verified and committed a passkey assertion) and ignores whatever a client sends here at\n``plain``; at ``passkey`` a client-sent ``verified`` is refused (``bad_shape``). Clients omit it.\nLevel ``passkey``: ``{decision: \"confirmed\", method: \"passkey\", passkey: {...}}`` or exactly\n``{decision: \"declined\", method: \"tap\"}``, sent through ``request.answer``.",
         "properties": {
           "decision": {
             "$ref": "#/components/schemas/ConfirmDecision"
@@ -8845,6 +9105,17 @@
             ],
             "default": null,
             "title": "Verified"
+          },
+          "passkey": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConfirmPasskeyAssertion"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
@@ -37636,7 +37907,7 @@
     },
     {
       "name": "confirm",
-      "summary": "The agent asks the person to confirm one sensitive action. 120 s. Level plain: a tap in a connected client, nothing verified; a verified level is planned.",
+      "summary": "The agent asks the person to confirm one sensitive action. 120 s. Level plain: a tap in a connected client, nothing verified. Level passkey: a WebAuthn assertion the gateway verifies.",
       "params": [
         {
           "name": "params",

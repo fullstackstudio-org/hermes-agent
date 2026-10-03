@@ -446,12 +446,20 @@ def _(rid, params: dict) -> dict:
     """What the calling client handles. ``server_requests: true`` marks this connection as one that answers
     server→client requests; a WebSocket client that never sends it gets every such request failed fast
     instead of stalling the agent for the deadline (#112548). ``confirm: [levels]`` (optional) lists the
-    ``confirm`` levels this connection can perform; the result echoes the ones accepted."""
-    from tui_gateway import server_requests
+    ``confirm`` levels this connection can perform; the result echoes the ones accepted. ``passkey`` is
+    accepted only with a ``confirm_passkey {v, kind, rp_id}`` this gateway accepts, from a signed-in
+    connection, while the level is enabled (``confirm_passkey.accept_advertisement``). Every result carries
+    ``confirm_passkey``: the level as this connection sees it (contract §8)."""
+    from tui_gateway import confirm_passkey, server_requests
     from tui_gateway.contracts import registry as contracts
-    levels = server_requests.advertise(_caller_transport(), bool(params.get("server_requests")),
-                                       params.get("confirm"))
-    return _ok(rid, {"server_requests": sorted(contracts.SERVER_REQUESTS), "confirm": levels})
+    transport = _caller_transport()
+    answers = bool(params.get("server_requests"))
+    confirm = params.get("confirm")
+    detail = (confirm_passkey.accept_advertisement(transport, params.get("confirm_passkey"))
+              if answers and isinstance(confirm, list) and "passkey" in confirm else None)
+    levels = server_requests.advertise(transport, answers, confirm, details={"passkey": detail} if detail else None)
+    return _ok(rid, {"server_requests": sorted(contracts.SERVER_REQUESTS), "confirm": levels,
+                     "confirm_passkey": confirm_passkey.capability(transport)})
 
 
 @method("ping")

@@ -46,6 +46,9 @@ _HOOK_TIMEOUT_BOUNDED_HOOKS: Set[str] = {
     # Fork: fired from a dashboard request after the passkey store committed; a stuck push plugin must not
     # hold the response (observer only, the change is already made).
     "on_passkey_change",
+    # Fork: fired for a confirm request once its frame is out, on its own thread; a stuck push plugin must
+    # not pile up threads (observer only, the request does not wait for it).
+    "pre_confirm_request",
 }
 
 # Policy hooks: timeout / still-running must fail closed (block the tool).

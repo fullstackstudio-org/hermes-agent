@@ -1,6 +1,6 @@
 ---
 title: "Ask the Person to Confirm a Sensitive Action"
-description: "Turn on the confirm_action tool so an agent asks for a confirmation in the connected app before it spends money, deletes data or acts on someone's behalf, and learn exactly what that confirmation proves"
+description: "Turn on the confirm_action tool so an agent asks for a confirmation in the connected app before it spends money, deletes data or acts on someone's behalf, set up the passkey level the gateway verifies itself, and learn exactly what each level proves"
 ---
 
 # Ask the Person to Confirm a Sensitive Action
@@ -13,10 +13,21 @@ The title, summary and detail are **the agent's own words**. Apps show them verb
 coming from the agent, but an agent can word them to look like a system or security message. Read them
 as the agent's description of what it is about to do, nothing more.
 
-## What a confirmation proves today
+## Two levels
 
-There is one level today, `plain`. A `plain` confirmation proves that **someone tapped Confirm in an app
-attached to this conversation**. Nothing more:
+| Level | What `confirmed` means | `verified` |
+| --- | --- | --- |
+| `plain` | Someone tapped Confirm in an app attached to this conversation. | always `false` |
+| `passkey` | The person this turn works for confirmed with their passkey, and the gateway checked the signature over exactly the text it sent. | `true` |
+
+The agent picks the level (`confirm_action(level="passkey")`). `passkey` is offered to the agent only
+while the operator has enabled it, and works only on a gateway with a sign-in provider (see
+[Set up the passkey level](#set-up-the-passkey-level)).
+
+## What `plain` proves
+
+A `plain` confirmation proves that **someone tapped Confirm in an app attached to this conversation**.
+Nothing more:
 
 - not who tapped it, and not that it was the account owner. Any app attached to the conversation that
   supports confirmations can answer: your other devices, and in a shared conversation any participant.
@@ -30,15 +41,70 @@ It only helps when the agent chooses to ask. Nothing makes an agent call `confir
 action, so it does not stop an agent that acts without asking. Where an agent does ask, it guards against
 the agent going ahead with a step the person wanted to see first, and against a slip.
 
-Every result carries `verified: false`. The gateway sets that field itself; it never takes it from the
-app.
+A `plain` result always carries `verified: false`. The gateway sets that field itself; it never takes it
+from the app.
 
-A verified level, which the gateway will check itself, is planned. Its name is reserved (`passkey`):
-asking for it today returns `unavailable` without showing anything, and no app can offer it yet. Its
-settings and store are operator-only (`hermes dashboard passkey`), but that is not a wall against a stolen
-dashboard session: the dashboard itself can run code on the gateway host (shell hooks, the file editor
-writing `config.yaml`, a console), and code on the host can change both. The level will raise the bar for
-a confirm; it does not make a stolen dashboard session harmless.
+## What `passkey` proves, and what it does not
+
+A `confirmed` answer with `verified: true` means: a passkey that was enrolled for this gateway user (with
+an enrolment code from the operator, or from an earlier passkey of the same user) signed, with user
+presence and user verification as reported by its authenticator, a challenge that commits to this
+gateway's base URL, this conversation, this request, a fresh random value and the exact title, summary and
+detail the gateway sent. The gateway checks the signature against the public key it stored at enrolment,
+re-reads the passkey before it accepts (one revoked meanwhile is refused), and keeps a receipt (digests and
+the signed bytes, never the text) for `confirm.passkey.receipts_days`. In the official app, the operating
+system only lets that app ask for its passkeys, and the app computes the challenge from the text it shows.
+
+Who is asked: the person **the running turn works for**, as the gateway itself knows them: the signed-in
+user whose app submitted the turn. Never a name the agent passes, never the person who created a shared
+conversation, never someone else who happens to be watching. Only that person's apps that can use a
+passkey for this gateway see the request; anyone else attached to the conversation never sees it and
+cannot answer it.
+
+What it does **not** prove:
+
+1. Not a biometric. User verification can be the device passcode, or whatever the passkey provider accepts
+   (a password manager's master password or PIN). Someone who holds the device and knows its passcode
+   passes.
+2. Not hardware. No attestation is checked; a software authenticator is accepted and the user-verification
+   flag is the authenticator's own statement. With a synced passkey, the security is that of the sync
+   account or vault.
+3. Not that the person started the conversation, read the text or understood it. A stolen session can open
+   a request that the real person then sees in their app; the text is verbatim, the app names the gateway
+   and the bot, and the decision is theirs.
+4. Not that the agent then does what it described, and nothing at all about actions the agent takes
+   without asking.
+5. Not anything on a gateway that is itself compromised. The gateway is the verifier. A malicious plugin,
+   the operator, or an agent with an unsandboxed terminal on the gateway host can write the store, change
+   the code or report any outcome.
+6. **A stolen dashboard session can go around the mechanism rather than through it.** A signed-in session
+   can edit `config.yaml`, set environment variables, upload files, use a console and drive the agent's
+   terminal. The direct doors to the passkey state are closed (the file manager refuses the store, the
+   config writers refuse `confirm.passkey.*`, only the operator CLI mints a first code), but an agent with
+   a local terminal running as the gateway's own user can still reach the store or run the CLI. The level
+   is a real barrier where the agent's terminal is sandboxed (a container or remote backend without the
+   gateway's home) or where the operator's rules cover the commands that matter (`confirm.passkey.require`,
+   read but not enforced yet); elsewhere it raises the
+   cost and leaves evidence (an audit line, a receipt, `passkey.changed`, a push) without being a wall.
+7. In a browser, the page is the client. The browser enforces the origin, but what the page displayed is
+   asserted by code the gateway served: a script injected into the gateway's origin, or a dashboard plugin
+   page on the same origin, can show one text and request a signature for another. The native app does
+   not have this weakness.
+8. On a plain-`http` gateway a network attacker cannot forge a confirmation, but owns the session.
+9. Bootstrap. The first enrolment code comes from the operator; whoever redeems it while signed in as the
+   user gets the passkey. Hand it over out of band, and bind it with `--user` when the id is known.
+
+A `declined` is never verified: declining needs no passkey.
+
+### No downgrade
+
+Once a `passkey` request in a conversation fails in a way someone else could cause after it was sent
+(declined, timed out, `verification_failed`, `error_response`, withdrawn, or `no_capable_client`), the
+gateway refuses `plain` requests in that conversation for ten minutes (`unavailable`, reason
+`downgrade_refused`), without showing anything, and the tool tells the agent not to ask again at `plain`
+and not to reach the same effect another way. A `passkey` request that is `unavailable` before anything is
+sent (the level is off, nobody to bind it to, no passkey enrolled, turn isolation, a rate limit) opens
+nothing: where the level is off, `plain` is the level the gateway has, and the tool says so.
 
 ## Turn it on
 
@@ -61,16 +127,49 @@ In a messaging platform, a cron job, the classic CLI or any other context it is 
 still arrives answers `unavailable` without sending anything. With `dashboard.turn_isolation` enabled the
 tool also answers `unavailable`: the isolated worker cannot see which app offered which level.
 
+## Set up the passkey level
+
+On the gateway host, as the gateway's user:
+
+1. The gateway needs a sign-in provider (OIDC, Nous or basic): a passkey belongs to a signed-in user
+   (`<provider>:<user id>`). In session-token or loopback mode the level is `unavailable` (`no_identity`).
+2. List the address (base URL) the apps dial for this gateway: `hermes dashboard passkey base-url add
+   https://gw.example.com`. This list is separate from `dashboard.public_url(s)` on purpose. A private or
+   plain-`http` address counts only with `confirm.passkey.allow_private_base_urls: true` (read the
+   contract's note on what that gives up).
+3. Enable it in `config.yaml` (`confirm.passkey.enabled: true`) and restart.
+4. Mint an enrolment code for the person (`hermes dashboard passkey invite --user <provider>:<user id>`)
+   and hand it over out of band. They add a passkey in the app with it; later passkeys (another provider,
+   a browser) they can add with a code they mint themselves with a passkey they already have.
+5. `hermes dashboard passkey status` names every reason the level is unavailable and what to set.
+
 ## The four outcomes
 
 | Outcome | Meaning | What the agent should do |
 | --- | --- | --- |
-| `confirmed` | Someone tapped Confirm in a connected app. | Do exactly what the summary said, nothing more. |
+| `confirmed` | `plain`: someone tapped Confirm in a connected app. `passkey`: verified, see above. | Do exactly what the summary said, nothing more. |
 | `declined` | The person said no. | Do not do it. |
-| `unavailable` | No connected app can answer, an app answered with an error, the request was withdrawn, a rate limit was hit, or the level is not implemented. | Not consent. Do not do it; tell the person. |
+| `unavailable` | Nothing that counts as consent was obtained; `reason` says why (table below). | Not consent. Do not do it; tell the person. After a `passkey` request that failed once sent: do not ask again at `plain`. |
 | `timeout` | No answer within 120 seconds. | Not consent. Do not do it; tell the person. |
 
 `unavailable` and `timeout` are never a `declined`, and never a `confirmed`.
+
+| `reason` | Level | Meaning |
+| --- | --- | --- |
+| `no_capable_client` | both | No app attached to this conversation can answer (at `passkey`: none signed in as the person, with a passkey for this gateway). |
+| `error_response`, `write_failed` | both | The app could not show it, or it could not be delivered. |
+| `already_pending`, `rate_limited` | both | Another confirmation is open, or too many were sent. |
+| `cancelled:<why>` | both | Withdrawn: the turn was stopped, the conversation closed, the gateway shut down. |
+| `turn_isolation` | both | Turns run isolated on this gateway. |
+| `no_session` | both | Not an interactive app session. |
+| `downgrade_refused` | `plain` | A `passkey` request in this conversation did not succeed in the last ten minutes. |
+| `disabled` | `passkey` | `confirm.passkey.enabled` is off. |
+| `no_base_url`, `private_origin` | `passkey` | No usable base URL is listed. |
+| `no_identity` | `passkey` | Nobody on this conversation is signed in (no sign-in provider). |
+| `no_acting_user` | `passkey` | The turn was not submitted by a signed-in person: a scheduled run, a relayed message, a continuation, or a shared conversation with nobody to bind it to. |
+| `not_enrolled` | `passkey` | The person has no passkey for this gateway. |
+| `verification_failed` | `passkey` | Five answers were refused, or the passkey was revoked or the store failed when the gateway tried to accept the answer. |
+| `settings_unavailable`, `store_unavailable` | `passkey` | The gateway could not read its passkey settings or store. |
 
 ## Limits
 
@@ -79,11 +178,16 @@ tool also answers `unavailable`: the isolated worker cannot see which app offere
   characters are removed, and apps show the text as plain text, never as markdown or HTML.
 - One open confirmation per conversation, and at most six sent per ten minutes. Requests that reached
   no app do not count.
+- At `passkey`: five refused answers end the request (`verification_failed`).
 - Each request and each outcome writes one record to the dashboard auth audit log
   (`$HERMES_HOME/logs/dashboard-auth.log`, events `confirm_request` and `confirm_outcome`): the session,
   the request id, the level, the signed-in user the turn works for, how many apps were asked, the outcome
-  and method, and the signed-in user and network address of the app whose answer counted. The title,
-  summary and detail are never logged.
+  and method, whether it was verified, and the signed-in user and network address of the app whose answer
+  counted. At `passkey` every refused answer (`confirm_passkey_refused`, with the reason) and every accepted
+  one (`confirm_passkey_verified`) is recorded too, with the first characters of the passkey's id, its RP,
+  the base URL and the digest of the text. The title, summary, detail, nonce and signature are never logged.
+- Plugins can send a push for a request through the `pre_confirm_request` hook (ids, level, user and
+  expiry; never the text).
 
 ## For app developers
 
@@ -107,3 +211,26 @@ tool also answers `unavailable`: the isolated worker cannot see which app offere
 5. Show the title, summary and detail as plain text, marked as coming from the agent; never let them
    style the buttons or the surrounding frame. Do not let a keystroke meant for something else answer
    the card.
+
+Level `passkey` follows `contract/confirm-passkey/README.md` (challenge, wire objects, the order of the
+checks, test vectors):
+
+- Every `client.capabilities` result carries `confirm_passkey {v, enabled, reason, gateway_id, rp: {native,
+  web}}`. Only when `enabled` is true, add `"passkey"` to `confirm` and send `confirm_passkey: {v: 1, kind:
+  "native" | "web", rp_id}`. `passkey` is accepted only from a signed-in connection with an RP the gateway
+  lists for that kind; anything else drops `passkey` and keeps `plain`.
+- The frame carries `params.passkey {v, nonce, gateway_id, base_url, expires_at, user: {id, name},
+  credentials: [{rp_id, ids}]}`. Compute the challenge from the base URL you dialed and the strings you
+  render, pass the ids for your RP as `allowCredentials`, require user verification.
+- Answer through `request.answer` with `{decision: "confirmed", method: "passkey", passkey: {v: 1, rp_id,
+  base_url, credential_id, authenticator_data, client_data_json, signature, user_handle?}}`, or exactly
+  `{decision: "declined", method: "tap"}`. Never send `verified`. A refusal is `4034` with `data.reason`;
+  the fifth one is `too_many_attempts` and ends the request (`request.cancel` with reason
+  `too_many_attempts`). If you cannot run the ceremony, answer the frame with error `4040` and
+  `data.reason`. Dismissing the system sheet sends nothing.
+- `{"status": "ok"}` from `request.answer` means the answer was received and valid, not yet confirmed: the
+  gateway then commits it. If that fails (the passkey was revoked meanwhile, a store error), the connections
+  get `request.cancel` with reason `verification_failed`; clear any "confirmed" state for that id.
+- At `plain` the method is always `tap`; an answer with `method: "passkey"` is refused (`4034`).
+- `confirm_passkey` in the second call is checked by the gateway, not by the contract: unknown extra keys
+  are allowed, and a shape it does not accept only drops `passkey`.

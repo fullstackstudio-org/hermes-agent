@@ -152,6 +152,13 @@ VALID_HOOKS: Set[str] = {
     # code, key, assertion or token. Meant for a security notification that cannot be muted. Bounded by
     # plugins.hook_callback_timeout (plugins_dispatch._HOOK_TIMEOUT_BOUNDED_HOOKS).
     "on_passkey_change",
+    # pre_confirm_request (fork): a `confirm` request (tui_gateway/confirm.py) was just written to the
+    # person's connected apps; fired off the request's thread, returns ignored. Kwargs: session_id,
+    # session_key, request_id, level ("plain"|"passkey"), user_id ("<provider>:<user id>" the request is
+    # for at passkey; the turn's acting user or "" at plain), expires_at (Unix seconds), reached (connections
+    # written to). Never the title, summary or detail. Meant for a push that opens the request in the app.
+    # Bounded by plugins.hook_callback_timeout (plugins_dispatch._HOOK_TIMEOUT_BOUNDED_HOOKS).
+    "pre_confirm_request",
     # on_room_member_activity: a hosted Group Chat member's live runtime events (tool.started/completed,
     # request.opened, message.delta, reasoning.delta, turn.error, ...) stamped with room_id, thread_id,
     # member_id, turn_id, task_id, execution_generation. Observer, queued per consumer off the token

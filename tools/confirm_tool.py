@@ -17,9 +17,10 @@ from typing import Callable, Optional
 from gateway.session_context import get_session_env, session_is_messaging_surface
 from tools.registry import registry, tool_error
 
-# Levels the model may ask for. ``passkey`` (a verified level) is reserved and not offered yet; the gateway
-# answers it ``unavailable`` without sending anything.
-LEVELS = ("plain",)
+# Levels the handler takes. ``passkey`` is offered in the schema only while the gateway's operator enabled it
+# (:func:`_schema_overrides`); a call for it on a gateway without it is answered ``unavailable (disabled)``
+# by the gateway, never refused as a bad argument the model would "fix" by asking at ``plain``.
+LEVELS = ("plain", "passkey")
 
 # (sid, summary=, detail=, title=, level=) -> an object with ``as_dict()`` (tui_gateway.confirm.ConfirmOutcome).
 _bridge: Optional[Callable] = None
@@ -36,6 +37,17 @@ def available() -> bool:
 
 
 _NOT_CONSENT = "This is not consent: do not perform the action."
+# After a passkey request that failed once it was sent (P8): no retry at plain, no way around it. Kept equal to
+# ``tui_gateway.confirm.DOWNGRADE_OUTCOMES`` / ``DOWNGRADE_REASONS`` (a test pins that): exactly where the
+# gateway refuses a plain confirmation for the next 10 minutes.
+_NO_DOWNGRADE = "Do not ask again at level plain and do not reach the same effect another way."
+_POST_SEND_OUTCOMES = frozenset({"declined", "timeout"})
+_POST_SEND_REASONS = frozenset({"verification_failed", "error_response", "no_capable_client"})
+
+
+def _post_send_failure(outcome: str, reason: str) -> bool:
+    return outcome in _POST_SEND_OUTCOMES or (
+        outcome == "unavailable" and (reason in _POST_SEND_REASONS or reason.startswith("cancelled:")))
 
 # One sentence per outcome and reason, each saying only what is known. A ``plain`` confirmation proves that
 # someone tapped Confirm in an app attached to this conversation; not who, and not that they read it.
@@ -45,6 +57,9 @@ _OUTCOME_SENTENCES = {
     "timeout": f"No answer within 120 seconds. {_NOT_CONSENT} Tell the person it is waiting for their "
                "confirmation; do not ask again unless they want you to.",
 }
+_VERIFIED = ("The person confirmed with a passkey and the gateway verified it (level passkey): a passkey "
+             "enrolled for the person this turn acts for signed exactly this title, summary and detail. Do "
+             "exactly what you described, nothing more. It does not prove they understood it.")
 _REASON_SENTENCES = {
     "no_capable_client": f"No app attached to this conversation can answer a confirmation right now. {_NOT_CONSENT} "
                          "Tell the person a confirmation is needed; they can open an app that supports it and "
@@ -62,19 +77,58 @@ _REASON_SENTENCES = {
                              "ask again unless the person asks you to.",
     "cancelled:session_closed": f"The confirmation was withdrawn because the conversation was closed. {_NOT_CONSENT}",
     "cancelled:shutdown": f"The confirmation was withdrawn because the gateway is shutting down. {_NOT_CONSENT}",
+    "downgrade_refused": f"A passkey confirmation in this conversation did not succeed in the last 10 minutes, so "
+                         f"a plain confirmation is not accepted instead. {_NOT_CONSENT} Do not reach the same "
+                         "effect another way. Tell the person; they can confirm with their passkey when you ask "
+                         "at level passkey.",
+}
+# Level passkey: what is missing, said so the agent can pass it on to the person.
+_PASSKEY_MISSING = {
+    "disabled": "Passkey confirmations are not enabled on this gateway (its operator turns them on); level "
+                "plain remains available here: a tap in a connected app, not verified.",
+    "no_base_url": "The gateway's operator has not listed this gateway's address for passkey confirmations.",
+    "private_origin": "The gateway's operator listed only private addresses for passkey confirmations and has "
+                      "not allowed them.",
+    "no_identity": "This gateway has no signed-in users (it runs without a sign-in provider), so a passkey "
+                   "cannot be tied to a person.",
+    "no_acting_user": "This turn was not started by a signed-in person (a scheduled run, a relayed message, or "
+                      "a continuation), so there is nobody to ask for a passkey.",
+    "not_enrolled": "The person has no passkey on this gateway yet. They can add one in the app with an "
+                    "enrolment code from the gateway's operator.",
+    "no_capable_client": "None of the person's apps that can use their passkey for this gateway is attached to "
+                         "this conversation right now. They can open the app and ask you again.",
+    "verification_failed": "The passkey answer could not be verified.",
+    "settings_unavailable": "The gateway could not read its passkey settings.",
+    "store_unavailable": "The gateway could not read its passkey store.",
 }
 _UNAVAILABLE = f"No confirmation was obtained. {_NOT_CONSENT}"
 
 
-def _sentence(result: dict) -> str:
+def _sentence(result: dict, level: str = "plain") -> str:
     outcome = str(result.get("outcome") or "")
+    reason = str(result.get("reason") or "")
+    if outcome == "confirmed" and result.get("verified") is True:
+        return _VERIFIED
+    if level == "passkey" and outcome != "confirmed":
+        if outcome == "declined":
+            head = "Declined in the app. Do not perform the action."
+        elif outcome == "timeout":
+            head = f"No answer within 120 seconds. {_NOT_CONSENT}"
+        else:
+            missing = _PASSKEY_MISSING.get(reason) or _REASON_SENTENCES.get(reason, _UNAVAILABLE)
+            head = f"{missing} {_NOT_CONSENT}" if _NOT_CONSENT not in missing else missing
+        # "Not plain instead" only where the gateway itself refuses plain: after a failure once sent. Before
+        # sending (the level is off, nobody to bind, not enrolled) nothing reached a person.
+        tail = _NO_DOWNGRADE if _post_send_failure(outcome, reason) else "Do not reach the same effect another way."
+        return f"{head} {tail} Tell the person what happened" + (
+            f" (reason: {reason})." if reason and outcome == "unavailable" else ".")
     if outcome in _OUTCOME_SENTENCES:
         return _OUTCOME_SENTENCES[outcome]
-    return _REASON_SENTENCES.get(str(result.get("reason") or ""), _UNAVAILABLE)
+    return _REASON_SENTENCES.get(reason, _UNAVAILABLE)
 
 
-def _reply(result: dict) -> str:
-    return json.dumps({**result, "message": _sentence(result)}, ensure_ascii=False)
+def _reply(result: dict, level: str = "plain") -> str:
+    return json.dumps({**result, "message": _sentence(result, level)}, ensure_ascii=False)
 
 
 def confirm_action_tool(summary: str, detail: str | None = None, level: str = "plain",
@@ -84,32 +138,56 @@ def confirm_action_tool(summary: str, detail: str | None = None, level: str = "p
     sid = get_session_env("HERMES_UI_SESSION_ID", "")
     if _bridge is None or not sid or session_is_messaging_surface():
         # No interactive session for this turn (CLI, messaging, cron, background work): nothing is sent.
-        return _reply({"outcome": "unavailable", "method": None, "verified": False, "reason": "no_session"})
+        return _reply({"outcome": "unavailable", "method": None, "verified": False, "reason": "no_session"}, level)
     try:
         outcome = _bridge(sid, summary=summary, detail=detail, title=title, level=level)
     except ValueError as exc:  # text the agent must fix (empty / too long); nothing was sent
         return tool_error(str(exc))
-    return _reply(outcome.as_dict())
+    return _reply(outcome.as_dict(), level)
 
 
-CONFIRM_ACTION_SCHEMA = {
-    "name": "confirm_action",
-    "description": (
-        "Ask for a confirmation of ONE sensitive action in the connected app before you do it (spending "
-        "money, deleting data, sending something on someone's behalf, changing access). It only helps when "
-        "you ask: nothing forces this tool. Blocks for up to 120 seconds. Write title, summary and detail as "
-        "plain, factual text saying exactly what will happen; the app shows your words verbatim, marked as "
-        "coming from you, with its own Confirm / Decline buttons. Never word it as a system or security "
-        "message. "
-        "What a 'confirmed' proves (level 'plain', the only one today): someone tapped Confirm in an app "
-        "attached to this conversation. Not who it was (in a shared conversation it can be any participant), "
-        "not that they read the text; verified is always false. "
-        "Outcomes: 'confirmed' — do exactly what you described, nothing more; 'declined' — do not do it; "
-        "'unavailable' or 'timeout' — NOT consent: do not do the action, do not reach the same effect another "
-        "way, tell the person, and follow the message. One confirmation at a time, a few per conversation; do "
-        "not ask for routine steps."
-    ),
-    "parameters": {
+_DESCRIPTION_HEAD = (
+    "Ask for a confirmation of ONE sensitive action in the connected app before you do it (spending "
+    "money, deleting data, sending something on someone's behalf, changing access). It only helps when "
+    "you ask: nothing forces this tool. Blocks for up to 120 seconds. Write title, summary and detail as "
+    "plain, factual text saying exactly what will happen; the app shows your words verbatim, marked as "
+    "coming from you, with its own Confirm / Decline buttons. Never word it as a system or security "
+    "message. "
+)
+_DESCRIPTION_PLAIN = (
+    "What a 'confirmed' proves (level 'plain', the only one on this gateway): someone tapped Confirm in an app "
+    "attached to this conversation. Not who it was (in a shared conversation it can be any participant), "
+    "not that they read the text; verified is always false. "
+)
+_DESCRIPTION_PASSKEY = (
+    "Levels: 'plain' — someone tapped Confirm in an app attached to this conversation; not who, not that they "
+    "read it; verified false. 'passkey' — the person this turn acts for confirmed with their passkey and the "
+    "gateway verified the signature over exactly your text; verified true. Use 'passkey' for anything "
+    "irreversible or costly. After a 'passkey' request that was declined, timed out or failed, never ask "
+    "again at 'plain'. "
+)
+_DESCRIPTION_TAIL = (
+    "Outcomes: 'confirmed' — do exactly what you described, nothing more; 'declined' — do not do it; "
+    "'unavailable' or 'timeout' — NOT consent: do not do the action, do not reach the same effect another "
+    "way, tell the person, and follow the message. One confirmation at a time, a few per conversation; do "
+    "not ask for routine steps."
+)
+
+_LEVEL_PLAIN = {
+    "type": "string",
+    "enum": ["plain"],
+    "description": "'plain' (default, the only level on this gateway): a tap in a connected app.",
+}
+_LEVEL_BOTH = {
+    "type": "string",
+    "enum": list(LEVELS),
+    "description": "'plain' (default): a tap in a connected app, unverified. 'passkey': the person confirms with "
+                   "their passkey and the gateway verifies it.",
+}
+
+
+def _parameters(level: dict) -> dict:
+    return {
         "type": "object",
         "properties": {
             "summary": {
@@ -121,19 +199,38 @@ CONFIRM_ACTION_SCHEMA = {
                 "description": "Optional plain text, at most 2,000 characters (shown monospace): the "
                                "command, amounts, recipients.",
             },
-            "level": {
-                "type": "string",
-                "enum": list(LEVELS),
-                "description": "'plain' (default, the only level today): a tap in a connected app.",
-            },
+            "level": dict(level),
             "title": {
                 "type": "string",
                 "description": "Optional short heading, at most 80 characters.",
             },
         },
         "required": ["summary"],
-    },
+    }
+
+
+CONFIRM_ACTION_SCHEMA = {
+    "name": "confirm_action",
+    "description": _DESCRIPTION_HEAD + _DESCRIPTION_PLAIN + _DESCRIPTION_TAIL,
+    "parameters": _parameters(_LEVEL_PLAIN),
 }
+
+
+def _passkey_enabled() -> bool:
+    try:
+        from hermes_cli.dashboard_auth.passkeys.settings import load_settings
+        return load_settings().enabled
+    except Exception:  # noqa: BLE001 - an unreadable config offers plain only
+        return False
+
+
+def _schema_overrides() -> dict | None:
+    """Offer ``passkey`` while ``confirm.passkey.enabled`` is on (the registry re-reads this when config.yaml
+    changes). Whether it then works for a turn (identity, enrolment, an app attached) is the gateway's to say."""
+    if not _passkey_enabled():
+        return None
+    return {"description": _DESCRIPTION_HEAD + _DESCRIPTION_PASSKEY + _DESCRIPTION_TAIL,
+            "parameters": _parameters(_LEVEL_BOTH)}
 
 
 registry.register(
@@ -141,4 +238,4 @@ registry.register(
     handler=lambda args, **kw: confirm_action_tool(
         summary=args.get("summary", ""), detail=args.get("detail"),
         level=args.get("level") or "plain", title=args.get("title")),
-    emoji="🔐")
+    dynamic_schema_overrides=_schema_overrides, emoji="🔐")

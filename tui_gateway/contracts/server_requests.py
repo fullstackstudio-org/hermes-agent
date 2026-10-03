@@ -218,9 +218,11 @@ CONFIRM_DETAIL_MAX = 2_000
 
 class ConfirmLevel(WireEnum):
     """What a confirmation proves. ``plain``: someone tapped Confirm in a connected client; nothing more,
-    and the gateway cannot check even that. ``passkey``: RESERVED for a verified level the gateway will
-    check itself; not implemented yet — a ``passkey`` request is ``unavailable`` without being sent, and
-    no client can advertise it. The set is open: a later level is one more value here."""
+    and the gateway cannot check even that. ``passkey``: the gateway verified a WebAuthn assertion with
+    user verification, made by a passkey enrolled for the person the turn acts for, over a challenge that
+    commits to this gateway, session, request and text (``contract/confirm-passkey/README.md``). Sent only
+    to connections signed in as that person that advertised the level with an accepted RP. The set is open:
+    a later level is one more value here."""
 
     plain = "plain"
     passkey = "passkey"
@@ -232,10 +234,55 @@ class ConfirmDecision(WireEnum):
 
 
 class ConfirmMethod(WireEnum):
-    """How the client obtained the decision. ``tap``: a button, nothing proven. Further values arrive with
-    the levels that need them."""
+    """How the client obtained the decision. ``tap``: a button, nothing proven (every decline is a tap).
+    ``passkey``: a WebAuthn assertion, carried in ``ConfirmResult.passkey`` and verified by the gateway."""
 
     tap = "tap"
+    passkey = "passkey"
+
+
+class ConfirmPasskeyUser(Params):
+    """The person the request is bound to: the turn's acting user, ``<provider>:<user id>``."""
+
+    id: str
+    name: str
+
+
+class ConfirmPasskeyCredentials(Params):
+    """The bound user's active credentials for one RP (base64url ids): a client passes the ones for its own
+    RP as ``allowCredentials`` and refuses (4040) a request without any."""
+
+    rp_id: str
+    ids: list[str]
+
+
+class ConfirmPasskeyParams(Params):
+    """Level ``passkey`` only (contract §8). ``nonce`` (32 bytes) and ``gateway_id`` (16 bytes) are base64url;
+    ``base_url`` is informative (a client always hashes the base URL it dialed); ``expires_at`` is Unix
+    seconds."""
+
+    v: int
+    nonce: str
+    gateway_id: str
+    base_url: str
+    expires_at: int
+    user: ConfirmPasskeyUser
+    credentials: list[ConfirmPasskeyCredentials]
+
+
+class ConfirmPasskeyAssertion(Result):
+    """The WebAuthn assertion of a ``passkey`` answer (contract §8); binary fields are base64url. The
+    gateway checks it in the order of contract §9; a refusal is ``request.answer`` error 4034 with
+    ``data.reason``."""
+
+    v: int
+    rp_id: str
+    base_url: str
+    credential_id: str
+    authenticator_data: str
+    client_data_json: str
+    signature: str
+    user_handle: str | None = None
 
 
 class ConfirmRequestParams(ServerRequestParams):
@@ -244,28 +291,36 @@ class ConfirmRequestParams(ServerRequestParams):
     client renders it verbatim, never as markdown or HTML. Button wording is the client's own, not the
     agent's. The text is the AGENT's own words: a client marks it as such and never lets it style its frame.
     Sent only to connections attached to the session whose ``client.capabilities`` listed ``level`` under
-    ``confirm``; only such a connection, still attached, may answer."""
+    ``confirm``; only such a connection, still attached, may answer. At level ``passkey`` also only to
+    connections signed in as ``passkey.user`` that advertised an RP the user has a credential for."""
 
     title: str = Field(min_length=1, max_length=CONFIRM_TITLE_MAX)
     summary: str = Field(min_length=1, max_length=CONFIRM_SUMMARY_MAX)
     detail: str | None = Field(default=None, max_length=CONFIRM_DETAIL_MAX)
     level: ConfirmLevel
+    #: Level ``passkey`` only: what the client needs to compute the challenge and run the ceremony.
+    passkey: ConfirmPasskeyParams | None = None
 
 
 class ConfirmResult(Result):
     """The person's decision. A client that cannot answer right now answers a JSON-RPC ERROR, never a
-    made-up ``declined``: the gateway reports that as ``unavailable``.
-    ``verified`` is not the client's to set: the gateway decides it from the level (always false for
-    ``plain``) and ignores whatever a client sends here. Clients should omit it."""
+    made-up ``declined``: the gateway reports that as ``unavailable`` (at level ``passkey``: code 4040,
+    ``data.reason``).
+    ``verified`` is not the client's to set: the gateway decides it (always false for ``plain``; true only
+    after it verified and committed a passkey assertion) and ignores whatever a client sends here at
+    ``plain``; at ``passkey`` a client-sent ``verified`` is refused (``bad_shape``). Clients omit it.
+    Level ``passkey``: ``{decision: "confirmed", method: "passkey", passkey: {...}}`` or exactly
+    ``{decision: "declined", method: "tap"}``, sent through ``request.answer``."""
 
     decision: ConfirmDecision
     method: ConfirmMethod
     verified: bool | None = None
+    passkey: ConfirmPasskeyAssertion | None = None
 
 
 server_request("confirm", params=ConfirmRequestParams, result=ConfirmResult,
                doc="The agent asks the person to confirm one sensitive action. 120 s. Level plain: a tap in a "
-                   "connected client, nothing verified; a verified level is planned.")
+                   "connected client, nothing verified. Level passkey: a WebAuthn assertion the gateway verifies.")
 
 
 # ── withdrawal ────────────────────────────────────────────────────────────────────────────────
@@ -277,6 +332,12 @@ class RequestCancelReason(WireEnum):
     shutdown = "shutdown"
     resolved = "resolved"
     session_closed = "session_closed"
+    #: A ``confirm`` at level ``passkey`` was settled ``unavailable`` after five refused answers.
+    too_many_attempts = "too_many_attempts"
+    #: A ``confirm`` at level ``passkey`` was answered with a valid assertion (``request.answer`` said
+    #: ``ok``), but the gateway could not commit it (the passkey was revoked meanwhile, a replay, a counter
+    #: regression, a store error): it is NOT confirmed. Clear any "confirmed" state for that id.
+    verification_failed = "verification_failed"
 
 
 class RequestCancelPayload(Payload):

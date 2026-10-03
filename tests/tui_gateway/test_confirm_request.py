@@ -3,8 +3,9 @@ the ``confirm_action`` tool (``tools/confirm_tool.py``).
 
 What is pinned here: the frame reaches only connections that advertised the requested level; the four
 outcomes stay apart (an error response or no capable client is ``unavailable``, never ``declined``); a
-connection that did not advertise the level cannot settle the request on any path; the reserved
-``passkey`` level is never sent and never advertisable; ``verified`` is the gateway's, not the client's;
+connection that did not advertise the level cannot settle the request on any path; ``passkey`` is never
+accepted or sent while the level is off (its own suite: ``test_confirm_passkey.py``); ``verified`` is the
+gateway's, not the client's;
 restore lists the request only to a connection that may answer it; the tool's gating and rate limit; and
 the existing request kinds see exactly what they saw before (``send`` wraps ``send_detailed``).
 """
@@ -198,15 +199,21 @@ def test_plain_check_validates_shape_and_never_verifies():
     assert plain.check(params, {"decision": "declined", "method": "tap"}) == (None, False)
     assert plain.check(params, {"decision": "yes", "method": "tap"})[0]
     assert plain.check(params, {"decision": "confirmed", "method": "biometric"})[0]
+    # A contract method of another level is not a plain answer: refused, so "passkey" never reads unverified.
+    assert plain.check(params, {"decision": "confirmed", "method": "passkey"})[0].startswith("bad_shape")
     assert plain.challenge("s1", params) == {}
 
 
-def test_advertisable_levels_match_and_passkey_is_reserved():
+def test_advertisable_levels_match_and_passkey_needs_a_checked_detail():
     from tui_gateway import confirm, server_requests
     from tui_gateway.contracts.server_requests import ConfirmLevel
     assert set(confirm.LEVELS) == {level.value for level in ConfirmLevel}
     assert set(server_requests.CONFIRM_LEVELS) == {n for n, lv in confirm.LEVELS.items() if lv.advertisable}
-    assert confirm.LEVELS["passkey"].implemented is False and confirm.LEVELS["passkey"].advertisable is False
+    assert server_requests.DETAILED_LEVELS == {"passkey"}
+    # Without its request's context the passkey level accepts nothing and verifies nothing.
+    passkey = confirm.LEVELS["passkey"]
+    assert passkey.check({"level": "passkey"}, {"decision": "confirmed", "method": "passkey"})[0]
+    assert passkey.check({"level": "passkey"}, {"decision": "confirmed", "method": "passkey"})[1] is False
 
 
 # ── capability ──────────────────────────────────────────────────────────────────────────────
@@ -248,17 +255,40 @@ def test_no_capable_client_is_unavailable_and_nothing_is_sent(server):
     assert confirm.request("nope", confirm.build_params(summary="Pay."), timeout=5).outcome == "unavailable"
 
 
-def test_passkey_is_not_implemented_unavailable_at_once_and_nothing_is_sent(server):
+def test_passkey_while_the_level_is_off_is_unavailable_at_once_and_nothing_is_sent(server):
     from tui_gateway import confirm, server_requests
-    app = _Peer("app")
-    _session(server, "s1", app)
-    _advertise(server, app, confirm=["plain", "passkey"])
+    app = _Peer("app", "self_hosted:alice")
+    _session(server, "s1", app, creator="self_hosted:alice")
+    response = _advertise(server, app, confirm=["plain", "passkey"])
+    assert response["result"]["confirm"] == ["plain"]
+    assert response["result"]["confirm_passkey"] == {"v": 1, "enabled": False, "reason": "disabled",
+                                                     "gateway_id": "", "rp": {"native": [], "web": []}}
     for _ in range(10):  # never sent, so never counted against the window either
         outcome = confirm.request("s1", confirm.build_params(summary="Pay.", level="passkey"), timeout=5)
         assert outcome.as_dict() == {"outcome": "unavailable", "method": None, "verified": False,
-                                     "reason": "level_not_implemented"}
+                                     "reason": "disabled"}
     assert app.frames == [] and server_requests.open_requests("s1") == []
+    # Nothing was sent, so nothing opens the no-downgrade window: plain is the level this gateway has.
     assert confirm.request("s1", confirm.build_params(summary="Pay."), timeout=0.01).outcome == "timeout"
+    assert len(app.requests()) == 1 and app.requests()[0]["params"]["level"] == "plain"
+
+
+def test_a_plain_answer_claiming_method_passkey_is_refused(server):
+    from tui_gateway import server_requests
+    app = _Peer("app")
+    _session(server, "s1", app)
+    _advertise(server, app, confirm=["plain"])
+    thread, box = _ask("s1")
+    req = _wait_open()
+    claimed = {"decision": "confirmed", "method": "passkey"}
+    refused = _as(app, server.handle_request, {"id": 2, "method": "request.answer",
+                                               "params": {"id": req.id, "result": claimed}})
+    assert refused["error"]["code"] == 4034 and refused["error"]["message"].startswith("bad_shape")
+    assert _answer(server, app, req.id, claimed) is None  # the bare frame is refused too
+    assert thread.is_alive() and req.id in server_requests._open
+    _answer(server, app, req.id, CONFIRMED)
+    thread.join(5)
+    assert box["r"].as_dict() == {"outcome": "confirmed", "method": "tap", "verified": False}
 
 
 # ── the four outcomes ───────────────────────────────────────────────────────────────────────
@@ -704,7 +734,11 @@ def test_tool_round_trip_and_messages(server):
     result = json.loads(box["r"])
     assert result["outcome"] == "confirmed" and result["verified"] is False
     assert result["message"].startswith("Someone confirmed in a connected app")
-    assert "error" in json.loads(confirm_tool.confirm_action_tool(summary="Pay.", level="passkey"))
+    assert "error" in json.loads(confirm_tool.confirm_action_tool(summary="Pay.", level="device_auth"))
+    # passkey is never a bad argument (the model would retry at plain): it reaches the gateway, which says why.
+    passkey = json.loads(confirm_tool.confirm_action_tool(summary="Pay.", level="passkey"))
+    assert passkey["outcome"] == "unavailable" and "Do not reach the same effect another way" in passkey["message"]
+    assert "level plain" not in passkey["message"]  # nothing was sent: plain is not ruled out
     not_consent = "This is not consent: do not perform the action."
     assert confirm_tool._sentence({"outcome": "declined"}).startswith("Declined in a connected app.")
     assert not_consent in confirm_tool._sentence({"outcome": "timeout"})

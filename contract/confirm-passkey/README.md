@@ -246,10 +246,15 @@ the level; otherwise 4033) reach §9, and only their refusals count toward the f
     passkey is one key on several devices, each with its own counter (or none), so a lower value is
     expected and is not evidence of a cloned authenticator.
 
-Accepted: the outcome is `confirmed` with `method: "passkey"` and `verified: true`; the gateway then
-re-reads the credential (revoked meanwhile → refused, `verification_failed`), stores `n` and BS with a
-compare-and-set, and writes a receipt. The first verified answer settles the request; other connections
-get `request.cancel {reason: "resolved"}`.
+Accepted: the first answer that passes these steps settles the request, and `request.answer` answers
+`{"status": "ok"}`, which means **received and valid**, not yet "confirmed"; other connections get
+`request.cancel {reason: "resolved"}`. The gateway then commits it once, outside the request lock: it
+re-reads the credential (revoked meanwhile → refused), stores `n` and BS with a compare-and-set, and
+writes a receipt. Only a successful commit makes the outcome `confirmed` with `method: "passkey"` and
+`verified: true`. A refused commit (revoked meanwhile, a replay, a counter regression against the value
+stored now, a store error) makes it `unavailable` (`verification_failed`), and the session's connections
+get `request.cancel {reason: "verification_failed"}`: a client clears any "confirmed" state it showed for
+that id.
 
 **`too_many_attempts`** — the fifth refused answer (from connections allowed to answer) for one request
 is refused with this reason and settles the request as `unavailable` (`verification_failed`). See

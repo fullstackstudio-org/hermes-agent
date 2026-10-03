@@ -1671,13 +1671,34 @@ export interface GatewayCapabilitiesResult {
 export interface ClientCapabilitiesParams {
   server_requests?: boolean
   confirm?: string[] | null
+  confirm_passkey?: ConfirmPasskeyAdvertisement | null
+}
+/** Second ``client.capabilities`` call, with ``passkey`` in ``confirm``: how this client runs the ceremony, ``{v: 1, kind, rp_id}``. ``kind``: ``native`` (an app under a native RP) or ``web`` (a browser; ``rp_id`` is its host). Deliberately permissive here (any value, extra keys allowed) and checked in code (``confirm_passkey.accept_advertisement``): a shape this gateway does not accept, including a later client's extra field, only drops ``passkey`` and never fails the call (and ``plain`` with it). */
+export interface ConfirmPasskeyAdvertisement {
+  v?: unknown
+  kind?: unknown
+  rp_id?: unknown
+  [key: string]: unknown
 }
 export interface ClientCapabilitiesResult {
   server_requests: string[]
   confirm?: ConfirmLevel[]
+  confirm_passkey?: ConfirmPasskeyCapability | null
 }
-/** What a confirmation proves. ``plain``: someone tapped Confirm in a connected client; nothing more, and the gateway cannot check even that. ``passkey``: RESERVED for a verified level the gateway will check itself; not implemented yet — a ``passkey`` request is ``unavailable`` without being sent, and no client can advertise it. The set is open: a later level is one more value here. */
+/** What a confirmation proves. ``plain``: someone tapped Confirm in a connected client; nothing more, and the gateway cannot check even that. ``passkey``: the gateway verified a WebAuthn assertion with user verification, made by a passkey enrolled for the person the turn acts for, over a challenge that commits to this gateway, session, request and text (``contract/confirm-passkey/README.md``). Sent only to connections signed in as that person that advertised the level with an accepted RP. The set is open: a later level is one more value here. */
 export type ConfirmLevel = 'plain' | 'passkey'
+/** Whether this connection may advertise ``passkey`` (contract §8). ``reason`` is ``""`` exactly when ``enabled``; otherwise ``disabled``, ``no_base_url``, ``private_origin``, ``no_identity`` (this connection has no signed-in user) or ``store_unavailable``. ``gateway_id`` (base64url, 16 bytes) is ``""`` while the level is disabled. */
+export interface ConfirmPasskeyCapability {
+  v: number
+  enabled: boolean
+  reason: string
+  gateway_id: string
+  rp: ConfirmPasskeyRps
+}
+export interface ConfirmPasskeyRps {
+  native: string[]
+  web: string[]
+}
 /** ``word`` is the token under the cursor (``@`` prefix = context reference); ``cwd`` / ``session_id`` pick the directory the listing resolves against. */
 export interface CompletePathParams {
   profile?: string | null
@@ -4243,23 +4264,56 @@ export interface TourStep {
   side?: string | null
   [key: string]: unknown
 }
-/** Built and bounded by the gateway (``tui_gateway/confirm.py``), never passed through from the agent: control and format characters are stripped, lengths are capped, and every string is PLAIN TEXT — a client renders it verbatim, never as markdown or HTML. Button wording is the client's own, not the agent's. The text is the AGENT's own words: a client marks it as such and never lets it style its frame. Sent only to connections attached to the session whose ``client.capabilities`` listed ``level`` under ``confirm``; only such a connection, still attached, may answer. */
+/** Built and bounded by the gateway (``tui_gateway/confirm.py``), never passed through from the agent: control and format characters are stripped, lengths are capped, and every string is PLAIN TEXT — a client renders it verbatim, never as markdown or HTML. Button wording is the client's own, not the agent's. The text is the AGENT's own words: a client marks it as such and never lets it style its frame. Sent only to connections attached to the session whose ``client.capabilities`` listed ``level`` under ``confirm``; only such a connection, still attached, may answer. At level ``passkey`` also only to connections signed in as ``passkey.user`` that advertised an RP the user has a credential for. */
 export interface ConfirmRequestParams {
   session_id: string
   title: string
   summary: string
   detail?: string | null
   level: ConfirmLevel
+  passkey?: ConfirmPasskeyParams | null
 }
-/** The person's decision. A client that cannot answer right now answers a JSON-RPC ERROR, never a made-up ``declined``: the gateway reports that as ``unavailable``. ``verified`` is not the client's to set: the gateway decides it from the level (always false for ``plain``) and ignores whatever a client sends here. Clients should omit it. */
+/** Level ``passkey`` only (contract §8). ``nonce`` (32 bytes) and ``gateway_id`` (16 bytes) are base64url; ``base_url`` is informative (a client always hashes the base URL it dialed); ``expires_at`` is Unix seconds. */
+export interface ConfirmPasskeyParams {
+  v: number
+  nonce: string
+  gateway_id: string
+  base_url: string
+  expires_at: number
+  user: ConfirmPasskeyUser
+  credentials: ConfirmPasskeyCredentials[]
+}
+/** The person the request is bound to: the turn's acting user, ``<provider>:<user id>``. */
+export interface ConfirmPasskeyUser {
+  id: string
+  name: string
+}
+/** The bound user's active credentials for one RP (base64url ids): a client passes the ones for its own RP as ``allowCredentials`` and refuses (4040) a request without any. */
+export interface ConfirmPasskeyCredentials {
+  rp_id: string
+  ids: string[]
+}
+/** The person's decision. A client that cannot answer right now answers a JSON-RPC ERROR, never a made-up ``declined``: the gateway reports that as ``unavailable`` (at level ``passkey``: code 4040, ``data.reason``). ``verified`` is not the client's to set: the gateway decides it (always false for ``plain``; true only after it verified and committed a passkey assertion) and ignores whatever a client sends here at ``plain``; at ``passkey`` a client-sent ``verified`` is refused (``bad_shape``). Clients omit it. Level ``passkey``: ``{decision: "confirmed", method: "passkey", passkey: {...}}`` or exactly ``{decision: "declined", method: "tap"}``, sent through ``request.answer``. */
 export interface ConfirmResult {
   decision: ConfirmDecision
   method: ConfirmMethod
   verified?: boolean | null
+  passkey?: ConfirmPasskeyAssertion | null
 }
 export type ConfirmDecision = 'confirmed' | 'declined'
-/** How the client obtained the decision. ``tap``: a button, nothing proven. Further values arrive with the levels that need them. */
-export type ConfirmMethod = 'tap'
+/** How the client obtained the decision. ``tap``: a button, nothing proven (every decline is a tap). ``passkey``: a WebAuthn assertion, carried in ``ConfirmResult.passkey`` and verified by the gateway. */
+export type ConfirmMethod = 'tap' | 'passkey'
+/** The WebAuthn assertion of a ``passkey`` answer (contract §8); binary fields are base64url. The gateway checks it in the order of contract §9; a refusal is ``request.answer`` error 4034 with ``data.reason``. */
+export interface ConfirmPasskeyAssertion {
+  v: number
+  rp_id: string
+  base_url: string
+  credential_id: string
+  authenticator_data: string
+  client_data_json: string
+  signature: string
+  user_handle?: string | null
+}
 export interface DisplayInstallSudoParams {
   session_id: string
   profile_key: string
@@ -5424,7 +5478,7 @@ export interface ServerRequestMap {
   approval: { params: ApprovalRequestParams; result: ApprovalResult }
   /** The clarify tool: ask the user one question or a batch. */
   clarify: { params: ClarifyRequestParams; result: ClarifyResult }
-  /** The agent asks the person to confirm one sensitive action. 120 s. Level plain: a tap in a connected client, nothing verified; a verified level is planned. */
+  /** The agent asks the person to confirm one sensitive action. 120 s. Level plain: a tap in a connected client, nothing verified. Level passkey: a WebAuthn assertion the gateway verifies. */
   confirm: { params: ConfirmRequestParams; result: ConfirmResult }
   /** Masked sudo password for the Bot Screen package install; app-level (empty session). */
   'display.install.sudo': { params: DisplayInstallSudoParams; result: ValueResult }

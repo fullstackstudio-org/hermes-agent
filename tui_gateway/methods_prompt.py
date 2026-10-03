@@ -1249,8 +1249,9 @@ def _(rid, params: dict) -> dict:
     window answering a member's prompt mirrored from its resume snapshot). The response-frame path is
     the norm; this is the proxy for it. ``expired`` when the request already ended; 4033 for a connection
     that may not act on the request's session (``_transport_may_access_session``). A gated request
-    (``confirm``) answers 4033 to a connection that did not advertise its level and 4034 to a result that
-    is not a valid answer; the request stays open for one that is."""
+    (``confirm``) answers 4033 to a connection that did not advertise its level (or, at level ``passkey``, is
+    not signed in as the request's user) and 4034 to a result that is not a valid answer (at ``passkey`` with
+    ``data.reason``); the request stays open for one that is, up to the level's refusal cap."""
     request_id = str(params.get("id") or "")
     result = params.get("result")
     if not request_id or not isinstance(result, dict):

@@ -393,7 +393,7 @@ def register(ctx):
 
 - Callbacks receive **keyword arguments**. Always accept `**kwargs` for forward compatibility.
 - Callback exceptions are logged and skipped; later callbacks continue. A callback that fails the same way on every call (typically a signature naming a field the hook does not send, e.g. `tool_data` instead of `tool_name`/`args`) is reported **once** at WARNING — the message lists the fields the hook provides — and identical repeats go to DEBUG, so a mis-declared plugin cannot flood the log.
-- If a Python plugin callback on a **timeout-bounded** hook (hot-path observers such as `post_tool_call` / `pre_llm_call`, `on_passkey_change`, plus the policy hook `pre_tool_call`) **blocks** longer than `plugins.hook_callback_timeout` (default 30s, set `0` to disable, max 600), it is abandoned without joining the worker so the agent loop continues. Timed-out or still-running `pre_tool_call` callbacks **fail closed** (block the tool); other bounded hooks fail open (skip). Hooks with a documented caller-thread contract (`subagent_stop`) are never moved onto a timeout worker. Shell hooks keep their own per-entry `timeout`.
+- If a Python plugin callback on a **timeout-bounded** hook (hot-path observers such as `post_tool_call` / `pre_llm_call`, `on_passkey_change`, `pre_confirm_request`, plus the policy hook `pre_tool_call`) **blocks** longer than `plugins.hook_callback_timeout` (default 30s, set `0` to disable, max 600), it is abandoned without joining the worker so the agent loop continues. Timed-out or still-running `pre_tool_call` callbacks **fail closed** (block the tool); other bounded hooks fail open (skip). Hooks with a documented caller-thread contract (`subagent_stop`) are never moved onto a timeout worker. Shell hooks keep their own per-entry `timeout`.
 - The catalog below is descriptive: **observers** ignore returns, **transforms** accept the first valid string replacement, and **directive/control** hooks consume documented return shapes. Plugin middleware is a separate registry and surface, not another hook category.
 - Correlation fields such as `turn_id`, `api_request_id`, `task_id`, `session_id`, and `api_call_count` are hook-specific and may be absent. Treat IDs as opaque.
 - Runtime event-name validity comes from `hermes_cli.plugins.VALID_HOOKS`. `hermes hooks list` lists configured shell/outbound hooks, not every available event; `hermes hooks test <event>` reports the valid set only when an invalid event is supplied.
@@ -481,6 +481,7 @@ Payload fields below are the exact event-specific fields supplied by each call s
 | `pre_approval_request` | Observer | Before prompted or smart approval; return ignored. | `command`, `description`, `pattern_key`, `pattern_keys`, `session_key`, `surface`, `turn_id`, `tool_call_id` | Command may contain secrets; smart observer preparation force-redacts, but surfaces do not all have identical redaction. |
 | `post_approval_response` | Observer | After a decision, timeout, or gateway notification failure; return ignored. | `command`, `description`, `pattern_key`, `pattern_keys`, `session_key`, `surface`, `turn_id`, `tool_call_id`, `choice`; smart path may add `decided_by` | Same command sensitivity plus decision metadata. |
 | `on_passkey_change` | Observer | After a passkey of a signed-in user was added or revoked through the dashboard's passkey routes and the store committed it (fork; confirm level `passkey`); return ignored. | `change`, `user_id`, `credential`, `at`, `via` | Names the user and the credential (id, name, RP); never a code, key, assertion or token. |
+| `pre_confirm_request` | Observer | A `confirm` request (the `confirm_action` tool) was just written to the person's connected apps (fork); fired on its own thread, return ignored. | `session_id`, `session_key`, `request_id`, `level`, `user_id`, `expires_at`, `reached` | Ids, the level and the user the request is for; never the title, summary or detail. |
 | `on_room_member_activity` | Observer | While a hosted Group Chat member turn runs on the Bot Mode gateway, once per runtime event the member session emits (tool start/complete, approval request, message/reasoning deltas, errors); queued per consumer off the token path; return ignored. | `room_id`, `thread_id`, `member_id`, `turn_id`, `task_id`, `execution_generation`, `kind`, `seq`, `payload` | `payload` is the client-safe session event body: tool args and results, redacted approval commands, streamed member text. |
 | `kanban_task_claimed` | Observer | After claim commit, in dispatcher process before worker spawn; return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id` | Board/task/profile/assignee identifiers. |
 | `kanban_task_completed` | Observer | After completion and cleanup, usually in worker process; return ignored. | `task_id`, `profile_name`, `board`, `assignee`, `run_id`, `summary` | Summary may contain project/user content. |
@@ -1434,6 +1435,38 @@ own process and do not fire it.
 **Return value:** ignored. A callback that raises is logged and never undoes the change. Callbacks are
 bounded by `plugins.hook_callback_timeout` (default 30 s); one that runs longer is abandoned so the
 request that made the change can answer.
+
+---
+
+### `pre_confirm_request`
+
+Fires once a `confirm` request (the agent's `confirm_action` tool, see
+[Confirm sensitive actions](../../guides/confirm-sensitive-actions.md)) has been written to the person's
+connected apps, before the gateway waits for the answer. It is meant for a push that opens the request in
+the app. It runs on its own thread, so a slow plugin never shortens the person's 120 seconds.
+
+**Callback signature:**
+
+```python
+def my_callback(session_id: str, session_key: str, request_id: str, level: str, user_id: str,
+                expires_at: int, reached: int, **kwargs):
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `session_id` | `str` | The interactive session the request belongs to |
+| `session_key` | `str` | The conversation it belongs to |
+| `request_id` | `str` | The request's id (`srq-…`), as the app receives it |
+| `level` | `str` | `"plain"` or `"passkey"` |
+| `user_id` | `str` | `"<provider>:<user id>"`: at `passkey` the person the request is bound to (only their apps receive it); at `plain` the user the turn works for, or `""` |
+| `expires_at` | `int` | Unix seconds when the request times out |
+| `reached` | `int` | How many connections it was written to |
+
+Never the title, summary or detail: the app shows the request itself once the notification opens it. At
+level `passkey` a notification must not offer a Confirm action: only the app can run the passkey ceremony.
+
+**Return value:** ignored. A callback that raises is logged. Callbacks are bounded by
+`plugins.hook_callback_timeout` (default 30 s).
 
 ---
 

@@ -39,6 +39,14 @@ never to the whole session. An answer is accepted only from a connection that ad
 anything else is refused and the request stays open. An error response from a connection the frame
 went to takes that connection out of the running; when none is left the outcome is ``unavailable``.
 The first valid answer wins and the other connections get ``request.cancel {reason: "resolved"}``.
+
+A gated request may narrow its audience further with a TARGET PREDICATE (``target(transport, detail)``,
+``confirm`` at level ``passkey``: signed in as the bound user, with an accepted RP the user has a
+credential for). The same predicate decides who gets the frame, who may answer (:func:`_may_answer`, both
+answer paths) and who sees it in ``open_requests``; ``detail`` is what the connection advertised with the
+level (``client.capabilities {confirm_passkey: ...}``). It may also cap refused answers (``max_refusals``):
+each refused answer from a connection allowed to answer counts, and the last one settles the request
+``unavailable (too_many_attempts)``; ``request.answer`` then reports refusals as 4034 with ``data.reason``.
 """
 
 from __future__ import annotations
@@ -70,15 +78,21 @@ class RequestOutcome(NamedTuple):
     answered_by: Any = None
 
 
+def new_request_id() -> str:
+    """A fresh request id (``srq-<12 hex>``), for a caller that must know it before the frame goes out (the
+    passkey challenge commits to it)."""
+    return f"srq-{uuid.uuid4().hex[:12]}"
+
+
 class ServerRequest:
     __slots__ = ("id", "sid", "method", "params", "event", "result", "answered", "created_at",
                  "qids", "locked", "on_result", "errored", "cancel_reason", "level", "validate", "targets",
-                 "answered_by")
+                 "answered_by", "target", "max_refusals", "refusals", "exhausted", "on_refusal")
 
     def __init__(self, sid: str, method: str, params: dict, *, qids: list[str] | None = None,
                  on_result: Callable[[dict | None], None] | None = None, level: str | None = None,
-                 validate: Callable[[dict], str | None] | None = None) -> None:
-        self.id = f"srq-{uuid.uuid4().hex[:12]}"
+                 validate: Callable[[dict], str | None] | None = None, request_id: str | None = None) -> None:
+        self.id = request_id or new_request_id()
         self.sid = sid
         self.method = method
         self.params = dict(params)
@@ -100,6 +114,12 @@ class ServerRequest:
         self.validate = validate
         self.targets: list = []
         self.answered_by: Any = None
+        # Gated requests that narrow their audience (``send_gated(target=...)``) and cap refused answers.
+        self.target: Callable[[Any, Any], bool] | None = None
+        self.max_refusals: int | None = None
+        self.refusals = 0
+        self.exhausted = False
+        self.on_refusal: Callable[[Any, str, Any, bool], None] | None = None
 
     def frame(self) -> dict:
         return {"jsonrpc": "2.0", "id": self.id, "method": self.method,
@@ -137,12 +157,16 @@ _peers: Callable[[str], list] = lambda sid: []  # noqa: E731
 _answering_clients: set = set()
 # The ``confirm`` levels each answering transport advertised (``client.capabilities {confirm: [...]}``).
 _confirm_levels: dict[Any, frozenset[str]] = {}
+# What a transport advertised WITH a level that needs more than its name (``passkey``: ``{kind, rp_id}``,
+# accepted by ``confirm_passkey.accept_advertisement``). Handed to a request's target predicate.
+_confirm_details: dict[Any, dict[str, Any]] = {}
 
 #: The ``confirm`` levels a CLIENT may advertise; anything else it lists is ignored. Kept equal to the
-#: advertisable levels in ``tui_gateway/confirm.py::LEVELS`` (a test pins that). A level that needs a
-#: per-user registration first (a verified level) is where that check would go: ``advertise`` would accept
-#: it only for a connection whose signed-in user has a registered credential.
-CONFIRM_LEVELS = ("plain",)
+#: advertisable levels in ``tui_gateway/confirm.py::LEVELS`` (a test pins that).
+CONFIRM_LEVELS = ("plain", "passkey")
+#: Levels accepted only together with a detail the caller of :func:`advertise` already checked (``passkey``:
+#: a signed-in connection with an accepted RP, see ``methods_voice.py`` ``client.capabilities``).
+DETAILED_LEVELS = frozenset({"passkey"})
 
 
 def bind_sinks(write_json: Callable[[dict], Any], emit: Callable[[str, str, dict], Any],
@@ -162,12 +186,19 @@ def _caller() -> Any:
     return current_transport()
 
 
-def advertise(transport: Any, server_requests: bool, confirm: Any = None) -> list[str]:
+def advertise(transport: Any, server_requests: bool, confirm: Any = None,
+              details: dict[str, Any] | None = None) -> list[str]:
     """Record whether *transport*'s client answers server→client requests (``client.capabilities``), and
     which ``confirm`` levels it can perform. Levels count only together with ``server_requests``; unknown
-    or malformed entries are dropped. Returns the levels accepted (sorted)."""
+    or malformed entries are dropped, and a level in :data:`DETAILED_LEVELS` counts only with an entry in
+    *details* (already checked by the caller). Every call replaces the previous advertisement. Returns the
+    levels accepted (sorted)."""
+    details = details or {}
     levels = frozenset(level for level in (confirm if isinstance(confirm, (list, tuple)) else ())
-                       if isinstance(level, str) and level in CONFIRM_LEVELS) if server_requests else frozenset()
+                       if isinstance(level, str) and level in CONFIRM_LEVELS
+                       and (level not in DETAILED_LEVELS or details.get(level) is not None)
+                       ) if server_requests else frozenset()
+    kept = {level: details[level] for level in levels if level in DETAILED_LEVELS}
     with _lock:
         if server_requests:
             _answering_clients.add(transport)
@@ -177,6 +208,10 @@ def advertise(transport: Any, server_requests: bool, confirm: Any = None) -> lis
             _confirm_levels[transport] = levels
         else:
             _confirm_levels.pop(transport, None)
+        if kept:
+            _confirm_details[transport] = kept
+        else:
+            _confirm_details.pop(transport, None)
     return sorted(levels)
 
 
@@ -185,6 +220,7 @@ def forget(transport: Any) -> None:
     with _lock:
         _answering_clients.discard(transport)
         _confirm_levels.pop(transport, None)
+        _confirm_details.pop(transport, None)
 
 
 def answers_requests(transport: Any) -> bool:
@@ -198,18 +234,25 @@ def confirm_levels(transport: Any) -> frozenset[str]:
         return _confirm_levels.get(transport, frozenset()) if transport in _answering_clients else frozenset()
 
 
+def _qualifies(req: ServerRequest, transport: Any) -> bool:
+    """Caller holds ``_lock``. *transport* advertised *req*'s level and passes its target predicate (attachment
+    is checked by the caller). The predicate runs under ``_lock``: it must be pure and must not call back here."""
+    return (transport is not None and transport in _answering_clients
+            and req.level in _confirm_levels.get(transport, frozenset())
+            and (req.target is None or bool(req.target(transport, _confirm_details.get(transport, {}).get(req.level)))))
+
+
 def _may_answer(req: ServerRequest, transport: Any) -> bool:
     """Caller holds ``_lock``. Ungated requests: a connection that may act on the session (``_access``).
     Gated: only a connection attached to the request's session RIGHT NOW (a peer of its slot) that advertised
-    the request's level — never one that merely knows the session id or attached to it in the past. A
-    reconnecting client gets a gated request back after it reattaches (``session.resume`` / ``activate``)."""
+    the request's level and passes its target predicate — never one that merely knows the session id or
+    attached to it in the past. A reconnecting client gets a gated request back after it reattaches
+    (``session.resume`` / ``activate``) and advertises the level again."""
     if not _access(req.sid, transport):
         return False
     if req.level is None:
         return True
-    return (transport is not None and transport in _answering_clients
-            and req.level in _confirm_levels.get(transport, frozenset())
-            and any(peer is transport for peer in _peers(req.sid)))
+    return _qualifies(req, transport) and any(peer is transport for peer in _peers(req.sid))
 
 
 def _unanswerable(method: str, sid: str) -> bool:
@@ -222,6 +265,14 @@ def _unanswerable(method: str, sid: str) -> bool:
 
 def _emit_cancel(req: ServerRequest, reason: str) -> None:
     _emit("request.cancel", req.sid, {"id": req.id, "method": req.method, "reason": reason})
+
+
+def withdraw_settled(sid: str, request_id: str, method: str, reason: str) -> None:
+    """``request.cancel`` for a request that already SETTLED here but whose owner then rejected the answer
+    (``confirm`` at level ``passkey``: the store refused the commit). The clients were told ``ok`` /
+    ``resolved``; this tells them the answer did not count, so none keeps showing it as accepted. Like every
+    ``request.cancel`` it goes to the session's clients and carries only the id, the method and the reason."""
+    _emit("request.cancel", sid, {"id": request_id, "method": method, "reason": reason})
 
 
 def _contract(method: str):
@@ -297,6 +348,8 @@ def _await(req: ServerRequest, timeout: float | None) -> RequestOutcome:
         errored, cancel_reason = req.errored, req.cancel_reason
     if answered:
         return RequestOutcome("answered", result, "", req.id, req.answered_by)
+    if req.exhausted:
+        return RequestOutcome("unavailable", None, "too_many_attempts", req.id)
     if timed_out:
         _emit_cancel(req, "timeout")
         return RequestOutcome("timeout", {"answers": locked, "timed_out": True} if req.qids is not None else None,
@@ -308,7 +361,10 @@ def _await(req: ServerRequest, timeout: float | None) -> RequestOutcome:
 
 def send_gated(method: str, sid: str, params: dict, *, level: str, timeout: float | None,
                validate: Callable[[dict], str | None],
-               on_open: Callable[[str, int], None] | None = None) -> RequestOutcome:
+               on_open: Callable[[str, int], None] | None = None,
+               target: Callable[[Any, Any], bool] | None = None, request_id: str | None = None,
+               max_refusals: int | None = None,
+               on_refusal: Callable[[Any, str, Any, bool], None] | None = None) -> RequestOutcome:
     """Send *method* only to the connections attached to *sid* that advertised *level* (today: the
     ``confirm`` levels), and wait like :func:`send_detailed`.
 
@@ -319,6 +375,15 @@ def send_gated(method: str, sid: str, params: dict, *, level: str, timeout: floa
     answer that must not settle the request (the request stays open for a valid one). A valid answer
     withdraws the request from every other connection (``request.cancel {reason: resolved}``).
     ``on_open(request_id, connections_reached)`` runs once the frame is out (the audit line).
+
+    Narrowing (``confirm`` at level ``passkey``): ``target(transport, detail)`` must also hold for a
+    connection to get the frame, answer, or see the request in ``open_requests`` (it runs under the module
+    lock: pure, fast, no calls back into this module). ``request_id`` fixes the frame's id
+    (:func:`new_request_id`). ``max_refusals``: the answer refused that many times by ``validate`` (from
+    connections allowed to answer; 4033s, errors and accepted answers do not count) settles the request
+    ``unavailable (too_many_attempts)`` and withdraws it everywhere (``request.cancel {reason:
+    too_many_attempts}``). ``on_refusal(transport, reason, result, exhausted)`` runs outside the lock for every
+    counted refusal (the audit line); ``reason`` is ``validate``'s problem.
 
     Delivery notes. The frame is written to each target's own transport, NOT through the session's
     fan-out mailbox, so it may overtake events already queued for that connection; that is harmless for a
@@ -336,13 +401,13 @@ def send_gated(method: str, sid: str, params: dict, *, level: str, timeout: floa
         raise ValueError(f"invalid {method} params: {exc}") from exc
     if level not in CONFIRM_LEVELS:
         raise ValueError(f"unknown level {level!r}")
+    req = ServerRequest(sid, method, params, level=level, validate=validate, request_id=request_id)
+    req.target, req.max_refusals, req.on_refusal = target, max_refusals, on_refusal
     candidates = list(_peers(sid))
     with _lock:
-        targets = [peer for peer in candidates
-                   if peer in _answering_clients and level in _confirm_levels.get(peer, frozenset())]
+        targets = [peer for peer in candidates if _qualifies(req, peer)]
     if not targets:
         return RequestOutcome("unavailable", None, "no_capable_client")
-    req = ServerRequest(sid, method, params, level=level, validate=validate)
     req.targets = list(targets)
     with _lock:
         _open[req.id] = req
@@ -365,6 +430,8 @@ def send_gated(method: str, sid: str, params: dict, *, level: str, timeout: floa
     if outcome.status == "answered":
         # The other connections still show the card: withdraw it there (the answering one ignores it).
         _emit_cancel(req, "resolved")
+    elif req.exhausted:
+        _emit_cancel(req, "too_many_attempts")
     return outcome
 
 
@@ -387,12 +454,14 @@ def send_async(method: str, sid: str, params: dict, on_result: Callable[[dict | 
     return settle
 
 
-def answer_problem(request_id: str, result: Any) -> tuple[int, str] | None:
+def answer_problem(request_id: str, result: Any) -> tuple[int, str] | tuple[int, str, dict] | None:
     """Why the CALLING connection may not settle the open request *request_id* with *result*, as
-    ``(code, message)`` for a ``request.answer`` error; None when it may, or when *request_id* is not open
-    here (the ordinary path decides). 4033: the connection may not act on the request's session, or (gated
-    requests) is not attached to it or did not advertise the level; 4034: the result is not a valid answer
-    for this gated request."""
+    ``(code, message[, data])`` for a ``request.answer`` error; None when it may, or when *request_id* is not
+    open here (the ordinary path decides). 4033: the connection may not act on the request's session, or
+    (gated requests) is not attached to it, did not advertise the level or fails its target predicate; 4034:
+    the result is not a valid answer for this gated request. A request with ``max_refusals`` counts the
+    refusal here and answers ``(4034, "answer refused", {"reason": ...})``; the refusal that reaches the cap
+    settles the request and its reason is ``too_many_attempts``."""
     transport = _caller()
     with _lock:
         req = _open.get(request_id)
@@ -401,13 +470,48 @@ def answer_problem(request_id: str, result: Any) -> tuple[int, str] | None:
         if not _may_answer(req, transport):
             if req.level is None or not _access(req.sid, transport):
                 return 4033, "this connection may not answer requests of that session"
-            return 4033, f"this connection is not attached or did not advertise {req.method} level {req.level!r}"
+            return 4033, f"this connection is not attached or may not answer {req.method} level {req.level!r}"
         if req.level is None:
             return None
         validate = req.validate
+    # Outside the lock: a validator may be slow (a signature check). It is pure, so the answer path that
+    # settles the request (``resolve_response``) reaches the same verdict.
     problem = validate(result) if validate is not None and isinstance(result, dict) else (
         None if isinstance(result, dict) else "result must be an object")
-    return (4034, problem) if problem else None
+    if not problem:
+        return None
+    if req.max_refusals is None:
+        return 4034, problem
+    with _lock:
+        if _open.get(request_id) is not req:
+            return None  # settled meanwhile: the ordinary path answers "expired"
+        if not _may_answer(req, transport):
+            return 4033, f"this connection is not attached or may not answer {req.method} level {req.level!r}"
+        exhausted = _count_refusal(req)
+    _after_refusal(req, transport, problem, result, exhausted)
+    return 4034, "answer refused", {"reason": "too_many_attempts" if exhausted else problem}
+
+
+def _count_refusal(req: ServerRequest) -> bool:
+    """Caller holds ``_lock`` and *req* is open. Count one refused answer; True when that used up
+    ``max_refusals`` (the request is then settled: removed, marked exhausted)."""
+    req.refusals += 1
+    if req.max_refusals is None or req.refusals < req.max_refusals:
+        return False
+    _open.pop(req.id, None)
+    req.result, req.answered, req.exhausted = None, False, True
+    return True
+
+
+def _after_refusal(req: ServerRequest, transport: Any, problem: str, result: Any, exhausted: bool) -> None:
+    """Outside the lock: tell the request's owner about a counted refusal, and wake the waiter when it settled."""
+    if req.on_refusal is not None:
+        try:
+            req.on_refusal(transport, problem, result, exhausted)
+        except Exception:
+            logger.debug("server request %s: on_refusal failed", req.id, exc_info=True)
+    if exhausted:
+        req.event.set()
 
 
 def request_session(request_id: str) -> str | None:
@@ -423,6 +527,8 @@ def resolve_response(frame: dict) -> bool:
     rid = frame.get("id")
     if not isinstance(rid, str):
         return False
+    transport = _caller()
+    exhausted = False
     with _lock:
         req = _open.get(rid)
         if req is None:
@@ -430,69 +536,81 @@ def resolve_response(frame: dict) -> bool:
             # another process; say so — a dropped answer used to vanish without a trace.
             logger.debug("server request %s: response dropped, request no longer open", rid)
             return False
-        if not _access(req.sid, _caller()):
+        if not _access(req.sid, transport):
             logger.warning("server request %s (%s): response refused, the connection may not act on session %s",
                            rid, req.method, req.sid)
             return False
-        if req.level is not None and (verdict := _gated_verdict(req, frame)) != "settle":
+        verdict, problem = _gated_verdict(req, frame) if req.level is not None else ("settle", "")
+        if verdict == "counted":
+            exhausted = _count_refusal(req)
+        elif verdict != "settle":
             return verdict == "kept"
-        # Removing the request and committing its outcome are one settlement.
-        # ``cancel()`` also settles under this lock, so the first side to get
-        # here wins instead of a later cancellation overwriting a response.
-        _open.pop(rid, None)
-        if "error" in frame:
-            logger.debug("server request %s (%s) answered with error: %s", rid, req.method, frame.get("error"))
-            req.result, req.answered, req.errored = None, False, True
         else:
-            result = frame.get("result")
-            req.result = result if isinstance(result, dict) else {}
-            if req.qids and "answers" in req.result:
-                # Batch clarify: answers locked early via clarify.lock belong to the final set even when
-                # the closing response only carries the tail the user answered last.
-                answers = req.result.get("answers")
-                merged = dict(req.locked)
-                if isinstance(answers, dict):
-                    merged.update(answers)
-                req.result = {**req.result, "answers": merged}
-            req.answered = True
-            req.answered_by = _caller()
+            # Removing the request and committing its outcome are one settlement.
+            # ``cancel()`` also settles under this lock, so the first side to get
+            # here wins instead of a later cancellation overwriting a response.
+            _open.pop(rid, None)
+            if "error" in frame:
+                logger.debug("server request %s (%s) answered with error: %s", rid, req.method, frame.get("error"))
+                req.result, req.answered, req.errored = None, False, True
+            else:
+                result = frame.get("result")
+                req.result = result if isinstance(result, dict) else {}
+                if req.qids and "answers" in req.result:
+                    # Batch clarify: answers locked early via clarify.lock belong to the final set even when
+                    # the closing response only carries the tail the user answered last.
+                    answers = req.result.get("answers")
+                    merged = dict(req.locked)
+                    if isinstance(answers, dict):
+                        merged.update(answers)
+                    req.result = {**req.result, "answers": merged}
+                req.answered = True
+                req.answered_by = transport
+    if verdict == "counted":
+        # A bare response frame gets no reply; the refusal is still counted and reported to the owner.
+        _after_refusal(req, transport, problem, frame.get("result"), exhausted)
+        return exhausted
     if req.on_result is not None:
         req.on_result(req.result)
     req.event.set()
     return True
 
 
-def _gated_verdict(req: ServerRequest, frame: dict) -> str:
-    """Caller holds ``_lock``. What *frame* does to the open gated *req*: ``settle`` it now, leave it open
-    having taken the frame into account (``kept``), or leave it open ignoring the frame (``refused``).
+def _gated_verdict(req: ServerRequest, frame: dict) -> tuple[str, str]:
+    """Caller holds ``_lock``. What *frame* does to the open gated *req*, with the validator's problem:
+    ``settle`` it now, leave it open having taken the frame into account (``kept``), leave it open ignoring
+    the frame (``refused``), or refuse it as an answer that counts toward ``max_refusals`` (``counted``).
 
     An error response from a connection the frame went to takes that connection out of the running and
     settles (as ``unavailable``) only when it was the last one; an error from any other connection is
-    ignored. A result settles only from a connection that advertised the level and only when it passes
-    ``req.validate``; a refused result leaves the request open for a valid answer and is logged."""
+    ignored. A result settles only from a connection allowed to answer (:func:`_may_answer`) and only when it
+    passes ``req.validate``; a refused result leaves the request open for a valid answer and is logged."""
     transport = _caller()
     if "error" in frame:
         if not any(peer is transport for peer in req.targets):
             logger.debug("server request %s (%s): error from a connection it was not sent to, ignored",
                          req.id, req.method)
-            return "refused"
+            return "refused", ""
         req.targets = [peer for peer in req.targets if peer is not transport]
         if req.targets:
             logger.info("server request %s (%s): one client answered an error, %d still asked",
                         req.id, req.method, len(req.targets))
-            return "kept"
-        return "settle"
+            return "kept", ""
+        return "settle", ""
     if not _may_answer(req, transport):
-        logger.warning("server request %s (%s): answer refused, the connection did not advertise level %r",
+        logger.warning("server request %s (%s): answer refused, the connection may not answer level %r",
                        req.id, req.method, req.level)
-        return "refused"
+        return "refused", ""
     result = frame.get("result")
+    # Runs under the module lock, also for ``confirm`` at level ``passkey`` (an ES256 check): acceptable only
+    # because that validator is pure (no I/O, no logging), memoised per answer, and bounded (size checks first,
+    # five refusals per request). Never add I/O to a validator.
     problem = req.validate(result) if req.validate is not None and isinstance(result, dict) else (
         None if isinstance(result, dict) else "result must be an object")
     if problem:
         logger.warning("server request %s (%s): answer refused: %s", req.id, req.method, problem)
-        return "refused"
-    return "settle"
+        return ("counted" if req.max_refusals is not None else "refused"), problem
+    return "settle", ""
 
 
 def lock_answer(request_id: str, question_id: str, answer: str) -> list[str] | None:
@@ -569,3 +687,4 @@ def reset_for_tests() -> None:
         _open.clear()
         _answering_clients.clear()
         _confirm_levels.clear()
+        _confirm_details.clear()

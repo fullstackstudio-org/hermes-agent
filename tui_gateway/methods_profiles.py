@@ -594,17 +594,27 @@ def _save_mcp_toggles(cfg, enabled, launch_mcp, save_config) -> None:
     save_config(cfg)
 
 
+def _config_mutation_lock():
+    """The lock every config.yaml read-modify-write in this process holds across load → save: the
+    dashboard's routers and ``_write_profile_model`` (the model pin above) take it too.
+    ``_CONFIG_LOCK`` only covers each load or save on its own, so two writers that each load,
+    change one key and save would put back each other's old file."""
+    return _lazy("hermes_cli.web_server", "_CONFIG_MUTATION_LOCK")
+
+
 def _configure_cfg_sections(profile_dir, params, applied) -> None:
     """Apply ``disabled_skills`` / ``enabled_toolsets`` / ``enabled_mcp_servers`` (replace
     semantics; empty toolsets clears the pin). An undefined MCP server is copied from the LAUNCH
-    catalog (unknown names skipped); credentials stay in .env/auth."""
+    catalog (unknown names skipped); credentials stay in .env/auth. The whole load → change →
+    save runs under ``_config_mutation_lock`` (configure runs on the RPC pool; two saves of one
+    editor at once used to drop each other's sections)."""
     want_mcp = isinstance(params.get("enabled_mcp_servers"), list)
     launch_mcp = {}
     if want_mcp:  # launch catalog read BEFORE the home override flips config resolution
         load_launch = _lazy("hermes_cli.config", "load_config_readonly")
         launch_mcp = _try(lambda: (load_launch() or {}).get("mcp_servers"), {})
         launch_mcp = launch_mcp if isinstance(launch_mcp, dict) else {}
-    with _hermes_home_scope(profile_dir):
+    with _hermes_home_scope(profile_dir), _config_mutation_lock():
         from hermes_cli.config import load_config, save_config
         cfg = load_config() or {}
         if isinstance(params.get("disabled_skills"), list):
@@ -637,8 +647,13 @@ def _(rid, params: dict) -> dict:
         applied["soul"] = _best_effort(lambda: (profile_dir / "SOUL.md").write_text(params["soul"], encoding="utf-8"))
     if isinstance(params.get("description"), str):
         write_meta = _lazy("hermes_cli.profiles", "write_profile_meta")
-        applied["description"] = _best_effort(lambda: write_meta(
-            profile_dir, description=params["description"].strip(), description_auto=False))
+
+        def write_description():
+            # profile.yaml is one file for ui_meta and description alike: both read-modify-writes
+            # hold the same lock, or one puts back the other's old file.
+            with _profile_ui_meta_lock:
+                write_meta(profile_dir, description=params["description"].strip(), description_auto=False)
+        applied["description"] = _best_effort(write_description)
     confirm_message = _configure_model(profile_dir, params, applied)
     if any(isinstance(params.get(k), list) for k in ("disabled_skills", "enabled_toolsets", "enabled_mcp_servers")):
         _configure_cfg_sections(profile_dir, params, applied)

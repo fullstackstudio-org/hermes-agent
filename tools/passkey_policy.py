@@ -486,10 +486,22 @@ def _why(reason: str, noun: str, limit: int) -> str:
 
 
 def block_message(forced: Forced, noun: str) -> str:
-    """The text the agent gets for a forced confirmation that did not end in consent."""
+    """The text the agent gets for a forced confirmation that did not end in consent. Every ending says
+    "do NOT retry it" except ``padding``: there nothing was shown to the person, and the same operation
+    written without the extra whitespace is a new forced confirmation, shown in full and signed with a
+    passkey like any other, so resubmitting it compactly costs the rule nothing. The padded form itself
+    is never to be sent again."""
     if forced.outcome == "declined":
         return (f"BLOCKED: the person declined this {noun} in the passkey confirmation. The user has NOT "
                 f"consented. Do NOT retry it, do NOT rephrase it, and do NOT reach the same outcome another way.")
+    if forced.reason == "padding":
+        return (f"BLOCKED: this gateway's operator requires a passkey confirmation in the Hermie app for this "
+                f"{noun}, and {_why(forced.reason, noun, forced.limit)}. It did not run and nothing was shown to "
+                f"the person; this is not consent. Submit the same {noun} once more without the extra whitespace: "
+                f"at most 16 spaces in a row inside a line, at most 32 spaces of indentation and at most 3 blank "
+                f"lines in a row. Do NOT send "
+                f"the padded form again, do NOT change what the {noun} does, and do NOT reach the same effect "
+                f"another way. The person then confirms the {noun} as written, with their passkey.")
     return (f"BLOCKED: this gateway's operator requires a passkey confirmation in the Hermie app for this "
             f"{noun}, and {_why(forced.reason, noun, forced.limit)}. It did not run. This is not consent: do "
             f"NOT retry it, do NOT rephrase it, and do NOT reach the same effect another way; an ordinary "

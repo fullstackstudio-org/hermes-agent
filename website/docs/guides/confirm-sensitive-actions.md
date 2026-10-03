@@ -199,7 +199,9 @@ would show as `git status`. The bounds are more than 16 spaces in a row after a 
 character, a line indented more than 32 spaces (8 levels of 4-space Python, 16 levels of 2-space YAML),
 more than 3 blank lines in a row, and a line over 2,000 characters. Ordinary indented scripts, manifests
 and heredocs stay well inside them. Nothing is collapsed to fit: the passkey signs the exact text, so the
-command is blocked (`padding`), and the agent is told that a confirmation shows it only without the padding.
+command is blocked (`padding`). This is the one block after which the agent is told to submit again: the
+same command without the extra whitespace, never the padded form. Nothing was shown to the person, and
+the compact command is a new confirmation, shown in full and signed with a passkey like any other.
 
 - It never enters the approval queue: `/approve`, `/approve all`, `approval.respond` and messaging
   surfaces cannot answer it.

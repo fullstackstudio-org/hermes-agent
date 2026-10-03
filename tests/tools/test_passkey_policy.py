@@ -936,7 +936,22 @@ def test_no_block_message_invites_a_retry():
     for reason in [*_PASSKEY_MISSING, *passkey_policy.OWN_REASONS, "timeout", "rate_limited", "already_pending"]:
         message = passkey_policy.block_message(passkey_policy.Forced("blocked", reason, 2000), "command")
         assert "ask you again" not in message and "ask again" not in message, reason
-        assert "do NOT retry it" in message
+        if reason == "padding":
+            # The one exception (test below): nothing was shown, and the compact form is confirmed anew.
+            continue
+        assert "do NOT retry it" in message, reason
+
+
+def test_the_padding_message_asks_for_the_same_command_without_the_padding():
+    for noun in passkey_policy.NOUNS.values():
+        message = passkey_policy.block_message(passkey_policy.Forced("blocked", "padding"), noun)
+        assert f"Submit the same {noun} once more without the extra whitespace" in message
+        assert "Do NOT send the padded form again" in message and f"do NOT change what the {noun} does" in message
+        assert "not consent" in message and "with their passkey" in message
+        assert "do NOT retry it" not in message and "ask again" not in message
+    # A decline stays a decline whatever the reason field says.
+    declined = passkey_policy.block_message(passkey_policy.Forced("declined", "padding"), "command")
+    assert "Do NOT retry it" in declined
 
 
 def test_malformed_rules_are_logged_once(caplog):

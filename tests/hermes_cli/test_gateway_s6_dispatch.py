@@ -352,19 +352,171 @@ def test_start_is_unaffected_when_messaging_gateway_is_on_or_unset(monkeypatch):
         assert rec.calls == [("start", "gateway-coder")]
 
 
-def test_run_redirect_refuses_when_messaging_gateway_is_off(monkeypatch, capsys):
-    """The legacy `gateway run` -> supervised-longrun redirect funnels through the same dispatcher
-    and must refuse the same way, rather than falling through to a foreground gateway run."""
-    from hermes_cli import gateway as gw
+# ---------------------------------------------------------------------------
+# HERM-133: `gateway run` as the container command with HERMES_MESSAGING_GATEWAY=off parks instead
+# of exiting 1 (which crash-looped the container and took the dashboard down with it).
+# ---------------------------------------------------------------------------
 
-    _stub_s6(monkeypatch, on_s6=True)
+
+class _Execd(Exception):
+    """Raised by the stubbed ``os.execvp``: a real exec never returns to the caller."""
+
+
+def _run_args(no_supervise: bool = False):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(gateway_command="run", no_supervise=no_supervise, verbose=0, quiet=False,
+                           replace=False, force=False, external_supervisor=False)
+
+
+def _wire_run(monkeypatch, *, s6: bool, container: bool, switch: str | None):
+    """Stub everything ``_cmd_run`` can reach; returns (s6 recorder, execvp calls, run_gateway calls)."""
+    rec = _stub_s6(monkeypatch, on_s6=s6)
+    monkeypatch.setattr("hermes_cli.gateway.is_container", lambda: container)
     monkeypatch.setattr("hermes_cli.gateway._profile_suffix", lambda: "")
     monkeypatch.delenv("HERMES_S6_SUPERVISED_CHILD", raising=False)
     monkeypatch.delenv("HERMES_GATEWAY_NO_SUPERVISE", raising=False)
-    monkeypatch.setenv("HERMES_MESSAGING_GATEWAY", "off")
+    if switch is None:
+        monkeypatch.delenv("HERMES_MESSAGING_GATEWAY", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_MESSAGING_GATEWAY", switch)
+    execs: list[tuple[str, list[str]]] = []
+
+    def _fake_execvp(file, argv):
+        execs.append((file, list(argv)))
+        raise _Execd
+
+    monkeypatch.setattr("hermes_cli.gateway.os.execvp", _fake_execvp)
+    runs: list[bool] = []
+    monkeypatch.setattr("hermes_cli.gateway.run_gateway", lambda *a, **k: runs.append(True))
+    return rec, execs, runs
+
+
+@pytest.mark.parametrize("switch", ["off", "OFF", "0", "false", "no"])
+def test_run_parks_in_s6_container_when_messaging_gateway_is_off(monkeypatch, capsys, switch):
+    """The image's documented command: idle as `sleep infinity`, one stderr line, no slot touched."""
+    from hermes_cli import gateway as gw
+
+    rec, execs, runs = _wire_run(monkeypatch, s6=True, container=True, switch=switch)
+
+    with pytest.raises(_Execd):
+        gw._cmd_run(_run_args())
+
+    assert execs == [("sleep", ["sleep", "infinity"])]
+    assert rec.calls == [], "the s6 gateway slot must stay down"
+    assert runs == [], "no foreground gateway either"
+    captured = capsys.readouterr()
+    assert captured.out == "", "stdout stays clean for scripts"
+    lines = [line for line in captured.err.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert "HERMES_MESSAGING_GATEWAY=off" in lines[0]
+    assert "not starting the messaging gateway" in lines[0]
+
+
+def test_run_parks_even_with_no_supervise_when_messaging_gateway_is_off(monkeypatch, capsys):
+    """--no-supervise opts out of supervision, not of the container's kill switch."""
+    from hermes_cli import gateway as gw
+
+    rec, execs, runs = _wire_run(monkeypatch, s6=True, container=True, switch="off")
+    monkeypatch.setenv("HERMES_GATEWAY_NO_SUPERVISE", "1")
+
+    with pytest.raises(_Execd):
+        gw._cmd_run(_run_args(no_supervise=True))
+
+    assert execs and rec.calls == [] and runs == []
+    capsys.readouterr()
+
+
+def test_run_parks_in_container_without_s6_when_messaging_gateway_is_off(monkeypatch, capsys):
+    """The non-PID-1 entrypoint fallback (docker run --init, Fly) has no s6, so the redirect is not
+    taken; the switch must still keep the gateway from running in the foreground."""
+    from hermes_cli import gateway as gw
+
+    rec, execs, runs = _wire_run(monkeypatch, s6=False, container=True, switch="off")
+
+    with pytest.raises(_Execd):
+        gw._cmd_run(_run_args())
+
+    assert execs == [("sleep", ["sleep", "infinity"])]
+    assert rec.calls == [] and runs == []
+    capsys.readouterr()
+
+
+def test_run_outside_a_container_ignores_the_switch(monkeypatch, capsys):
+    """Outside a container the variable means nothing: `gateway run` starts the gateway as always."""
+    from hermes_cli import gateway as gw
+
+    rec, execs, runs = _wire_run(monkeypatch, s6=False, container=False, switch="off")
+
+    gw._cmd_run(_run_args())
+
+    assert runs == [True]
+    assert execs == [] and rec.calls == []
+    assert "HERMES_MESSAGING_GATEWAY" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("switch", [None, "on"])
+def test_run_in_s6_container_redirects_as_before_when_switch_on_or_unset(monkeypatch, capsys, switch):
+    """No behaviour change for a container that never set the variable or set it to on."""
+    from hermes_cli import gateway as gw
+
+    rec, execs, runs = _wire_run(monkeypatch, s6=True, container=True, switch=switch)
+
+    with pytest.raises(_Execd):
+        gw._cmd_run(_run_args())
+
+    assert rec.calls == [("start", "gateway-default")]
+    assert execs == [("sleep", ["sleep", "infinity"])]
+    assert runs == []
+    assert "running under s6 supervision" in capsys.readouterr().err
+
+
+def test_supervised_child_is_not_parked_by_the_switch(monkeypatch, capsys):
+    """The s6 slot's own process is governed by boot reconcile and `gateway start`, not this path."""
+    from hermes_cli import gateway as gw
+
+    rec, execs, runs = _wire_run(monkeypatch, s6=True, container=True, switch="off")
+    monkeypatch.setenv("HERMES_S6_SUPERVISED_CHILD", "1")
+
+    gw._cmd_run(_run_args())
+
+    assert runs == [True]
+    assert execs == [] and rec.calls == []
+    capsys.readouterr()
+
+
+def test_parked_run_falls_back_in_process_and_disarms_watchdog(monkeypatch, capsys):
+    """Without `sleep` on PATH the idle path uses the in-process heartbeat, with the startup watchdog
+    disarmed first (#102000), so a switched-off container is not os._exit(75)ed as a deadlock."""
+    from hermes_cli import gateway as gw
+
+    sw, handle = _armed_watchdog(monkeypatch)
+    try:
+        rec, _execs, runs = _wire_run(monkeypatch, s6=True, container=True, switch="off")
+        monkeypatch.setattr("hermes_cli.gateway.os.execvp", _raise_missing_sleep)
+        disarmed_at_park: list[bool] = []
+        monkeypatch.setattr("hermes_cli.gateway._block_until_terminated",
+                            lambda: disarmed_at_park.append(handle.disarmed))
+
+        gw._cmd_run(_run_args())
+
+        assert disarmed_at_park == [True]
+        assert sw._handle is None
+        assert rec.calls == [] and runs == []
+    finally:
+        sw._reset_for_tests()
+    assert "`sleep` is unavailable" in capsys.readouterr().err
+
+
+def test_gateway_start_still_refuses_when_switch_is_off_after_herm133(monkeypatch, capsys):
+    """HERM-133 only changes `gateway run`; an explicit `gateway start` keeps exiting non-zero."""
+    from hermes_cli import gateway as gw
+
+    rec, execs, runs = _wire_run(monkeypatch, s6=True, container=True, switch="off")
 
     with pytest.raises(SystemExit) as excinfo:
-        gw._maybe_redirect_run_to_s6_supervision(_Args())
+        gw._dispatch_via_service_manager_if_s6("start")
 
     assert excinfo.value.code == 1
-    assert "HERMES_MESSAGING_GATEWAY=off" in capsys.readouterr().out
+    assert rec.calls == [] and execs == [] and runs == []
+    capsys.readouterr()

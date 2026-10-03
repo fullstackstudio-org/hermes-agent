@@ -466,13 +466,22 @@ What turning it off costs:
   during the window the switch was off.
 - **The dashboard keeps working.** It is a separate supervised service and does not depend on the
   gateway; port 9119 stays reachable, and you can still browse sessions, logs and settings.
+- **The container keeps running.** When the container's command is `gateway run` (the documented
+  command, and the one in `docker-compose.yml`), it does not start a gateway and does not exit
+  either: it logs one line, `[hermes] HERMES_MESSAGING_GATEWAY=off: not starting the messaging
+  gateway; …`, and idles like `sleep infinity`. A `restart: unless-stopped` policy or a Kubernetes
+  Deployment therefore sees a running container, not a restart loop, the dashboard stays up, and
+  `docker stop` ends the container at once. You do not need to swap the command for
+  `sleep infinity` to turn the gateway off. This holds with `--no-supervise` too (it opts out of
+  supervision, not of the switch) and in the unsupervised non-PID-1 fallback. Outside a container
+  the variable has no effect and `gateway run` behaves as always.
 - **`hermes gateway start` explains itself instead of starting anything.** Run from inside the
   container (`docker exec … hermes gateway start`), it prints that the messaging gateway is off by
   configuration and exits non-zero, rather than silently doing nothing or fighting the switch on
   the next restart.
 
 Unlike the other variables in this section, `HERMES_MESSAGING_GATEWAY` is **not** written to
-`config.yaml` — it is read live, at every container boot and by `hermes gateway start`, so
+`config.yaml` — it is read live, at every container boot and by `hermes gateway start` and `gateway run`, so
 unsetting it (or setting it back to `on`) and restarting the container brings the gateway back
 exactly as it was: whatever was durably recorded as running before the switch was flipped off
 starts again, and whatever was stopped stays stopped. That durability is the other half of this

@@ -4343,9 +4343,9 @@ def _service_call(backend: str, verb: str, system: bool | None = False) -> None:
 def _refuse_start_if_messaging_gateway_disabled() -> None:
     """HERM-131: explain — and refuse — a start when this container's ``HERMES_MESSAGING_GATEWAY``
     is off, instead of silently un-downing an s6 slot that ``02-reconcile-profiles`` deliberately
-    left down at boot. Covers both ``hermes gateway start`` and the ``gateway run`` → supervised
-    longrun redirect (:func:`_maybe_redirect_run_to_s6_supervision`), which both funnel through
-    :func:`_dispatch_via_service_manager_if_s6`."""
+    left down at boot. Guards ``hermes gateway start`` (via :func:`_dispatch_via_service_manager_if_s6`).
+    ``gateway run`` as the container's command never gets here with the switch off: it parks first
+    (:func:`_idle_if_messaging_gateway_off_in_container`, HERM-133), because exiting crash-looped it."""
     from hermes_cli.container_env_config import MESSAGING_GATEWAY, messaging_gateway_enabled
 
     if messaging_gateway_enabled():
@@ -4444,6 +4444,45 @@ def gateway_command(args):
         sys.exit(1)
 
 
+def _messaging_gateway_off_in_container() -> bool:
+    """HERM-133: True when ``gateway run`` runs as a container's command with ``HERMES_MESSAGING_GATEWAY``
+    off. The s6 supervised child (``HERMES_S6_SUPERVISED_CHILD``) is excluded: it is the slot's own
+    process, which boot reconcile and ``gateway start`` already keep down while the switch is off.
+    Outside a container the variable means nothing and ``gateway run`` behaves as it always did."""
+    if os.environ.get("HERMES_S6_SUPERVISED_CHILD"):
+        return False
+    from hermes_cli.container_env_config import messaging_gateway_enabled
+
+    if messaging_gateway_enabled():
+        return False
+    from hermes_cli.service_manager import detect_service_manager
+
+    return detect_service_manager() == "s6" or is_container()
+
+
+def _idle_if_messaging_gateway_off_in_container() -> bool:
+    """HERM-133: with the switch off, park the container's ``gateway run`` CMD instead of exiting.
+
+    Exiting non-zero made the image's documented command (``gateway run``) crash-loop under Docker
+    ``restart:`` policies and Kubernetes, taking the dashboard (a separate s6 service in the same
+    container) down with every restart. Parking keeps /init and the dashboard up, ``docker stop``
+    still ends it at once (``sleep`` dies on SIGTERM; /init runs stage 3), and nothing gateway-shaped
+    starts. ``--no-supervise`` does not bypass this: it opts out of supervision, not of the switch.
+    True iff parked (only reachable when the heartbeat is stubbed in tests)."""
+    if not _messaging_gateway_off_in_container():
+        return False
+    from hermes_cli.container_env_config import MESSAGING_GATEWAY
+
+    print(
+        f"[hermes] {MESSAGING_GATEWAY}=off: not starting the messaging gateway; this container stays "
+        f"up idle (dashboard unaffected). Set {MESSAGING_GATEWAY}=on and restart to run it.",
+        file=sys.stderr,
+        flush=True,
+    )
+    _park_container_cmd()
+    return True
+
+
 def _maybe_redirect_run_to_s6_supervision(args) -> bool:
     """Inside an s6 container, upgrade bare ``gateway run`` to the supervised s6 longrun; True iff dispatched.
     ``HERMES_S6_SUPERVISED_CHILD`` (set by ``S6ServiceManager._render_run_script``) marks the supervised
@@ -4456,12 +4495,6 @@ def _maybe_redirect_run_to_s6_supervision(args) -> bool:
         return False
     if not _dispatch_via_service_manager_if_s6("start"):
         return False
-    # This process never reaches a GatewayRunner, so the watchdog armed by hermes_cli.main's argv
-    # fast-path has no other disarm site: the in-process heartbeat below parks with zero CPU and no
-    # progress lease, which the watchdog reads as a startup deadlock and os._exit(75)s the CMD process.
-    from hermes_startup_watchdog import disarm_startup_watchdog
-
-    disarm_startup_watchdog()
     # Breadcrumb on stderr (keep stdout clean for scripts); gateway logs follow via s6-log.
     print(
         "→ gateway is now running under s6 supervision (auto-restart on crash,\n"
@@ -4473,6 +4506,22 @@ def _maybe_redirect_run_to_s6_supervision(args) -> bool:
         file=sys.stderr,
         flush=True,
     )
+    _park_container_cmd()
+    return True  # unreachable on the execvp success path
+
+
+def _park_container_cmd() -> None:
+    """Keep the container's CMD process alive until ``docker stop``, without a resident interpreter.
+
+    Shared by the supervised-``gateway run`` redirect and the HERM-133 idle path for a container whose
+    messaging gateway is switched off. Only returns when the in-process fallback heartbeat is stubbed
+    (tests); in the image ``execvp`` replaces this process or the fallback exits on SIGTERM."""
+    # This process never reaches a GatewayRunner, so the watchdog armed by hermes_cli.main's argv
+    # fast-path has no other disarm site: the in-process heartbeat below parks with zero CPU and no
+    # progress lease, which the watchdog reads as a startup deadlock and os._exit(75)s the CMD process.
+    from hermes_startup_watchdog import disarm_startup_watchdog
+
+    disarm_startup_watchdog()
     # Keep the CMD process alive as a heartbeat so the container survives gateway flaps (`docker stop`
     # SIGTERMs it). Prefer `sleep infinity` (frees the interpreter); execvp only returns by raising
     # (ENOENT with a clobbered PATH / no `sleep`), which used to crash containers.
@@ -4497,7 +4546,6 @@ def _maybe_redirect_run_to_s6_supervision(args) -> bool:
             flush=True,
         )
         _block_until_terminated()
-    return True  # unreachable on the execvp success path
 
 
 def _block_until_terminated() -> None:
@@ -4575,6 +4623,8 @@ def _print_runtime_health() -> None:
 
 
 def _cmd_run(args):
+    if _idle_if_messaging_gateway_off_in_container():
+        return  # unreachable; the heartbeat execs `sleep` or exits on SIGTERM
     if _maybe_redirect_run_to_s6_supervision(args):
         return  # unreachable; execvp doesn't return
     if getattr(args, "external_supervisor", False):

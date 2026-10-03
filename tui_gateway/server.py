@@ -1970,6 +1970,19 @@ def _resolve_explicit_toolsets(explicit: list[str], validate_toolset) -> list[st
     return (built_in + mcp_valid) or False
 
 
+def _configured_cli_toolsets(cfg: dict) -> set[str]:
+    """The toolsets *cfg* selects for every chat this gateway runs (app, web, TUI): the ``cli`` platform's
+    list, resolved the way the agent resolves it. Empty means "no restriction", which ``_load_enabled_toolsets``
+    hands to the agent as ``None`` (every toolset).
+
+    ``profiles.describe`` reads this same function, so the toolset switches a bot's settings show are the
+    toolsets its next chat gets (``tests/tui_gateway/test_profiles_toolset_truth.py``).
+    ``include_default_mcp_servers=True`` is the runtime variant (the agent must be able to call default MCP
+    servers); the config-editing variant would silently drop MCP tools from the TUI. See PR #3252."""
+    from hermes_cli.tools_config import _get_platform_tools
+    return set(_get_platform_tools(cfg, "cli", include_default_mcp_servers=True))
+
+
 def _load_enabled_toolsets(platform: str | None = None) -> list[str] | None:
     """The agent's toolsets for this session (None = all): an explicit HERMES_TUI_TOOLSETS pin; else the
     coding posture (coding_context collapses to coding toolset + enabled MCP servers in a code workspace);
@@ -1995,14 +2008,7 @@ def _load_enabled_toolsets(platform: str | None = None) -> list[str] | None:
         fallback_notice = "[tui] no valid HERMES_TUI_TOOLSETS entries; using configured CLI toolsets"
     try:
         from hermes_cli.config import load_config
-        from hermes_cli.tools_config import _get_platform_tools
-        cfg = load_config()
-        # include_default_mcp_servers=True is the runtime variant (the agent must be able to call
-        # default MCP servers); the config-editing variant would silently drop MCP tools from the TUI.
-        # Passing ``False`` here is the config-editing variant — used when we need to persist a toolset list
-        # without baking in implicit MCP defaults. Using the wrong variant at agent creation time makes MCP
-        # tools silently missing from the TUI. See PR #3252 for the original design split.
-        enabled = _get_platform_tools(cfg, "cli", include_default_mcp_servers=True)
+        enabled = _configured_cli_toolsets(load_config())
         if fallback_notice is not None:
             _tui_notice(fallback_notice)
         return sorted(_with_session_toolsets(enabled, session_platform)) if enabled else None

@@ -425,18 +425,31 @@ def _(rid, params: dict) -> dict:
 
 def _describe_toolsets(cfg):
     """``(toolsets, pinned_set)`` as the `hermes tools` checklist presents them (the raw registry
-    leaks platform composites and reports everything enabled without a pin)."""
+    leaks platform composites and reports everything enabled without a pin).
+
+    ``enabled`` is what the bot's next app chat actually gets: the ``cli`` selection resolved by
+    ``_configured_cli_toolsets``, the function ``_load_enabled_toolsets`` builds the agent from. It is NOT
+    read off the raw pin: a pin holding a composite (``[hermes-cli]``, what ``hermes setup`` and older
+    configs write) names no checklist key, so reading the list literally showed every switch off on a bot
+    that had every tool. ``pinned_set`` is only the literal list, for ``toolsets_pinned``."""
     from hermes_cli.tools_config import (
-        _coerce_platform_toolsets_value, _get_effective_configurable_toolsets, _get_platform_tools,
+        _CONFIG_ONLY_TOOLSETS, _coerce_platform_toolsets_value, _get_effective_configurable_toolsets,
         _toolset_allowed_for_platform)
     from toolsets import resolve_toolset
     pinned = _coerce_platform_toolsets_value((cfg.get("platform_toolsets") or {}).get("cli"), "cli")
     pinned_set = _clean_names(pinned) if isinstance(pinned, list) else None
-    platform_enabled = _try(lambda: set(_get_platform_tools(cfg, "cli", include_default_mcp_servers=False)), set())
+    resolved = _try(lambda: _lazy("tui_gateway.server", "_configured_cli_toolsets")(cfg), set())
+    # An empty resolution reaches the agent as ``None`` = every toolset (``_load_enabled_toolsets``).
+    unrestricted = not resolved
     default_off = _try(lambda: _lazy("hermes_cli.tools_config", "_DEFAULT_OFF_TOOLSETS"), set())
     toolsets_out = []
     for ts_name, ts_label, ts_desc in _get_effective_configurable_toolsets():
-        enabled = ts_name in (pinned_set if pinned_set is not None else platform_enabled)
+        # Config-only capabilities (``stt``) have their own switch and no tools: a row here never changed anything.
+        if ts_name in _CONFIG_ONLY_TOOLSETS:
+            continue
+        # "Every toolset" still leaves the default-off integrations out (kanban is not in the all-tools
+        # assembly), so they stay off here and, below, hidden.
+        enabled = ts_name in resolved or (unrestricted and ts_name not in default_off and ts_name != "yuanbao")
         # Default-off integrations (+ opt-in yuanbao) are noise unless already enabled.
         if not _toolset_allowed_for_platform(ts_name, "cli") or (
                 (ts_name in default_off or ts_name == "yuanbao") and not enabled):

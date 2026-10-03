@@ -54,6 +54,21 @@ describe("calm preset", () => {
     expect(calm.palette.noiseOpacity).toBe(0);
     expect(calm.componentStyles).toBeUndefined();
     expect(calm.assets).toBeUndefined();
-    expect(calm.customCSS ?? "").not.toMatch(/border-image|box-shadow|animation|scanline/i);
+    expect(calm.customCSS ?? "").not.toMatch(/border-image|animation|scanline|glow|text-shadow|blur/i);
+  });
+});
+
+describe("calm preset stylesheet", () => {
+  const css = BUILTIN_THEMES.calm.customCSS ?? "";
+
+  it("keeps the CSS escapes intact so the selectors can match", () => {
+    expect(css).toContain("leading-\\[0\\.95\\]");
+    expect(css).toContain(".bg-success\\/10");
+  });
+
+  it("does not touch the brand lockup", () => {
+    for (const rule of css.match(/[^{}]*(?:uppercase|tracking-)[^{}]*\{/g) ?? []) {
+      expect(rule).toContain("leading-\\[0\\.95\\]");
+    }
   });
 });

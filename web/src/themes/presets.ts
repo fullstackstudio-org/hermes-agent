@@ -224,8 +224,55 @@ export const calmTheme: DashboardTheme = {
     ...DEFAULT_LAYOUT,
     radius: "0.625rem",
   },
-  // The default grain overlay on badges is texture, not calm.
-  customCSS: ".grain::after { display: none; }",
+  // Calm-only shell tuning. The stylesheet exists only while this theme is
+  // active (applyCustomCSS removes it on switch), so none of this reaches the
+  // other themes. The brand lockup is kept as is: it is the one element with
+  // `leading-[0.95]`, which the type rules below leave out.
+  customCSS: String.raw`
+.grain::after { display: none; }
+
+/* Solid primary buttons and the active tab: the sage accent, no bevel. */
+html button.bg-midground,
+html a.bg-midground {
+  background-color: #96b8a5;
+  color: #1b211f;
+  box-shadow: none;
+}
+
+/* Outline buttons draw their border as an inset box-shadow in the text
+   colour; keep it, but at about a third of the strength. */
+html button.shadow-midground {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--midground-base) 35%, transparent);
+}
+
+/* Sentence case and normal tracking across the shell. */
+html .uppercase:not(.leading-\[0\.95\]),
+html .text-display:not(.leading-\[0\.95\]) {
+  text-transform: none;
+}
+html [class*="tracking-"]:not(.leading-\[0\.95\]),
+html .text-display:not(.leading-\[0\.95\]) {
+  letter-spacing: normal;
+}
+
+/* System font on buttons, badges, headings and inputs instead of the
+   monospace and condensed display faces. Code and terminal keep theirs. */
+html button.font-mono,
+html .font-mondwest,
+html .font-expanded,
+html .font-compressed,
+html .font-courier {
+  font-family: var(--theme-font-sans);
+}
+html button.font-bold { font-weight: 500; }
+html .font-expanded.font-bold { font-weight: 600; }
+
+/* The shell hard-codes a bright green for success; use the calm one. */
+html .text-success { color: #8fbf9f; }
+html .bg-success { background-color: #8fbf9f; }
+html .bg-success\/10 { background-color: color-mix(in srgb, #8fbf9f 10%, transparent); }
+html .bg-success\/15 { background-color: color-mix(in srgb, #8fbf9f 15%, transparent); }
+`,
   colorOverrides: {
     primary: "#96b8a5",
     primaryForeground: "#1b211f",

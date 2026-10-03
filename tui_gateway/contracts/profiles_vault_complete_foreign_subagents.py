@@ -245,7 +245,14 @@ class ProfileModelPin(Result):
 
 
 class ProfilesDescribeResult(Result):
-    """Editor snapshot; ``toolsets_pinned`` says whether ``tools.enabled_toolsets`` is explicit."""
+    """Editor snapshot. ``toolsets[].enabled`` is what the bot's next app/web chat gets: the ``cli``
+    platform selection resolved the way the agent resolves it (a pinned composite such as ``hermes-cli``
+    expands, ``agent.disabled_toolsets`` is subtracted). It covers app, web and TUI chats only: messaging
+    platforms and cron jobs resolve their own ``platform_toolsets.<platform>`` lists, and a gateway started
+    with ``HERMES_TUI_TOOLSETS`` overrides every profile. ``toolsets_pinned`` only says whether
+    ``platform_toolsets.cli`` holds a list at all, not that the list names the enabled toolsets one by one.
+    A toolset's switch governs its tools, and the skill index in the prompt when it is ``skills``; it does
+    not govern ``/skill-name`` slash commands, per-skill ``disabled_skills``, or surfaces with their own list."""
 
     name: str
     description: str = ""

@@ -570,7 +570,7 @@ def test_skip_unit_names_are_filtered_to_the_serve_family():
                             {"scope": "user", "unit": "hermes-serve-work.service"},
                             "hermes-server",
                             "../../etc/systemd/evil",
-                            "hermes-serve; rm -rf /",
+                            "hermes-serve; echo pwned",
                             "hermes-gateway",
                         ],
                     },

@@ -93,11 +93,11 @@ class TestWriteToSandbox:
     def test_semicolon_injection_neutralized(self):
         env = MagicMock()
         env.execute.return_value = {"output": "", "returncode": 0}
-        malicious_path = "/tmp/x; rm -rf /; echo .txt"
+        malicious_path = "/tmp/x; echo pwned; echo .txt"
         _write_to_sandbox("content", malicious_path, env)
         cmd = env.execute.call_args_list[0][0][0]
         # The semicolons must be inside quotes, not acting as command separators
-        assert "'/tmp/x; rm -rf /; echo .txt'" in cmd
+        assert "'/tmp/x; echo pwned; echo .txt'" in cmd
 
     @pytest.mark.parametrize(
         "stdin_mode, probed, ok",

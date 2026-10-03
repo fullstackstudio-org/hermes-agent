@@ -176,7 +176,7 @@ class TestPreToolCheck:
         tc1 = MagicMock()
         tc1.id = "tc_1"
         tc1.function.name = "terminal"
-        tc1.function.arguments = '{"command": "rm -rf /"}'
+        tc1.function.arguments = '{"command": "echo should-not-run"}'
 
         tc2 = MagicMock()
         tc2.id = "tc_2"

@@ -332,11 +332,11 @@ raise RuntimeError("deliberate crash")
         code = """
 from hermes_tools import shell_quote
 # String with backticks, quotes, and special chars
-dangerous = '`rm -rf /` && $(whoami) "hello"'
+dangerous = '`echo pwned` && $(whoami) "hello"'
 escaped = shell_quote(dangerous)
 print(escaped)
 # Verify it's wrapped in single quotes with proper escaping
-assert "rm -rf" in escaped
+assert "echo pwned" in escaped
 assert escaped.startswith("'")
 """
         result = self._run(code)

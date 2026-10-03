@@ -744,7 +744,7 @@ class TestSecurity:
 
     def test_restore_rejects_invalid_hex_chars(self, mgr, work_dir):
         mgr.ensure_checkpoint(str(work_dir), "initial")
-        result = mgr.restore(str(work_dir), "abc; rm -rf /")
+        result = mgr.restore(str(work_dir), "abc; echo pwned")
         assert result["success"] is False
         assert "expected 4-64 hex characters" in result["error"]
 

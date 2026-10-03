@@ -274,7 +274,7 @@ class TestRenderCommandTtsTemplate:
         """Embedded shell metacharacters in a placeholder value must be quoted."""
         placeholders = {
             "input_path": "/tmp/in.txt", "text_path": "/tmp/in.txt",
-            "output_path": "/tmp/out; rm -rf /",
+            "output_path": "/tmp/out; echo pwned",
             "format": "mp3",
             "voice": "$(whoami)", "model": "", "speed": "1.0",
         }
@@ -286,8 +286,8 @@ class TestRenderCommandTtsTemplate:
         # command. On POSIX shlex.quote wraps the value in single quotes.
         if os.name != "nt":
             assert "'$(whoami)'" in rendered or "'\\''" in rendered
-            assert "; rm -rf /" not in rendered.replace(
-                "'/tmp/out; rm -rf /'", "",
+            assert "; echo pwned" not in rendered.replace(
+                "'/tmp/out; echo pwned'", "",
             )
 
     def test_preserves_shell_quoting_style(self):

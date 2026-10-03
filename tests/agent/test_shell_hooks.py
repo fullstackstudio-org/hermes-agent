@@ -597,7 +597,7 @@ class TestFailSemanticsEndToEnd:
             event="pre_tool_call", command=str(script),
         )
         cb = shell_hooks._make_callback(spec)
-        result = cb(tool_name="terminal", args={"command": "rm -rf /"})
+        result = cb(tool_name="terminal", args={"command": "echo should-not-run"})
         assert result == {
             "action": "block", "message": "rm -rf is not permitted",
         }

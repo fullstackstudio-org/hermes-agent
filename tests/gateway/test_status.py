@@ -1038,7 +1038,7 @@ class TestScopedLockOwnerLabel:
         # An invalid persisted profile string must not block the safe
         # hermes_home fallback — attribution degrades, never corrupts.
         record = {
-            "profile": "bad; rm -rf /",
+            "profile": "bad; echo pwned",
             "hermes_home": "/opt/data/profiles/zerocool",
         }
         assert status.scoped_lock_owner_label(record) == "zerocool"

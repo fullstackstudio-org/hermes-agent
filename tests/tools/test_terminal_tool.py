@@ -68,7 +68,7 @@ def test_headless_sudo_never_runs_backend_nopasswd_probe(monkeypatch):
 
 
 def test_validate_workdir_blocks_shell_metacharacters_in_windows_paths():
-    assert terminal_tool._validate_workdir(r"C:\Users\Alice\project; rm -rf /")
+    assert terminal_tool._validate_workdir(r"C:\Users\Alice\project; echo pwned")
     assert terminal_tool._validate_workdir(r"C:\Users\Alice\project$(whoami)")
     assert terminal_tool._validate_workdir("C:\\Users\\Alice\\project\nwhoami")
 
@@ -85,7 +85,7 @@ def test_validate_workdir_still_blocks_metachars_in_unicode_paths():
     # Widening to Unicode letters must not open the injection boundary:
     # shell metacharacters and control chars stay rejected even when mixed
     # with non-ASCII path segments.
-    assert terminal_tool._validate_workdir("/tmp/テスト; rm -rf /")
+    assert terminal_tool._validate_workdir("/tmp/テスト; echo pwned")
     assert terminal_tool._validate_workdir("/tmp/项目$(whoami)")
     assert terminal_tool._validate_workdir("/tmp/über`id`")
     assert terminal_tool._validate_workdir("/tmp/テスト\nwhoami")

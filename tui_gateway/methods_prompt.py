@@ -506,8 +506,10 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None, 
                 data=_storage_error_data(failure, exc))
     # No turn thread will start, so neither resume nor the busy queue may see
     # this rejected prompt as live. Release the slot a turn would normally own.
+    from tui_gateway.row_identity import release_turn_identity
     with session["history_lock"]:
         session["running"] = False
+        release_turn_identity(session)
         session["last_active"] = time.time()
         session.pop("_hosted_room_task", None)
         _clear_inflight_turn(session)

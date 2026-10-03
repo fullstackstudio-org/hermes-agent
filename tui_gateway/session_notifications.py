@@ -141,9 +141,10 @@ _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = _BOT_DELIVERY_POLL_SECONDS = 5.0
 
 
 def _notif_release_turn(session: dict) -> None:
+    from tui_gateway.row_identity import release_turn_identity
     with session["history_lock"]:
         # A turn that failed before ``_run_prompt_submit`` adopted a pre-minted id leaves it behind.
-        session.pop("turn_id", None)
+        release_turn_identity(session)
         session["running"] = False
 
 

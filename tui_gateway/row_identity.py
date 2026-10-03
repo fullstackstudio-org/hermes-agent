@@ -16,6 +16,7 @@ their bodies re-created against ``server.py``'s globals, so callers import from 
 function that needs it.
 """
 
+import contextvars
 import uuid
 
 #: Advertised through ``gateway.capabilities``. A module constant beside the code that stamps, the
@@ -48,13 +49,52 @@ def mint_turn_id() -> str:
     return uuid.uuid4().hex
 
 
+#: ``(sid, turn_id)`` of the turn whose thread is emitting right now, bound by ``_run_prompt_submit``'s turn
+#: body. ``_event_frame`` prefers it to ``session["turn_id"]`` for that session's frames: a frame from a
+#: turn's own thread names that turn even when the session has since moved on (a Stop released it, the next
+#: turn already began), so a late frame never takes the next turn's id. A thread that never bound it (a tool
+#: pool worker, a plugin thread) falls back to the session's current id, and so does a frame the turn's
+#: thread emits for ANOTHER session.
+_EMITTING_TURN: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "hermes_emitting_turn", default=None)
+
+
+def bind_emitting_turn(sid: str, turn_id: str):
+    """Bind the turn the calling context emits for; returns the token for ``unbind_emitting_turn``."""
+    return _EMITTING_TURN.set((sid, turn_id))
+
+
+def unbind_emitting_turn(token) -> None:
+    _EMITTING_TURN.reset(token)
+
+
+def frame_turn_id(sid: str, session: dict | None) -> str | None:
+    """The turn id a turn-stream frame for ``sid`` is stamped with: the emitting turn's own, else the
+    session's current."""
+    bound = _EMITTING_TURN.get()
+    candidates = (bound[1] if bound and bound[0] == sid else None, (session or {}).get("turn_id"))
+    return next((c for c in candidates if isinstance(c, str) and c), None)
+
+
 def begin_turn_id(session: dict) -> str:
-    """Mint this turn's id onto ``session`` for a caller that emits ``message.start`` BEFORE it calls
-    ``_run_prompt_submit`` (which adopts it), so that first frame is stamped too. The caller holds the
-    session's ``running`` claim, so no other turn can be reading ``session["turn_id"]``."""
+    """Mint this turn's id for a caller that emits ``message.start`` BEFORE it calls ``_run_prompt_submit``,
+    so that first frame is stamped too. It goes on the session twice: ``turn_id`` is what frames are stamped
+    with, ``_pending_turn_id`` is the ONE hand-off ``_run_prompt_submit`` adopts. A leftover ``turn_id`` is
+    never adopted (a turn that was force-released leaves its id behind, and the next turn must not inherit
+    it), so a caller that mints here and then fails to dispatch must ``release_turn_identity``. The caller
+    holds the session's ``running`` claim, so no other turn can be reading these keys."""
     turn_id = mint_turn_id()
     session["turn_id"] = turn_id
+    session["_pending_turn_id"] = turn_id
     return turn_id
+
+
+def release_turn_identity(session: dict) -> None:
+    """Forget the turn's id wherever ``running`` is force-released: a turn that ends without its own
+    ``finally`` (a Stop on a dead run thread, a refused dispatch, a failed hand-off) must not leave an id for
+    the next frame, drain or heartbeat to wear. Call under ``history_lock`` next to ``running = False``."""
+    session.pop("turn_id", None)
+    session.pop("_pending_turn_id", None)
 
 
 def with_turn_id(display_metadata: dict | None, turn_id: str) -> dict:
@@ -62,6 +102,15 @@ def with_turn_id(display_metadata: dict | None, turn_id: str) -> dict:
     ALWAYS overwritten: the gateway mints it, so a value that arrived from anywhere else is never
     trusted."""
     return {**(display_metadata or {}), "turn_id": turn_id}
+
+
+def without_turn_id(display_metadata: dict | None) -> dict | None:
+    """``display_metadata`` minus ``turn_id``, for metadata taken from a row that already exists and about to
+    ride a NEW turn (a retried or replayed row): the old row's id names the old turn, and a new turn must
+    mint its own. ``None`` stays ``None``; an emptied dict stays a dict."""
+    if not isinstance(display_metadata, dict):
+        return display_metadata
+    return {key: value for key, value in display_metadata.items() if key != "turn_id"}
 
 
 def turn_id_of(display_metadata) -> str | None:

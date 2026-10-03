@@ -185,3 +185,52 @@ def test_resume_snapshot_leaves_out_the_text_a_sealed_note_already_shows(tmp_pat
         {"text": "Looking at it.", "already_streamed": True, "row_id": 7},
         {"text": "Commentary the stream never showed.", "already_streamed": False}]
     event_replay.reset_replay_state()
+
+
+# ---------------------------------------------------------------------------
+# A tool call seals the round's row even when no ``message.interim`` ever does
+# ---------------------------------------------------------------------------
+
+def _tool_start_session(monkeypatch):
+    session = {"history_lock": threading.Lock(), "session_key": "room", "tool_progress_mode": "all",
+               "transport": _Peer(), "inflight_turn": None}
+    monkeypatch.setattr(server, "_sessions", {"sid": session}, raising=False)
+    return session
+
+
+def _stream(session, text):
+    with session["history_lock"]:
+        server._append_inflight_delta(session, text)
+
+
+def test_a_tool_call_naming_its_row_seals_the_streamed_text_with_interim_notes_off(monkeypatch):
+    """Interim notes off (or a note identical to the previous one) means ``message.interim`` never fires, yet
+    the round's assistant row is persisted and ``tool.start.call_row_id`` names it. A resume taken now reads
+    that row from history, so ``assistant_unsealed`` must not offer its text again."""
+    session = _tool_start_session(monkeypatch)
+    _stream(session, "Let me look at the layout first.")
+    assert "assistant_unsealed" not in server._inflight_snapshot(session)
+
+    server._on_tool_start("sid", "call_0", "web_search", {}, call_row_id=7, call_index=0)
+
+    snapshot = server._inflight_snapshot(session)
+    assert snapshot["assistant"] == "Let me look at the layout first."
+    assert snapshot["assistant_unsealed"] == ""
+    # What streams after the call is the next round's text, and is still unshown.
+    _stream(session, "\n\nNow the tests.")
+    assert server._inflight_snapshot(session)["assistant_unsealed"] == "Now the tests."
+    # The next round's call names its own row and seals that round's text in turn.
+    server._on_tool_start("sid", "call_1", "web_search", {}, call_row_id=9, call_index=0)
+    assert server._inflight_snapshot(session)["assistant_unsealed"] == ""
+
+
+def test_a_tool_call_without_a_row_identity_seals_nothing(monkeypatch):
+    """No ``call_row_id`` means no row to hold the text (an older agent, a flush that failed): the whole
+    streamed text stays unshown."""
+    session = _tool_start_session(monkeypatch)
+    _stream(session, "Let me look at the layout first.")
+
+    server._on_tool_start("sid", "call_0", "web_search", {})
+    server._on_tool_start("sid", "call_1", "web_search", {}, call_row_id=None, call_index=0)
+
+    assert "assistant_unsealed" not in server._inflight_snapshot(session)

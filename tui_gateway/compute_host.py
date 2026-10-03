@@ -297,10 +297,12 @@ class ComputeHost:
         except Exception as exc:
             with contextlib.suppress(Exception):
                 from tui_gateway import server
+                from tui_gateway.row_identity import release_turn_identity
                 session = server._sessions.get(sid)
                 if session is not None:
                     with session.get("history_lock", threading.Lock()):
                         session["running"] = False
+                        release_turn_identity(session)
                         server._clear_inflight_turn(session)
             self._reply("turn.error", sid, request_id, reason="exception", message=str(exc))
 

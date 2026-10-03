@@ -11,7 +11,8 @@ wrote, ``session.events.since``, ``session.resume``, ``session.history``) and pi
 - ``tool.start`` / ``tool.complete`` name their call as ``(call_row_id, call_index)``, and ``tool.complete``
   names the tool RESULT row (``row_id``); history tool rows carry the same three numbers;
 - the replay ring returns the same frames, ids included;
-- a ``session.resume`` mid-turn says which streamed text no sealed note shows yet (``assistant_unsealed``).
+- a ``session.resume`` mid-turn says which streamed text no stored row shows yet (``assistant_unsealed``), the
+  same with interim notes on or off.
 
 It runs twice: with ``display.interim_assistant_messages`` on and off. Off, no ``message.interim`` exists and the
 call still names the assistant row, which is the row the note would have been.
@@ -312,18 +313,17 @@ def test_a_resume_mid_turn_paints_only_what_no_sealed_note_shows(world, interim_
     assert inflight_1["display_metadata"]["turn_id"] == inflight_2["display_metadata"]["turn_id"] == turn_id
     assert inflight_1["user"] == PROMPT
 
-    if interim_on:
-        # ``assistant`` (what upstream desktop reads) keeps the sealed note; ``assistant_unsealed`` leaves it out.
-        assert NOTE_1 in inflight_1["assistant"]
-        assert inflight_1["assistant_unsealed"] == ""
-        assert NOTE_1 not in inflight_1["assistant_unsealed"]
-        assert NOTE_1 in inflight_2["assistant"] and NOTE_2 in inflight_2["assistant"]
-        assert inflight_2["assistant_unsealed"] == ""
-    else:
-        # No note was sealed: the whole streamed text is still unshown, so the field is not offered.
-        assert "assistant_unsealed" not in inflight_1
-        assert NOTE_1 in inflight_1["assistant"]
-        assert "assistant_unsealed" not in inflight_2
+    # ``assistant`` (what upstream desktop reads) keeps every streamed note, sealed or not.
+    assert NOTE_1 in inflight_1["assistant"]
+    assert NOTE_1 in inflight_2["assistant"] and NOTE_2 in inflight_2["assistant"]
+    # ``assistant_unsealed`` leaves out the notes the history rows already show. The round's assistant row is
+    # durable and named by ``tool.start.call_row_id`` whether or not interim notes are on, so the answer is the
+    # same both ways: with interims off no ``message.interim`` ever sealed it, and a resume used to paint the
+    # round's whole text again beside the history row.
+    for inflight in (inflight_1, inflight_2):
+        assert inflight["assistant_unsealed"] == ""
+    assert NOTE_1 not in inflight_1["assistant_unsealed"]
+    assert NOTE_2 not in inflight_2["assistant_unsealed"]
 
     # Once the turn is over nothing is in flight.
     assert _rpc("session.resume", session_id=KEY).get("inflight") is None

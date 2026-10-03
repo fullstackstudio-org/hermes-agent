@@ -121,7 +121,9 @@ def replayed_row_metadata(display_metadata: dict | None, author_auth_user, press
     """``display_metadata`` for a row carrying somebody's stored words again: ``author`` is who wrote them
     (or nobody), and ``replayed_by`` names the presser when that is somebody else, so a reader can say
     "Robin (retried by Sam)" instead of reading the row as sent by its author at that moment."""
-    rest = {key: value for key, value in (display_metadata or {}).items() if key not in ("author", "replayed_by")}
+    # ``turn_id`` goes too: it names the turn that first wrote the row, and the replay is a new turn that mints its own.
+    rest = {key: value for key, value in (display_metadata or {}).items()
+            if key not in ("author", "replayed_by", "turn_id")}
     stamped = with_row_author(rest or None, author_auth_user)
     by = row_author(presser)
     if by is not None and by.get("id") != (row_author(author_auth_user) or {}).get("id"):

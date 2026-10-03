@@ -632,9 +632,13 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
                 origin_ui_session_id=_lifecycle_own_sid(session, sid), reason="user_stop",
                 parent_session_id=str(getattr(session.get("agent"), "session_id", "") or ""))
         if not run_thread_alive:
+            from tui_gateway.row_identity import release_turn_identity
             with session["history_lock"]:
                 if session.get("running"):
                     session["running"] = False
+                    # The dead turn's id goes with it: nothing is left to end it, and the next drain or
+                    # heartbeat would otherwise wear it.
+                    release_turn_identity(session)
                     _clear_inflight_turn(session)
     _clear_pending(sid)
     with contextlib.suppress(Exception):

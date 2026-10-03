@@ -250,6 +250,14 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict, *, call_r
     if _connector_lifecycle_is_stale(sid, name, args):
         return
     session = _sessions.get(sid)
+    if session is not None and _call_identity_payload(call_row_id, call_index):
+        # The round's assistant row is durable and named by this call, whether or not interim notes are on
+        # (off, or a duplicate of the previous note, no ``message.interim`` ever seals it). Everything
+        # streamed so far is that row's text: a client resuming from here sees the row in history and must
+        # not paint the same words again from ``inflight.assistant``.
+        with session.get("history_lock") or contextlib.nullcontext():
+            if isinstance(inflight := session.get("inflight_turn"), dict):
+                inflight["sealed_len"] = len(str(inflight.get("assistant") or ""))
     if session is not None:
         with contextlib.suppress(Exception):
             from agent.display import capture_local_edit_snapshot

@@ -317,6 +317,7 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
 def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     """Fire a queued next-turn prompt if one is waiting and the session is idle. True when dispatched: the caller
     skips lower-priority follow-ups this cycle (the user's message wins)."""
+    from tui_gateway.row_identity import release_turn_identity, without_turn_id
     with _session_turn_admission(session) as admitted:
         if not admitted or session.get("_closing") or not (queued := session.get("queued_prompt")) or session.get("running"):
             return False
@@ -339,6 +340,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             advanced = session.get("queued_prompt")
             _ac_set_queue(session, [queued, *([advanced] if advanced else []), *(session.get("queued_prompts") or [])])
             session["running"] = False
+            release_turn_identity(session)
             return True
     kwargs: dict = {"queued_prompt_generation": queue_generation}
     if queued.get("image_paths"):
@@ -362,7 +364,8 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     # replay carries its own row metadata (who wrote it, who replayed it) apart from its scope.
     from tui_gateway.row_author import with_row_author
     if "row_metadata" in queued:
-        metadata = queued.get("row_metadata")
+        # An existing row's metadata rides this NEW turn: whatever turn id it still names is the old turn's.
+        metadata = without_turn_id(queued.get("row_metadata"))
         if metadata:
             author_kwargs["display_metadata"] = metadata
     else:
@@ -378,6 +381,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
                 rid, sid, session, queued["text"], **kwargs, **isolated_kwargs)).get("error"):
             with session["history_lock"]:
                 session["running"] = False
+                release_turn_identity(session)
                 _clear_inflight_turn(session)
             _emit("error", sid, {"message": str((resp.get("error") or {}).get("message") or "queued prompt failed")})
             dispatch_failed = True

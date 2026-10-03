@@ -52,7 +52,11 @@ A frame of a turn's stream (`message.*`, `reasoning.*`, `thinking.delta`, `tool.
 `turn_id` on its ENVELOPE (`params.turn_id`, stamped by `_event_frame` from the running turn), never in its payload, and
 names the persisted rows it becomes (`row_id`, `call_row_id` + `call_index`); a new frame of that stream goes into
 `tui_gateway/row_identity.py` `TURN_STREAM_EVENTS`. `tests/tui_gateway/test_transcript_row_identity_e2e.py` is the wire
-truth for all of it.
+truth for all of it. A turn's id reaches `_run_prompt_submit` only through the row's `display_metadata` or the explicit
+`session["_pending_turn_id"]` hand-off (`begin_turn_id`); never read `session["turn_id"]` to adopt one, and call
+`release_turn_identity` wherever `running` is force-released. Clients: a stamped `error` is not necessarily the turn's
+terminal error (settle on `message.complete`), and a Codex commentary interim can carry only the undelivered text while
+naming the right row.
 
 ## Profile scope in RPC methods
 

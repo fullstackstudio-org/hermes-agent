@@ -200,6 +200,44 @@ def test_calls_of_one_message_are_indexed_in_the_order_the_row_lists_them(world)
     assert {r["tool_call_id"]: _identity(r) for r in history if r["role"] == "tool"} == expected
 
 
+@pytest.mark.parametrize("plan", ["concurrent", "sequential", "segmented"])
+def test_calls_of_one_message_keep_their_index_on_every_executor(world, plan):
+    """The index is assigned when the refs are built, which is sequential, not inside a pool worker: forced
+    through each executor (the planner would pick one from the tools' paths), frames and rows still agree."""
+    from agent import tool_executor
+
+    calls = [_call("first"), _call("second"), _call("third")]
+    segments = {
+        "concurrent": [("parallel", calls)],
+        "sequential": [("sequential", calls)],
+        "segmented": [("sequential", calls[:1]), ("parallel", calls[1:])],
+    }[plan]
+    ran = []
+
+    def spy(real, kind):
+        def run(*args, **kwargs):
+            ran.append(kind)
+            return real(*args, **kwargs)
+        return run
+
+    with (
+        patch("agent.tool_dispatch_helpers._plan_tool_batch_segments", return_value=segments),
+        patch.object(tool_executor, "execute_tool_calls_concurrent",
+                     side_effect=spy(tool_executor.execute_tool_calls_concurrent, "concurrent")),
+    ):
+        _run(world, _response(finish_reason="tool_calls", tool_calls=calls), _response("done"),
+             dispatch=lambda *a, **k: "ok")
+
+    # The executor under test really ran (the concurrent one is what spawns pool workers).
+    assert ("concurrent" in ran) == (plan != "sequential")
+    stored, history = _history(world)
+    row_id = next(r["_row_id"] for r in stored if r["role"] == "assistant" and r.get("tool_calls"))
+    expected = {"first": (row_id, 0), "second": (row_id, 1), "third": (row_id, 2)}
+    assert {e["payload"]["tool_id"]: _identity(e["payload"]) for e in world.peer.events("tool.start")} == expected
+    assert {e["payload"]["tool_id"]: _identity(e["payload"]) for e in world.peer.events("tool.complete")} == expected
+    assert {r["tool_call_id"]: _identity(r) for r in history if r["role"] == "tool"} == expected
+
+
 def test_an_invalid_call_in_the_batch_keeps_its_place_in_the_row(world):
     _run(world,
          _response(finish_reason="tool_calls", tool_calls=[_call("bad", name="no_such_tool"), _call("good")]),

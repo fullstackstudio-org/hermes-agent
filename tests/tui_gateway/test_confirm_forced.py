@@ -230,3 +230,18 @@ def test_the_gateway_refuses_padding_even_when_the_policy_lets_it_through(server
         result = _done(*_guard(server, command))
         assert result["approved"] is False and result["passkey_reason"] == "not_showable", repr(command[:30])
     assert phone.requests() == []
+
+
+def test_a_tool_call_with_indented_code_reaches_the_phone_as_it_runs(server, passkeys, rules):
+    """``detail_layout: json`` crosses to the gateway: a file's indentation inside the arguments is not padding."""
+    from tests.tools.test_passkey_policy import DEEP_PYTHON
+    rules["tools"] = ["write_*"]
+    args = {"path": "job.py", "content": DEEP_PYTHON}
+    phone, auth = _alice_session(server, passkeys)
+    server._register_strong_confirm("s1", "key-s1")
+    thread, box = _guard(server, guard=lambda command, env: passkey_policy.tool_call_block("write_file", args))
+    frame = _frame(server, phone)
+    assert frame["params"]["detail"] == passkey_policy._tool_detail("write_file", args)
+    _answer_rpc(server, phone, frame["id"], passkeys.answer(auth, frame))
+    thread.join(10)
+    assert box["r"] is None  # confirmed: the call proceeds

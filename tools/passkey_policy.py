@@ -56,6 +56,7 @@ request id and the acting user).
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import contextvars
 import fnmatch
@@ -278,16 +279,34 @@ _MAX_COMBINING_MARKS = 4
 # The layout bounds of a verbatim detail (``tui_gateway.confirm.MAX_SPACE_RUN`` and the rest, which say
 # why): spacing beyond them could park part of the detail outside what the person sees.
 _MAX_SPACE_RUN, _MAX_INDENT, _MAX_BLANK_LINES, _MAX_LINE_CHARS = 16, 32, 3, 2000
+# ``Default_Ignorable_Code_Point`` (Unicode ``DerivedCoreProperties.txt``, 14.0 through 16.0): code points
+# a renderer shows as nothing. The same table as ``tui_gateway.confirm.DEFAULT_IGNORABLE``, which says more.
+_DEFAULT_IGNORABLE = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
+    (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
+    (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
+)
+_IGNORABLE_STARTS = [low for low, _ in _DEFAULT_IGNORABLE]
+
+
+def _default_ignorable(ch: str) -> bool:
+    code = ord(ch)
+    at = bisect.bisect_right(_IGNORABLE_STARTS, code) - 1
+    return at >= 0 and code <= _DEFAULT_IGNORABLE[at][1]
 
 
 def hidden_characters(text: str) -> bool:
     """True when *text* holds a character a confirmation could not show faithfully: a control character
     other than newline and tab, a format character (bidi overrides, zero-width characters), a surrogate,
-    a private-use character, an invisible letter, whitespace other than space, newline and tab, or more
-    than four combining marks on one character."""
+    a private-use character, an invisible letter, whitespace other than space, newline and tab, more
+    than four combining marks on one character, an unassigned code point (``Cn``) or a default-ignorable
+    one (variation selectors, the combining grapheme joiner and the rest of ``_DEFAULT_IGNORABLE``)."""
     marks = 0
     for ch in text:
         category = unicodedata.category(ch)
+        if category == "Cn" or _default_ignorable(ch):
+            return True
         if category in ("Mn", "Me"):
             marks += 1
             if marks > _MAX_COMBINING_MARKS:
@@ -301,12 +320,16 @@ def hidden_characters(text: str) -> bool:
     return False
 
 
-def padded(text: str) -> bool:
+def padded(text: str, *, json_strings: bool = False) -> bool:
     """True when the spacing of *text* could push part of it out of view in a confirmation: more than 16
     spaces in a row after a line's first non-space character, a line indented more than 32 spaces, more
     than 3 blank lines in a row, or a line over 2,000 characters. Clients show the detail monospaced with
     every space kept and scroll long lines sideways, so ``git status`` + 300 spaces + ``; curl … | sh``
-    would show as ``git status``."""
+    would show as ``git status``. The bounds limit padding; they do not keep everything in view (gaps
+    just under them, repeated, still overflow), which is the clients' overflow marker's job.
+
+    *json_strings* (a tool call's detail, ``tui_gateway.confirm._layout_problem`` says more): a run right
+    after the visible escape ``\\n`` inside a JSON string is a line's indentation, up to 32."""
     blank = 0
     for line in text.split("\n"):
         if not line.strip(" "):
@@ -316,9 +339,16 @@ def padded(text: str) -> bool:
             continue
         blank = 0
         body = line.lstrip(" ")
-        if (len(line) > _MAX_LINE_CHARS or len(line) - len(body) > _MAX_INDENT
-                or " " * (_MAX_SPACE_RUN + 1) in body):
+        if len(line) > _MAX_LINE_CHARS or len(line) - len(body) > _MAX_INDENT:
             return True
+        start = body.find(" " * (_MAX_SPACE_RUN + 1))
+        while start >= 0:
+            end = start
+            while end < len(body) and body[end] == " ":
+                end += 1
+            if not (json_strings and end - start <= _MAX_INDENT and body[max(0, start - 2):start] == "\\n"):
+                return True
+            start = body.find(" " * (_MAX_SPACE_RUN + 1), end)
     return False
 
 
@@ -333,8 +363,9 @@ def forced_text(*, kind: str, description: str, detail: str) -> dict:
     when longer), and *detail* exactly as it will run. Raises :class:`NotShowable` instead of cutting the
     detail or showing anything other than what runs: ``too_long`` (measured on the raw text),
     ``hidden_characters`` (tabs too: their width depends on the renderer), ``trailing_whitespace`` (no
-    rendering shows it), ``padding`` (:func:`padded`: spacing that could push part of it out of view), or
-    ``redacted`` when the secret redactor would change it. The redactor swallows
+    rendering shows it), ``padding`` (:func:`padded`: spacing that could push part of it out of view; for
+    a tool call ``not_showable`` instead, since the agent cannot respace a file it writes without changing
+    it), or ``redacted`` when the secret redactor would change it. The redactor swallows
     whole regions (a fake key block, a shortened token), so a redacted detail could hide a second command
     behind what the person signs. The detail travels verbatim (``confirm.build_params(verbatim_detail=True)``:
     no whitespace collapsing, indentation kept), and clients render it monospaced with whitespace kept."""
@@ -345,25 +376,29 @@ def forced_text(*, kind: str, description: str, detail: str) -> dict:
         raise NotShowable("hidden_characters")
     if any(line != line.rstrip() for line in detail.split("\n")) or detail != detail.rstrip():
         raise NotShowable("trailing_whitespace")
-    if padded(detail):
-        raise NotShowable("padding")
+    if padded(detail, json_strings=kind == "tool"):
+        raise NotShowable("not_showable" if kind == "tool" else "padding")
     if _redact(detail) != detail:
         raise NotShowable("redacted")
     shown = detail
     summary = " ".join(_redact(description or "").split()) or "This gateway's operator requires a passkey for it."
     if len(summary) > summary_max:
         summary = summary[:summary_max - 1].rstrip() + "…"
-    return {"title": TITLES[kind], "summary": summary, "detail": shown}
+    # ``detail_layout``: the gateway measures a tool call's detail as JSON (``confirm.build_params(detail_layout=)``).
+    text = {"title": TITLES[kind], "summary": summary, "detail": shown}
+    return {**text, "detail_layout": "json"} if kind == "tool" else text
 
 
 @dataclass(frozen=True)
 class Forced:
     """How a forced confirmation ended: ``confirmed`` (verified, consent for this one operation),
-    ``declined`` or ``blocked`` (with the reason)."""
+    ``declined`` or ``blocked`` (with the reason). ``before_asking``: blocked by :func:`forced_text`, so
+    nothing reached the person."""
 
     outcome: str
     reason: str = ""
     limit: int = 0
+    before_asking: bool = False
 
 
 def _outcome_fields(outcome: Any) -> tuple[str, bool, str]:
@@ -386,7 +421,7 @@ def _ask(session_key: str, *, kind: str, description: str, detail: str) -> Force
     try:
         text = forced_text(kind=kind, description=description, detail=detail)
     except NotShowable as exc:
-        return Forced("blocked", exc.reason, exc.limit)
+        return Forced("blocked", exc.reason, exc.limit, before_asking=True)
     except Exception:  # noqa: BLE001 - fail closed
         logger.warning("passkey policy: the confirmation text could not be built", exc_info=True)
         return Forced("blocked", "error")
@@ -494,7 +529,7 @@ def block_message(forced: Forced, noun: str) -> str:
     if forced.outcome == "declined":
         return (f"BLOCKED: the person declined this {noun} in the passkey confirmation. The user has NOT "
                 f"consented. Do NOT retry it, do NOT rephrase it, and do NOT reach the same outcome another way.")
-    if forced.reason == "padding":
+    if forced.outcome == "blocked" and forced.reason == "padding" and forced.before_asking:
         return (f"BLOCKED: this gateway's operator requires a passkey confirmation in the Hermie app for this "
                 f"{noun}, and {_why(forced.reason, noun, forced.limit)}. It did not run and nothing was shown to "
                 f"the person; this is not consent. Submit the same {noun} once more without the extra whitespace: "

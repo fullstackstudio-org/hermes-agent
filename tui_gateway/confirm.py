@@ -39,6 +39,7 @@ in its own module before the frame goes out; :class:`Level` covers the context-f
 
 from __future__ import annotations
 
+import bisect
 import collections
 import logging
 import os
@@ -157,6 +158,28 @@ class ConfirmParamsError(ValueError):
 # notehead): text built from them looks empty or hides where a line really ends.
 _INVISIBLE_LETTERS = frozenset({"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800", "\U0001d159"})
 _LINE_BREAKS = frozenset({"\n", "\u2028", "\u2029"})
+#: ``Default_Ignorable_Code_Point`` as Unicode publishes it (``DerivedCoreProperties.txt``; unchanged
+#: from 14.0, which added U+180F, through 16.0): code points a renderer shows as nothing. ``unicodedata``
+#: does not expose the property, so the ranges are copied here (``tools/passkey_policy.py`` holds the same
+#: table; a test keeps the two and the running Unicode database's ``Cf`` in step). Most are ``Cf`` and
+#: refused as such; the rest are variation selectors, the combining grapheme joiner, the Khmer inherent
+#: vowels (``Mn``), the Hangul fillers (``Lo``) and reserved ranges (``Cn``). Refused in a VERBATIM
+#: detail; :func:`_clean` keeps the ``Mn`` ones under :data:`MAX_COMBINING_MARKS` (an emoji's U+FE0F).
+DEFAULT_IGNORABLE = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
+    (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
+    (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
+)
+_IGNORABLE_STARTS = [low for low, _ in DEFAULT_IGNORABLE]
+
+
+def default_ignorable(ch: str) -> bool:
+    """Whether *ch* is a ``Default_Ignorable_Code_Point`` (:data:`DEFAULT_IGNORABLE`)."""
+    code = ord(ch)
+    at = bisect.bisect_right(_IGNORABLE_STARTS, code) - 1
+    return at >= 0 and code <= DEFAULT_IGNORABLE[at][1]
+
 #: At most this many combining marks (Mn, Me) on one base character; more stack into unreadable glyphs.
 MAX_COMBINING_MARKS = 4
 
@@ -177,6 +200,10 @@ MAX_INDENT = 32
 MAX_BLANK_LINES = 3
 #: Characters on one line, whatever the detail's own bound (``CONFIRM_DETAIL_MAX``) becomes.
 MAX_LINE_CHARS = 2_000
+# These bounds LIMIT padding; they cannot by themselves keep everything in view. Gaps just under them,
+# repeated, still run a line off the screen, as do many short lines, a long visible prefix or wide glyphs
+# (U+FDFD three hundred times). That is the clients' part: an overflow marker on the detail, and Confirm
+# disabled until it has been scrolled to its end (``website/docs/guides/confirm-sensitive-actions.md``).
 _SPACE_RUN = re.compile(" +")
 
 
@@ -219,10 +246,15 @@ def _clean(text: object, *, multiline: bool) -> str:
     return "\n".join(kept)
 
 
-def _layout_problem(text: str) -> str:
+def _layout_problem(text: str, *, json_strings: bool = False) -> str:
     """Why the spacing of *text* could hide part of it from the person confirming it, or "" (see
     :data:`MAX_SPACE_RUN`, :data:`MAX_INDENT`, :data:`MAX_BLANK_LINES`, :data:`MAX_LINE_CHARS`). Tabs and
-    every other kind of whitespace are refused before this runs, so only spaces and newlines count."""
+    every other kind of whitespace are refused before this runs, so only spaces and newlines count.
+
+    *json_strings* (a tool call's detail: its name, then its arguments as indented JSON): a string value
+    keeps its line breaks as the visible escape ``\\n``, so the indentation of each line of code in it
+    shows as a run of spaces right after that escape. Such a run is that line's indentation and may be up
+    to :data:`MAX_INDENT`; every other run keeps :data:`MAX_SPACE_RUN`."""
     blank = 0
     for number, line in enumerate(text.split("\n"), start=1):
         if not line.strip(" "):
@@ -236,22 +268,30 @@ def _layout_problem(text: str) -> str:
         body = line.lstrip(" ")
         if (indent := len(line) - len(body)) > MAX_INDENT:
             return f"line {number} is indented {indent} spaces (at most {MAX_INDENT})"
-        if " " * (MAX_SPACE_RUN + 1) in body:
-            longest = max(len(run) for run in _SPACE_RUN.findall(body))
-            return f"line {number} has {longest} spaces in a row (at most {MAX_SPACE_RUN})"
+        for run in _SPACE_RUN.finditer(body):
+            size = run.end() - run.start()
+            if size <= MAX_SPACE_RUN:
+                continue
+            if json_strings and size <= MAX_INDENT and body[max(0, run.start() - 2):run.start()] == "\\n":
+                continue
+            return f"line {number} has {size} spaces in a row (at most {MAX_SPACE_RUN})"
     return ""
 
 
-def verbatim_problem(text: str) -> str:
+def verbatim_problem(text: str, *, json_strings: bool = False) -> str:
     """Why *text* cannot be shown VERBATIM (no cleaning at all), or "": a character :func:`_clean` would
     drop or rewrite (a control character other than newline, a tab, a format, surrogate or private-use
     character, a line or paragraph separator, whitespace other than space, an invisible letter, more than
-    :data:`MAX_COMBINING_MARKS` combining marks on one character), whitespace at the end of a line or of
-    the text, which no rendering shows, or spacing that could push part of it out of view
-    (:func:`_layout_problem`)."""
+    :data:`MAX_COMBINING_MARKS` combining marks on one character), an unassigned code point (``Cn``: the
+    running Unicode database does not know it, so neither does this check) or a default-ignorable one
+    (:data:`DEFAULT_IGNORABLE`, which renders as nothing), whitespace at the end of a line or of the text,
+    which no rendering shows, or spacing that could push part of it out of view (:func:`_layout_problem`,
+    with *json_strings* for a tool call's detail)."""
     marks = 0
     for ch in text:
         category = unicodedata.category(ch)
+        if category == "Cn" or default_ignorable(ch):
+            return f"character U+{ord(ch):04X} cannot be shown as it is"
         if category in ("Mn", "Me"):
             marks += 1
             if marks > MAX_COMBINING_MARKS:
@@ -264,13 +304,16 @@ def verbatim_problem(text: str) -> str:
             return f"character U+{ord(ch):04X} cannot be shown as it is"
     if any(line != line.rstrip() for line in text.split("\n")) or text != text.rstrip():
         return "whitespace at the end of a line or of the text cannot be seen"
-    if problem := _layout_problem(text):
+    if problem := _layout_problem(text, json_strings=json_strings):
         return f"{problem}, which can put part of it out of view; present it without padding"
     return ""
 
 
+DETAIL_LAYOUTS = ("text", "json")
+
+
 def build_params(*, summary: object, detail: object = None, title: object = None,
-                 level: object = "plain", verbatim_detail: bool = False) -> dict:
+                 level: object = "plain", verbatim_detail: bool = False, detail_layout: str = "text") -> dict:
     """The ``confirm`` params (without ``session_id``), cleaned and bounded. Raises
     :class:`ConfirmParamsError` instead of truncating: the person must see the whole of what the agent
     asks, so text over a bound goes back to the agent to shorten.
@@ -278,8 +321,11 @@ def build_params(*, summary: object, detail: object = None, title: object = None
     *verbatim_detail* (a confirmation the gateway forces for an operator rule): the detail is the command
     exactly as it runs and is NOT cleaned (no whitespace collapsing, no stripping, indentation kept); text
     :func:`verbatim_problem` refuses (hidden characters, trailing whitespace, padding that could push part
-    of it out of view) raises instead, never rewritten. Clients render the detail monospaced with whitespace
+    of it out of view) raises instead, never rewritten. *detail_layout* ``json`` is a tool call's detail
+    (:func:`verbatim_problem` with ``json_strings``). Clients render the detail monospaced with whitespace
     preserved."""
+    if detail_layout not in DETAIL_LAYOUTS:
+        raise ConfirmParamsError(f"detail_layout must be one of: {', '.join(DETAIL_LAYOUTS)}")
     level = str(level or "").strip()
     if level not in LEVELS:
         raise ConfirmParamsError(f"level must be one of: {', '.join(sorted(LEVELS))}")
@@ -291,7 +337,7 @@ def build_params(*, summary: object, detail: object = None, title: object = None
                                  "Shorten it and put specifics in detail.")
     if verbatim_detail and detail is not None:
         detail_text = detail if isinstance(detail, str) else str(detail)
-        if problem := verbatim_problem(detail_text):
+        if problem := verbatim_problem(detail_text, json_strings=detail_layout == "json"):
             raise ConfirmParamsError(f"detail cannot be shown verbatim: {problem}")
     else:
         detail_text = _clean(detail, multiline=True) if detail is not None else ""
@@ -560,12 +606,14 @@ def _request(sid: str, params: dict, *, timeout: float, forced: bool = False) ->
 def strong_confirm(sid: str):
     """The strong-confirm callback this gateway registers for session *sid*
     (``tools.passkey_policy.register_strong_confirm``, keyed by the conversation): a forced ``passkey``
-    confirmation of the gateway-built ``{title, summary, detail}``. It runs on the thread of the guarded
-    command or tool call, inside the turn's context, so the request binds to the turn's submitter. Raises
-    :class:`ConfirmParamsError` for text over the contract's bounds."""
+    confirmation of the gateway-built ``{title, summary, detail, detail_layout?}`` (``"json"`` for a tool
+    call). It runs on the thread of the guarded command or tool call, inside the turn's context, so the
+    request binds to the turn's submitter. Raises :class:`ConfirmParamsError` for text over the contract's
+    bounds."""
     def ask(text: dict) -> ConfirmOutcome:
         params = build_params(level="passkey", title=text.get("title"), summary=text.get("summary"),
-                              detail=text.get("detail"), verbatim_detail=True)
+                              detail=text.get("detail"), verbatim_detail=True,
+                              detail_layout=str(text.get("detail_layout") or "text"))
         return request(sid, params, timeout=TIMEOUT_SECONDS, forced=True)
 
     return ask

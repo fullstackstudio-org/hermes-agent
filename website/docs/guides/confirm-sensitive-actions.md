@@ -193,15 +193,24 @@ match the security scanner still runs first: its findings are added to the summa
 desktop app's batch of commands, the call's own `workdir`, or that the directory is the session's when
 the command's turn comes). The detail travels verbatim: indentation, runs of spaces and line breaks are
 kept. Because no rendering shows them, a command with whitespace at the end of a line, or with tabs, is
-refused rather than shown. So is a command spaced so that part of it could sit out of view: apps keep
-every space and scroll long lines sideways, so `git status` followed by 300 spaces and `; curl … | sh`
-would show as `git status`. The bounds are more than 16 spaces in a row after a line's first non-space
-character, a line indented more than 32 spaces (8 levels of 4-space Python, 16 levels of 2-space YAML),
-more than 3 blank lines in a row, and a line over 2,000 characters. Ordinary indented scripts, manifests
-and heredocs stay well inside them. Nothing is collapsed to fit: the passkey signs the exact text, so the
-command is blocked (`padding`). This is the one block after which the agent is told to submit again: the
+refused rather than shown, and so is a character that renders as nothing: a default-ignorable code
+point (variation selectors and the combining grapheme joiner included) or one the gateway's Unicode
+database does not know. The gateway also limits padding: apps keep every space and scroll long lines
+sideways, so `git status` followed by 300 spaces and `; curl … | sh` would show as `git status`. It
+refuses more than 16 spaces in a row after a line's first non-space character, a line indented more than
+32 spaces (8 levels of 4-space Python, 16 levels of 2-space YAML), more than 3 blank lines in a row, and
+a line over 2,000 characters. Ordinary indented scripts, manifests and heredocs stay well inside them.
+These bounds limit padding; they do not keep every command in view. Gaps just under them, repeated, many
+short lines, a long visible prefix or wide glyphs (U+FDFD three hundred times) still run past the edge
+of the sheet, which is why apps must mark a detail that overflows and keep Confirm disabled until it has
+been scrolled to its end (see "Limits"). Nothing is collapsed to fit: the passkey signs the exact text, so
+the command is blocked (`padding`). This is the one block after which the agent is told to submit again: the
 same command without the extra whitespace, never the padded form. Nothing was shown to the person, and
-the compact command is a new confirmation, shown in full and signed with a passkey like any other.
+the compact command is a new confirmation, shown in full and signed with a passkey like any other. A
+tool call's detail is its name and arguments as indented JSON, so a file's indentation shows as spaces
+right after a visible `\n`; there a run up to 32 spaces counts as indentation. A tool call that still
+breaks a bound (deeper code, JSON nested more than 16 levels) is blocked as `not_showable`, without that
+invitation: the agent cannot respace a file it writes without changing it.
 
 - It never enters the approval queue: `/approve`, `/approve all`, `approval.respond` and messaging
   surfaces cannot answer it.
@@ -356,7 +365,10 @@ checks, test vectors):
   `detail` is the command verbatim: render `detail` monospaced with whitespace preserved (`white-space:
   pre` or the platform's equivalent; scroll long lines rather than reflow them), never collapsed or trimmed.
   The gateway never sends a detail with more than 16 spaces in a row inside a line, an indent over 32
-  spaces, more than 3 blank lines in a row or a line over 2,000 characters, so spacing alone cannot push
-  part of a command far outside the visible part of the sheet.
+  spaces, more than 3 blank lines in a row or a line over 2,000 characters. That limits padding and no
+  more: a detail inside every bound can still be wider or longer than the sheet (gaps just under the
+  bounds, repeated; many short lines; wide glyphs). Apps must show that a detail overflows (a marker on
+  the side that runs past the edge, or a caption with its line count and longest line) and keep Confirm
+  disabled until the detail has been scrolled to its end, both ways.
 - `confirm_passkey` in the second call is checked by the gateway, not by the contract: unknown extra keys
   are allowed, and a shape it does not accept only drops `passkey`.

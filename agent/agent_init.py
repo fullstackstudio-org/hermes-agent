@@ -653,7 +653,7 @@ _STREAM_STATE: Dict[str, Any] = {
     "_turn_sender_note": "",
     "_turn_sender_wire_note": "",
     "_turn_final_note": "",
-    # The current-request-only copy of the note with the person's profile; never stored or replayed.
+    # The current-request-only copy of the note with the person's profile; Hermes never persists or replays it.
     "_turn_wire_note": "",
     "_turn_person_id": None,
     # Image-to-text fallbacks cached per payload/URL so one tool loop doesn't re-run vision.

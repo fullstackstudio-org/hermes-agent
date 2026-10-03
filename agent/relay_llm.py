@@ -77,7 +77,16 @@ class _ManagedAttempt:
         self.runtime, self.session, self.request, self.metadata = runtime, session, request, metadata
         self.logical = _logical_parent(runtime, session, parent, metadata)
         self.parent = self.logical[1] if self.logical is not None else parent
-        self.body = _relay_request_body(request, metadata)
+        # Relay records what it is handed (LLM spans in its ATIF/ATOF/OTEL exporters), so it gets the
+        # request with the stored turn note, never the profile-bearing wire copy (agent/turn_sender.py).
+        # ``self.request`` keeps the wire copy: unless an intercept rewrites the messages, the provider
+        # is sent the original messages (``_provider_request``); a messages rewrite sends the stored note.
+        # The two views may differ by that one span only: if the scrub cut anything more, the provider is
+        # sent what Relay saw, so an intercept (a DLP check) never passes text it did not see.
+        from agent.turn_sender import scrub_wire_note, scrub_wire_notes
+        self.body, cut = scrub_wire_notes(_relay_request_body(request, metadata))
+        if cut > 1:
+            self.request = scrub_wire_note(request)
         self.relay_request = runtime.relay.LLMRequest({}, self.body)
         self.codec_baseline = _codec_round_trip_request_body(
             runtime.relay, self.relay_request, relay_request_body=self.body, metadata=metadata

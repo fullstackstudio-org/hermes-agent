@@ -455,6 +455,41 @@ class TestAgentInitConfig:
         ]
 
 
+    @pytest.mark.parametrize("native", [True, False], ids=["native-compaction", "no-native-compaction"])
+    def test_a_natively_compacted_turn_sends_no_profile(self, native):
+        """Native compaction (and its checkpoint replay) stays exactly as it was; a turn whose request would
+        carry it drops the person's profile instead, so the provider never folds the profile into a
+        compaction item. Without native compaction the profile goes out as usual."""
+        from agent.person_profile import AuthUser, coerce_profile
+        from run_agent import AIAgent
+        from tui_gateway.turn_sender_note import turn_notes
+
+        agent = AIAgent(
+            api_key="test-key", base_url="https://api.openai.com/v1", api_mode="codex_responses",
+            model="gpt-5.6", provider="openai-api", quiet_mode=True, skip_context_files=True,
+            skip_memory=True, enabled_toolsets=[],
+        )
+        agent.codex_responses_native_compaction = native
+        person = AuthUser("oidc:sam", "Sam", coerce_profile({"email": "sam@example.org"}))
+        note, _person, wire = turn_notes(person, record_login="oidc:sam")
+        agent._turn_final_note, agent._turn_wire_note = note, wire
+        messages = [{"role": "user", "content": "hi\n\n" + wire}]
+
+        kwargs = agent._build_api_kwargs(messages)
+
+        sent = repr(kwargs["input"])
+        assert messages[0]["content"] == "hi\n\n" + wire  # the caller's list is never rewritten
+        if native:
+            assert kwargs["context_management"][0]["type"] == "compaction"  # compaction exactly as before
+            assert "sam@example.org" not in sent and "Sam" in sent
+            assert agent._turn_wire_note == ""  # and for the rest of the turn
+            # A retry or recovery rebuilds from the same list, which still holds the wire note.
+            again = agent._build_api_kwargs(messages)
+            assert again.get("context_management") and "sam@example.org" not in repr(again["input"])
+        else:
+            assert "context_management" not in kwargs
+            assert "sam@example.org" in sent and agent._turn_wire_note == wire
+
     def test_kwargs_omit_field_for_ineligible_model_even_when_enabled(self):
         from run_agent import AIAgent
 

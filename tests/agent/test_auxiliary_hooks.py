@@ -70,3 +70,24 @@ def test_raising_subscriber_does_not_break_the_auxiliary_call(manager, aux_clien
     response = call_llm(task="compression", messages=[{"role": "user", "content": "summarize"}])
 
     assert response is aux_client.chat.completions.create.return_value
+
+
+def test_pre_auxiliary_call_never_receives_a_turn_notes_profile(manager, aux_client):
+    """An auxiliary call whose messages hold a wire turn note (the person's profile) still sends it, but the
+    ``pre_auxiliary_call`` subscriber records the stored note in ``request_messages`` and ``request``."""
+    from agent.person_profile import AuthUser, coerce_profile
+    from tui_gateway.turn_sender_note import turn_notes
+
+    person = AuthUser("oidc:sam", "Sam", coerce_profile({"email": "sam@example.org"}))
+    note, _person, wire = turn_notes(person, record_login="oidc:sam")
+    fired = []
+    manager.register_hook("pre_auxiliary_call", lambda **kw: fired.append(kw))
+
+    call_llm(task="title_generation", messages=[{"role": "user", "content": "hello\n\n" + wire}])
+
+    sent = aux_client.chat.completions.create.call_args.kwargs["messages"]
+    assert sent[0]["content"] == "hello\n\n" + wire
+    [pre] = fired
+    assert pre["request_messages"] == [{"role": "user", "content": "hello\n\n" + note}]
+    assert pre["request"]["body"]["messages"] == [{"role": "user", "content": "hello\n\n" + note}]
+    assert "sam@example.org" not in repr(pre)

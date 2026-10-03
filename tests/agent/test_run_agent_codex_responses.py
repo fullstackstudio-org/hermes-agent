@@ -2575,3 +2575,42 @@ def test_codex_text_only_max_output_incomplete_keeps_codex_continuation(monkeypa
     assert result["completed"] is True
     assert not any(m.get("_length_continuation_nudge") for m in result["messages"])
     assert any(m.get("finish_reason") == "incomplete" for m in result["messages"] if m["role"] == "assistant")
+
+
+def test_a_retried_native_compaction_request_never_carries_the_profile(monkeypatch):
+    """A 429 on a request with ``context_management`` is retried from the same message list, which still
+    holds the turn's wire note: neither attempt may send the person's profile alongside native compaction."""
+    from agent.person_profile import AuthUser, coerce_profile
+    from agent.turn_sender import stage_turn_sender
+    from tui_gateway.turn_sender_note import turn_notes
+
+    agent = _build_agent(monkeypatch)
+    payload = [{"type": "compaction", "compact_threshold": 100_000}]
+    monkeypatch.setattr("agent.native_compaction.native_compaction_context_management", lambda *_a, **_k: payload)
+    person = AuthUser("oidc:sam", "Sam", coerce_profile({"email": "sam@example.org"}))
+    note, person_id, wire = turn_notes(person, record_login="oidc:sam")
+    stage_turn_sender(agent, note, person_id, wire)
+
+    class _RateLimitError(Exception):
+        status_code = 429
+
+        def __str__(self):
+            return "Error code: 429 - Rate limit exceeded."
+
+    responses = [_RateLimitError(), _codex_message_response("Recovered")]
+    sent = []
+
+    def _fake_call(api_kwargs):
+        sent.append(api_kwargs)
+        result = responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", _fake_call)
+    result = agent.run_conversation("hello")
+
+    assert result["completed"] is True and len(sent) == 2
+    for request in sent:
+        assert request.get("context_management") == payload
+        assert "sam@example.org" not in repr(request["input"]) and "«Sam»" in repr(request["input"])

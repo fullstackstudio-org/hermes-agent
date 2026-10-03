@@ -744,4 +744,6 @@ def finalize_turn(
 
     agent._turn_preflight_display_snapshot = None
     agent._turn_received_provider_response = False
+    # The turn's notes end with it: nothing between turns may read a stale profile-bearing wire note.
+    agent._turn_final_note = agent._turn_wire_note = ""
     return result

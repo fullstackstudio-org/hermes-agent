@@ -126,15 +126,18 @@ class _AuxCallHooks:
             messages = []
         body = {k: v for k, v in kwargs.items() if k not in {"timeout", "http_client"}}
         total_chars = sum(len(str(_field(m, "content") or "")) for m in messages)
+        # Subscribers record the request: a turn note's profile-bearing wire copy (agent/turn_sender.py)
+        # never reaches them, whatever auxiliary task carried it.
+        from agent.turn_sender import scrub_wire_note
         _fire(
             PRE_AUXILIARY_CALL, **self.base,
-            request_messages=list(messages),
+            request_messages=scrub_wire_note(list(messages)),
             system_prompt=_system_prompt(messages, kwargs),
             tool_count=len(kwargs.get("tools") or []),
             approx_input_tokens=total_chars // 4,
             request_char_count=total_chars,
             max_tokens=kwargs.get("max_tokens") or kwargs.get("max_completion_tokens"),
-            request=_Sanitize._sanitize_hook_payload({"method": "POST", "body": body}),
+            request=_Sanitize._sanitize_hook_payload({"method": "POST", "body": scrub_wire_note(body)}),
         )
 
     def post(self, response: Any = None, error: Optional[BaseException] = None) -> None:

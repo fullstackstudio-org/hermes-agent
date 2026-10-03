@@ -1014,6 +1014,9 @@ def build_turn_context(
     # Reset first: a cached gateway agent must never carry the previous turn's bot author into a human turn.
     turn_author = parse_turn_author(turn_author)
     agent._turn_author = turn_author
+    # Nothing before this turn's notes are taken (turn-start compaction included) may see the previous
+    # turn's notes, the profile-bearing wire copy least of all (agent/turn_sender.py).
+    agent._turn_final_note = agent._turn_wire_note = ""
 
     # Recover a rotated session before binding log/turn ids or copying client history so
     # everything in this turn belongs to the canonical child.

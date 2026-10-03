@@ -1399,7 +1399,7 @@ def dump_api_request_debug(
         body = {k: v for k, v in copy.deepcopy(api_kwargs).items() if v is not None and k != "timeout"}
         # A dump records the request; the person's profile in this turn's note is sent, never kept.
         from agent.turn_sender import scrub_wire_note
-        body = scrub_wire_note(body, agent)
+        body = scrub_wire_note(body)
         api_key = None
         # anthropic_messages keeps its SDK client on ``_anthropic_client`` (``client`` is None):
         # read the key from there so the dump does not say "Bearer None" (#24293).
@@ -1424,7 +1424,9 @@ def dump_api_request_debug(
             },
         }
         if error is not None:
-            dump_payload["error"] = _api_error_debug_info(error)
+            # A provider may echo the request (this turn's wire note with it) in its error body.
+            from agent.turn_sender import scrub_echoed_wire_notes
+            dump_payload["error"] = scrub_echoed_wire_notes(_api_error_debug_info(error))
         # Sanitize the session ID (may come from an untrusted X-Hermes-Session-Id header) so a
         # "../"-shaped ID cannot write outside logs_dir.
         from agent.session_persistence import _safe_session_filename_component

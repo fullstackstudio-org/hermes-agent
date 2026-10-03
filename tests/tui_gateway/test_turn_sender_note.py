@@ -46,6 +46,7 @@ class _Provider(BaseHTTPRequestHandler):
     requests: list = []
     replies: list = []  # queued assistant messages; "ok" text when empty
     on_request = None
+    fail_status = None  # answer every chat request with this HTTP error status
 
     def do_POST(self):  # noqa: N802 (http.server API)
         req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
@@ -54,6 +55,14 @@ class _Provider(BaseHTTPRequestHandler):
             cls.requests.append(req)
             if cls.on_request is not None:
                 cls.on_request(req)
+            if cls.fail_status:
+                body = json.dumps({"error": {"message": "marker rejection", "type": "invalid_request_error"}}).encode()
+                self.send_response(cls.fail_status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
         message = cls.replies.pop(0) if cls.replies and "messages" in req else {"role": "assistant", "content": "ok"}
         finish = "tool_calls" if message.get("tool_calls") else "stop"
         if req.get("stream") is True:
@@ -83,7 +92,7 @@ def gateway(monkeypatch, tmp_path):
     """A namespace: ``make_agent()``, ``turn(...)`` (one prompt through ``_invoke_agent``, with the
     turn's identity bound exactly as ``_run_prompt_submit`` binds it), ``requests()``, ``db``, ``sid``,
     ``titles`` (what auto-titling was asked to title)."""
-    _Provider.requests, _Provider.replies, _Provider.on_request = [], [], None
+    _Provider.requests, _Provider.replies, _Provider.on_request, _Provider.fail_status = [], [], None, None
     server = HTTPServer(("127.0.0.1", 0), _Provider)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
     db = SessionDB(db_path=Path(tmp_path) / "state.db")
@@ -728,3 +737,141 @@ def test_a_request_dump_records_the_stored_note(gateway, tmp_path):
         {"model": "test-model", "messages": [{"role": "user", "content": "hi\n\n" + wire}]}, reason="test")
     written = Path(dump).read_text(encoding="utf-8")
     assert _carries_alice(written) == [] and "«Alice»" in written
+
+
+class _WebhookSink(BaseHTTPRequestHandler):
+    def log_message(self, *_a, **_k):
+        pass
+
+    def do_POST(self):  # noqa: N802 (http.server API)
+        self.server.bodies.append(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
+        self.send_response(204)
+        self.end_headers()
+
+
+@pytest.fixture()
+def recorders(tmp_path):
+    """Real hook subscribers for ``pre_api_request`` and ``api_request_error``, registered the way an
+    operator registers them: a plugin hook (``PluginContext.register_hook``), a shell hook from the
+    ``hooks:`` config (a script that writes its stdin to a file) and an outbound webhook from the same
+    config, POSTing to a local sink. Yields what each of them received."""
+    import sys
+
+    from agent import outbound_webhooks, shell_hooks
+    from hermes_cli import plugins
+    from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+
+    events = ("pre_api_request", "api_request_error")
+    original = plugins._plugin_manager
+    manager = plugins._plugin_manager = PluginManager()
+    manager._discovered = True
+    shell_hooks.reset_for_tests()
+    outbound_webhooks.reset_for_tests()
+    sink = HTTPServer(("127.0.0.1", 0), _WebhookSink)
+    sink.bodies = []
+    threading.Thread(target=sink.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+
+    plugin_calls: list = []
+    ctx = PluginContext(PluginManifest(name="marker-recorder", key="marker-recorder", source="user"), manager)
+    for event in events:
+        ctx.register_hook(event, lambda _event=event, **kw: plugin_calls.append(
+            (_event, json.dumps(kw, ensure_ascii=False, default=str))))
+
+    shell_dir = tmp_path / "shell-hook-stdin"
+    shell_dir.mkdir()
+    script = tmp_path / "record_stdin.py"
+    script.write_text("import pathlib, sys, uuid\n"
+                      f"pathlib.Path({str(shell_dir)!r}, uuid.uuid4().hex + '.json').write_text(sys.stdin.read())\n")
+    command = f"{sys.executable} {script}"
+    url = f"http://127.0.0.1:{sink.server_address[1]}/hook"
+    cfg = {"hooks": {**{event: [{"command": command, "timeout": 30}] for event in events},
+                     "outbound": [{"url": url, "events": list(events)}]}}
+    assert len(shell_hooks.register_from_config(cfg, accept_hooks=True)) == 2
+    assert len(outbound_webhooks.register_from_config(cfg)) == 1
+
+    def received():
+        assert outbound_webhooks.flush()
+        shell = [json.loads(f.read_text(encoding="utf-8")) for f in sorted(shell_dir.glob("*.json"))]
+        return SimpleNamespace(plugin=list(plugin_calls), shell=shell, webhook=[json.loads(b) for b in sink.bodies])
+
+    try:
+        yield received
+    finally:
+        sink.shutdown()
+        sink.server_close()
+        plugins._plugin_manager = original
+        shell_hooks.reset_for_tests()
+        outbound_webhooks.reset_for_tests()
+
+
+@pytest.mark.parametrize("ascii_recovery", [False, True], ids=["plain", "ascii-recovery"])
+def test_request_hooks_shell_hooks_and_webhooks_never_receive_the_profile(gateway, recorders, tmp_path,
+                                                                          ascii_recovery):
+    """``pre_api_request`` and ``api_request_error`` carry the request (``request=`` and, for the first,
+    ``request_messages``) to plugins, to shell hooks (every kwarg under ``extra`` on stdin) and to outbound
+    webhooks (the same shape, POSTed). None of them may receive the wire note's profile -- also after the
+    ASCII-recovery strip rewrote the request -- while the model provider's own request does."""
+    agent = gateway.make_agent()
+    agent.logs_dir = tmp_path
+    if ascii_recovery:
+        agent._force_ascii_payload = True
+    alice = _profile_scope("oidc:alice", "Alice", ALICE_PROFILE)
+
+    gateway.turn(agent, "first ask", [], alice)  # succeeds: pre_api_request
+    gateway.provider.fail_status = 400
+    # Rejected with a 400: the turn ends failed, firing api_request_error with the request it tried.
+    gateway.turn(agent, "second ask", gateway.db.get_messages_as_conversation(gateway.sid), alice)
+    gateway.provider.fail_status = None
+
+    sent = [r for r in gateway.requests() if _text(_users(r)[-1]["content"]).startswith(("first ask", "second ask"))]
+    assert len(sent) >= 2 and all("alice@example.org" in json.dumps(r, ensure_ascii=False) for r in sent)
+
+    got = recorders()
+    for channel, calls in (("plugin", got.plugin), ("shell", got.shell), ("webhook", got.webhook)):
+        named = [c[0] if channel == "plugin" else c["hook_event_name"] for c in calls]
+        assert {"pre_api_request", "api_request_error"} <= set(named), (channel, named)
+        for call in calls:
+            assert _carries_alice(call) == [], channel
+            # What they recorded is the request with the stored note: the scrub removed the profile only.
+            text = json.dumps(call, ensure_ascii=False)
+            assert "Gateway note" in text and "Alice" in text and "first ask" in text, channel
+    # pre_api_request's request_messages and request body both reached the plugin, profile-free.
+    pre = [json.loads(kw) for name, kw in got.plugin if name == "pre_api_request"]
+    assert pre and all(kw["request_messages"] and kw["request"]["body"]["messages"] for kw in pre)
+
+
+def test_hooks_get_tool_output_quoting_the_note_unchanged(gateway):
+    """A tool result (a file the agent read) that quotes the note's exact structure reaches the request hooks
+    byte for byte; only the user message's own wire note is put back to the stored note."""
+    from tui_gateway.turn_sender_note import turn_notes
+    agent = gateway.make_agent()
+    note, _person, wire = turn_notes(_profile_scope("oidc:alice", "Alice", ALICE_PROFILE), record_login="oidc:alice")
+    quoted = "file line 1\n" + wire + "\nfile line 3"
+    payload = agent._api_request_payload_for_hook({"model": "test-model", "messages": [
+        {"role": "user", "content": "read it\n\n" + wire},
+        {"role": "assistant", "content": quoted},
+        {"role": "tool", "tool_call_id": "c1", "content": quoted}]})
+    messages = payload["body"]["messages"]
+    assert messages[0]["content"] == "read it\n\n" + note
+    assert messages[1]["content"] == quoted and messages[2]["content"] == quoted
+
+
+def test_a_request_dump_scrubs_a_provider_error_that_echoes_the_request(gateway, tmp_path):
+    """A provider's 400 body or response text may quote the request back; the dump writes the stored note."""
+    from tui_gateway.turn_sender_note import turn_notes
+    agent = gateway.make_agent()
+    agent.logs_dir = tmp_path
+    note, _person, wire = turn_notes(_profile_scope("oidc:alice", "Alice", ALICE_PROFILE), record_login="oidc:alice")
+    echoed = "invalid request near: hi\n\n" + wire
+
+    class _Echo(Exception):
+        status_code = 400
+        body = {"error": {"message": echoed, "param": ["messages", 0]}}
+        response = SimpleNamespace(status_code=400, text=json.dumps({"error": {"message": echoed}}))
+
+    dump = agent._dump_api_request_debug(
+        {"model": "test-model", "messages": [{"role": "user", "content": "hi\n\n" + wire}]}, reason="test",
+        error=_Echo("marker 400"))
+    written = json.loads(Path(dump).read_text(encoding="utf-8"))
+    assert _carries_alice(written) == []
+    assert written["error"]["body"]["error"]["message"] == "invalid request near: hi\n\n" + note

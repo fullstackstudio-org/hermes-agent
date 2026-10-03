@@ -26,7 +26,7 @@ import json
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from agent.turn_sender import NAME_LIMIT, clean_value, relabel_note_lookalikes
+from agent.turn_sender import NAME_LIMIT, PROFILE_INTRO, clean_value, relabel_note_lookalikes
 
 #: ``(key, label in the note, per-value cap)``, in the order the note lists them. When the note would grow
 #: past :data:`PROFILE_NOTE_LIMIT` the later ones are left out first.
@@ -157,7 +157,7 @@ def profile_note_sentence(profile: Mapping[str, Any], *, shown_name: str = "") -
         add("a profile picture is set")
     if not parts:
         return ""
-    return "Their identity provider asserts this profile for them: " + "; ".join(parts) + "."
+    return PROFILE_INTRO + "; ".join(parts) + "."
 
 
 def profile_env(profile: Mapping[str, Any]) -> dict[str, str]:

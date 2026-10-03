@@ -137,7 +137,10 @@ class ApiRequestHooksMixin:
             for key, value in (api_kwargs or {}).items()
             if key not in {"timeout", "http_client"}
         }
-        return self._sanitize_hook_payload({"method": "POST", "body": body})
+        # Hooks record the request (and feed shell hooks and outbound webhooks): they get the stored note,
+        # never the profile-bearing wire copy of this turn's note (agent/turn_sender.py).
+        from agent.turn_sender import scrub_wire_note
+        return self._sanitize_hook_payload({"method": "POST", "body": scrub_wire_note(body)})
 
     def _api_response_payload_for_hook(
         self, response: Any, assistant_message: Any, *, finish_reason: Optional[str]

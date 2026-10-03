@@ -1380,11 +1380,17 @@ def _build_bedrock_kwargs(agent, api_messages, tools_for_api):
 def _build_codex_kwargs(agent, api_messages, tools_for_api, reasoning_config, request_overrides, cache_scope_id):
     from agent.codex_responses_adapter import classify_responses_route
     from agent.native_compaction import native_compaction_context_management
+    from agent.turn_sender import drop_turn_profile
     is_codex_backend, is_xai_responses, is_github_responses = classify_responses_route(agent)
     # Native server-side compaction (gpt-5.6 on direct OpenAI / ChatGPT Codex routes
     # only) — None on every other route/model, leaving the request unchanged.
     context_management = native_compaction_context_management(agent, is_codex_backend=is_codex_backend,
         is_xai_responses=is_xai_responses, is_github_responses=is_github_responses)
+    if context_management is not None:
+        # Native compaction (and the checkpoint replay keyed on the same gate) would let the provider fold
+        # the person's profile into a compaction item Hermes persists and replays: the profile is dropped
+        # for the rest of the turn instead, and this request sends the stored note (agent/turn_sender.py).
+        api_messages = drop_turn_profile(agent, api_messages)
     # xAI's /responses endpoint 400s on ``pattern``/``format`` schema keywords and on
     # ``enum`` values containing ``/`` — strip them (#27197). Deep-copy first: the
     # sanitizers mutate in place and tools_for_api aliases agent.tools (#27907).

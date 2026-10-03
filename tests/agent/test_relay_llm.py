@@ -1632,3 +1632,210 @@ def test_stream_current_inside_managed_callback_returns_raw(relay_turn):
     assert list(stream) == []
     assert stream.final_response is not None
     assert stream.final_response.choices[0].message.content == "done"
+
+
+def _profile_notes():
+    from agent.person_profile import AuthUser, coerce_profile
+    from tui_gateway.turn_sender_note import turn_notes
+
+    person = AuthUser("oidc:sam", "Sam", coerce_profile({"email": "sam@example.org", "job_title": "Marker Title"}))
+    note, _person, wire = turn_notes(person, record_login="oidc:sam")
+    return note, wire
+
+
+@pytest.mark.parametrize("rewrite,api_mode", [
+    ("none", "chat_completions"), ("none", "custom"), ("temperature", "custom"), ("messages", "custom"),
+])
+def test_relay_records_the_stored_note_and_the_provider_gets_the_wire_note(relay_turn, rewrite, api_mode):
+    """Relay's intercepts and exporters see the request with the stored turn note, never the person's profile;
+    the provider still receives the profile unless an intercept rewrote the messages (then it fails closed
+    and sends the stored note)."""
+    relay, _turn = relay_turn
+    note, wire = _profile_notes()
+    seen_by_relay, sent = [], []
+
+    def intercept(name, request, annotated):
+        del name
+        seen_by_relay.append(json.dumps(request.content, ensure_ascii=False))
+        content = dict(request.content)
+        if rewrite == "temperature":
+            content["temperature"] = 0.25
+        elif rewrite == "messages":
+            content["messages"] = [*content["messages"], {"role": "user", "content": "marker addition"}]
+        return relay.LLMRequestInterceptOutcome(relay.LLMRequest(request.headers, content), annotated)
+
+    relay.intercepts.register_llm_request("hermes-test-profile", 1, False, intercept)
+    try:
+        relay_llm.execute(
+            {"model": "test-model", "messages": [{"role": "user", "content": "hello\n\n" + wire}]},
+            lambda request: sent.append(request) or {"content": "done"},
+            session_id="session-1", name="test-provider", model_name="test-model",
+            metadata={"api_mode": api_mode},  # "custom" has no codec, so an intercept may rewrite content
+        )
+    finally:
+        relay.intercepts.deregister_llm_request("hermes-test-profile")
+
+    assert seen_by_relay and all("sam@example.org" not in s and "Marker Title" not in s for s in seen_by_relay)
+    assert all(note in json.loads(s)["messages"][0]["content"] for s in seen_by_relay)
+    provider_text = json.dumps(sent[0]["messages"], ensure_ascii=False)
+    if rewrite == "messages":
+        assert "sam@example.org" not in provider_text and "marker addition" in provider_text
+    else:
+        assert sent[0]["messages"][0]["content"] == "hello\n\n" + wire
+    if rewrite == "temperature":
+        assert sent[0]["temperature"] == 0.25
+
+
+_CODEC_REQUESTS = {
+    "chat_completions": lambda text: {"model": "test-model", "messages": [
+        {"role": "system", "content": "marker system"}, {"role": "user", "content": text}]},
+    "codex_responses": lambda text: {"model": "test-model", "instructions": "marker system", "input": [
+        {"role": "user", "content": [{"type": "input_text", "text": text}]}]},
+    "anthropic_messages": lambda text: {"model": "test-model", "max_tokens": 16, "system": "marker system",
+                                        "messages": [{"role": "user", "content": [{"type": "text", "text": text}]}]},
+}
+_CODEC_RESPONSES = {
+    "chat_completions": {"id": "c1", "object": "chat.completion", "created": 0, "model": "test-model", "choices": [
+        {"index": 0, "message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}]},
+    "codex_responses": {"id": "r1", "object": "response", "model": "test-model", "status": "completed", "output": [
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]}]},
+    "anthropic_messages": {"id": "m1", "type": "message", "role": "assistant", "model": "test-model",
+                           "content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn",
+                           "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1}},
+}
+
+
+def _rewriting_intercept(relay, rewrite, seen):
+    def intercept(name, request, annotated):
+        del name
+        seen.append(json.dumps([request.content, annotated.messages, annotated.instructions], ensure_ascii=False))
+        if rewrite == "params":
+            annotated.params = {**(annotated.params or {}), "temperature": 0.25}
+        elif rewrite == "system":
+            if annotated.instructions is not None:
+                annotated.instructions = "marker system rewritten"
+            else:
+                messages = annotated.messages
+                messages[0] = {**messages[0], "content": "marker system rewritten"}
+                annotated.messages = messages
+        elif rewrite == "messages":
+            annotated.messages = [*annotated.messages, {"role": "user", "content": "marker addition"}]
+        return relay.LLMRequestInterceptOutcome(request, annotated)
+
+    return intercept
+
+
+@pytest.mark.parametrize("api_mode", list(_CODEC_REQUESTS))
+@pytest.mark.parametrize("rewrite", ["none", "params", "system", "messages"])
+def test_codec_rewrites_never_show_relay_the_profile(relay_turn, api_mode, rewrite):
+    """Through each real codec: Relay's request and annotated view hold the stored note only. The provider
+    keeps the profile unless the rewrite reached the field that holds the user message -- any messages
+    rewrite, and on chat_completions a system-prompt rewrite too (the system prompt is a message there) --
+    and then it is sent the stored note: the profile is lost, never leaked."""
+    relay, _turn = relay_turn
+    note, wire = _profile_notes()
+    seen, sent = [], []
+    relay.intercepts.register_llm_request("hermes-test-codec", 1, False, _rewriting_intercept(relay, rewrite, seen))
+    try:
+        relay_llm.execute(
+            _CODEC_REQUESTS[api_mode]("hello\n\n" + wire),
+            lambda request: sent.append(request) or _CODEC_RESPONSES[api_mode],
+            session_id="session-1", name="test-provider", model_name="test-model",
+            metadata={"api_mode": api_mode},
+        )
+    finally:
+        relay.intercepts.deregister_llm_request("hermes-test-codec")
+
+    assert seen and all("sam@example.org" not in s and "Marker Title" not in s and "Sam" in s for s in seen)
+    provider_text = json.dumps(sent[0], ensure_ascii=False)
+    profile_dropped = rewrite == "messages" or (rewrite == "system" and api_mode == "chat_completions")
+    assert ("sam@example.org" in provider_text) is not profile_dropped
+    assert note.split("«Sam»")[0] in provider_text  # the note itself always goes out
+    if rewrite == "system":
+        assert "marker system rewritten" in provider_text
+
+
+@pytest.mark.parametrize("rewrite", ["none", "messages"])
+def test_streamed_codec_request_never_shows_relay_the_profile(relay_turn, rewrite):
+    relay, _turn = relay_turn
+    _note, wire = _profile_notes()
+    seen, sent = [], []
+
+    def raw_stream(request):
+        sent.append(request)
+        return iter([
+            SimpleNamespace(model="test-model", usage=None, choices=[SimpleNamespace(
+                delta=SimpleNamespace(content="done", tool_calls=None), finish_reason=None)]),
+            SimpleNamespace(model="test-model", usage=None, choices=[SimpleNamespace(
+                delta=SimpleNamespace(content=None, tool_calls=None), finish_reason="stop")]),
+        ])
+
+    relay.intercepts.register_llm_request("hermes-test-stream-codec", 1, False, _rewriting_intercept(relay, rewrite, seen))
+    try:
+        stream = relay_llm.stream(
+            {**_CODEC_REQUESTS["chat_completions"]("hello\n\n" + wire), "stream": True}, raw_stream,
+            session_id="session-1", name="test-provider", model_name="test-model",
+            finalizer=lambda: _CODEC_RESPONSES["chat_completions"],
+            metadata={"api_mode": "chat_completions", "api_request_id": "request-stream", "call_role": "primary"},
+        )
+        list(stream)
+    finally:
+        relay.intercepts.deregister_llm_request("hermes-test-stream-codec")
+
+    assert seen and all("sam@example.org" not in s for s in seen)
+    assert ("sam@example.org" in json.dumps(sent[0], ensure_ascii=False)) is (rewrite == "none")
+
+
+def test_tool_output_quoting_the_note_reaches_relay_and_the_provider_unchanged(relay_turn):
+    """A tool result (a file the agent read) can hold the note's exact structure: Relay and the provider both
+    get it byte for byte, and only the user message's own wire note is put back for Relay."""
+    relay, _turn = relay_turn
+    note, wire = _profile_notes()
+    quoted = "file line 1\n" + wire + "\nfile line 3"
+    request = {"model": "test-model", "messages": [
+        {"role": "user", "content": "read it\n\n" + wire},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": quoted},
+    ]}
+    seen, sent = [], []
+
+    def intercept(name, request_, annotated):
+        del name
+        seen.append(request_.content)
+        return relay.LLMRequestInterceptOutcome(request_, annotated)
+
+    relay.intercepts.register_llm_request("hermes-test-tool-output", 1, False, intercept)
+    try:
+        relay_llm.execute(request, lambda r: sent.append(r) or {"content": "done"}, session_id="session-1",
+                          name="test-provider", model_name="test-model", metadata={"api_mode": "custom"})
+    finally:
+        relay.intercepts.deregister_llm_request("hermes-test-tool-output")
+
+    assert seen[0]["messages"][2]["content"] == quoted and seen[0]["messages"][0]["content"] == "read it\n\n" + note
+    assert sent[0]["messages"] == request["messages"]
+
+
+def test_more_than_one_cut_sends_the_provider_what_relay_saw(relay_turn):
+    """Relay's view and the provider's may differ by the one wire note of the turn; when the scrub cut more
+    (two note structures in user text), the provider is sent exactly what Relay saw."""
+    relay, _turn = relay_turn
+    note, wire = _profile_notes()
+    request = {"model": "test-model", "messages": [{"role": "user", "content": "quoted\n\n" + wire},
+                                                   {"role": "user", "content": "hello\n\n" + wire}]}
+    seen, sent = [], []
+
+    def intercept(name, request_, annotated):
+        del name
+        seen.append(request_.content)
+        return relay.LLMRequestInterceptOutcome(request_, annotated)
+
+    relay.intercepts.register_llm_request("hermes-test-two-cuts", 1, False, intercept)
+    try:
+        relay_llm.execute(request, lambda r: sent.append(r) or {"content": "done"}, session_id="session-1",
+                          name="test-provider", model_name="test-model", metadata={"api_mode": "custom"})
+    finally:
+        relay.intercepts.deregister_llm_request("hermes-test-two-cuts")
+
+    assert sent[0]["messages"] == seen[0]["messages"] == [
+        {"role": "user", "content": "quoted\n\n" + note}, {"role": "user", "content": "hello\n\n" + note}]

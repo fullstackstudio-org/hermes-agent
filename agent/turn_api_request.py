@@ -57,7 +57,7 @@ def _fire_pre_api_request_hook(
                 request_messages = api_messages
             # Observers record the request: they get the stored note, never the profile-bearing wire copy.
             from agent.turn_sender import scrub_wire_note
-            request_messages = scrub_wire_note(request_messages, agent)
+            request_messages = scrub_wire_note(request_messages)
             # Shallow copies: plugins may retain the lists; deepcopy is costly.
             # ``request_messages``/``conversation_history`` are raw langfuse passthroughs.
             # Anthropic (``system``) and Responses/Codex (``instructions``) move the system

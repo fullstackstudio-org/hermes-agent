@@ -704,8 +704,9 @@ class TestMinifiedBundleSudoData:
             'function Te(s){const{ask:t}=s.prompt;if(t.kind!=="sudo")return null;return u.jsx(P,{...s})}',
             "const k={ 'sudo' : 1 };if('sudo'===m)go();",
             'const v=a.return/2,w={sudo:"sudo"};',                      # `.return /` is a division
+            'function n(u){var a=new u.constructor(u.type,u);return{kind:"sudo",a}}',   # React's event copy
         ])
-        assert sev == {1: "low", 2: "low", 3: "low", 4: "low", 5: "low"}
+        assert sev == {1: "low", 2: "low", 3: "low", 4: "low", 5: "low", 6: "low"}
         assert result.verdict == "safe"
         assert should_allow_plugin_install(result)[0] is True
 
@@ -779,6 +780,17 @@ class TestMinifiedBundleSudoData:
         'const k={kind:"sudo"};// a comment the engine ends here\u2028eval(k.kind);',
         'const k={kind:"sudo"};/* x */\u2028--> eval(k.kind)',
         'const k={kind:"sudo"};// ends at a carriage return\reval(k.kind);',
+        # review round 3: lexer misreads and escaped module names
+        "const k={kind:\"sudo\"};export default /'/;eval(k.kind)//'",   # a regex may follow `default`
+        'const k={kind:"sudo"};x.if(a)/1;eval(k.kind)/1;',              # `x.if(` is a call, then a division
+        'const k={kind:"sudo"};import x from"child\\x5fprocess";',
+        'const k={kind:"sudo"};import x from"\\u0063hild_process";',
+        'const k={kind:"sudo"};import("\\u{63}hild_process").then(m=>m.exec(c));',
+        'const k={kind:"sudo"};import x from"\\1";',                   # an escape it will not guess: a doubt
+        'const k={kind:"sudo"};x["\\x63onstructor"]["\\x63onstructor"](k.kind)();',
+        'const o={"c\\x6dd":"sudo"};',                                 # an escaped command-shaped key
+        'const k={kind:"sudo"};process["bin"+"ding"]("spawn_sync");',
+        'const k={kind:"sudo"};(()=>{}).constructor("return 1")();',
     ])
     def test_running_loading_or_smuggling_sudo_keeps_high(self, tmp_path, line):
         sev, result = self._scan(tmp_path, [line])
@@ -884,6 +896,26 @@ class TestJsLexer:
 class TestJsLexerKeepsWhatItCanDecide:
     def test_a_decrement_before_a_comparison_is_code(self):
         assert [t.text for t in lex_js("for(;n-->0;)go()")][3:6] == ["n", "--", ">"]
+
+    def test_keyword_contexts(self):
+        kinds = lambda text: [(t.kind, t.text) for t in lex_js(text)]    # noqa: E731
+        assert ("re", "/a/g") in kinds("export default /a/g")
+        assert ("re", "/a/") in kinds("x=void /a/")
+        assert ("p", "/") in kinds("x.default/2")
+        assert ("p", "/") in kinds("x.if(1)/2")          # a call of a property named `if`
+        assert ("re", "/a/") in kinds("if(x)/a/.test(y)")
+        assert ("p", "/") in kinds("x?.while(1)/2")
+
+    @pytest.mark.parametrize("raw, value", [
+        (r'"child\x5fprocess"', "child_process"), (r'"\u0063hild_process"', "child_process"),
+        (r'"\u{63}hild_process"', "child_process"), ('"child_\\\nprocess"', "child_process"),
+        (r"'a\qb'", "aqb"), (r'"\0"', "\0"), (r'"\1"', None), (r'"\08"', None), (r'"\x5"', None),
+        (r'"\u12"', None), (r'"\u{110000}"', None), (r'"\u{}"', None),
+    ])
+    def test_string_values_are_decoded_or_doubted(self, raw, value):
+        from tools.plugin_guard_context import _decode_js_string
+
+        assert _decode_js_string(raw) == value
 
     def test_line_comments_end_at_a_carriage_return_and_separators_stay_in_strings(self):
         assert [t.text for t in lex_js("// c\reval(x)")] == ["eval", "(", "x", ")"]

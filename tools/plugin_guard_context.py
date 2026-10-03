@@ -311,7 +311,7 @@ _JS_PUNCT = re.compile(
 _JS_SPACE = frozenset(" \t\r\n\v\f\ufeff\xa0\u1680\u202f\u205f\u3000") | frozenset(
     chr(c) for c in range(0x2000, 0x200b))
 _RE_AFTER_KEYWORDS = frozenset({"return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw",
-                                "case", "do", "else", "yield", "await", "extends"})
+                                "case", "do", "else", "yield", "await", "extends", "default"})
 _OBJECT_AFTER_KEYWORDS = _RE_AFTER_KEYWORDS - {"do", "else", "extends"}
 _REGEX_FLAGS = re.compile(r"[A-Za-z]*")
 _ASCII_DIGITS = frozenset("0123456789")
@@ -507,7 +507,9 @@ def lex_js(text: str) -> list:
             if t == "{":
                 tok.block = _brace_opens_block(prev)
             elif t == "(":
-                tok.block = prev is not None and prev.kind == "id" and prev.text in ("if", "while", "for", "with")
+                # ``if (`` opens a statement head; ``x.if(`` is a call of a property named ``if``.
+                tok.block = (prev is not None and prev.kind == "id" and prev.text in ("if", "while", "for", "with")
+                             and not (len(toks) >= 2 and _is_p(toks[-2], ".", "?.")))
             emit(tok)
             stack.append(len(toks) - 1)
         elif t in (")", "]", "}"):
@@ -544,8 +546,76 @@ def _is_p(tok: Optional[_Tok], *texts: str) -> bool:
     return tok is not None and tok.kind == "p" and tok.text in texts
 
 
-def _name(tok: _Tok) -> str:
-    return tok.text[1:-1] if tok.kind == "str" else tok.text
+_JS_SIMPLE_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v",
+                      "'": "'", '"': '"', "\\": "\\"}
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def _decode_js_string(text: str) -> Optional[str]:
+    """The value of a quoted string token: ``\\xNN``, ``\\uXXXX``, ``\\u{…}``, the single-letter escapes,
+    identity escapes and line continuations decoded. ``None`` when unsure (a legacy octal or
+    ``\\8``/``\\9`` escape, a malformed hex or unicode escape): callers treat that as a doubt."""
+    body = text[1:-1]
+    out: list = []
+    i, n = 0, len(body)
+    while i < n:
+        c = body[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        i += 1
+        if i >= n:
+            return None
+        e = body[i]
+        if e == "0" and not (i + 1 < n and body[i + 1].isdigit()):
+            out.append("\0")
+            i += 1
+        elif e.isdigit():
+            return None    # legacy octal, \8, \9
+        elif e in _JS_SIMPLE_ESCAPES:
+            out.append(_JS_SIMPLE_ESCAPES[e])
+            i += 1
+        elif e == "x":
+            h = body[i + 1:i + 3]
+            if len(h) != 2 or not set(h) <= _HEX:
+                return None
+            out.append(chr(int(h, 16)))
+            i += 3
+        elif e == "u":
+            if body.startswith("{", i + 1):
+                j = body.find("}", i + 2)
+                h = body[i + 2:j] if j > 0 else ""
+                if not h or not set(h) <= _HEX or int(h, 16) > 0x10FFFF:
+                    return None
+                out.append(chr(int(h, 16)))
+                i = j + 1
+            else:
+                h = body[i + 1:i + 5]
+                if len(h) != 4 or not set(h) <= _HEX:
+                    return None
+                out.append(chr(int(h, 16)))
+                i += 5
+        elif e in "\r\n\u2028\u2029":    # a line continuation
+            i += 2 if e == "\r" and body.startswith("\n", i + 1) else 1
+        else:
+            out.append(e)    # an identity escape: \q is q
+            i += 1
+    return "".join(out)
+
+
+def _name(tok: _Tok) -> Optional[str]:
+    """An identifier's text or a string's decoded value (``None`` when the string is doubtful)."""
+    return _decode_js_string(tok.text) if tok.kind == "str" else tok.text
+
+
+def _is_member_name(toks: list, k: int) -> bool:
+    """Token ``k`` follows ``.``/``?.``: a property name, even when it spells a keyword."""
+    return k >= 1 and _is_p(toks[k - 1], ".", "?.")
+
+
+def _command_shaped(name: Optional[str]) -> bool:
+    return name is None or _JS_COMMAND_NAME.search(name) is not None
 
 
 def _member_chain(toks: list, end: int) -> list:
@@ -572,7 +642,9 @@ def _call_runs(toks: list, p: int) -> bool:
     if b is None:
         return False
     if b.kind == "id":
-        return b.text not in _JS_NOT_A_CALL and _chain_runs(_member_chain(toks, bi))
+        if b.text in _JS_NOT_A_CALL and not _is_member_name(toks, bi):
+            return False    # ``if (``, ``typeof (``: not a call; ``x.if(`` is one
+        return _chain_runs(_member_chain(toks, bi))
     if _is_p(b, ")"):
         inner = toks[b.match + 1:bi]    # esbuild's ``(0,x.y)(…)``: judge ``x.y``
         if (len(inner) >= 3 and inner[0].kind == "num" and _is_p(inner[1], ",") and inner[-1].kind == "id"
@@ -587,7 +659,7 @@ def _call_runs(toks: list, p: int) -> bool:
 def _bound_to_command(toks: list, k: int) -> bool:
     """Token ``k`` is the value of ``<command-shaped name> :``/``=`` (``args:[``, ``cmd=``)."""
     return (k >= 2 and _is_p(toks[k - 1], *_JS_BINDING) and toks[k - 2].kind in ("id", "str")
-            and _JS_COMMAND_NAME.search(_name(toks[k - 2])) is not None)
+            and _command_shaped(_name(toks[k - 2])))
 
 
 def _handed_on(toks: list, k: int) -> bool:
@@ -618,7 +690,7 @@ def _is_data_token(toks: list, k: int, start: int, end: int) -> bool:
                     or (prev is not None and prev.kind == "id" and prev.text == "case" and _is_p(nxt, ":")))
         is_value = (in_object and _is_p(prev, ":") and _is_p(nxt, ",", "}") and k >= 3
                     and toks[k - 2].kind in ("id", "str") and _is_p(toks[k - 3], "{", ",")
-                    and _JS_COMMAND_NAME.search(_name(toks[k - 2])) is None)
+                    and not _command_shaped(_name(toks[k - 2])))
         if not (is_key or compared or is_value):
             return False
     else:
@@ -671,7 +743,8 @@ def _is_method_definition(toks: list, k: int, closer_of: dict) -> bool:
 def _computed_member(toks: list, k: int) -> bool:
     """The ``[`` at ``k`` indexes a value (``x["exec"]``), not an array literal."""
     b = toks[k - 1] if k else None
-    return b is not None and ((b.kind == "id" and b.text not in (_JS_NOT_A_CALL | _RE_AFTER_KEYWORDS))
+    return b is not None and ((b.kind == "id" and (b.text not in (_JS_NOT_A_CALL | _RE_AFTER_KEYWORDS)
+                                                   or _is_member_name(toks, k - 1)))
                               or _is_p(b, ")", "]") or b.kind == "str")
 
 
@@ -704,22 +777,30 @@ def _js_token_sink(toks: list) -> bool:
             if t.text == "constructor" and member and k >= 2 and toks[k - 2].kind == "id" and (
                     toks[k - 2].text in ("constructor", "module", "Module")):
                 return True
+            if t.text == "process" and not member and _is_p(nxt, "["):
+                return True    # process["bin"+"ding"]
             if t.text == "process" and _is_p(nxt, ".", "?.") and k + 2 < len(toks) and toks[k + 2].text in (
                     "binding", "dlopen", "mainModule"):
                 return True
+            if t.text == "constructor" and member and _is_p(nxt, "(") and k + 2 < len(toks) and (
+                    toks[k + 2].kind in ("str", "tpl")):
+                return True    # (()=>{}).constructor("code"): the Function constructor by another name
             if nxt is not None and nxt.kind == "tpl" and nxt.text.startswith("`") and (
-                    t.text not in (_JS_NOT_A_CALL | _RE_AFTER_KEYWORDS)) and _chain_runs(_member_chain(toks, k)):
+                    t.text not in (_JS_NOT_A_CALL | _RE_AFTER_KEYWORDS) or member) \
+                    and _chain_runs(_member_chain(toks, k)):
                 return True    # a shell tag: zx's $`…`, Bun.$`…`, sh`…`
         elif t.kind == "str":
-            value = t.text[1:-1]
-            if value in ("constructor", "exec") and _is_p(prev, "[") and _computed_member(toks, k - 1):
+            value = _decode_js_string(t.text)    # None: an escape this lexer will not guess at
+            computed = _is_p(prev, "[") and _computed_member(toks, k - 1)
+            if computed and (value is None or value in ("constructor", "exec")):
                 return True
-            if value == "exec" and t.parent >= 1 and _is_p(toks[t.parent], "(") and toks[t.parent - 1].kind == "id" \
-                    and toks[t.parent - 1].text in _JS_DEFINERS:
+            definer = t.parent >= 1 and _is_p(toks[t.parent], "(") and toks[t.parent - 1].kind == "id" \
+                and toks[t.parent - 1].text in _JS_DEFINERS
+            if definer and (value is None or value == "exec"):
                 return True    # Object.defineProperty(RegExp.prototype, "exec", …)
             specifier = (prev is not None and prev.kind == "id" and prev.text in ("from", "import")) or (
                 _is_p(prev, "(") and k >= 2 and toks[k - 2].kind == "id" and toks[k - 2].text in ("require", "import"))
-            if specifier and _JS_PROCESS_MODULES.match(value):
+            if specifier and (value is None or _JS_PROCESS_MODULES.match(value)):
                 return True
     return False
 

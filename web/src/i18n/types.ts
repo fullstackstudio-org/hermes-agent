@@ -382,6 +382,10 @@ export interface Translations {
     updateGit: string;
     /** Optional: locales without it fall back to the English body at the call site. */
     updateConsentBody?: (name: string, sha: string) => string;
+    /** Optional: the update's security scan said caution; nothing was applied until confirmed. */
+    updateScanConsentBody?: (name: string, sha: string) => string;
+    /** Optional: the update's security scan refused the new version; nothing was applied. */
+    updateScanRefused?: (name: string, verdict: string) => string;
     versionBadge: string;
     showInSidebar: string;
     hideFromSidebar: string;

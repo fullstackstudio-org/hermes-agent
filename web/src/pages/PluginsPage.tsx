@@ -1179,7 +1179,35 @@ function PluginRowCard(props: PluginRowCardProps) {
                 size="sm"
                 onClick={() => {
                   void setRuntimeLoading(row.name, async () => {
-                    const res = await api.updateAgentPlugin(row.name);
+                    let res = await api.updateAgentPlugin(row.name);
+                    if (res.update_refused) {
+                      // The scan of the fetched version did not pass; the installed one keeps running.
+                      const findings = (res.scan_findings ?? []).map(
+                        (f) => `${f.severity.toUpperCase()} ${f.pattern_id} ${f.file}:${f.line}`,
+                      );
+                      if (!res.caution_consent_required) {
+                        window.alert(
+                          [
+                            (t.pluginsPage.updateScanRefused ?? en.pluginsPage.updateScanRefused!)(
+                              row.name,
+                              res.scan_verdict ?? "",
+                            ),
+                            ...findings,
+                          ].join("\n"),
+                        );
+                        return;
+                      }
+                      const body = [
+                        (t.pluginsPage.updateScanConsentBody ?? en.pluginsPage.updateScanConsentBody!)(
+                          row.name,
+                          (res.revision ?? "").slice(0, 8),
+                        ),
+                        ...findings,
+                      ].join("\n");
+                      if (!window.confirm(body)) return;
+                      res = await api.updateAgentPlugin(row.name, false, true);
+                      if (!res.ok) return;
+                    }
                     if (res.consent_required) {
                       // The new pin widens the plugin; the backend changed nothing until confirmed.
                       const body = [

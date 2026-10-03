@@ -1089,13 +1089,16 @@ export const api = {
       method: "POST",
     }),
 
-  updateAgentPlugin: (name: string, acceptCapabilities = false) =>
+  updateAgentPlugin: (name: string, acceptCapabilities = false, acceptCaution = false) =>
     fetchJSON<AgentPluginUpdateResponse>(
       `/api/dashboard/agent-plugins/${pluginPath(name)}/update`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accept_capabilities: acceptCapabilities }),
+        body: JSON.stringify({
+          accept_capabilities: acceptCapabilities,
+          ...(acceptCaution ? { accept_caution: true } : {}),
+        }),
       },
     ),
 
@@ -2848,6 +2851,20 @@ export interface AgentPluginUpdateResponse {
   consent_required?: boolean;
   sha?: string;
   delta_lines?: string[];
+  /** The security scan refused the fetched version; nothing was applied. */
+  update_refused?: boolean;
+  scan_verdict?: string;
+  /** Consent (`accept_caution`) would apply it: the verdict was caution. */
+  caution_consent_required?: boolean;
+  revision?: string;
+  scan_findings?: {
+    pattern_id: string;
+    severity: string;
+    category: string;
+    file: string;
+    line: number;
+    description: string;
+  }[];
 }
 
 export interface PluginProvidersPutRequest {

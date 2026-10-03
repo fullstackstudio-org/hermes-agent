@@ -438,6 +438,10 @@ export const en: Translations = {
     updateGit: "Git pull",
     updateConsentBody: (name: string, sha: string) =>
       `The new catalog pin of ${name} (${sha}) adds surfaces the installed version does not have. Apply it only if you trust them:`,
+    updateScanConsentBody: (name: string, sha: string) =>
+      `The security scan flagged the new version of ${name} (${sha}). Nothing has changed yet. Update anyway only if you trust the source:`,
+    updateScanRefused: (name: string, verdict: string) =>
+      `The security scan refused the new version of ${name} (${verdict}). Nothing was changed; the installed version keeps running.`,
     versionBadge: "Version",
     showInSidebar: "Show in sidebar",
     hideFromSidebar: "Hide from sidebar",

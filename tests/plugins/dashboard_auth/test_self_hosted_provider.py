@@ -755,6 +755,103 @@ class TestProfileClaims:
         assert "avatars.example.org" not in repr(session)
 
 
+class TestSessionProfile:
+    """``Session.profile`` is the allowlisted rest of the verified ID token's profile claims: what each
+    turn tells the model about the person. Built on every verify, never from userinfo, never a token."""
+
+    @pytest.fixture
+    def provider(self, rsa_keypair):
+        return _make_provider(rsa_keypair)
+
+    def _session(self, provider, rsa_keypair, **kwargs):
+        return provider.verify_session(access_token=_mint_id_token(rsa_keypair, **kwargs))
+
+    def test_fss_shaped_token_becomes_a_profile(self, provider, rsa_keypair):
+        session = self._session(provider, rsa_keypair, name="Robin de Vries", groups=["admin"], extra_claims={
+            "email_verified": True, "preferred_username": "robin", "job_title": "Developer",
+            "picture": "https://avatars.example.org/robin.png", "updated_at": 1759400000,
+            "birthdate": "1990-01-01", "locale": "nl-NL", "zoneinfo": "Europe/Amsterdam",
+            "nonce": "n-123", "at_hash": "h-123", "amr": ["pwd"], "auth_time": 1759400000})
+        assert session.profile == {
+            "email": "alice@example.com", "job_title": "Developer", "preferred_username": "robin",
+            "name": "Robin de Vries", "locale": "nl-NL", "zoneinfo": "Europe/Amsterdam",
+            "birthdate": "1990-01-01", "groups": ["admin"], "picture": True}
+        # Never the picture URL, a token or any protocol claim.
+        flat = repr(dict(session.profile))
+        for absent in ("avatars.example.org", "n-123", "h-123", "pwd", "1759400000", "usr_abc",
+                       session.access_token):
+            assert absent not in flat
+
+    def test_profile_never_in_session_repr(self, provider, rsa_keypair):
+        session = self._session(provider, rsa_keypair, extra_claims={"job_title": "Marker Title"})
+        assert session.profile["job_title"] == "Marker Title"
+        assert "Marker Title" not in repr(session)
+
+    def test_unverified_email_never_reaches_the_profile(self, provider, rsa_keypair):
+        session = self._session(provider, rsa_keypair, extra_claims={"email_verified": False})
+        assert "email" not in session.profile
+
+    @pytest.mark.parametrize("flag,kept", [(True, True), ("true", True), (False, False), (None, False)])
+    def test_phone_number_only_when_verified(self, provider, rsa_keypair, flag, kept):
+        claims = {"phone_number": "+31 6 00000000"}
+        if flag is not None:
+            claims["phone_number_verified"] = flag
+        session = self._session(provider, rsa_keypair, extra_claims=claims)
+        assert ("phone_number" in session.profile) is kept
+
+    def test_address_is_one_line(self, provider, rsa_keypair):
+        composed = self._session(provider, rsa_keypair, extra_claims={"address": {
+            "street_address": "Main 1", "postal_code": "1000 AA", "locality": "Amsterdam", "country": "NL"}})
+        assert composed.profile["address"] == "Main 1, 1000 AA, Amsterdam, NL"
+        formatted = self._session(provider, rsa_keypair, extra_claims={"address": {
+            "formatted": "Main 1\n1000 AA Amsterdam", "locality": "ignored"}})
+        assert formatted.profile["address"] == "Main 1 1000 AA Amsterdam"
+
+
+class TestDefaultScopes:
+    """``groups`` is asked for by default only when the IDP advertises it; ``phone`` / ``address`` never
+    by default (they can put a consent screen in front of every login); configured scopes are sent as
+    written."""
+
+    def _scope(self, provider) -> str:
+        url = provider.start_login(redirect_uri="https://hermes.example/auth/callback").redirect_url
+        return dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query))["scope"]
+
+    def test_advertised_groups_is_added(self, rsa_keypair):
+        provider = _make_provider(rsa_keypair)
+        provider._discovery["scopes_supported"] = [
+            "openid", "profile", "email", "phone", "address", "groups", "offline_access"]
+        assert self._scope(provider) == "openid profile email groups"
+
+    def test_not_advertised_means_not_asked(self, rsa_keypair):
+        provider = _make_provider(rsa_keypair)
+        provider._discovery["scopes_supported"] = ["openid", "profile", "email"]
+        assert self._scope(provider) == "openid profile email"
+
+    def test_configured_scopes_are_authoritative(self, rsa_keypair):
+        provider = _make_provider(rsa_keypair, scopes="openid  profile phone address")
+        provider._discovery["scopes_supported"] = ["openid", "profile", "groups", "phone", "address"]
+        assert self._scope(provider) == "openid profile phone address"
+
+    def test_refresh_asks_for_the_same_scopes(self, rsa_keypair):
+        provider = _make_provider(rsa_keypair)
+        provider._discovery["scopes_supported"] = ["groups"]
+        data, _headers = provider._refresh_request("rt")
+        assert data["scope"] == "openid profile email groups"
+
+    def test_discovery_keeps_scopes_supported(self, rsa_keypair):
+        provider = _make_provider(rsa_keypair)
+        doc = {**_DISCOVERY_DOC, "scopes_supported": ["openid", "groups", 7]}
+        resp = MagicMock(spec=httpx.Response)
+        resp.status_code = 200
+        resp.url = f"{_ISSUER}/.well-known/openid-configuration"
+        resp.headers = {"content-type": "application/json"}
+        resp.text = json.dumps(doc)
+        resp.json = MagicMock(return_value=doc)
+        with patch("plugins.dashboard_auth.self_hosted.httpx.get", return_value=resp):
+            assert provider._fetch_discovery()["scopes_supported"] == ["openid", "groups", "7"]
+
+
 # ---------------------------------------------------------------------------
 # refresh_session + revoke_session
 # ---------------------------------------------------------------------------
@@ -808,7 +905,8 @@ class TestPluginRegister:
         assert isinstance(registered, oidc_plugin.SelfHostedOIDCProvider)
         assert registered._issuer == _ISSUER
         assert registered._client_id == _CLIENT_ID
-        assert registered._scopes == "openid profile email"
+        # Unconfigured: the default set plus the optional scopes the IDP advertises, decided at login.
+        assert registered._configured_scopes == ""
         assert oidc_plugin.LAST_SKIP_REASON == ""
 
 

@@ -470,7 +470,9 @@ def _mint_pty_credential_for(ws: WebSocket) -> tuple[Optional[str], Optional[str
         return None, None
     from hermes_cli.dashboard_auth.ws_tickets import mint_pty_credential
     credential = mint_pty_credential(user_id=str(identity["user_id"]), provider=str(identity["provider"]),
-                                     user_name=str(identity.get("user_name") or ""))
+                                     user_name=str(identity.get("user_name") or ""),
+                                     profile=identity.get("profile") if isinstance(identity.get("profile"), dict)
+                                     else None)
     return credential, f"{identity['provider']}:{identity['user_id']}"
 
 

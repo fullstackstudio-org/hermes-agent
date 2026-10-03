@@ -1334,6 +1334,7 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
         profile = _current_profile_name()
         browser_control_principal = browser_control_transport_family = ""
         user_id = user_name = ""
+        profile_vars: dict = {}
         # Live conversation id for subprocess HERMES_SESSION_ID: an explicitly empty contextvar is authoritative
         # (no os.environ fallback), so never leave it "" — agent's durable session_id, then session_key.
         session_id = session_key
@@ -1348,8 +1349,13 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
             # conversation. An ungated gateway (and a server-internal caller) names no
             # login, and neither does a session more than one signed-in person could be behind: both bind
             # "" rather than a name nothing can question. See :func:`_acting_auth_user`.
-            user_id, display_name = _acting_auth_user(sess)
+            acting = _acting_auth_user(sess)
+            user_id, display_name = acting
             user_id = user_id or ""
+            # The rest of the person's profile, only when the acting pair came from a signed-in connection
+            # (the record fallback is a plain pair and carries none), so tools and the note agree.
+            from agent.person_profile import profile_env, profile_of
+            profile_vars = profile_env(profile_of(acting))
             # The person's own name when the login carried one (the OIDC ``name`` claim, verified with the
             # login itself and minted into the WS credential beside it) — never a lookup on this path, and
             # never a name from another identity. Without one, the provider-scoped login id is still the
@@ -1361,7 +1367,7 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
                 browser_control_transport_family = _methods_browser_control._CLOUD_TRANSPORT_FAMILY
         return set_session_vars(
             session_key=session_key, session_id=session_id, source=source,
-            user_id=user_id, user_name=user_name,
+            user_id=user_id, user_name=user_name, **profile_vars,
             profile=profile,
             browser_control_principal=browser_control_principal,
             browser_control_transport_family=browser_control_transport_family, cwd=resolved,
@@ -2477,12 +2483,16 @@ def _transport_auth_user(transport) -> tuple[str | None, str]:
     """``(<provider>:<user id>, display name)`` the WS-upgrade credential authenticated for ``transport``: ONE
     pair out of ONE minted identity, so a name can never end up labelling a different login. ``(None, "")`` for
     the legacy token, stdio and a server-internal caller. The prefix keeps a basic-auth
-    ``alice`` and an OIDC ``alice`` apart; the name is "" unless the credential carried one."""
+    ``alice`` and an OIDC ``alice`` apart; the name is "" unless the credential carried one.
+
+    The pair is an ``AuthUser``: it also carries the profile minted with that same login
+    (``agent/person_profile.py``), which only the turn note and the tool variables read."""
     identity = getattr(transport, "auth_identity", None)
     if not _methods_browser_control._is_authenticated_identity(identity):
         return None, ""
+    from agent.person_profile import AuthUser
     user_id = f"{str(identity['provider']).strip()}:{str(identity['user_id']).strip()}"
-    return user_id, str(identity.get("user_name") or "").strip()
+    return AuthUser(user_id, str(identity.get("user_name") or "").strip(), identity.get("profile"))
 
 
 def _transport_auth_user_id(transport) -> str | None:
@@ -2506,7 +2516,9 @@ def _session_auth_user(session: dict | None) -> tuple[str | None, str]:
     if "auth_user_id" in session:
         user_id = session["auth_user_id"]
         return user_id, (str(session.get("auth_user_name") or "").strip() if user_id else "")
-    return _transport_auth_user(session.get("transport"))
+    # A plain pair: the record is the fallback for turns nobody submitted, and a person's profile is only
+    # ever told for a turn their own connection sent.
+    return tuple(_transport_auth_user(session.get("transport")))
 
 
 def _session_auth_user_id(session: dict | None) -> str | None:
@@ -2536,8 +2548,8 @@ def _submitting_auth_user() -> tuple[str, str] | None:
     (stdio, the legacy token, a server-internal caller, an internal caller with no
     transport bound). Only meaningful on a request thread — a turn thread's bound transport is the
     session's slot, not the submitter's socket."""
-    user_id, user_name = _transport_auth_user(current_transport())
-    return (user_id, user_name) if user_id is not None else None
+    acting = _transport_auth_user(current_transport())
+    return acting if acting[0] is not None else None
 
 
 def _acting_auth_user(session: dict | None) -> tuple[str | None, str]:

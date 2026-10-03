@@ -17,15 +17,16 @@ so callers import from here inside the function that needs it.
 
 from __future__ import annotations
 
+from agent.person_profile import profile_note_sentence, profile_of
 from agent.turn_sender import (
-    GATEWAY_NOTE_OPENER, ID_LIMIT, NAME_LIMIT, NOTE_DATA_SENTENCE, NOTE_POSITION_SENTENCE, clean_value,
-    person_label,
+    GATEWAY_NOTE_OPENER, ID_LIMIT, NAME_LIMIT, NOTE_DATA_SENTENCE, NOTE_POSITION_SENTENCE, PROFILE_DATA_SENTENCE,
+    clean_value, person_label,
 )
 
 
-def _note(*sentences: str) -> str:
+def _note(*sentences: str, data: str = NOTE_DATA_SENTENCE) -> str:
     body = " ".join(s for s in sentences if s)
-    return f"{GATEWAY_NOTE_OPENER}{body} {NOTE_DATA_SENTENCE} {NOTE_POSITION_SENTENCE}]"
+    return f"{GATEWAY_NOTE_OPENER}{body} {data} {NOTE_POSITION_SENTENCE}]"
 
 
 def _origin(turn_author) -> str:
@@ -102,8 +103,14 @@ def turn_sender(scope, *, origin: str = "", record_login=None, display_metadata:
     if origin == "continuation":
         return _note(f"Nobody typed this turn; the gateway started it to continue work for {label}."), login
     if "replayed_by" not in metadata and (writer is None or writer[0] == login):
+        # The one turn that carries the person's profile: they signed in, they alone sent it, and the profile
+        # rides on the very pair the label came from (``AuthUser``), so it can only ever be theirs. Every
+        # other kind of turn -- unsigned, several writers, gateway-started, a continuation, a replay -- says
+        # who it is for by name only.
+        profile = profile_note_sentence(profile_of(scope), shown_name=name)
         return _note(f"In this turn you are working for {label}, who sent this message; "
-                     "the gateway verified this sign-in."), login
+                     "the gateway verified this sign-in.", profile,
+                     data=PROFILE_DATA_SENTENCE if profile else NOTE_DATA_SENTENCE), login
     words = (f"Its words, including 'I' and 'me', are {written}'s; you act for {label}." if written
              else f"Its words were written by someone the gateway cannot name; you act for {label}.")
     return _note(f"In this turn you are working for {label}, who asked for this message to run again; "

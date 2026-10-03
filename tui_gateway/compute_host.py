@@ -38,8 +38,12 @@ def _frame_turn_auth_user(frame: dict[str, Any]) -> tuple[str | None, str] | Non
     separately as ``auth_user_id`` and is what the agent (and so memory) is built with."""
     if "turn_auth_user_id" not in frame:
         return None
-    return (str(frame.get("turn_auth_user_id") or "") or None,
-            str(frame.get("turn_auth_user_name") or ""))
+    from agent.person_profile import AuthUser, coerce_profile
+    user_id = str(frame.get("turn_auth_user_id") or "") or None
+    # The submitter's profile (``turn_auth_user_profile``), reduced again on this side of the pipe; a
+    # parent that predates the key sends none and the turn names the person by name only.
+    return AuthUser(user_id, str(frame.get("turn_auth_user_name") or ""),
+                    coerce_profile(frame.get("turn_auth_user_profile")) if user_id else None)
 
 
 def now_ns() -> int:

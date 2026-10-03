@@ -267,6 +267,11 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
             identity = {"user_id": info.get("user_id"), "provider": info.get("provider")}
             if user_name := str(info.get("user_name") or "").strip():
                 identity["user_name"] = user_name
+            # The person's profile, minted with the same login (``Session.profile``), reduced once more to
+            # the allowlisted, cleaned shape; absent from an older or profile-less credential.
+            from agent.person_profile import coerce_profile
+            if profile := coerce_profile(info.get("profile")):
+                identity["profile"] = profile
             ws._hermes_auth_identity = identity
 
         pty = ws.query_params.get("pty", "")

@@ -506,8 +506,11 @@ async def api_auth_ws_ticket(request: Request):
     # The display name rides along with the login it belongs to: this verified session is the only
     # place a human name for the user exists without asking the provider again, and the WS turn has
     # no way to ask (see ws_tickets.mint_ticket).
+    # So does the person's profile (``Session.profile``), for the same reason: each turn tells the model
+    # who it is for, and this session is the only verified source of it.
     ticket = mint_ticket(
-        user_id=sess.user_id, provider=sess.provider, user_name=sess.display_name)
+        user_id=sess.user_id, provider=sess.provider, user_name=sess.display_name,
+        profile=dict(getattr(sess, "profile", None) or {}))
     _audit(request, AuditEvent.WS_TICKET_MINTED, provider=sess.provider, user_id=sess.user_id)
     return {"ticket": ticket, "ttl_seconds": TTL_SECONDS}
 

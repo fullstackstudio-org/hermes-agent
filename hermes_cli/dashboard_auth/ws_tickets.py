@@ -45,6 +45,7 @@ class TicketInvalid(Exception):
 
 def mint_ticket(
     *, user_id: str, provider: str, user_name: str = "", extra: Optional[Dict[str, Any]] = None,
+    profile: Optional[Dict[str, Any]] = None,
 ) -> str:
     """One-shot base64url ticket (32 random bytes) bound to this identity; ``consume_ticket``
     hands the ``info`` dict back to the WS handler.
@@ -54,12 +55,18 @@ def mint_ticket(
     label the person without a second token verification later. It travels as one pair with the
     login and is ``""`` when the provider minted no name (then only the login id exists).
 
+    ``profile`` is the rest of what that same verified session says about the person
+    (``Session.profile``: email, job title, groups, locale, ...), carried under ``"profile"`` only when
+    there is one, so a ticket minted without it -- or by an older caller -- carries the name alone.
+
     ``extra`` rides along for routes that need server-chosen context (the Bot Desktop bridge pins
     the RFB socket's profile home here so a client can never pick another profile's screen).
     """
     ticket = secrets.token_urlsafe(32)
     info = {"user_id": user_id, "provider": provider, "user_name": user_name,
             "minted_at": int(time.time()), **(extra or {})}
+    if profile:
+        info["profile"] = dict(profile)
     with _lock:
         _tickets[ticket] = (int(time.time()) + TTL_SECONDS, info)
         _gc_expired_locked()
@@ -88,12 +95,15 @@ def _gc_expired_locked() -> None:
         _tickets.pop(t, None)
 
 
-def mint_pty_credential(*, user_id: str, provider: str, user_name: str = "") -> str:
-    """A multi-use credential for ONE embedded-chat PTY, carrying the login that opened it. The PTY child
-    reuses it on every reconnect of ``/api/ws`` and ``/api/pub``; :func:`revoke_pty_credential` ends it
-    when the PTY ends."""
+def mint_pty_credential(
+    *, user_id: str, provider: str, user_name: str = "", profile: Optional[Dict[str, Any]] = None,
+) -> str:
+    """A multi-use credential for ONE embedded-chat PTY, carrying the login that opened it (with its name
+    and profile, when the socket that opened it had them). The PTY child reuses it on every reconnect of
+    ``/api/ws`` and ``/api/pub``; :func:`revoke_pty_credential` ends it when the PTY ends."""
     value = secrets.token_urlsafe(32)
-    info = {"user_id": user_id, "provider": provider, **({"user_name": user_name} if user_name else {})}
+    info = {"user_id": user_id, "provider": provider, **({"user_name": user_name} if user_name else {}),
+            **({"profile": dict(profile)} if profile else {})}
     with _lock:
         _pty_credentials[value] = info
     return value

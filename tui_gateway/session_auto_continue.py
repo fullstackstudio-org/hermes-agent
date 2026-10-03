@@ -475,7 +475,9 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     # finished, which is somebody else's turn as often as not. It is both the scope of the drained turn
     # and the author of its row -- the envelope is the one place the text and its sender are held
     # together. An envelope that names nobody authors nothing, on either runner.
-    submitter = tuple(queued["turn_auth_user"]) if queued.get("turn_auth_user") else None
+    # An ``AuthUser`` is kept as it is, so the drained turn still carries its sender's profile.
+    queued_user = queued.get("turn_auth_user")
+    submitter = (queued_user if isinstance(queued_user, tuple) else tuple(queued_user)) if queued_user else None
     if submitter:
         kwargs["turn_auth_user"] = submitter
     if queued.get("origin"):

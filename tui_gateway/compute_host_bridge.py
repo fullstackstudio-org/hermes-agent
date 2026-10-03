@@ -65,8 +65,13 @@ def _compute_host_turn_frame(
     # answer ("nobody"), not a missing field; a parent that predates these keys sends neither and the
     # child keeps its old behaviour.
     auth_user_id, auth_user_name = _session_auth_user(session)
+    turn_user_profile: dict = {}
     if turn_auth_user:
         turn_user_id, turn_user_name = turn_auth_user
+        # The submitter's profile rides with the submitter, so the child can tell the model the same
+        # thing an inline turn does; a turn nobody submitted resolves a plain pair and carries none.
+        from agent.person_profile import profile_of
+        turn_user_profile = dict(profile_of(turn_auth_user)) if turn_user_id else {}
     else:
         # Nobody submitted this turn (a relayed bot DM, a queued prompt naming nobody, a crash continuation):
         # resolve it exactly as the inline turn does, with the unattributed sentinel bound, so the socket
@@ -91,6 +96,7 @@ def _compute_host_turn_frame(
         "source": _session_source(session), "attached_images": attached_images,
         "auth_user_id": auth_user_id, "auth_user_name": auth_user_name,
         "turn_auth_user_id": turn_user_id or "", "turn_auth_user_name": turn_user_name,
+        **({"turn_auth_user_profile": turn_user_profile} if turn_user_profile else {}),
         # How the turn came about. The pair above is the SCOPE the parent resolved (a turn nobody submitted
         # falls back to the owner there, for tools); this is what keeps the child from telling the model
         # that the owner sent it.

@@ -3,19 +3,24 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 
 @dataclass(frozen=True)
 class Session:
     """A verified interactive identity (from ``complete_login`` / ``verify_session``). All fields
-    but ``picture`` mandatory; providers without orgs set ``org_id=""``. The tokens are opaque to
+    but ``picture`` and ``profile`` mandatory; providers without orgs set ``org_id=""``. The tokens are opaque to
     Hermes.
 
     ``picture`` is the profile-picture URL the provider asserted in the verified token, ``""`` when
     it sent none. It is an input for the login-time fetch (``dashboard_auth.pictures``) and nothing
     else: it is never serialised to a client, because a client loading it directly would tell the
-    provider whose conversation it is looking at. Kept out of ``repr`` so it never reaches a log."""
+    provider whose conversation it is looking at. Kept out of ``repr`` so it never reaches a log.
+
+    ``profile`` is the rest of what the verified token says about the person (email, job title, groups,
+    locale, ...), already reduced by ``agent.person_profile.coerce_profile`` (``dashboard_auth.profile``
+    builds it from claims). ``{}`` when the provider builds none. It rides into the WS credential beside
+    the login so each turn can tell the model who it is for; out of ``repr``, hashing and equality."""
     user_id: str
     email: str
     display_name: str
@@ -25,6 +30,7 @@ class Session:
     access_token: str
     refresh_token: str
     picture: str = field(default="", repr=False)
+    profile: Mapping[str, Any] = field(default_factory=dict, repr=False, hash=False, compare=False)
 
 
 @dataclass(frozen=True)

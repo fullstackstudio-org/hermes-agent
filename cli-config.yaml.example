@@ -1070,7 +1070,7 @@ group_sessions_per_user: true
 # gives running turns this many seconds to finish while they are still
 # connected. Turns still running then are interrupted so the next
 # session.resume continues them. 0 = interrupt at once. Under systemd set
-# TimeoutStopSec to at least this plus 15 and KillMode=mixed.
+# TimeoutStopSec to at least this plus 25 and KillMode=mixed.
 #
 # dashboard:
 #   shutdown_drain_timeout: 20

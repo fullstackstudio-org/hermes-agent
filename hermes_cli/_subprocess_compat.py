@@ -335,6 +335,15 @@ def noninteractive_git_env(base: "Mapping[str, str] | None" = None) -> dict[str,
     ``stdin=subprocess.DEVNULL``. Internal plumbing only — the agent-facing terminal tool has its
     own policy layer and visible PTY.
 
+    What this does NOT neutralise: ``core.hooksPath=/dev/null`` turns hooks off, but a checkout
+    or merge still runs the smudge/clean ``filter.<driver>.*`` commands and applies the in-tree
+    ``.gitattributes`` conversions (``eol``/``text``, ``working-tree-encoding``, ``ident``). Filter
+    drivers are defined in config only: with global/system config at /dev/null (here), a fresh
+    clone carries none, so a repository's ``filter=x`` attribute names a driver that does not exist
+    and git passes the bytes through. A repository's own ``.git/config`` can still define one; code
+    that must know the bytes a checkout writes compares them afterwards
+    (``plugins_cmd._same_tracked_files``) instead of trusting this environment.
+
     Hermes shells out to git from many non-interactive contexts — MCP catalog installs, plugin
     install/update, profile distribution staging, worktree base fetches, desktop review-pane fetch/push.
     When the remote is private, misconfigured, or requires auth, git's default behavior is to prompt on the

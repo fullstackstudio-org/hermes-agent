@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -848,6 +849,8 @@ def _install_plugin_core(
     catalog: Optional[dict] = None,
     allow_removed: bool = False,
     before_swap=None,
+    scan_force: Optional[bool] = None,
+    caution_consent=None,
 ) -> tuple[Path, dict, str]:
     """Clone a Git plugin and atomically record its source and exact revision.
 
@@ -860,7 +863,11 @@ def _install_plugin_core(
     its ``pin`` is kept only when the checkout satisfies it (a ``--ref`` install is off-pin).
     *allow_removed* records that the user knowingly bypassed the kill list.
     *before_swap(manifest, tree)* runs on the validated clone before anything moves into place
-    and may raise :class:`PluginOperationError` to abort (re-pin consent)."""
+    and may raise :class:`PluginOperationError` to abort (re-pin consent).
+    *scan_force* is what the scan's ``force`` means (accept ``caution`` without asking); it defaults
+    to *force* (replace an existing install), and an update passes False to keep the two apart.
+    *caution_consent(result, revision)* asks for consent bound to the cloned revision; it stands in
+    for *scan_decision_cb*. A refusal (:class:`PluginScanBlocked`) carries ``revision``."""
     requested_revision = _normalize_exact_revision(ref) if ref is not None else None
     try:
         git_url, subdir = _resolve_git_url(identifier)
@@ -895,8 +902,14 @@ def _install_plugin_core(
             raise PluginOperationError(str(e)) from e
         _check_manifest_version(manifest, plugin_name)
         # Scan BEFORE anything is moved into place; raises PluginScanBlocked when blocked.
-        _scan_plugin_tree(tmp_target, identifier, force=force, scan_decision_cb=scan_decision_cb,
-                          reviewed_pin=at_reviewed_pin)
+        if caution_consent is not None:
+            scan_decision_cb = lambda result: caution_consent(result, installed_revision)    # noqa: E731
+        try:
+            _scan_plugin_tree(tmp_target, identifier, force=force if scan_force is None else scan_force,
+                              scan_decision_cb=scan_decision_cb, reviewed_pin=at_reviewed_pin)
+        except PluginScanBlocked as exc:
+            exc.revision = installed_revision
+            raise
         if python_deps:
             _refuse_conflicting_python_deps(tmp_target, plugin_name)
         _refuse_unavailable_portable_plugin(plugin_name, tmp_target)
@@ -978,7 +991,7 @@ def cmd_install(
         from tools.plugin_guard import format_scan_report
         console.print()
         console.print("[yellow]⚠ Security scan flagged this plugin:[/yellow]")
-        console.print(format_scan_report(scan_result))
+        console.print(format_scan_report(scan_result), markup=False, highlight=False)
         return _is_tty() and _ask_yes("  Install anyway? Only continue if you trust the source. [y/N]: ")
 
     try:
@@ -991,7 +1004,8 @@ def cmd_install(
                 identifier, force=force, ref=ref, scan_decision_cb=_interactive_scan_decision,
                 python_deps=not no_deps, allow_removed=allow_removed)
     except PluginOperationError as e:
-        _fail(console, f"[red]{'Blocked' if isinstance(e, PluginScanBlocked) else 'Error'}:[/red] {e}")
+        from rich.markup import escape as _escape    # the scan report quotes repo text: no markup from it
+        _fail(console, f"[red]{'Blocked' if isinstance(e, PluginScanBlocked) else 'Error'}:[/red] {_escape(str(e))}")
     if not _looks_like_plugin_dir(target):
         console.print(
             f"[yellow]Warning:[/yellow] {installed_name} doesn't contain plugin.yaml, "
@@ -1022,14 +1036,15 @@ def cmd_install(
 
 
 def _pull_plugin_update(target: Path, pinned_msg, not_git_msg, before_pull=None, *,
-                        accept_caution=lambda _result: False) -> str:
+                        accept_caution=lambda _result, _revision: False) -> str:
     """Shared ``update`` core: refuse pinned checkouts, then update a git checkout by
     :func:`_git_update_plugin_dir` (fetch, scan the fetched revision outside the plugins dir, apply
     it only when it passes) or re-install from the recorded source when the tree carries no
     ``.git`` (subdirectory installs; the installer scans its clone before the swap). Records the new
     revision. Returns the update output; raises :class:`PluginOperationError` on any refusal and
     :class:`PluginUpdateRefused` when the scan refused the new revision (nothing was applied).
-    *accept_caution(scan_result)* is the consent a ``caution`` verdict needs.
+    *accept_caution(scan_result, revision)* is the consent a ``caution`` verdict needs, for exactly
+    that revision.
     *pinned_msg(install_record)* / *not_git_msg()* build the caller-specific error text."""
     metadata = _read_install_metadata()
     install_record = metadata.get(target.name, {})
@@ -1041,7 +1056,7 @@ def _pull_plugin_update(target: Path, pinned_msg, not_git_msg, before_pull=None,
             raise PluginOperationError(not_git_msg())
         if before_pull is not None:
             before_pull()
-        return _reclone_plugin_update(source, install_record.get("revision"))
+        return _reclone_plugin_update(source, install_record.get("revision"), accept_caution=accept_caution)
     # A URL install whose name/repo later landed on the kill list must not keep pulling new code.
     from hermes_cli import plugins_cmd_catalog as catalog
     catalog.refuse_if_installed_removed(target.name, target)
@@ -1058,12 +1073,25 @@ def _pull_plugin_update(target: Path, pinned_msg, not_git_msg, before_pull=None,
     return output
 
 
-def _reclone_plugin_update(source: str, previous_revision: object) -> str:
+def _reclone_plugin_update(source: str, previous_revision: object, *, accept_caution) -> str:
     """Update a plugin whose tree is not a git checkout: a subdirectory install ships only
     ``<clone>/<subdir>``, so the ``.git`` stays in the temp clone (#65314). Re-run the install
     from the recorded source (same URL, same subdir) and swap the fresh tree in; the metadata
-    revision is rewritten by the installer. Returns pull-shaped output for the callers."""
-    new_target, _manifest, _name = _install_plugin_core(source, force=True)
+    revision is rewritten by the installer. Returns pull-shaped output for the callers.
+
+    The installer scans its clone before the swap. ``force`` here only means "replace the existing
+    directory": a ``caution`` verdict needs *accept_caution(result, revision)* like any update, and a
+    refusal raises :class:`PluginUpdateRefused` with the tree untouched."""
+    try:
+        new_target, _manifest, _name = _install_plugin_core(
+            source, force=True, scan_force=False, caution_consent=accept_caution)
+    except PluginScanBlocked as exc:
+        verdict = str(getattr(exc.scan_result, "verdict", "") or "dangerous")
+        revision = str(getattr(exc, "revision", "") or "")
+        what = "needs your consent for" if verdict == "caution" else "blocked"
+        raise PluginUpdateRefused(
+            f"the security scan {what} the new version ({revision[:8]}); nothing was changed.",
+            verdict=verdict, revision=revision, scan_result=exc.scan_result) from exc
     revision = str(_read_install_metadata().get(new_target.name, {}).get("revision") or "")
     previous = previous_revision if isinstance(previous_revision, str) else ""
     if revision and revision == previous:
@@ -1083,11 +1111,11 @@ def cmd_update(name: str) -> None:
         return
     from tools.plugin_guard import format_scan_report
 
-    def _ask(result) -> bool:
+    def _ask(result, _revision) -> bool:
         """A caution verdict needs a person, as ``hermes plugins install`` does."""
         console.print()
         console.print("[yellow]⚠ Security scan flagged the new version:[/yellow]")
-        console.print(format_scan_report(result))
+        console.print(format_scan_report(result), markup=False, highlight=False)
         if not _is_tty():
             console.print("[yellow]Non-interactive session: a caution verdict is not accepted without "
                           "a person (fail closed).[/yellow]")
@@ -1106,7 +1134,7 @@ def cmd_update(name: str) -> None:
             accept_caution=_ask)
     except PluginUpdateRefused as exc:
         if exc.verdict == "dangerous" and exc.scan_result is not None:
-            console.print(format_scan_report(exc.scan_result))
+            console.print(format_scan_report(exc.scan_result), markup=False, highlight=False)
         _fail(console, f"[red]Update of '{escape(name)}' not applied:[/red] {escape(str(exc))}")
     except PluginOperationError as exc:
         _fail(console, f"[red]Error:[/red] {exc}")
@@ -2235,7 +2263,7 @@ def _user_installed_plugin_dir(name: str) -> Optional[Path]:
 
 
 def dashboard_update_user_plugin(name: str, *, accept_capabilities: bool = False,
-                                 accept_caution: bool = False) -> dict[str, Any]:
+                                 accept_caution_revision: str = "") -> dict[str, Any]:
     """``git pull`` inside ``~/.hermes/plugins/<name>``; catalog installs re-pin instead. A re-pin that
     widens the plugin returns ``{"ok": False, "consent_required": True, "delta": {...}}`` with nothing
     changed — the surface shows the delta and retries with *accept_capabilities*.
@@ -2244,8 +2272,10 @@ def dashboard_update_user_plugin(name: str, *, accept_capabilities: bool = False
     applying it only when it passes (:func:`_git_update_plugin_dir`). A refused revision is NOT applied:
     the plugin stays on its old commit, enabled as before, and the answer is ``ok: False`` with
     ``scan_blocked``, ``scan_verdict``, ``scan_findings`` and ``revision``. A ``caution`` verdict needs
-    *accept_caution* (the explicit consent an install needs); without it the answer also carries
-    ``caution_consent_required`` and the client retries with consent."""
+    *accept_caution_revision*: the consent an install needs, bound to the revision the client was
+    shown (the ``revision`` of an earlier answer). It applies only when the newly fetched revision is
+    exactly that one; a different revision (a force-push between the two clicks) is scanned and, on
+    ``caution``, asked about again with its own findings (``caution_consent_required``)."""
     from hermes_cli import plugins_cmd_catalog as catalog
     target = _user_installed_plugin_dir(name)
     if target is None:
@@ -2269,7 +2299,8 @@ def dashboard_update_user_plugin(name: str, *, accept_capabilities: bool = False
                 f"run `hermes plugins install {rec.get('source', '<source>')} --force "
                 "--ref <40-character commit SHA>` to move it."),
             lambda: f"Plugin '{name}' is not a git checkout; cannot pull updates.",
-            accept_caution=lambda _result: accept_caution)
+            accept_caution=lambda _result, revision: bool(accept_caution_revision)
+            and revision.lower() == accept_caution_revision.strip().lower())
     except PluginUpdateRefused as exc:
         return {"ok": False, "name": name, "update_refused": True, "scan_blocked": True, "scan_verdict": exc.verdict,
                 "caution_consent_required": exc.verdict == "caution", "revision": exc.revision,
@@ -2374,13 +2405,19 @@ def _git_update_plugin_dir(target: Path, *, name: str, accept_caution) -> tuple[
     1. ``git fetch`` (anonymous first, a stored credential only when the remote refuses).
     2. Upstream equals HEAD: nothing changed — no scan, no change ("Already up to date."). A newer
        scanner never disables or touches an unchanged, already-accepted plugin.
-    3. Otherwise the upstream commit is written out of the object store into a temporary directory
-       outside the plugins dir (:func:`_export_revision`: blob by blob, so ``export-ignore`` or a
-       smudge filter cannot hide a file) and scanned there; the loader and the dashboard never see it.
-    4. ``safe``, or ``caution`` with *accept_caution(result)*: ``merge --ff-only`` to exactly that
-       commit (never a second fetch), autostashing local edits as before.
-    5. ``dangerous``, ``caution`` without consent, a scan that raises, an export that fails: raise
-       :class:`PluginUpdateRefused`. Nothing was applied, the plugin keeps its enabled state, and a
+    3. Otherwise the upstream commit's paths are checked (:func:`_refuse_unsafe_tree_paths`), and the
+       commit is checked out by git itself into a temporary clone outside the plugins dir
+       (:func:`_checkout_for_scan`: the same attributes, conversions and config the live merge will
+       use, git's own guards against writing through links) and scanned there. The loader and the
+       dashboard never see it.
+    4. ``safe``, or ``caution`` with *accept_caution(result, revision)*: ``merge --ff-only`` to exactly
+       that commit (never a second fetch), autostashing local edits as before; then every tracked file
+       the merge wrote is compared byte for byte with the scanned checkout
+       (:func:`_same_tracked_files`). A difference (a local filter, a config change, a race) resets
+       the checkout to the old commit and refuses.
+    5. ``dangerous``, ``caution`` without consent, a scan that raises, a tree that cannot be checked
+       out safely, a written tree that differs from the scanned one: raise
+       :class:`PluginUpdateRefused`. Nothing stays applied, the plugin keeps its enabled state, and a
        scan killed half-way leaves only a temporary directory behind.
 
     Returns ``(ok, message)`` for git failures (not a fast-forward, no upstream, network)."""
@@ -2407,112 +2444,206 @@ def _git_update_plugin_dir(target: Path, *, name: str, accept_caution) -> tuple[
         if _run_plugin_git(git_exe, target, "merge-base", "--is-ancestor", head, upstream,
                            timeout=15).returncode != 0:
             return False, "Not possible to fast-forward, aborting."
-        _scan_fetched_revision(git_exe, target, upstream, name=name, accept_caution=accept_caution)
-        return _apply_with_autostash(git_exe, target, "merge", "--ff-only", "--quiet", upstream,
-                                     done=f"Updating {head[:8]}..{upstream[:8]}")
+        done = f"Updating {head[:8]}..{upstream[:8]}"
+        if not _scan_on_install_enabled():
+            return _apply_with_autostash(git_exe, target, "merge", "--ff-only", "--quiet", upstream, done=done)
+        with tempfile.TemporaryDirectory(prefix="hermes-plugin-update-") as tmp:
+            tree = _checkout_for_scan(git_exe, target, upstream, Path(tmp), name=name)
+            _judge_scanned_tree(tree, upstream, name=name, accept_caution=accept_caution)
+            return _apply_with_autostash(
+                git_exe, target, "merge", "--ff-only", "--quiet", upstream, done=done, rollback_to=head,
+                verify=lambda: _same_tracked_files(git_exe, target, tree))
     except FileNotFoundError:
         return False, "git is not installed or not in PATH."
     except subprocess.TimeoutExpired:
         return False, "Git operation timed out after 60 seconds."
 
 
-def _scan_fetched_revision(git_exe: str, target: Path, revision: str, *, name: str, accept_caution) -> None:
-    """Scan *revision* of *target* outside the plugins dir; raise :class:`PluginUpdateRefused` unless
-    it may be applied. Scanning switched off (``plugins.scan_on_install: false``) applies it."""
-    if not _scan_on_install_enabled():
-        return
-    with tempfile.TemporaryDirectory(prefix="hermes-plugin-update-") as tmp:
-        tree = Path(tmp) / (target.name or "plugin")
-        try:
-            _export_revision(git_exe, target, revision, tree)
-        except Exception as exc:    # noqa: BLE001 - a tree that cannot be written out is not applied
-            logger.exception("could not export %s of plugin %s for its scan", revision[:12], name)
-            raise PluginUpdateRefused(
-                f"the new version ({revision[:8]}) could not be prepared for its security scan "
-                f"({type(exc).__name__}); nothing was changed.", verdict="error", revision=revision) from exc
-        try:
-            from tools.plugin_guard import scan_plugin, should_allow_plugin_install
-            result = scan_plugin(tree, source=name)
-            allowed, reason = should_allow_plugin_install(result)
-        except Exception as exc:    # noqa: BLE001 - fail closed on anything
-            logger.exception("security scan of plugin %s at %s failed", name, revision[:12])
-            raise PluginUpdateRefused(
-                f"the security scan of the new version ({revision[:8]}) failed ({type(exc).__name__}); "
-                "nothing was changed.", verdict="error", revision=revision) from exc
-        if allowed is True:
-            return
-        if allowed is None:
-            try:
-                if accept_caution(result):
-                    return
-            except Exception:    # noqa: BLE001 - a broken prompt is a "no"
-                logger.exception("caution consent for plugin %s failed", name)
-            raise PluginUpdateRefused(
-                f"the security scan of the new version ({revision[:8]}) needs your consent ({reason}); "
-                "nothing was changed.", verdict="caution", revision=revision, scan_result=result)
-        raise PluginUpdateRefused(
-            f"the security scan blocked the new version ({revision[:8]}): {reason}; nothing was changed.",
-            verdict=str(result.verdict), revision=revision, scan_result=result)
+# Repo-level settings that change the bytes ``checkout``/``merge`` write; copied into the scan clone
+# so it writes what the live merge will. Global and system config are /dev/null for both
+# (``noninteractive_git_env``). Anything else that differs (a repo-level filter driver, say) shows up
+# as a difference in :func:`_same_tracked_files` and refuses the update.
+_CHECKOUT_CONFIG_KEYS = (
+    "core.autocrlf", "core.eol", "core.safecrlf", "core.checkRoundtripEncoding", "core.symlinks",
+    "core.ignorecase", "core.precomposeunicode", "core.protectNTFS", "core.protectHFS")
 
 
-_TREE_ENTRY = re.compile(rb"^(\d{6}) (\w+) ([0-9a-f]{40,64})\t(.*)$", re.DOTALL)
+def _checkout_for_scan(git_exe: str, repo: Path, revision: str, tmp: Path, *, name: str) -> Path:
+    """Check *revision* of *repo* out into ``tmp/checkout`` with git itself, or raise
+    :class:`PluginUpdateRefused`. The scan repository borrows *repo*'s objects through
+    ``objects/info/alternates`` (what ``clone --shared`` sets up; a plugin checkout is shallow, and
+    git will not clone a shallow repository locally, so the borrowing is set up by hand along with
+    its ``shallow`` list) and writes nothing into *repo*; ``checkout --detach`` then applies the
+    commit's own ``.gitattributes`` (eol, ``working-tree-encoding``, ``ident``) exactly as the merge
+    will. Hooks are off (``core.hooksPath=/dev/null`` in ``noninteractive_git_env``)."""
+    def refuse(why: str, exc: Optional[BaseException] = None) -> PluginUpdateRefused:
+        if exc is not None:
+            logger.warning("could not check out %s of plugin %s for its scan: %s", revision[:12], name, exc)
+        return PluginUpdateRefused(
+            f"the new version ({revision[:8]}) could not be checked out safely for its security scan "
+            f"({why}); nothing was changed.", verdict="error", revision=revision)
 
-
-def _export_revision(git_exe: str, repo: Path, revision: str, dest: Path) -> None:
-    """Write the files of *revision* into *dest* straight from the object store: ``git ls-tree`` for
-    the paths and modes, ``git cat-file --batch`` for the bytes. No checkout, no attributes, no
-    filters, nothing written to *repo*. Symlinks are recreated as links (the scanner judges them);
-    submodules are skipped (an update never fetches them either). Raises on anything odd."""
     env = noninteractive_git_env()
+
+    def git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([git_exe, *args], cwd=str(cwd), env=env, capture_output=True,
+                              stdin=subprocess.DEVNULL, timeout=120)
+
+    try:
+        _refuse_unsafe_tree_paths(git_exe, repo, revision, env)
+    except ValueError as exc:
+        raise refuse(str(exc)) from exc
+    tree = tmp / "checkout"
+    try:
+        made = git(tmp, "init", "--quiet", str(tree))
+        if made.returncode != 0:
+            raise refuse("git init failed", RuntimeError(made.stderr.decode("utf-8", "replace")[-400:]))
+
+        def git_path(cwd: Path, name: str) -> Path:
+            done = git(cwd, "rev-parse", "--path-format=absolute", "--git-path", name)
+            if done.returncode != 0:
+                raise refuse("git rev-parse failed", RuntimeError(done.stderr.decode("utf-8", "replace")[-400:]))
+            return Path(done.stdout.decode("utf-8", "surrogateescape").strip())
+
+        alternates = git_path(tree, "objects/info/alternates")
+        alternates.parent.mkdir(parents=True, exist_ok=True)
+        alternates.write_text(str(git_path(repo, "objects")) + "\n", encoding="utf-8")
+        shallow = git_path(repo, "shallow")
+        if shallow.is_file():
+            shutil.copyfile(shallow, git_path(tree, "shallow"))
+        for key in _CHECKOUT_CONFIG_KEYS:
+            value = git(repo, "config", "--local", "--get", key)
+            if value.returncode == 0:
+                git(tree, "config", "--local", key, value.stdout.decode("utf-8", "replace").strip())
+        checked = git(tree, "checkout", "--quiet", "--detach", revision)
+        if checked.returncode != 0:
+            raise refuse("git checkout failed", RuntimeError(checked.stderr.decode("utf-8", "replace")[-400:]))
+    except subprocess.TimeoutExpired as exc:
+        raise refuse("git timed out", exc) from exc
+    return tree
+
+
+def _refuse_unsafe_tree_paths(git_exe: str, repo: Path, revision: str, env: dict) -> None:
+    """Raise ``ValueError`` for a tree no platform could check out unambiguously: a path with a
+    drive or an anchor (``C:x``, ``/x``, ``\\\\x``), a ``..``/``.``/``.git`` component, a ``:`` or ``\\``
+    in a name, a path listed twice, two paths that are the same after case folding or NFC
+    normalisation (``Link`` and ``link/x``), or a symlink that is the prefix of another path."""
+    import unicodedata
+    from pathlib import PurePosixPath, PureWindowsPath
+
     listing = subprocess.run([git_exe, "ls-tree", "-r", "-z", "--full-tree", revision], cwd=str(repo), env=env,
-                             capture_output=True, timeout=60, check=True).stdout
-    entries = []
+                             capture_output=True, stdin=subprocess.DEVNULL, timeout=60, check=True).stdout
+    seen: set = set()
+    folded: dict = {}
+    links: set = set()
+    paths: list = []
     for raw in listing.split(b"\0"):
         if not raw:
             continue
         m = _TREE_ENTRY.match(raw)
         if m is None:
-            raise ValueError("unreadable git ls-tree entry")
-        mode, kind, sha, path = m.group(1).decode(), m.group(2).decode(), m.group(3).decode(), m.group(4)
-        rel = Path(path.decode("utf-8", "surrogateescape"))
-        if rel.is_absolute() or any(p in ("", ".", "..") or p.lower() == ".git" for p in rel.parts):
-            raise ValueError(f"refusing tree path {path!r}")
-        if kind == "commit":    # a submodule
-            continue
-        if kind != "blob" or mode not in ("100644", "100755", "120000"):
-            raise ValueError(f"unexpected tree entry {mode} {kind}")
-        entries.append((mode, sha, rel))
-    dest.mkdir(parents=True)
-    with subprocess.Popen([git_exe, "cat-file", "--batch"], cwd=str(repo), env=env,
-                          stdin=subprocess.PIPE, stdout=subprocess.PIPE) as proc:
+            raise ValueError("an unreadable tree entry")
+        mode, path = m.group(1).decode(), m.group(4).decode("utf-8", "surrogateescape")
+        if path in seen:
+            raise ValueError(f"a path listed twice: {path!r}")
+        seen.add(path)
+        win = PureWindowsPath(path)
+        parts = PurePosixPath(path).parts
+        if win.drive or win.anchor or PurePosixPath(path).is_absolute():
+            raise ValueError(f"a path with a drive or root: {path!r}")
+        if any(p in ("", ".", "..") or p.casefold() == ".git" or ":" in p or "\\" in p for p in parts):
+            raise ValueError(f"an unsafe path component: {path!r}")
+        for depth in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:depth])
+            key = unicodedata.normalize("NFC", prefix).casefold()
+            if folded.setdefault(key, prefix) != prefix:
+                raise ValueError(f"paths that collide on a case-insensitive or normalising filesystem: "
+                                 f"{folded[key]!r} and {prefix!r}")
+        if mode == "120000":
+            links.add(path)
+        paths.append(parts)
+    for parts in paths:
+        for depth in range(1, len(parts)):
+            if "/".join(parts[:depth]) in links:
+                raise ValueError(f"a symlink used as a directory: {'/'.join(parts[:depth])!r}")
+
+
+def _same_tracked_files(git_exe: str, live: Path, scanned: Path) -> bool:
+    """Every tracked path of *live* (after the merge) and of the *scanned* checkout is the same set,
+    and each file has the same bytes (a symlink the same target, a file the same executable bit)."""
+    import filecmp
+
+    env = noninteractive_git_env()
+
+    def tracked(repo: Path) -> set:
+        out = subprocess.run([git_exe, "ls-files", "-z", "--cached"], cwd=str(repo), env=env,
+                             capture_output=True, stdin=subprocess.DEVNULL, timeout=60, check=True).stdout
+        return {os.fsdecode(p) for p in out.split(b"\0") if p}
+
+    try:
+        paths = tracked(live)
+        if paths != tracked(scanned):
+            return False
+        for rel in paths:
+            a, b = live / rel, scanned / rel
+            sa, sb = a.lstat(), b.lstat()
+            if stat.S_ISLNK(sa.st_mode) or stat.S_ISLNK(sb.st_mode):
+                if not (stat.S_ISLNK(sa.st_mode) and stat.S_ISLNK(sb.st_mode)) or os.readlink(a) != os.readlink(b):
+                    return False
+            elif stat.S_ISREG(sa.st_mode) and stat.S_ISREG(sb.st_mode):
+                if (sa.st_mode & 0o111 != 0) != (sb.st_mode & 0o111 != 0) or not filecmp.cmp(a, b, shallow=False):
+                    return False
+            elif stat.S_ISDIR(sa.st_mode) and stat.S_ISDIR(sb.st_mode):
+                continue    # a submodule's empty directory
+            else:
+                return False
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _judge_scanned_tree(tree: Path, revision: str, *, name: str, accept_caution) -> None:
+    """Scan the checked-out *tree*; raise :class:`PluginUpdateRefused` unless it may be applied."""
+    try:
+        from tools.plugin_guard import scan_plugin, should_allow_plugin_install
+        result = scan_plugin(tree, source=name)
+        allowed, reason = should_allow_plugin_install(result)
+    except Exception as exc:    # noqa: BLE001 - fail closed on anything
+        logger.exception("security scan of plugin %s at %s failed", name, revision[:12])
+        raise PluginUpdateRefused(
+            f"the security scan of the new version ({revision[:8]}) failed ({type(exc).__name__}); "
+            "nothing was changed.", verdict="error", revision=revision) from exc
+    if allowed is True:
+        return
+    if allowed is None:
         try:
-            for mode, sha, rel in entries:
-                proc.stdin.write(sha.encode() + b"\n")
-                proc.stdin.flush()
-                header = proc.stdout.readline().split()
-                if len(header) != 3 or header[1] != b"blob":
-                    raise ValueError(f"object {sha[:12]} is not a blob")
-                data = proc.stdout.read(int(header[2]))
-                proc.stdout.read(1)    # the newline after each object
-                out = dest / rel
-                out.parent.mkdir(parents=True, exist_ok=True)
-                if mode == "120000":
-                    out.symlink_to(os.fsdecode(data))
-                else:
-                    out.write_bytes(data)
-                    if mode == "100755":
-                        out.chmod(0o755)
-        finally:
-            proc.stdin.close()
+            if accept_caution(result, revision):
+                return
+        except Exception:    # noqa: BLE001 - a broken prompt is a "no"
+            logger.exception("caution consent for plugin %s failed", name)
+        raise PluginUpdateRefused(
+            f"the security scan of the new version ({revision[:8]}) needs your consent ({reason}); "
+            "nothing was changed.", verdict="caution", revision=revision, scan_result=result)
+    raise PluginUpdateRefused(
+        f"the security scan blocked the new version ({revision[:8]}): {reason}; nothing was changed.",
+        verdict=str(result.verdict), revision=revision, scan_result=result)
 
 
-def _apply_with_autostash(git_exe: str, target: Path, *args: str, done: str) -> tuple[bool, str]:
+_TREE_ENTRY = re.compile(rb"^(\d{6}) (\w+) ([0-9a-f]{40,64})\t(.*)$", re.DOTALL)
+
+
+def _apply_with_autostash(git_exe: str, target: Path, *args: str, done: str, verify=None,
+                          rollback_to: str = "") -> tuple[bool, str]:
     """Run one fast-forward (*args*) in a plugin checkout, autostashing local edits.
 
     Users tweak installed plugins in place (config constants, small patches), and a plain
     fast-forward then aborts with "Your local changes ... would be overwritten by merge" — making
     the plugin permanently un-updatable until they hand-run git. Same approach ``hermes update``
-    uses for the main checkout (PR #70161)."""
+    uses for the main checkout (PR #70161).
+
+    *verify()* runs right after the fast-forward, before the stash comes back and before anything
+    else: when it answers False the checkout is reset to *rollback_to*, the stash re-applied, and
+    :class:`PluginUpdateRefused` raised."""
     stash_sha, err = _autostash_dirty_tree(git_exe, target)
     if err:
         return False, err
@@ -2527,6 +2658,15 @@ def _apply_with_autostash(git_exe: str, target: Path, *args: str, done: str) -> 
         else:
             note = "Local changes are preserved in git stash (restore with: git stash pop)."
         return False, f"{err}\n{note}"
+    if verify is not None and not verify():
+        _run_plugin_git(git_exe, target, "reset", "--hard", "--quiet", rollback_to)
+        if stash_sha and not _reapply_stash(git_exe, target, stash_sha):
+            logger.warning("local changes of %s stay in git stash after a refused update", target)
+        revision = args[-1]
+        raise PluginUpdateRefused(
+            f"the files git wrote for the new version ({revision[:8]}) are not the ones that were scanned "
+            "(a local filter, a line-ending setting or a change during the update); the plugin was put back "
+            "on its old version.", verdict="error", revision=revision)
     if not stash_sha:
         return True, done
     if _reapply_stash(git_exe, target, stash_sha):

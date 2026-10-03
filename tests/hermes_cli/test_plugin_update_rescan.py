@@ -56,6 +56,54 @@ class _Plugin:
     def head(self) -> str:
         return _git(self.target, "rev-parse", "HEAD")
 
+    def push_tree(self, extra: list, version: str = "2.0.0") -> str:
+        """Commit, with git plumbing, the current files plus *extra* entries: ``(path, mode, bytes)``
+        (``mode`` 100644/100755/120000) or ``(path, "dup", [(mode, bytes), ...])`` for a name listed
+        twice. Trees are written with ``--literally`` so a tree git fsck would refuse can be made."""
+        (self.repo / "plugin.yaml").write_text(yaml.safe_dump({"name": "demo", "version": version}), encoding="utf-8")
+        entries = [("plugin.yaml", "100644", (self.repo / "plugin.yaml").read_bytes()),
+                   ("__init__.py", "100644", (self.repo / "__init__.py").read_bytes())] + list(extra)
+        tree = _write_tree(self.repo, entries)
+        parent = _git(self.repo, "rev-parse", "HEAD")
+        commit = _git(self.repo, "commit-tree", tree, "-p", parent, "-m", "plumbing")
+        _git(self.repo, "update-ref", _git(self.repo, "symbolic-ref", "HEAD"), commit)
+        _git(self.repo, "reset", "--quiet", "--soft", commit)
+        return commit
+
+
+def _hash(repo: Path, data: bytes, kind: str = "blob", literally: bool = False) -> str:
+    args = ["hash-object", "-w", "-t", kind, "--stdin"] + (["--literally"] if literally else [])
+    done = subprocess.run(["git", *args], cwd=repo, input=data, check=True, capture_output=True)
+    return done.stdout.decode().strip()
+
+
+def _write_tree(repo: Path, entries: list) -> str:
+    """A tree object from ``(path, mode, bytes)`` entries (nested paths make subtrees)."""
+    top: dict = {}
+    order: list = []
+    for path, mode, data in entries:
+        head, _, rest = path.partition("/")
+        if rest:
+            top.setdefault(head, ("tree", []))[1].append((rest, mode, data))
+            if head not in order:
+                order.append(head)
+        elif mode == "dup":
+            for dup_mode, dup_data in data:
+                order.append((head, dup_mode, dup_data))
+        else:
+            order.append((head, mode, data))
+    raw = []
+    for item in order:
+        if isinstance(item, str):
+            sub = _write_tree(repo, top[item][1])
+            raw.append((item + "/", b"40000 " + item.encode() + b"\0" + bytes.fromhex(sub)))
+        else:
+            name, mode, data = item
+            sha = _hash(repo, data)
+            raw.append((name, mode.encode() + b" " + name.encode() + b"\0" + bytes.fromhex(sha)))
+    raw.sort(key=lambda pair: pair[0].encode())
+    return _hash(repo, b"".join(r for _, r in raw), kind="tree", literally=True)
+
 
 @pytest.fixture(params=["same", "renamed"])
 def plugin(request, tmp_path, monkeypatch):
@@ -208,6 +256,111 @@ class TestCliUpdate:
         _refused_and_untouched(plugin, old)
 
 
+# ── the checkout that is scanned is the tree that is applied (review round 3) ─────────────
+
+
+class TestScannedCheckout:
+    """The new commit is checked out by git into a temporary clone and scanned there; a tree no
+    platform can check out unambiguously is refused before anything is written, and the files the
+    merge writes must be the files that were scanned."""
+
+    def _refused(self, plugin, old, outside: Path) -> None:
+        with pytest.raises(SystemExit):
+            plugin.pc.cmd_update(plugin.name)
+        _refused_and_untouched(plugin, old)
+        assert not (outside / "owned.txt").exists()
+
+    def test_a_symlink_prefix_with_a_case_variant_is_refused(self, plugin, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        old = plugin.head()
+        plugin.push_tree([("Link", "120000", str(outside).encode()), ("link/owned.txt", "100644", b"pwned\n")])
+        self._refused(plugin, old, outside)
+
+    def test_a_duplicate_tree_entry_is_refused(self, plugin, tmp_path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        old = plugin.head()
+        plugin.push_tree([("lnk", "dup", [("120000", str(outside).encode()), ("100644", b"x\n")])])
+        self._refused(plugin, old, outside)
+
+    def test_a_case_collision_is_refused(self, plugin, tmp_path):
+        old = plugin.head()
+        plugin.push_tree([("Run.py", "100644", b"x = 1\n"), ("run.py", "100644", b"x = 2\n")])
+        self._refused(plugin, old, tmp_path / "nowhere")
+
+    @pytest.mark.parametrize("name", ["C:x", "C:\\x", "a\\..\\b"])
+    def test_a_drive_relative_or_backslash_path_is_refused(self, plugin, tmp_path, name):
+        old = plugin.head()
+        plugin.push_tree([(name, "100644", b"x = 1\n")])
+        self._refused(plugin, old, tmp_path / "nowhere")
+
+    def test_eol_and_ident_conversions_are_what_was_scanned(self, plugin, monkeypatch):
+        import tools.plugin_guard as guard
+
+        seen: dict = {}
+        real = guard.scan_plugin
+
+        def spy(tree, **kw):
+            seen["notes"] = (Path(tree) / "notes.txt").read_bytes()
+            seen["mod"] = (Path(tree) / "mod.py").read_bytes()
+            return real(tree, **kw)
+
+        monkeypatch.setattr(guard, "scan_plugin", spy)
+        (plugin.repo / ".gitattributes").write_text("notes.txt eol=crlf\nmod.py ident\n", encoding="utf-8")
+        (plugin.repo / "mod.py").write_text("# $Id$\nVALUE = 1\n", encoding="utf-8")
+        new = plugin.push("notes.txt", "one\ntwo\n")
+        plugin.pc.cmd_update(plugin.name)
+        assert plugin.head() == new
+        assert seen["notes"] == b"one\r\ntwo\r\n" == (plugin.target / "notes.txt").read_bytes()
+        assert b"$Id: " in seen["mod"] and seen["mod"] == (plugin.target / "mod.py").read_bytes()
+
+    def test_working_tree_encoding_is_scanned_as_written(self, plugin, tmp_path):
+        """IBM037: the blob is harmless-looking, the file git writes is ``os.system(...)``."""
+        payload = b'import os\nos.system("rm -rf /")\n'
+        probe = tmp_path / "probe"
+        probe.mkdir()
+        _git(probe, "init", "-q")
+        (probe / ".gitattributes").write_text("e.py text working-tree-encoding=IBM037\n", encoding="utf-8")
+        _git(probe, "add", ".gitattributes")
+        blob = _hash(probe, payload.decode("cp037").encode("utf-8"))
+        _git(probe, "update-index", "--add", "--cacheinfo", f"100644,{blob},e.py")
+        _git(probe, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "probe")
+        subprocess.run(["git", "checkout", "--", "e.py"], cwd=probe, capture_output=True)
+        if not (probe / "e.py").exists() or (probe / "e.py").read_bytes() != payload:
+            pytest.skip("this git/iconv does not convert IBM037")
+        old = plugin.head()
+        plugin.push_tree([(".gitattributes", "100644", b"evil.py text working-tree-encoding=IBM037\n"),
+                          ("evil.py", "100644", payload.decode("cp037").encode("utf-8"))])
+        with pytest.raises(SystemExit):
+            plugin.pc.cmd_update(plugin.name)
+        _refused_and_untouched(plugin, old)
+
+    @pytest.mark.parametrize("tamper", ["autocrlf", "filter"])
+    def test_a_conversion_changed_between_scan_and_apply_is_refused(self, plugin, monkeypatch, tamper):
+        """Whatever makes the merge write other bytes than the scanned checkout (a line-ending
+        setting, a repo-level filter driver) puts the plugin back on its old commit."""
+        pc = plugin.pc
+        real = pc._judge_scanned_tree
+
+        def judge_then_tamper(*a, **kw):
+            real(*a, **kw)
+            if tamper == "autocrlf":
+                _git(plugin.target, "config", "core.autocrlf", "true")
+            else:
+                _git(plugin.target, "config", "filter.shout.smudge", "tr a-z A-Z")
+
+        monkeypatch.setattr(pc, "_judge_scanned_tree", judge_then_tamper)
+        if tamper == "filter":
+            (plugin.repo / ".gitattributes").write_text("notes.txt filter=shout\n", encoding="utf-8")
+        old = plugin.head()
+        plugin.push("notes.txt", "one\ntwo\n")
+        with pytest.raises(SystemExit):
+            pc.cmd_update(plugin.name)
+        assert plugin.head() == old and _git(plugin.target, "status", "--porcelain") == ""
+        assert _loader(plugin.target) == ("load", "1.0.0") and plugin.deps == []
+
+
 # ── the dashboard's update ───────────────────────────────────────────────────────────────
 
 
@@ -231,7 +384,7 @@ class TestDashboardUpdate:
 
     def test_caution_with_explicit_consent_is_applied(self, plugin):
         new = plugin.push("run.py", CAUTION)
-        result = plugin.pc.dashboard_update_user_plugin(plugin.name, accept_caution=True)
+        result = plugin.pc.dashboard_update_user_plugin(plugin.name, accept_caution_revision=new)
         assert result["ok"] is True and plugin.head() == new and plugin.deps == [plugin.target]
         assert _loader(plugin.target) == ("load", "2.0.0")
 
@@ -249,6 +402,28 @@ class TestDashboardUpdate:
         new = plugin.push("notes.txt", "nothing to see\n")
         result = plugin.pc.dashboard_update_user_plugin(plugin.name)
         assert result["ok"] is True and plugin.head() == new and plugin.deps == [plugin.target]
+
+    def test_consent_is_bound_to_the_revision_shown(self, plugin):
+        """A force-push between the two clicks: the consent for the first revision does not apply
+        the second; the answer asks again, with the second revision and its findings."""
+        old = plugin.head()
+        first = plugin.push("run.py", CAUTION)
+        asked = plugin.pc.dashboard_update_user_plugin(plugin.name)
+        assert asked["caution_consent_required"] is True and asked["revision"] == first
+        _git(plugin.repo, "reset", "--quiet", "--hard", "HEAD~1")
+        second = plugin.push("run2.py", CAUTION.replace("apt install x", "apt install y"))
+        assert second != first
+        again = plugin.pc.dashboard_update_user_plugin(plugin.name, accept_caution_revision=first)
+        assert again["ok"] is False and again["caution_consent_required"] is True and again["revision"] == second
+        assert plugin.head() == old and plugin.deps == []
+        applied = plugin.pc.dashboard_update_user_plugin(plugin.name, accept_caution_revision=second)
+        assert applied["ok"] is True and plugin.head() == second
+
+    def test_a_malformed_consent_applies_nothing(self, plugin):
+        old = plugin.head()
+        plugin.push("run.py", CAUTION)
+        result = plugin.pc.dashboard_update_user_plugin(plugin.name, accept_caution_revision="yes")
+        assert result["caution_consent_required"] is True and plugin.head() == old
 
 
 # ── installs scan a temporary clone: nothing lands when the scan does not pass ───────────
@@ -296,3 +471,71 @@ class TestInstall:
         result = pc.dashboard_install_plugin(origin.as_uri(), force=False, enable=True)
         assert result["ok"] is False and result["scan_blocked"] is True
         assert not (pc._plugins_dir() / "fresh").exists()
+
+
+# ── a subdirectory install has no .git: the reclone path ─────────────────────────────────
+
+
+class TestRecloneUpdate:
+    """A subdirectory install is updated by a fresh clone the installer scans before the swap.
+    ``force`` there only replaces the directory: a caution verdict needs the same consent."""
+
+    @pytest.fixture
+    def sub(self, tmp_path, monkeypatch):
+        import hermes_cli.plugins_cmd as pc
+
+        if not pc._resolve_git_executable():
+            pytest.skip("git not available")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        repo = tmp_path / "mono"
+        (repo / "plugins" / "demo").mkdir(parents=True)
+        _git(repo, "init", "-q")
+        _git(repo, "config", "user.email", "fixture@example.com")
+        _git(repo, "config", "user.name", "Fixture")
+        (repo / "plugins/demo/plugin.yaml").write_text(yaml.safe_dump({"name": "demo", "version": "1.0.0"}),
+                                                      encoding="utf-8")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-qm", "first")
+        target, _m, _n = pc._install_plugin_core(f"{repo.as_uri()}#plugins/demo", force=False)
+        assert not (target / ".git").exists()
+        deps: list = []
+        monkeypatch.setattr(pc, "_install_python_dependencies", lambda path, *_a, **_k: deps.append(Path(path)))
+        monkeypatch.setattr(pc, "_install_python_dependencies_quietly",
+                            lambda path, *_a, **_k: deps.append(Path(path)) or [])
+
+        def push(content: str) -> str:
+            (repo / "plugins/demo/run.py").write_text(content, encoding="utf-8")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-qm", "run")
+            return _git(repo, "rev-parse", "HEAD")
+
+        return pc, target, push, deps
+
+    def test_caution_without_consent_is_refused_with_findings(self, sub):
+        pc, target, push, deps = sub
+        push(CAUTION)
+        result = pc.dashboard_update_user_plugin("demo")
+        assert result["ok"] is False and result["update_refused"] is True
+        assert result["caution_consent_required"] is True and result["scan_findings"]
+        assert not (target / "run.py").exists() and deps == []
+
+    def test_caution_with_consent_for_that_revision_is_applied(self, sub):
+        pc, target, push, deps = sub
+        new = push(CAUTION)
+        result = pc.dashboard_update_user_plugin("demo", accept_caution_revision=new)
+        assert result["ok"] is True and (target / "run.py").exists() and deps == [target]
+
+    def test_the_cli_without_a_terminal_refuses_caution(self, sub, monkeypatch):
+        pc, target, push, deps = sub
+        monkeypatch.setattr(pc, "_is_tty", lambda: False)
+        push(CAUTION)
+        with pytest.raises(SystemExit):
+            pc.cmd_update("demo")
+        assert not (target / "run.py").exists() and deps == []
+
+    def test_dangerous_is_refused(self, sub):
+        pc, target, push, deps = sub
+        push(DANGEROUS)
+        result = pc.dashboard_update_user_plugin("demo")
+        assert result["ok"] is False and result["scan_verdict"] == "dangerous"
+        assert not (target / "run.py").exists() and deps == []

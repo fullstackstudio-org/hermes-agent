@@ -102,7 +102,8 @@ def test_failure_and_request_shape_errors_are_unchanged(client, multiplexed, mon
 
 
 def test_update_route_passes_caution_consent_and_answers_a_refused_update_as_json(client, multiplexed, monkeypatch):
-    """``{"accept_caution": true}`` reaches the update core, and an update the security scan refused
+    """``{"accept_caution_revision": <sha>}`` reaches the update core (a malformed one does not), and an
+    update the security scan refused
     (nothing applied) answers with its structured result, not a plain-text 400 (HERM-192)."""
     import hermes_cli.plugins_cmd as plugins_cmd
 
@@ -115,7 +116,7 @@ def test_update_route_passes_caution_consent_and_answers_a_refused_update_as_jso
 
     def _update(name, **kwargs):
         calls.append(kwargs)
-        return {"ok": True, "name": name} if kwargs.get("accept_caution") else refused
+        return {"ok": True, "name": name} if kwargs.get("accept_caution_revision") == "a" * 40 else refused
 
     monkeypatch.setattr(plugins_cmd, "dashboard_update_user_plugin", _update)
 
@@ -124,6 +125,8 @@ def test_update_route_passes_caution_consent_and_answers_a_refused_update_as_jso
     body = answer.json()
     assert body["caution_consent_required"] is True and body["scan_verdict"] == "caution"
     assert body["scan_findings"][0]["pattern_id"] == "sudo_usage"
-    kept = client.post("/api/dashboard/agent-plugins/probe/update", json={"accept_caution": True})
+    junk = client.post("/api/dashboard/agent-plugins/probe/update", json={"accept_caution_revision": "yes; rm"})
+    assert junk.status_code == 200 and junk.json()["caution_consent_required"] is True
+    kept = client.post("/api/dashboard/agent-plugins/probe/update", json={"accept_caution_revision": "a" * 40})
     assert kept.status_code == 200 and kept.json()["ok"] is True
-    assert [c.get("accept_caution") for c in calls] == [False, True]
+    assert [c.get("accept_caution_revision") for c in calls] == ["", "", "a" * 40]

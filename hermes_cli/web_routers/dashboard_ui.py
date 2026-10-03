@@ -6,6 +6,7 @@ Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch o
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -279,12 +280,14 @@ async def post_agent_plugin_update(request: Request, name: str):
     except Exception:
         body = {}
     accept = isinstance(body, dict) and body.get("accept_capabilities") is True
-    # ``{"accept_caution": true}`` applies an update whose security scan said ``caution`` (the consent an
-    # install needs); without it nothing is applied and the answer says why.
-    caution = isinstance(body, dict) and body.get("accept_caution") is True
+    # ``{"accept_caution_revision": "<sha>"}`` applies an update whose security scan said ``caution``
+    # (the consent an install needs), for exactly the revision the user was shown; without it, or for
+    # another revision, nothing is applied and the answer says why.
+    revision = body.get("accept_caution_revision") if isinstance(body, dict) else None
+    caution = revision if isinstance(revision, str) and re.fullmatch(r"[0-9a-fA-F]{40,64}", revision) else ""
     return await _named_plugin_action(
         request, name,
-        lambda n: dashboard_update_user_plugin(n, accept_capabilities=accept, accept_caution=caution),
+        lambda n: dashboard_update_user_plugin(n, accept_capabilities=accept, accept_caution_revision=caution),
         "Update failed.", rescan=True)
 
 

@@ -594,11 +594,8 @@ def _lock_in_submit_turn(
                 rid, sid, session, params, requested_rebind_ids, cut_out)
             if err is not None:
                 return err, {}
-        session["running"] = True
-        session["_turn_cancel_requested"] = False
-        # A shutdown mark belongs to the turn it interrupted, never to the next one.
-        for key in ("_shutdown_interrupt", "_shutdown_queued", "_shutdown_token"):
-            session.pop(key, None)
+        from tui_gateway.session_lifecycle import _claim_turn_running
+        _claim_turn_running(session)
         session["last_active"] = time.time()
         if hosted_task is not None:
             session["_hosted_room_task"] = dict(hosted_task)

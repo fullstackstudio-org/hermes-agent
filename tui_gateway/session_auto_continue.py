@@ -114,6 +114,10 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             err = {"error": {"message": "agent build failed"}}
         if err:  # leave the marker: the next resume retries (bounded by attempts)
             session["_auto_continue_scheduled"] = False
+            # ... but not its queue: the next turn's marker write would replace the entry and lose it.
+            if marker.get("queued"):
+                _hand_back_journaled_queue(sid, session, marker, turn_not_resumed=False)
+                drop_journaled_queue(home, session_key)
             return
         with session["history_lock"]:
             if session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized"):
@@ -123,7 +127,8 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
                     # in memory, where it drains after the user's turn like any queued prompt.
                     _restore_queued_after_restart(session, queued)
                 return
-            session["running"] = True
+            from tui_gateway.session_lifecycle import _claim_turn_running
+            _claim_turn_running(session)
             session["last_active"] = time.time()
         # Ownership admission BEFORE message.start: a sibling backend sharing this HERMES_HOME may have written the
         # marker and still be mid-turn. Leave the marker so a later resume retries.
@@ -215,8 +220,12 @@ def _schedule_queued_prompts_after_restart(sid: str, session: dict, session_key:
         except Exception:
             logger.warning("restart queue drain: agent build failed for %s", sid, exc_info=True)
             err = {"error": {"message": "agent build failed"}}
-        if err:  # leave the entry: the next resume retries
+        if err:  # the queue goes back to the session, where the next turn drains it
             session["_auto_continue_scheduled"] = False
+            with session["history_lock"]:
+                _restore_queued_after_restart(session, queued)
+            _emit_restart_notice(sid, f"{len(queued)} message(s) queued before the restart run after your next message.")
+            drop_journaled_queue(home, session_key)
             return
         with session["history_lock"]:
             if session.get("_finalized"):
@@ -436,7 +445,8 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             return False
         queue_generation = int(session.get("_queued_prompt_generation", 0))
         _ac_set_queue(session, session.get("queued_prompts") or [])
-        session["running"] = True
+        from tui_gateway.session_lifecycle import _claim_turn_running
+        _claim_turn_running(session)
         queued_transport = queued.get("transport")
         # The queuer's transport is pinned so the drained turn reaches the client that sent it — but
         # ATTACHED, not rebound: a mid-turn prompt from a second client used to silence the first for the

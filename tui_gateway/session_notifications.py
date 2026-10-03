@@ -153,7 +153,8 @@ def _notif_claim_turn(session: dict) -> bool:
     with _session_turn_admission(session) as admitted:
         if not admitted or session.get("running"):
             return False
-        session["running"] = True
+        from tui_gateway.session_lifecycle import _claim_turn_running
+        _claim_turn_running(session)
         return True
 
 
@@ -632,7 +633,8 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
         claimed = claim_pending_delivery(home, owner)
         if claimed is None:
             return False
-        session["running"] = True
+        from tui_gateway.session_lifecycle import _claim_turn_running
+        _claim_turn_running(session)
 
     delivery_id = str(claimed["id"])
 

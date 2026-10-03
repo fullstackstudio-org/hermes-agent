@@ -178,7 +178,12 @@ def _shutdown_journal_idle_queue(session: dict) -> None:
 
 def _stop_session_turn_for_exit(sid: str, session: dict) -> None:
     """A non-resumable exit (stdio TUI quit, Desktop quitting its backend): stop the turn as a /stop
-    would and retire its marker now, so the next resume does not bring it back."""
+    would and retire its marker now, so the next resume does not bring it back. Once per turn: the drain
+    and each exit step may get here, and agent_loop_stopped must not fire for every one of them."""
+    with session["history_lock"]:
+        if session.get("_exit_stop_done"):
+            return
+        session["_exit_stop_done"] = True
     _interrupt_session_turn(sid, session)
     with session["history_lock"]:
         active_marker_key = str(session.pop("_active_turn_marker_key", "") or "")

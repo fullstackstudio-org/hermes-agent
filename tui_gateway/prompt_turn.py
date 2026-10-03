@@ -483,7 +483,8 @@ def _run_post_turn_followups(
         with _session_turn_admission(session) as admitted:
             if not admitted or session.get("running"):
                 return  # user already sent something — their turn wins
-            session["running"] = True
+            from tui_gateway.session_lifecycle import _claim_turn_running
+            _claim_turn_running(session)
         _dispatch_followup_turn(rid, sid, session, goal_followup, "goal continuation dispatch",
                                 turn_auth_user=turn_auth_user)
     # Safety net for completion events that arrived mid-turn.  Ownership is positive-proof

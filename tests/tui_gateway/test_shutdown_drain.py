@@ -838,3 +838,96 @@ def test_a_new_turn_drops_the_previous_turns_shutdown_mark():
     assert err is None
     assert not any(k in session for k in ("_shutdown_interrupt", "_shutdown_queued", "_shutdown_token"))
     assert session["_turn_cancel_requested"] is False
+
+
+# ── Re-review: a stop of an EARLIER turn must not leak into the next turn ──
+
+
+def _stale_stop_session(sid, agent):
+    """A session whose previous turn was stopped by the user: the flags that stop left behind."""
+    return _register(sid, _session(agent=agent, _turn_cancel_requested=True, _shutdown_interrupt=True,
+                                   _shutdown_token="old", _shutdown_queued=[{"text": "old"}]))
+
+
+def test_notification_turn_after_a_stop_is_still_drained_and_resumable(emits, turn_env, marker_home):
+    agent = _ModelWaitAgent()
+    session = _stale_stop_session("notif", agent)
+
+    assert server._notif_claim_turn(session) is True
+    assert session["_turn_cancel_requested"] is False and "_shutdown_interrupt" not in session
+    server._run_prompt_submit("rid", "notif", session, "[process finished] build done")
+    assert agent.entered.wait(5)
+    assert read_turn_marker(marker_home, "session-key") is not None  # not retired by the stale stop
+
+    asyncio.run(server.drain_turns_for_shutdown(timeout=0.0))
+    _wait_settled(session)
+
+    assert agent.interrupts == [("Dashboard restarting", "dashboard shutdown")]
+    marker = read_turn_marker(marker_home, "session-key")
+    assert marker["interrupted_by"] == "shutdown" and "queued" not in marker
+    (complete,) = _completes(emits, "notif")
+    assert complete["interrupt_reason"] == "shutdown"
+
+
+def test_delivery_turn_after_a_stop_is_still_drained_and_resumable(emits, turn_env, marker_home, monkeypatch):
+    from tools import bot_live_delivery as mailbox
+
+    agent = _ModelWaitAgent()
+    session = _stale_stop_session("live", agent)
+    session["active_session_lease"] = types.SimpleNamespace(lease_id="lease", released=False)
+    owner = {"lease_id": "lease", "live_session_id": "live", "session_id": "session-key"}
+    receipts: list = []
+    monkeypatch.setattr(mailbox, "has_mailbox", lambda home: True)
+    monkeypatch.setattr(mailbox, "find_canonical_live_owner", lambda home: owner)
+    monkeypatch.setattr(mailbox, "claim_pending_delivery",
+                        lambda home, pinned: {"id": "d1", "message": "a bot asks something"})
+    monkeypatch.setattr(mailbox, "complete_delivery", lambda home, delivery_id, **kw: receipts.append(kw["status"]))
+
+    assert server._poll_bot_live_delivery_once("live", session) is True
+    assert agent.entered.wait(5)
+    assert session["_turn_cancel_requested"] is False
+
+    asyncio.run(server.drain_turns_for_shutdown(timeout=0.0))
+    _wait_settled(session)
+
+    assert agent.interrupts == [("Dashboard restarting", "dashboard shutdown")]
+    assert receipts == ["cancelled"]  # the receipt is committed before the process goes
+    assert read_turn_marker(marker_home, "session-key")["interrupted_by"] == "shutdown"
+
+
+def test_failed_continuation_build_hands_the_queue_back(emits, marker_home, monkeypatch):
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    monkeypatch.setattr(server, "_start_agent_build", lambda sid, s: None)
+    monkeypatch.setattr(server, "_wait_agent", lambda s, rid, timeout=30.0: {"error": {"message": "boom"}})
+    record_turn_start(marker_home, "session-key", "the long task")
+    mark_turn_shutdown_interrupted(marker_home, "session-key", [{"text": "then deploy"}], token="t")
+    session = _session()
+
+    assert server._maybe_schedule_auto_continue("sid", session, "session-key") is not None
+    deadline = time.monotonic() + 5
+    while session.get("_auto_continue_scheduled") and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert session["queued_prompt"]["text"] == "then deploy"
+    marker = read_turn_marker(marker_home, "session-key")
+    assert marker["prompt"] == "the long task" and "queued" not in marker  # the next resume still retries
+
+
+def test_non_resumable_exit_stops_each_turn_once(emits, turn_env, marker_home, monkeypatch):
+    from hermes_cli import plugins
+
+    hooks: list = []
+    monkeypatch.setattr(plugins, "invoke_hook", lambda name, **kw: hooks.append((name, kw.get("reason"))))
+    server._resumable_shutdown.clear()
+    agent = _ModelWaitAgent(honor_interrupt=False)
+    session = _register("desk", _session(agent=agent))
+    _start_turn("desk", session)
+    monkeypatch.setattr(server, "_SHUTDOWN_INTERRUPT_SETTLE_S", 0.2)
+
+    asyncio.run(server.drain_turns_for_shutdown(timeout=0.0))
+    server._stop_turns_before_exit(budget_s=0.1)
+
+    assert agent.interrupts == [(None, None)]
+    assert hooks == [("agent_loop_stopped", "user_stop")]
+    agent.release.set()
+    _wait_settled(session)

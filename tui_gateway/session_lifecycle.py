@@ -23,6 +23,17 @@ def _session_turn_admission(session: dict):
         yield admitted and not _shutdown_drain_active()
 
 
+def _claim_turn_running(session: dict) -> None:
+    """Mark ``session`` as running a NEW turn. Every turn claim goes through here, under ``history_lock``:
+    the per-turn flags a previous turn left behind are dropped, so a /stop or a shutdown mark of that turn
+    is never read as this turn's (``_turn_cancel_requested`` would retire this turn's crash marker at its
+    write, make ``_wait_agent`` treat it as cancelled, and make a restart's drain skip it as user-stopped)."""
+    session["running"] = True
+    session["_turn_cancel_requested"] = False
+    for key in ("_shutdown_interrupt", "_shutdown_queued", "_shutdown_token", "_exit_stop_done"):
+        session.pop(key, None)
+
+
 def _start_session_work(target, *, name: str, session: dict | None = None):
     """Reserve before spawning; release only after the worker (including cleanup) has unwound."""
     from agent.memory_provider import spawn_context_thread

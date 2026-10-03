@@ -402,6 +402,10 @@ def _inflight_snapshot(session: dict) -> dict | None:
     if not (user or assistant or streaming or error):
         return None
     snapshot = {"assistant": assistant, "streaming": streaming, "user": user}
+    # Text streamed after the last sealed note: a resuming client paints this, not ``assistant``, so a note
+    # that already shows above is not repeated. Absent when no note was sealed (or the offset is not usable).
+    if type(sealed_len := turn.get("sealed_len")) is int and 0 <= sealed_len <= len(assistant):
+        snapshot["assistant_unsealed"] = assistant[sealed_len:].lstrip()
     if isinstance(display_kind := turn.get("display_kind"), str) and display_kind:
         snapshot["display_kind"] = display_kind
     if isinstance(display_metadata := turn.get("display_metadata"), dict):

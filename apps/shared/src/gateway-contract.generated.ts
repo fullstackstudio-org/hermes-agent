@@ -2895,6 +2895,7 @@ export interface SessionResumeResult {
 /** ``session_auto_continue._inflight_snapshot``: the live (or retained failed) turn a reconnecting client rebuilds its bubbles from. */
 export interface InflightTurn {
   assistant?: string
+  assistant_unsealed?: string | null
   streaming?: boolean
   user?: string
   display_kind?: string | null
@@ -4427,6 +4428,7 @@ export interface StreamDeltaPayload {
 export interface MessageInterimPayload {
   text: string
   already_streamed: boolean
+  row_id?: number | null
 }
 /** ``prompt_turn._complete_turn_payload`` / ``session_auto_continue._emit_terminal_turn_error`` / ``agent_callbacks._mirror_subagent_to_child`` (child watch mirror: ``text`` only) / ``compute_host_bridge`` (``text`` + ``status``). */
 export interface MessageCompletePayload {
@@ -4444,6 +4446,7 @@ export interface MessageCompletePayload {
   error_surface?: ErrorSurface | null
   partial?: boolean | null
   persisted_turn?: PersistedTurn | null
+  row_id?: number | null
 }
 /** ``prompt_turn._result_status``. */
 export type TurnStatus = 'complete' | 'error' | 'interrupted'

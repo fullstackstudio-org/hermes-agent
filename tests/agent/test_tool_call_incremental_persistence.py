@@ -226,6 +226,87 @@ def test_interim_assistant_is_durable_before_ui_projection_on_abnormal_exit(tmp_
     assert len(_durable_messages(db_path, session_id)) == 2
 
 
+def _interim_row_ids_seen(tmp_path, session_id, callback_factory):
+    """Run one tool round with ``callback_factory(seen)`` as the UI callback; return (seen, durable rows)."""
+    agent = _make_agent()
+    db_path = tmp_path / "state.db"
+    db = _attach_real_session_db(agent, db_path, session_id)
+    agent.client.chat.completions.create.return_value = _mock_response(
+        content="I'll inspect the repository now.",
+        finish_reason="tool_calls",
+        tool_calls=[_mock_tool_call(call_id="named-call")],
+    )
+    seen: list = []
+    agent.interim_assistant_callback = callback_factory(seen)
+    try:
+        with pytest.raises(GeneratorExit):
+            agent.run_conversation("inspect the repository")
+        rows = db.get_messages(session_id)
+    finally:
+        db.close()
+    return seen, rows
+
+
+def test_interim_callback_that_takes_row_id_observes_the_durable_assistant_row(tmp_path):
+    def factory(seen):
+        def _ui_projection(text, *, already_streamed=False, row_id=None):
+            seen.append(row_id)
+            raise GeneratorExit("simulated process termination after UI projection")
+        return _ui_projection
+
+    seen, rows = _interim_row_ids_seen(tmp_path, "interim-row-id", factory)
+
+    assistant = [row for row in rows if row["role"] == "assistant"]
+    assert len(assistant) == 1
+    assert seen == [assistant[0]["id"]]
+
+
+def test_interim_callback_without_row_id_keyword_still_receives_the_call(tmp_path):
+    def factory(seen):
+        def _ui_projection(text, *, already_streamed=False):
+            seen.append(text)
+            raise GeneratorExit("simulated process termination after UI projection")
+        return _ui_projection
+
+    seen, _rows = _interim_row_ids_seen(tmp_path, "interim-bare-callback", factory)
+
+    assert seen == ["I'll inspect the repository now."]
+
+
+def test_continuation_note_is_durable_with_an_id_before_its_interim_is_emitted(tmp_path):
+    """The stall guard's note (a text-only reply the turn goes on after) is flushed before it is surfaced, so
+    its ``message.interim`` can name the row it becomes."""
+    agent = _make_agent()
+    db_path = tmp_path / "state.db"
+    db = _attach_real_session_db(agent, db_path, "continuation-note")
+    agent.valid_tool_names = {"web_search"}
+    agent._intent_ack_continuation = True
+    agent._looks_like_codex_intermediate_ack = MagicMock(return_value=True)
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(content="I'll inspect the repository now.", finish_reason="stop"),
+        _mock_response(content="The repository is fine.", finish_reason="stop"),
+    ]
+    agent._looks_like_codex_intermediate_ack.side_effect = [True, False]
+    seen: list[tuple] = []
+
+    def _ui_projection(text, *, already_streamed=False, row_id=None):
+        seen.append((text, row_id, [m["content"] for m in db.get_messages("continuation-note")]))
+
+    agent.interim_assistant_callback = _ui_projection
+    try:
+        agent.run_conversation("inspect the repository")
+        rows = db.get_messages("continuation-note")
+    finally:
+        db.close()
+
+    assert len(seen) == 1
+    text, row_id, durable_at_emit = seen[0]
+    assert text == "I'll inspect the repository now."
+    note = next(r for r in rows if r["role"] == "assistant" and r["content"] == text)
+    assert row_id == note["id"]
+    assert text in durable_at_emit
+
+
 def test_failed_assistant_persist_blocks_ui_projection_and_tool_side_effects():
     agent = _make_agent()
     tool_call = _mock_tool_call(call_id="must-not-run")

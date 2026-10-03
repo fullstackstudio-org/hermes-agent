@@ -161,13 +161,20 @@ class StreamDeliveryMixin:
                 self._delivered_interim_texts = set()
             self._delivered_interim_texts.add(normalized)
 
-    def _deliver_interim(self, visible: str, *, already_streamed: bool, record: List[str]) -> None:
-        """Hand ``visible`` to ``interim_assistant_callback`` and mark ``record`` delivered; swallows callback errors."""
+    def _deliver_interim(
+        self, visible: str, *, already_streamed: bool, record: List[str], row_id: int | None = None,
+    ) -> None:
+        """Hand ``visible`` to ``interim_assistant_callback`` and mark ``record`` delivered; swallows callback errors.
+        ``row_id`` (the persisted assistant row the note belongs to) goes in only when the callback takes it."""
         cb = getattr(self, "interim_assistant_callback", None)
         if cb is None:
             return
         try:
-            cb(visible, already_streamed=already_streamed)
+            from agent.interrupt_control import accepts_keyword
+            if row_id is not None and accepts_keyword(cb, "row_id"):
+                cb(visible, already_streamed=already_streamed, row_id=row_id)
+            else:
+                cb(visible, already_streamed=already_streamed)
             for part in record:
                 self._record_delivered_interim_text(part)
         except Exception:
@@ -181,6 +188,14 @@ class StreamDeliveryMixin:
         if not visible or visible == "(empty)" or self._interim_text_was_delivered(visible):
             return
         self._deliver_interim(visible, already_streamed=False, record=[visible])
+
+    @staticmethod
+    def _committed_assistant_row_id(assistant_msg: Dict[str, Any]) -> int | None:
+        """The ``messages.id`` of ``assistant_msg`` once it is committed to the session DB, else ``None``
+        (a projection that was never flushed names no row)."""
+        from agent.context_compressor import _DB_PERSISTED_MARKER
+        row_id = assistant_msg.get("_row_id")
+        return row_id if assistant_msg.get(_DB_PERSISTED_MARKER) and type(row_id) is int and row_id > 0 else None
 
     def _emit_interim_assistant_message(self, assistant_msg: Dict[str, Any]) -> None:
         """Surface a real mid-turn assistant commentary message to the UI layer. Does NOT set
@@ -201,7 +216,9 @@ class StreamDeliveryMixin:
             return
         already_streamed = self._interim_content_was_streamed(visible)
         self._enqueue_stream_hook("on_interim_message", text=visible, already_streamed=already_streamed)
-        self._deliver_interim(visible, already_streamed=already_streamed, record=undelivered_parts or [visible])
+        self._deliver_interim(
+            visible, already_streamed=already_streamed, record=undelivered_parts or [visible],
+            row_id=self._committed_assistant_row_id(assistant_msg))
 
     def _ensure_stream_writer_state(self) -> None:
         """Lazily create the single-writer guard fields (#65991).

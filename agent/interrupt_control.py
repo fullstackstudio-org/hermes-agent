@@ -155,17 +155,22 @@ def append_pending_text(agent, slot: str, record_attr: str, text: str, separator
     setattr(agent, record_attr, (joined, markers))
 
 
-def accepts_author(method: Any) -> bool:
-    """True when ``method`` (a resolved ``steer`` / ``redirect``) takes an ``author=`` keyword. Checked on
-    the method actually bound, not on a class flag: a subclass that overrides ``steer(self, text)``
-    without it must get the bare text, not a TypeError."""
+def accepts_keyword(method: Any, name: str) -> bool:
+    """True when ``method`` takes a ``name=`` keyword (or ``**kwargs``). Checked on the callable actually
+    bound, not on a class flag: a subclass or test double that overrides it without the keyword must get the
+    bare call, not a TypeError."""
     try:
         parameters = inspect.signature(method).parameters
     except (TypeError, ValueError):
         return False
-    param = parameters.get("author")
+    param = parameters.get(name)
     return (param is not None and param.kind in (param.KEYWORD_ONLY, param.POSITIONAL_OR_KEYWORD)) or any(
         p.kind is p.VAR_KEYWORD for p in parameters.values())
+
+
+def accepts_author(method: Any) -> bool:
+    """True when ``method`` (a resolved ``steer`` / ``redirect``) takes an ``author=`` keyword."""
+    return accepts_keyword(method, "author")
 
 
 def steer_with_author(agent: Any, text: str, author: Optional[dict]) -> bool:

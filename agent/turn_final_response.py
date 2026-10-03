@@ -212,6 +212,12 @@ def finish_text_response(
             # ``reasoning_content``, or the continuation replays an empty assistant turn.
             interim_msg["api_content"] = final_response
         append_message(messages, interim_msg)
+        # Flush first so the continuation note is a durable row with an id the interim frame can name;
+        # a flush that fails still emits the note, just without one.
+        try:
+            agent._flush_messages_to_session_db(messages, conversation_history)
+        except Exception:
+            logger.debug("continuation interim flush failed", exc_info=True)
         agent._emit_interim_assistant_message(interim_msg)
         append_message(messages, {
             "role": "user",

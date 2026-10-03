@@ -41,3 +41,27 @@ def test_agent_cbs_includes_interim_callback_when_enabled():
     assert emitted[0][1] == "test-session"
     assert emitted[0][2]["text"] == "hello world"
     assert emitted[0][2]["already_streamed"] is True
+
+
+def test_interim_callback_names_the_row_it_was_given():
+    from tui_gateway.server import _agent_cbs
+
+    emitted: list[tuple] = []
+    with patch("tui_gateway.server._load_cfg", return_value={}), \
+         patch("tui_gateway.server._emit", side_effect=lambda *a, **k: emitted.append(a)):
+        cb = _agent_cbs("test-session")["interim_assistant_callback"]
+        cb("with a row", already_streamed=True, row_id=7)
+
+    assert emitted[0][2] == {"text": "with a row", "already_streamed": True, "row_id": 7}
+
+
+def test_interim_callback_without_a_row_emits_no_row_id_key():
+    from tui_gateway.server import _agent_cbs
+
+    emitted: list[tuple] = []
+    with patch("tui_gateway.server._load_cfg", return_value={}), \
+         patch("tui_gateway.server._emit", side_effect=lambda *a, **k: emitted.append(a)):
+        cb = _agent_cbs("test-session")["interim_assistant_callback"]
+        cb("no row", already_streamed=False)
+
+    assert emitted[0][2] == {"text": "no row", "already_streamed": False}

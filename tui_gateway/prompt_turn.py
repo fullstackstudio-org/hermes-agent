@@ -673,10 +673,18 @@ def _invoke_agent(
 
     # Interim assistant text (commentary beside tool calls, pre-nudge final answer) is sealed
     # by the desktop as its own segment instead of being lost to message.complete.
-    def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
+    def _interim_assistant_cb(text: str, *, already_streamed: bool = False, row_id: int | None = None) -> None:
         if getattr(agent, "_mute_notification_reply", False):
             return
-        _emit("message.interim", sid, {"text": text, "already_streamed": already_streamed})
+        payload = {"text": text, "already_streamed": already_streamed}
+        if row_id is not None:
+            payload["row_id"] = row_id
+        if already_streamed:
+            # The streamed text up to here is now a sealed note: a resuming client paints only what follows.
+            with session["history_lock"]:
+                if isinstance(inflight := session.get("inflight_turn"), dict):
+                    inflight["sealed_len"] = len(str(inflight.get("assistant") or ""))
+        _emit("message.interim", sid, payload)
     agent.interim_assistant_callback = (
         _interim_assistant_cb if _load_interim_assistant_messages() else None)
     # A synthesized turn is typed at turn START so a crash persist writes a timeline event,
@@ -786,6 +794,22 @@ def _absorb_turn_result(
     return status_note
 
 
+def _committed_row_id(message: dict) -> int | None:
+    """``messages.id`` of a row the agent has committed to the session DB, else ``None``."""
+    from agent.context_compressor import _DB_PERSISTED_MARKER
+    row_id = message.get("_row_id")
+    return row_id if message.get(_DB_PERSISTED_MARKER) and type(row_id) is int and row_id > 0 else None
+
+
+def _final_assistant_row_id(last: dict, raw: Any, status: str) -> int | None:
+    """The committed final answer row: the turn completed and its last row is an assistant message without
+    tool calls whose body is ``raw``. Equality only verifies the structurally selected row's body: it never
+    selects an identity. The one rule behind ``persisted_turn.final_assistant_row_id`` and ``message.complete.row_id``."""
+    if status == "complete" and last.get("role") == "assistant" and not last.get("tool_calls") and last.get("content") == raw:
+        return _committed_row_id(last)
+    return None
+
+
 def _persisted_turn_receipt(st: _TurnRun, raw: Any, status: str) -> dict | None:
     """Report committed row addresses, never a text/timestamp search for a matching turn.
 
@@ -793,17 +817,13 @@ def _persisted_turn_receipt(st: _TurnRun, raw: Any, status: str) -> dict | None:
     address its surviving rows, but cannot retire a client's entire streamed turn. Full coverage
     additionally requires the unchanged pre-turn prefix and no redirected user boundary.
     """
-    from agent.context_compressor import _DB_PERSISTED_MARKER
-
     messages = st.result.get("messages")
     start = getattr(st.agent, "_persist_user_message_idx", None)
     if (not isinstance(messages, list) or type(start) is not int or not 0 <= start < len(messages)
             or messages[start].get("role") != "user"):
         return None
 
-    def committed_id(message):
-        row_id = message.get("_row_id")
-        return row_id if message.get(_DB_PERSISTED_MARKER) and type(row_id) is int and row_id > 0 else None
+    committed_id = _committed_row_id
 
     tail = messages[start:]
     anchor_id = committed_id(tail[0])
@@ -816,10 +836,7 @@ def _persisted_turn_receipt(st: _TurnRun, raw: Any, status: str) -> dict | None:
     receipt = {"row_ids": row_ids, "complete": False}
     if (user_row_id := committed_id(tail[0])) is not None:
         receipt["user_row_id"] = user_row_id
-    last = tail[-1]
-    # Equality only verifies the structurally selected final row's body: it never selects an identity.
-    if (status == "complete" and last.get("role") == "assistant" and not last.get("tool_calls")
-            and last.get("content") == raw and (final_id := committed_id(last)) is not None):
+    if (final_id := _final_assistant_row_id(tail[-1], raw, status)) is not None:
         receipt["final_assistant_row_id"] = final_id
     prefix_unchanged = start == len(st.history) and all(
         committed_id(before) is not None and committed_id(before) == committed_id(after)
@@ -854,6 +871,9 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     payload = {"text": raw, "usage": _get_usage(agent), "status": status}
     if receipt := _persisted_turn_receipt(st, raw, status):
         payload["persisted_turn"] = receipt
+        # Taken from the receipt, never recomputed: the frame and its receipt cannot disagree on the row.
+        if (final_row_id := receipt.get("final_assistant_row_id")) is not None:
+            payload["row_id"] = final_row_id
     if last_reasoning:
         payload["reasoning"] = last_reasoning
     if status_note:

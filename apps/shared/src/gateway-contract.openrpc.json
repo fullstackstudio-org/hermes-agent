@@ -15834,6 +15834,18 @@
             "title": "Assistant",
             "type": "string"
           },
+          "assistant_unsealed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Assistant Unsealed"
+          },
           "streaming": {
             "default": false,
             "title": "Streaming",
@@ -18106,6 +18118,18 @@
               }
             ],
             "default": null
+          },
+          "row_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Row Id"
           }
         },
         "title": "MessageCompletePayload",
@@ -18122,6 +18146,18 @@
           "already_streamed": {
             "title": "Already Streamed",
             "type": "boolean"
+          },
+          "row_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Row Id"
           }
         },
         "required": [

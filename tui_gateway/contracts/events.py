@@ -128,6 +128,8 @@ class MessageInterimPayload(Payload):
 
     text: str
     already_streamed: bool
+    # The persisted assistant row this note belongs to; absent when it was not committed.
+    row_id: int | None = None
 
 
 event("message.interim", MessageInterimPayload,
@@ -199,6 +201,8 @@ class MessageCompletePayload(Payload):
     error_surface: ErrorSurface | None = None
     partial: bool | None = None
     persisted_turn: PersistedTurn | None = None
+    # The final assistant row; the same id as ``persisted_turn.final_assistant_row_id``.
+    row_id: int | None = None
 
 
 event("message.complete", MessageCompletePayload, doc="The turn ended: final text, usage and outcome.")

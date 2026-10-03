@@ -31,6 +31,8 @@ class InflightTurn(Result):
     client rebuilds its bubbles from."""
 
     assistant: str = ""
+    # ``assistant`` after the last sealed note (``already_streamed`` interim): what no note above shows yet.
+    assistant_unsealed: str | None = None
     streaming: bool = False
     user: str = ""
     display_kind: str | None = None

@@ -1180,33 +1180,56 @@ function PluginRowCard(props: PluginRowCardProps) {
                 onClick={() => {
                   void setRuntimeLoading(row.name, async () => {
                     let res = await api.updateAgentPlugin(row.name);
-                    if (res.update_refused) {
+                    // Repo-controlled text (paths, pattern ids) shown in a native dialog: one line each,
+                    // no control characters, bounded.
+                    const plain = (text: unknown, max = 120) =>
+                      Array.from(String(text ?? ""), (ch) => {
+                        const c = ch.codePointAt(0) ?? 0;
+                        const hidden =
+                          c < 0x20 || (c >= 0x7f && c <= 0x9f) || c === 0x2028 || c === 0x2029 ||
+                          (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069);
+                        return hidden ? " " : ch;
+                      })
+                        .join("")
+                        .slice(0, max);
+                    for (let round = 0; res.update_refused && round < 3; round += 1) {
                       // The scan of the fetched version did not pass; the installed one keeps running.
-                      const findings = (res.scan_findings ?? []).map(
-                        (f) => `${f.severity.toUpperCase()} ${f.pattern_id} ${f.file}:${f.line}`,
-                      );
-                      if (!res.caution_consent_required) {
-                        window.alert(
-                          [
-                            (t.pluginsPage.updateScanRefused ?? en.pluginsPage.updateScanRefused!)(
-                              row.name,
-                              res.scan_verdict ?? "",
-                            ),
-                            ...findings,
-                          ].join("\n"),
-                        );
+                      const findings = (res.scan_findings ?? [])
+                        .slice(0, 20)
+                        .map((f) => plain(`${f.severity.toUpperCase()} ${f.pattern_id} ${f.file}:${f.line}`));
+                      if (!res.caution_consent_required || !res.revision) {
+                        const msg = round === 0
+                          ? (t.pluginsPage.updateScanRefused ?? en.pluginsPage.updateScanRefused!)(
+                              plain(row.name),
+                              plain(res.scan_verdict, 20),
+                            )
+                          : (t.pluginsPage.updateScanRetryFailed ?? en.pluginsPage.updateScanRetryFailed!)(
+                              plain(row.name),
+                              plain(res.error, 300),
+                            );
+                        window.alert([msg, ...findings].join("\n"));
                         return;
                       }
                       const body = [
                         (t.pluginsPage.updateScanConsentBody ?? en.pluginsPage.updateScanConsentBody!)(
-                          row.name,
-                          (res.revision ?? "").slice(0, 8),
+                          plain(row.name),
+                          plain(res.revision, 12).slice(0, 8),
                         ),
                         ...findings,
                       ].join("\n");
                       if (!window.confirm(body)) return;
-                      res = await api.updateAgentPlugin(row.name, false, true);
-                      if (!res.ok) return;
+                      // Consent is bound to this revision: a newer one is scanned and asked about again.
+                      res = await api.updateAgentPlugin(row.name, false, res.revision);
+                    }
+                    if (res.update_refused) return;
+                    if (!res.ok && !res.consent_required) {
+                      window.alert(
+                        (t.pluginsPage.updateScanRetryFailed ?? en.pluginsPage.updateScanRetryFailed!)(
+                          plain(row.name),
+                          plain(res.error, 300),
+                        ),
+                      );
+                      return;
                     }
                     if (res.consent_required) {
                       // The new pin widens the plugin; the backend changed nothing until confirmed.

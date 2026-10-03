@@ -1089,7 +1089,8 @@ export const api = {
       method: "POST",
     }),
 
-  updateAgentPlugin: (name: string, acceptCapabilities = false, acceptCaution = false) =>
+  /** `acceptCautionRevision`: consent to a caution verdict, for exactly the revision shown. */
+  updateAgentPlugin: (name: string, acceptCapabilities = false, acceptCautionRevision = "") =>
     fetchJSON<AgentPluginUpdateResponse>(
       `/api/dashboard/agent-plugins/${pluginPath(name)}/update`,
       {
@@ -1097,7 +1098,7 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           accept_capabilities: acceptCapabilities,
-          ...(acceptCaution ? { accept_caution: true } : {}),
+          ...(acceptCautionRevision ? { accept_caution_revision: acceptCautionRevision } : {}),
         }),
       },
     ),
@@ -2854,7 +2855,7 @@ export interface AgentPluginUpdateResponse {
   /** The security scan refused the fetched version; nothing was applied. */
   update_refused?: boolean;
   scan_verdict?: string;
-  /** Consent (`accept_caution`) would apply it: the verdict was caution. */
+  /** Consent (`accept_caution_revision` = `revision`) would apply it: the verdict was caution. */
   caution_consent_required?: boolean;
   revision?: string;
   scan_findings?: {

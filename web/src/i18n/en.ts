@@ -442,6 +442,8 @@ export const en: Translations = {
       `The security scan flagged the new version of ${name} (${sha}). Nothing has changed yet. Update anyway only if you trust the source:`,
     updateScanRefused: (name: string, verdict: string) =>
       `The security scan refused the new version of ${name} (${verdict}). Nothing was changed; the installed version keeps running.`,
+    updateScanRetryFailed: (name: string, reason: string) =>
+      `The update of ${name} was not applied: ${reason}`,
     versionBadge: "Version",
     showInSidebar: "Show in sidebar",
     hideFromSidebar: "Hide from sidebar",

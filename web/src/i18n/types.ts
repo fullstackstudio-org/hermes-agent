@@ -386,6 +386,8 @@ export interface Translations {
     updateScanConsentBody?: (name: string, sha: string) => string;
     /** Optional: the update's security scan refused the new version; nothing was applied. */
     updateScanRefused?: (name: string, verdict: string) => string;
+    /** Optional: the retry after consent did not apply the update. */
+    updateScanRetryFailed?: (name: string, reason: string) => string;
     versionBadge: string;
     showInSidebar: string;
     hideFromSidebar: string;

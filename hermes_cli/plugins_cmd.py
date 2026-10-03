@@ -963,6 +963,7 @@ def _install_plugin_core(
             record["allow_removed"] = True
         _swap_in_plugin(tmp_target, target, Path(tmp) / "previous-plugin", plugin_name, record)
 
+    _clear_plugin_bytecode(target)    # never import bytecode an install did not scan (HERM-196)
     if not _looks_like_plugin_dir(target):
         logger.warning("%s has no plugin.yaml / __init__.py; may not be a valid plugin", plugin_name)
     _copy_example_files(target, _console())
@@ -2370,18 +2371,28 @@ def dashboard_update_user_plugin(name: str, *, accept_capabilities: bool = False
 
 
 def _clear_plugin_bytecode(target: Path) -> int:
-    """Remove ``__pycache__`` dirs under a just-updated plugin checkout. Plugin dirs sit outside
-    the repo, so the launch-time bytecode sweep never covers them and stale bytecode after a pull
-    can ImportError in the next process. Never raises.
+    """Remove ``__pycache__`` dirs and every other ``.pyc``/``.pyo`` under a just-installed or
+    just-updated plugin (``.git`` aside). Plugin dirs sit outside the repo, so the launch-time
+    bytecode sweep never covers them: stale bytecode after a pull can ImportError in the next
+    process, and bytecode is importable code no scan reads (HERM-196). Never raises.
 
     See #60242, #6207.
     """
     removed = 0
     try:
         for cache_dir in target.rglob("__pycache__"):
-            if cache_dir.is_dir():
+            if cache_dir.is_dir() and ".git" not in cache_dir.relative_to(target).parts:
                 shutil.rmtree(cache_dir, ignore_errors=True)
                 removed += 0 if cache_dir.exists() else 1
+        for pattern in ("*.pyc", "*.pyo"):
+            for stray in target.rglob(pattern):
+                if ".git" in stray.relative_to(target).parts or not (stray.is_file() or stray.is_symlink()):
+                    continue
+                try:
+                    stray.unlink()
+                    removed += 1
+                except OSError:
+                    pass
     except OSError:
         pass
     return removed

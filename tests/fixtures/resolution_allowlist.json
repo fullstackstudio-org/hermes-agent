@@ -565,6 +565,11 @@
     "kind": "bare_which"
   },
   {
+    "path": "tools/plugin_guard.py",
+    "symbol": "_tracked_paths",
+    "kind": "bare_which"
+  },
+  {
     "path": "tools/process_registry.py",
     "symbol": "_build_systemd_scope_argv",
     "kind": "bare_which"

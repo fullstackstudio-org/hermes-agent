@@ -881,13 +881,19 @@ class JsSinkInventory:
     """Per plugin scan: can any JavaScript in the plugin run something, and the tokens of each
     lexed file. Built lazily on the first candidate finding; one doubt answers "yes"."""
 
-    def __init__(self, plugin_dir: Path, excluded_dirs: frozenset = frozenset()) -> None:
+    def __init__(self, plugin_dir: Path, excluded_dirs: frozenset = frozenset(), walk=None) -> None:
         self.plugin_dir = plugin_dir
         self.excluded_dirs = excluded_dirs
+        self._walk = walk    # the scan's own walk (tracked-aware); without it, excluded_dirs are skipped
         self._unsafe: Optional[bool] = None
         self._tokens: dict = {}
 
     def _files(self):
+        if self._walk is not None:
+            for f, rel in sorted(self._walk()):
+                if f.suffix.lower() in JS_FAMILY_SUFFIXES and (f.is_symlink() or f.is_file()):
+                    yield f, rel
+            return
         for f in sorted(self.plugin_dir.rglob("*")):
             try:
                 parts = f.relative_to(self.plugin_dir).parts

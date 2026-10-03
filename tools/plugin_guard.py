@@ -11,6 +11,8 @@ needs confirmation, ``dangerous`` is blocked and ``--force`` does NOT override.
 from __future__ import annotations
 
 import ast
+import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
@@ -23,12 +25,25 @@ from tools.skills_guard import (
     Finding, ScanResult, SUSPICIOUS_BINARY_EXTENSIONS, _determine_verdict, format_scan_report,
     scan_file)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-fork-1"
+PLUGIN_SCANNER_VERSION = "plugin-guard-fork-2"
 
-# Never scanned: VCS internals, caches, vendored envs.
+# Caches and vendored environments a checkout makes for itself. Skipped only when nothing in
+# them is tracked by git: a TRACKED ``venv/evil.py`` or ``__pycache__/x.pyc`` ships with the
+# plugin and is importable (``from .venv import evil``), so it is scanned like any other file.
+# A tree that is not a git checkout cannot say what it ships, so there they are scanned too.
+# ``.git`` itself is never scanned. (HERM-196.)
 EXCLUDED_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
     ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox"}
+
+# Compiled Python bytecode. ``helper.pyc`` beside ``__init__.py`` is imported by
+# ``from . import helper`` with no ``helper.py`` at all, and an unchecked-hash
+# ``__pycache__/x.cpython-3XX.pyc`` is imported in place of a harmless ``x.py``: code that runs
+# and that no text scan can read. Any bytecode in a plugin tree is ``dangerous``.
+BYTECODE_EXTENSIONS = {".pyc", ".pyo"}
+# Native extension modules are imported like ``.so`` (already a binary finding); ``.pyd`` is
+# Windows' name for one.
+EXTRA_BINARY_EXTENSIONS = {".pyd"}
 
 # Test trees ARE scanned (``plugins_loader`` sets ``submodule_search_locations`` to the
 # plugin root, so ``from .tests import evil`` runs whatever lives there), but findings under
@@ -37,13 +52,15 @@ EXCLUDED_DIRS = {
 # made such plugins uninstallable and taught authors to obfuscate their own tests (#89610).
 
 # Code files, where "reads an env secret" / "HTTP call with a key" is normal (requires_env).
-CODE_FILE_EXTENSIONS = {".py", ".js", ".ts", ".sh", ".bash", ".rb", ".pl", ".php"}
+CODE_FILE_EXTENSIONS = {".py", ".js", ".ts", ".sh", ".bash", ".rb", ".pl", ".php",
+                        ".mjs", ".cjs", ".jsx", ".tsx", ".mts", ".cts", ".vue"}
 
 # Line-comment marker per code extension. Whole-line comments explain intent; hardening
 # notes like "# a symlink could point at /etc/passwd" are prose *about* a defense.
 COMMENT_PREFIXES_BY_EXTENSION = {
     ".py": "#", ".sh": "#", ".bash": "#", ".rb": "#", ".pl": "#", ".r": "#", ".jl": "#",
-    ".js": "//", ".ts": "//", ".php": "//"}
+    ".js": "//", ".ts": "//", ".php": "//", ".mjs": "//", ".cjs": "//", ".jsx": "//", ".tsx": "//",
+    ".mts": "//", ".cts": "//", ".vue": "//"}
 
 # One severity step down from the pattern's default.
 _COMMENT_SEVERITY_CAP = {"critical": "high", "high": "medium"}
@@ -104,15 +121,58 @@ MAX_PLUGIN_TOTAL_SIZE_KB = 10 * 1024   # 10MB of scannable tree
 MAX_PLUGIN_SINGLE_FILE_KB = 1024       # 1MB single file
 
 
-def _walk(plugin_dir: Path) -> Iterator[Tuple[Path, str]]:
-    """Yield (path, "a/b/c" relative path) for every non-excluded entry under plugin_dir."""
+def _tracked_paths(plugin_dir: Path) -> Optional[set]:
+    """The paths under *plugin_dir* that git tracks, relative to it, or ``None`` when *plugin_dir*
+    is not inside a git work tree git will read (no git, not a checkout, a repository git refuses).
+    Run with no global/system config, no hooks and no fsmonitor, and without any inherited
+    repository redirection, so the tree cannot make git do anything but list files."""
+    import subprocess
+
+    git = shutil.which("git")
+    if not git or not plugin_dir.is_dir():
+        return None
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0")
+    base = [git, "-c", "core.fsmonitor=false", "-c", f"core.hooksPath={os.devnull}", "-c", "core.quotePath=false"]
+    try:
+        inside = subprocess.run(base + ["rev-parse", "--is-inside-work-tree"], cwd=str(plugin_dir), env=env,
+                                capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+        if inside.returncode != 0 or inside.stdout.strip() != b"true":
+            return None
+        listed = subprocess.run(base + ["ls-files", "-z", "--cached"], cwd=str(plugin_dir), env=env,
+                                capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listed.returncode != 0:
+        return None
+    return {os.fsdecode(p) for p in listed.stdout.split(b"\0") if p}
+
+
+def _walk(plugin_dir: Path, tracked: Optional[set] = None, *, know_tracked: bool = False) -> Iterator[Tuple[Path, str]]:
+    """Yield (path, "a/b/c" relative path) for every entry under plugin_dir the scan reads.
+
+    ``.git`` is never read. An entry inside another of ``EXCLUDED_DIRS`` is read when git tracks it
+    (or it holds a tracked path), or when the tree is not a git checkout (*tracked* is None);
+    *know_tracked* False asks git here."""
+    if not know_tracked:
+        tracked = _tracked_paths(plugin_dir)
+    tracked_dirs = set()
+    if tracked is not None:
+        for path in tracked:
+            parts = path.split("/")
+            tracked_dirs.update("/".join(parts[:i]) for i in range(1, len(parts)))
     for f in plugin_dir.rglob("*"):
         try:
             rel_parts = f.relative_to(plugin_dir).parts
         except ValueError:
             continue
-        if not any(part in EXCLUDED_DIRS for part in rel_parts):
-            yield f, "/".join(rel_parts)
+        if ".git" in rel_parts:
+            continue
+        rel = "/".join(rel_parts)
+        if any(part in EXCLUDED_DIRS for part in rel_parts) and tracked is not None \
+                and rel not in tracked and rel not in tracked_dirs:
+            continue
+        yield f, rel
 
 
 def _finding(pattern_id: str, severity: str, category: str, file: str, match: str, description: str) -> Finding:
@@ -161,7 +221,7 @@ def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path,
     JavaScript inventory (``plugin_guard_context`` (5b)); without it no JS token rule applies."""
     is_code = Path(rel_path).suffix.lower() in CODE_FILE_EXTENSIONS
     main_guard_lines = _main_guard_body_lines(file_path) if file_path.suffix.lower() == ".py" else set()
-    is_js = Path(rel_path).suffix.lower() in {".js", ".ts"}
+    is_js = Path(rel_path).suffix.lower() in {".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx", ".mts", ".cts", ".vue"}
     # A CI workflow definition runs on the forge's runner, not the host: same cap as a README.
     doc_prose = is_doc_prose(rel_path) or is_ci_workflow(rel_path)
     lines = _file_lines(file_path) if findings else []
@@ -272,13 +332,13 @@ def _dangerous_findings_summary(findings: List[Finding]) -> str:
     return f"{len(critical)} critical of {len(findings)} findings{names}"
 
 
-def _check_plugin_structure(plugin_dir: Path) -> List[Finding]:
-    """Structural checks sized for plugin repositories."""
+def _check_plugin_structure(plugin_dir: Path, tracked: Optional[set] = None) -> List[Finding]:
+    """Structural checks sized for plugin repositories. *tracked*: see :func:`_walk`."""
     findings: List[Finding] = []
     file_count = 0
     total_size = 0
     resolved_root = plugin_dir.resolve()
-    for f, rel in _walk(plugin_dir):
+    for f, rel in _walk(plugin_dir, tracked, know_tracked=True):
         if f.is_symlink():
             file_count += 1
             try:
@@ -303,7 +363,11 @@ def _check_plugin_structure(plugin_dir: Path) -> List[Finding]:
             findings.append(_finding("oversized_file", "medium", "structural", rel, f"{size // 1024}KB",
                                      f"file is {size // 1024}KB (limit: {MAX_PLUGIN_SINGLE_FILE_KB}KB)"))
         ext = f.suffix.lower()
-        if ext in SUSPICIOUS_BINARY_EXTENSIONS:
+        if ext in BYTECODE_EXTENSIONS:
+            findings.append(_finding("compiled_bytecode", "critical", "execution", rel, f"bytecode: {ext}",
+                                     "compiled Python bytecode: imported in place of (or without) source "
+                                     "and cannot be scanned"))
+        elif ext in SUSPICIOUS_BINARY_EXTENSIONS or ext in EXTRA_BINARY_EXTENSIONS:
             findings.append(_finding("binary_file", SEVERITY_REMAP["binary_file"], "structural", rel,
                                      f"binary: {ext}", f"binary/executable file ({ext}) bundled in plugin (cannot be scanned)"))
     if file_count > MAX_PLUGIN_FILE_COUNT:
@@ -319,9 +383,11 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
     """Scan a plugin directory (typically the temp clone); every external plugin is ``community`` trust."""
     all_findings: List[Finding] = []
     if plugin_dir.is_dir():
-        all_findings.extend(_check_plugin_structure(plugin_dir))
-        js = JsSinkInventory(plugin_dir, frozenset(EXCLUDED_DIRS))
-        for f, rel in sorted(_walk(plugin_dir)):
+        tracked = _tracked_paths(plugin_dir)
+        all_findings.extend(_check_plugin_structure(plugin_dir, tracked))
+        js = JsSinkInventory(plugin_dir, frozenset(EXCLUDED_DIRS),
+                             walk=lambda: _walk(plugin_dir, tracked, know_tracked=True))
+        for f, rel in sorted(_walk(plugin_dir, tracked, know_tracked=True)):
             if f.is_file() and not f.is_symlink():
                 all_findings.extend(_filter_findings(scan_file(f, rel_path=rel), rel, f, js))
     verdict = _determine_verdict(all_findings)

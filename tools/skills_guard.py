@@ -491,7 +491,9 @@ MAX_FILE_COUNT, MAX_TOTAL_SIZE_KB, MAX_SINGLE_FILE_KB = 50, 5120, 256
 # Text extensions to scan; known binary extensions that should NOT be in a skill; script types allowed +x.
 SCANNABLE_EXTENSIONS = {
     '.md', '.txt', '.py', '.sh', '.bash', '.js', '.ts', '.rb', '.yaml', '.yml', '.json', '.toml',
-    '.cfg', '.ini', '.conf', '.html', '.css', '.xml', '.tex', '.r', '.jl', '.pl', '.php'}
+    '.cfg', '.ini', '.conf', '.html', '.css', '.xml', '.tex', '.r', '.jl', '.pl', '.php',
+    # JavaScript and TypeScript modules by their other names (HERM-195): never read before.
+    '.mjs', '.cjs', '.jsx', '.tsx', '.mts', '.cts', '.vue'}
 SUSPICIOUS_BINARY_EXTENSIONS = {
     '.exe', '.dll', '.so', '.dylib', '.bin', '.dat', '.com', '.msi', '.dmg', '.app', '.deb', '.rpm'}
 _SCRIPT_EXTENSIONS = {'.sh', '.bash', '.py', '.rb', '.pl'}

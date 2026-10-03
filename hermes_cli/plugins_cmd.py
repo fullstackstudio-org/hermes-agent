@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import logging
@@ -79,6 +80,21 @@ class PluginUpdateRefused(PluginOperationError):
         fields = ("pattern_id", "severity", "category", "file", "line", "description")
         return [{k: getattr(f, k, None) for k in fields}
                 for f in (getattr(self.scan_result, "findings", None) or ())]
+
+
+class PluginUpdateRollbackFailed(PluginUpdateRefused):
+    """The written tree did not match the scanned one AND putting the checkout back on its old
+    commit did not take. The plugin's code on disk is in an unknown state; the message says where
+    HEAD is and whether the plugin could be deactivated (``deactivated``)."""
+
+    def __init__(self, message: str, *, revision: str, head: str, deactivated: bool):
+        super().__init__(message, verdict="error", revision=revision)
+        self.head = head
+        self.deactivated = deactivated
+
+
+class PluginUpdateBusy(PluginOperationError):
+    """Another update of the same plugin holds its update lock."""
 
 
 def _console():
@@ -892,6 +908,17 @@ def _install_plugin_core(
         at_reviewed_pin = bool(reviewed_pin) and installed_revision == (
             _git_resolve_commit(tmp_clone, git_exe, reviewed_pin) if git_exe and reviewed_pin else reviewed_pin)
         tmp_target = _resolve_subdir_within(tmp_clone, subdir) if subdir else tmp_clone
+        try:    # the same path rules an update applies (``_refuse_unsafe_tree_paths``)
+            if (tmp_clone / ".git").exists():
+                _refuse_unsafe_tree_paths(git_exe or "git", tmp_clone, installed_revision, noninteractive_git_env(),
+                                          pathspec=subdir)
+            else:    # not a git checkout (a stand-in clone): judge the files on disk by the same rules
+                _check_tree_paths([("120000" if p.is_symlink() else "100644", p.relative_to(tmp_target).as_posix())
+                                   for p in tmp_target.rglob("*") if not p.is_dir() or p.is_symlink()])
+        except ValueError as e:
+            raise PluginOperationError(f"Refusing to install: the plugin's tree has {e}.") from e
+        except (OSError, subprocess.SubprocessError) as e:
+            raise PluginOperationError(f"Could not list the plugin's tree: {e}") from e
         _ensure_tree_readable(tmp_target, plugins_dir)
         manifest = _read_manifest_for_install(tmp_target)
         plugin_name = manifest.get("name") or (
@@ -1046,6 +1073,34 @@ def _pull_plugin_update(target: Path, pinned_msg, not_git_msg, before_pull=None,
     *accept_caution(scan_result, revision)* is the consent a ``caution`` verdict needs, for exactly
     that revision.
     *pinned_msg(install_record)* / *not_git_msg()* build the caller-specific error text."""
+    with _plugin_update_lock(target):
+        return _pull_plugin_update_locked(target, pinned_msg, not_git_msg, before_pull, accept_caution=accept_caution)
+
+
+@contextlib.contextmanager
+def _plugin_update_lock(target: Path):
+    """One update of a plugin at a time (the auto-update timer, the dashboard, a terminal): an
+    advisory lock on ``<plugins dir>/.<name>.update-lock``, held by the process, released when it
+    exits however it exits. A second update while one runs raises :class:`PluginUpdateBusy`."""
+    path = target.parent / f".{target.name}.update-lock"
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise PluginUpdateBusy(
+                f"Another update of '{target.name}' is running; try again when it has finished.") from exc
+        yield
+    finally:
+        os.close(fd)
+
+
+def _pull_plugin_update_locked(target: Path, pinned_msg, not_git_msg, before_pull, *, accept_caution) -> str:
     metadata = _read_install_metadata()
     install_record = metadata.get(target.name, {})
     if install_record.get("pinned") is True:
@@ -1137,7 +1192,7 @@ def cmd_update(name: str) -> None:
             console.print(format_scan_report(exc.scan_result), markup=False, highlight=False)
         _fail(console, f"[red]Update of '{escape(name)}' not applied:[/red] {escape(str(exc))}")
     except PluginOperationError as exc:
-        _fail(console, f"[red]Error:[/red] {exc}")
+        _fail(console, f"[red]Error:[/red] {escape(str(exc))}")
     _post_pull_housekeeping(target, console)
 
     # Re-consent when the new version declares capabilities the granted set lacks or the
@@ -2493,17 +2548,19 @@ def _checkout_for_scan(git_exe: str, repo: Path, revision: str, tmp: Path, *, na
         _refuse_unsafe_tree_paths(git_exe, repo, revision, env)
     except ValueError as exc:
         raise refuse(str(exc)) from exc
-    tree = tmp / "checkout"
+    tree = tmp / (re.sub(r"[^A-Za-z0-9._-]", "_", name).strip(".") or "plugin")    # reports name the plugin
     try:
         made = git(tmp, "init", "--quiet", str(tree))
         if made.returncode != 0:
             raise refuse("git init failed", RuntimeError(made.stderr.decode("utf-8", "replace")[-400:]))
 
         def git_path(cwd: Path, name: str) -> Path:
-            done = git(cwd, "rev-parse", "--path-format=absolute", "--git-path", name)
+            # ``--git-path`` answers relative to *cwd* (``--path-format=absolute`` needs git 2.31).
+            done = git(cwd, "rev-parse", "--git-path", name)
             if done.returncode != 0:
                 raise refuse("git rev-parse failed", RuntimeError(done.stderr.decode("utf-8", "replace")[-400:]))
-            return Path(done.stdout.decode("utf-8", "surrogateescape").strip())
+            found = Path(done.stdout.decode("utf-8", "surrogateescape").strip())
+            return found if found.is_absolute() else (cwd / found).resolve()
 
         alternates = git_path(tree, "objects/info/alternates")
         alternates.parent.mkdir(parents=True, exist_ok=True)
@@ -2511,6 +2568,13 @@ def _checkout_for_scan(git_exe: str, repo: Path, revision: str, tmp: Path, *, na
         shallow = git_path(repo, "shallow")
         if shallow.is_file():
             shutil.copyfile(shallow, git_path(tree, "shallow"))
+        # Attributes the plugin repository sets for itself apply to the merge, so to the scan too.
+        # (Attributes cannot run anything; a filter driver lives in config, which is not copied.)
+        attributes = git_path(repo, "info/attributes")
+        if attributes.is_file():
+            scan_attributes = git_path(tree, "info/attributes")
+            scan_attributes.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(attributes, scan_attributes)
         for key in _CHECKOUT_CONFIG_KEYS:
             value = git(repo, "config", "--local", "--get", key)
             if value.returncode == 0:
@@ -2523,27 +2587,37 @@ def _checkout_for_scan(git_exe: str, repo: Path, revision: str, tmp: Path, *, na
     return tree
 
 
-def _refuse_unsafe_tree_paths(git_exe: str, repo: Path, revision: str, env: dict) -> None:
+def _refuse_unsafe_tree_paths(git_exe: str, repo: Path, revision: str, env: dict,
+                              pathspec: Optional[str] = None) -> None:
     """Raise ``ValueError`` for a tree no platform could check out unambiguously: a path with a
     drive or an anchor (``C:x``, ``/x``, ``\\\\x``), a ``..``/``.``/``.git`` component, a ``:`` or ``\\``
     in a name, a path listed twice, two paths that are the same after case folding or NFC
-    normalisation (``Link`` and ``link/x``), or a symlink that is the prefix of another path."""
-    import unicodedata
-    from pathlib import PurePosixPath, PureWindowsPath
-
-    listing = subprocess.run([git_exe, "ls-tree", "-r", "-z", "--full-tree", revision], cwd=str(repo), env=env,
-                             capture_output=True, stdin=subprocess.DEVNULL, timeout=60, check=True).stdout
-    seen: set = set()
-    folded: dict = {}
-    links: set = set()
-    paths: list = []
+    normalisation (``Link`` and ``link/x``), or a symlink that is the prefix of another path.
+    *pathspec* limits the listing to a subdirectory (a subdirectory install)."""
+    spec = ["--", pathspec.strip("/")] if pathspec else []
+    listing = subprocess.run([git_exe, "ls-tree", "-r", "-z", "--full-tree", revision, *spec], cwd=str(repo),
+                             env=env, capture_output=True, stdin=subprocess.DEVNULL, timeout=60, check=True).stdout
+    entries = []
     for raw in listing.split(b"\0"):
         if not raw:
             continue
         m = _TREE_ENTRY.match(raw)
         if m is None:
             raise ValueError("an unreadable tree entry")
-        mode, path = m.group(1).decode(), m.group(4).decode("utf-8", "surrogateescape")
+        entries.append((m.group(1).decode(), m.group(4).decode("utf-8", "surrogateescape")))
+    _check_tree_paths(entries)
+
+
+def _check_tree_paths(entries: list) -> None:
+    """The path rules of :func:`_refuse_unsafe_tree_paths` over ``(mode, path)`` entries."""
+    import unicodedata
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    seen: set = set()
+    folded: dict = {}
+    links: set = set()
+    paths: list = []
+    for mode, path in entries:
         if path in seen:
             raise ValueError(f"a path listed twice: {path!r}")
         seen.add(path)
@@ -2642,8 +2716,12 @@ def _apply_with_autostash(git_exe: str, target: Path, *args: str, done: str, ver
     uses for the main checkout (PR #70161).
 
     *verify()* runs right after the fast-forward, before the stash comes back and before anything
-    else: when it answers False the checkout is reset to *rollback_to*, the stash re-applied, and
-    :class:`PluginUpdateRefused` raised."""
+    else. A fast-forward rewrites only the files that changed, so a new ``.gitattributes`` rule for
+    an unchanged file leaves the old bytes: on a first mismatch every tracked file is written again
+    from the merged commit (:func:`_rewrite_tracked_files`) and compared once more. When they still
+    differ the checkout is reset to *rollback_to* (checked: :func:`_roll_back`), the stash
+    re-applied, and :class:`PluginUpdateRefused` raised; a rollback that does not take deactivates
+    the plugin and raises :class:`PluginUpdateRollbackFailed`."""
     stash_sha, err = _autostash_dirty_tree(git_exe, target)
     if err:
         return False, err
@@ -2658,11 +2736,20 @@ def _apply_with_autostash(git_exe: str, target: Path, *args: str, done: str, ver
         else:
             note = "Local changes are preserved in git stash (restore with: git stash pop)."
         return False, f"{err}\n{note}"
-    if verify is not None and not verify():
-        _run_plugin_git(git_exe, target, "reset", "--hard", "--quiet", rollback_to)
+    revision = args[-1]
+    if verify is not None and not verify() and not (_rewrite_tracked_files(git_exe, target, revision) and verify()):
+        if not _roll_back(git_exe, target, rollback_to):
+            head = _current_head(git_exe, target)
+            keys = _deactivate_plugin_dir(target)
+            state = (f"it has been deactivated ({', '.join(keys)}) and will not load"
+                     if keys else "it could NOT be deactivated; disable it by hand before the next start")
+            raise PluginUpdateRollbackFailed(
+                f"the files git wrote for the new version ({revision[:8]}) are not the ones that were scanned, "
+                f"and putting the plugin back on {rollback_to[:8]} failed: its checkout is at "
+                f"{head[:8] or 'an unknown commit'} with files in an unknown state; {state}. Local changes, if "
+                "any, are in git stash.", revision=revision, head=head, deactivated=bool(keys))
         if stash_sha and not _reapply_stash(git_exe, target, stash_sha):
             logger.warning("local changes of %s stay in git stash after a refused update", target)
-        revision = args[-1]
         raise PluginUpdateRefused(
             f"the files git wrote for the new version ({revision[:8]}) are not the ones that were scanned "
             "(a local filter, a line-ending setting or a change during the update); the plugin was put back "
@@ -2679,6 +2766,59 @@ def _apply_with_autostash(git_exe: str, target: Path, *args: str, done: str, ver
         "were NOT re-applied. They are preserved in git stash — inspect "
         "with `git stash show -p` and re-apply with "
         f"`git stash pop` inside {target}.")
+
+
+def _current_head(git_exe: str, target: Path) -> str:
+    try:
+        done = _run_plugin_git(git_exe, target, "rev-parse", "HEAD", timeout=15)
+        return done.stdout.strip().lower() if done.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _rewrite_tracked_files(git_exe: str, target: Path, revision: str) -> bool:
+    """Write every tracked file of *target* again from *revision* (``rm --cached`` empties the index,
+    ``reset --hard`` checks everything out with the attributes now in force). Hooks stay off; a
+    repository's own filter drivers still run, as they do for any checkout of it."""
+    try:
+        emptied = _run_plugin_git(git_exe, target, "rm", "-r", "--cached", "-q", "--ignore-unmatch", ".")
+        if emptied.returncode != 0:
+            return False
+        return _run_plugin_git(git_exe, target, "reset", "--hard", "--quiet", revision).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _roll_back(git_exe: str, target: Path, rollback_to: str) -> bool:
+    """``reset --hard`` to *rollback_to* and confirm HEAD is there; any failure (an exit code, a
+    held ``index.lock``, a timeout) answers False."""
+    try:
+        reset = _run_plugin_git(git_exe, target, "reset", "--hard", "--quiet", rollback_to)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return reset.returncode == 0 and bool(rollback_to) and _current_head(git_exe, target) == rollback_to.lower()
+
+
+def _deactivate_plugin_dir(target: Path) -> list:
+    """Disable the plugin in *target* under every key the loader gates it on (its manifest key
+    and name, whatever the folder is called), and return those keys once the loader's own gate
+    refuses it; an empty list means it could not be deactivated."""
+    try:
+        from hermes_cli.plugins_discovery import (
+            _get_disabled_plugins, _get_enabled_plugins, collect_directory_manifests, gate_manifest)
+        from hermes_cli.plugins_manifest import manifest_key
+
+        resolved = target.resolve()
+        mine = [m for m in collect_directory_manifests() if m.path and Path(m.path).resolve() == resolved]
+        keys = sorted({k for m in mine for k in (manifest_key(m), m.name) if k})
+        for key in keys:
+            _activate_key(key, enable=False)
+        disabled, enabled = _get_disabled_plugins(), _get_enabled_plugins()
+        if mine and all(gate_manifest(m, disabled, enabled).action not in ("load", "load_now") for m in mine):
+            return keys
+    except Exception:    # noqa: BLE001 - report "could not deactivate" rather than raise past it
+        logger.exception("could not deactivate plugin in %s after a failed rollback", target)
+    return []
 
 
 def dashboard_remove_user_plugin(name: str) -> dict[str, Any]:

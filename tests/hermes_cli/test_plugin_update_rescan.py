@@ -539,3 +539,137 @@ class TestRecloneUpdate:
         result = pc.dashboard_update_user_plugin("demo")
         assert result["ok"] is False and result["scan_verdict"] == "dangerous"
         assert not (target / "run.py").exists() and deps == []
+
+
+# ── review round 5: a forced rewrite before refusing, a rollback that must take, one update at a time ──
+
+
+class TestRewriteRollbackAndLock:
+    def test_a_new_attribute_for_an_unchanged_file_is_accepted(self, plugin):
+        """A fast-forward does not rewrite ``tool.ps1``; ``*.ps1 eol=crlf`` arrives later. The
+        written tree is forced onto the merged commit once before anything is refused."""
+        plugin.push("tool.ps1", "Write-Host one\nWrite-Host two\n")
+        plugin.pc.cmd_update(plugin.name)
+        (plugin.repo / ".gitattributes").write_text("*.ps1 text eol=crlf\n", encoding="utf-8")
+        new = plugin.push("notes.txt", "x\n", version="3.0.0")
+        plugin.pc.cmd_update(plugin.name)
+        assert plugin.head() == new
+        assert (plugin.target / "tool.ps1").read_bytes() == b"Write-Host one\r\nWrite-Host two\r\n"
+        assert _loader(plugin.target) == ("load", "3.0.0")
+
+    def test_info_attributes_of_the_plugin_repo_are_scanned_as_written(self, plugin, monkeypatch):
+        import tools.plugin_guard as guard
+
+        seen: dict = {}
+        real = guard.scan_plugin
+        monkeypatch.setattr(guard, "scan_plugin",
+                            lambda tree, **kw: seen.setdefault("n", (Path(tree) / "notes.txt").read_bytes())
+                            and real(tree, **kw))
+        info = plugin.target / ".git" / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        (info / "attributes").write_text("notes.txt eol=crlf\n", encoding="utf-8")
+        new = plugin.push("notes.txt", "a\nb\n")
+        plugin.pc.cmd_update(plugin.name)
+        assert plugin.head() == new
+        assert seen["n"] == b"a\r\nb\r\n" == (plugin.target / "notes.txt").read_bytes()
+
+    def test_a_dirty_tree_with_a_mismatch_is_rolled_back_with_the_edit_kept(self, plugin, monkeypatch):
+        pc = plugin.pc
+        real = pc._judge_scanned_tree
+
+        def judge_then_tamper(*a, **kw):
+            real(*a, **kw)
+            _git(plugin.target, "config", "core.autocrlf", "true")
+
+        monkeypatch.setattr(pc, "_judge_scanned_tree", judge_then_tamper)
+        edited = (plugin.target / "__init__.py").read_text(encoding="utf-8") + "# a local tweak\n"
+        (plugin.target / "__init__.py").write_text(edited, encoding="utf-8")
+        old = plugin.head()
+        plugin.push("notes.txt", "one\ntwo\n")
+        with pytest.raises(SystemExit):
+            pc.cmd_update(plugin.name)
+        assert plugin.head() == old
+        assert "# a local tweak" in (plugin.target / "__init__.py").read_text(encoding="utf-8")
+        assert not (plugin.target / "notes.txt").exists() and plugin.deps == []
+
+    def test_a_rollback_blocked_by_index_lock_deactivates_the_plugin(self, plugin, monkeypatch):
+        """The written tree differs, and ``reset --hard`` cannot run (a held ``index.lock``): the
+        plugin is deactivated under its manifest keys, the loader refuses it, and the error says so."""
+        pc = plugin.pc
+        lock = plugin.target / ".git" / "index.lock"
+
+        def differs_and_lock(*_a, **_k):
+            lock.write_text("", encoding="utf-8")
+            return False
+
+        monkeypatch.setattr(pc, "_same_tracked_files", differs_and_lock)
+        new = plugin.push("notes.txt", "x\n")
+        try:
+            with pytest.raises(pc.PluginUpdateRollbackFailed) as exc:
+                pc._git_update_plugin_dir(plugin.target, name=plugin.name, accept_caution=lambda *_a: False)
+        finally:
+            lock.unlink(missing_ok=True)
+        assert exc.value.deactivated is True and exc.value.head == new
+        assert "deactivated" in str(exc.value) and new[:8] in str(exc.value)
+        action, _version = _loader(plugin.target)
+        assert action not in ("load", "load_now")
+
+    def test_a_rollback_that_times_out_fails_closed(self, plugin, monkeypatch):
+        pc = plugin.pc
+        real_run = pc._run_plugin_git
+
+        def run(git_exe, target, *args, **kwargs):
+            if args[:2] == ("reset", "--hard") and kwargs.get("timeout") is None and args[-1] != "HEAD":
+                if getattr(run, "rewritten", False):
+                    raise subprocess.TimeoutExpired(args, 60)
+                run.rewritten = True
+            return real_run(git_exe, target, *args, **kwargs)
+
+        monkeypatch.setattr(pc, "_run_plugin_git", run)
+        monkeypatch.setattr(pc, "_same_tracked_files", lambda *_a, **_k: False)
+        plugin.push("notes.txt", "x\n")
+        with pytest.raises(pc.PluginUpdateRollbackFailed) as exc:
+            pc._git_update_plugin_dir(plugin.target, name=plugin.name, accept_caution=lambda *_a: False)
+        assert exc.value.deactivated is True
+        assert _loader(plugin.target)[0] not in ("load", "load_now")
+
+    def test_a_concurrent_update_is_refused_by_the_lock(self, plugin):
+        old = plugin.head()
+        plugin.push("notes.txt", "x\n")
+        with plugin.pc._plugin_update_lock(plugin.target):
+            result = plugin.pc.dashboard_update_user_plugin(plugin.name)
+            assert result["ok"] is False and "Another update" in result["error"]
+            with pytest.raises(SystemExit):
+                plugin.pc.cmd_update(plugin.name)
+        assert plugin.head() == old
+        plugin.pc.cmd_update(plugin.name)              # released: the next update runs
+        assert plugin.head() != old
+
+
+def test_install_refuses_the_names_an_update_refuses(tmp_path, monkeypatch):
+    import hermes_cli.plugins_cmd as pc
+
+    if not pc._resolve_git_executable():
+        pytest.skip("git not available")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "colon"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "plugin.yaml").write_text(yaml.safe_dump({"name": "colon", "version": "1.0.0"}), encoding="utf-8")
+    _git(repo, "add", "plugin.yaml")
+    blob = _hash(repo, b"x = 1\n")
+    _git(repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},a:b.py")
+    _git(repo, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "colon")
+    with pytest.raises(pc.PluginOperationError, match="Refusing to install"):
+        pc._install_plugin_core(repo.as_uri(), force=False)
+    assert not (pc._plugins_dir() / "colon").exists()
+
+
+def test_git_redirection_variables_are_not_inherited():
+    from hermes_cli._subprocess_compat import noninteractive_git_env
+
+    env = noninteractive_git_env({"GIT_DIR": "/x", "GIT_WORK_TREE": "/y", "GIT_INDEX_FILE": "/z",
+                                  "GIT_OBJECT_DIRECTORY": "/o", "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/a",
+                                  "PATH": "/usr/bin"})
+    assert not {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES"} & set(env)

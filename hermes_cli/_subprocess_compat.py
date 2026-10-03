@@ -364,6 +364,10 @@ def noninteractive_git_env(base: "Mapping[str, str] | None" = None) -> dict[str,
         if key == "GIT_CONFIG_PARAMETERS" or key.startswith(_GIT_CONFIG_INJECT_PREFIXES):
             env.pop(key, None)
     env.pop("GIT_CONFIG_COUNT", None)
+    # An inherited repository redirection would point plumbing that passes ``cwd`` at another repo.
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE"):
+        env.pop(key, None)
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_SYSTEM"] = os.devnull
     env["GIT_CONFIG_NOSYSTEM"] = "1"

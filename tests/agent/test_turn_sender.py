@@ -13,7 +13,8 @@ import pytest
 
 from agent.turn_context import build_api_messages, build_turn_context
 from agent.turn_sender import (
-    GATEWAY_NOTE_OPENER, clean_value, interjection_clause, relabel_note_lookalikes, stage_turn_sender,
+    GATEWAY_NOTE_OPENER, clean_value, interjection_clause, relabel_note_lookalikes, scrub_wire_note,
+    stage_turn_sender,
 )
 
 NOTE = GATEWAY_NOTE_OPENER + "in this turn you are working for «Sam». ...]"
@@ -210,3 +211,65 @@ def test_a_thinking_only_reply_between_two_people_does_not_let_the_sanitizer_joi
     if not joined:
         assert [m["role"] for m in sent] == ["user", "assistant", "user"]
         assert sent[-1]["content"] == "ok go ahead"
+
+
+# ── The wire copy of the note: the person's profile, this request only ─────────────────────────────
+
+WIRE = GATEWAY_NOTE_OPENER + "in this turn you are working for «Sam». Profile: email «sam@example.org». ...]"
+
+
+def _wire(agent, ctx):
+    api_messages, _ = build_api_messages(
+        agent, ctx.messages, current_turn_user_idx=ctx.current_turn_user_idx, ext_prefetch_cache="",
+        plugin_user_context="", moa_config=None, active_system_prompt="SYSTEM")
+    return api_messages[-1]["content"]
+
+
+def test_the_sidecar_keeps_the_stored_note_and_the_request_sends_the_wire_note():
+    agent = _Agent()
+    stage_turn_sender(agent, NOTE, "oidc:sam", WIRE)
+    ctx = _prologue(agent, "hello")
+    stored = ctx.messages[ctx.current_turn_user_idx]["api_content"]
+    assert stored == "hello\n\n" + NOTE and "sam@example.org" not in stored
+    assert _wire(agent, ctx) == "hello\n\n" + WIRE
+    assert _wire(agent, ctx) == "hello\n\n" + WIRE  # every pass of the turn sends the same bytes
+    assert ctx.messages[ctx.current_turn_user_idx]["api_content"] == stored
+
+
+def test_a_multimodal_turn_sends_the_wire_note_on_the_request_copy_only():
+    agent = _Agent()
+    stage_turn_sender(agent, NOTE, "oidc:sam", WIRE)
+    ctx = _prologue(agent, [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": "u"}}])
+    assert _wire(agent, ctx)[-1] == {"type": "text", "text": WIRE}
+    assert "sam@example.org" not in repr(ctx.messages)
+
+
+def test_a_wire_note_without_a_stored_note_is_ignored_and_never_outlives_its_turn():
+    agent = _Agent()
+    stage_turn_sender(agent, "", "oidc:sam", WIRE)
+    ctx = _prologue(agent, "hello")
+    assert "sam@example.org" not in repr(ctx.messages) and agent._turn_wire_note == ""
+    stage_turn_sender(agent, NOTE, "oidc:sam", WIRE)
+    _prologue(agent, "first")
+    stage_turn_sender(agent, NOTE, "oidc:sam")  # the next turn stages no wire copy
+    ctx = _prologue(agent, "second")
+    assert agent._turn_wire_note == "" and "sam@example.org" not in repr(_wire(agent, ctx))
+
+
+@pytest.mark.parametrize("mode", [{"api_mode": "codex_app_server"}, {"provider": "moa"}])
+def test_modes_without_a_sidecar_get_no_wire_note_either(mode):
+    agent = _Agent(**mode)
+    stage_turn_sender(agent, NOTE, "oidc:sam", WIRE)
+    _prologue(agent, "hello")
+    assert agent._turn_final_note == "" and agent._turn_wire_note == ""
+
+
+def test_recorders_get_the_stored_note():
+    """A request dump and the ``pre_api_request`` hook record the request: they get the stored note."""
+    agent = _Agent(_turn_final_note=NOTE, _turn_wire_note=WIRE)
+    body = {"messages": [{"role": "user", "content": "hi\n\n" + WIRE},
+                         {"role": "user", "content": [{"type": "text", "text": WIRE}]}], "model": "m"}
+    scrubbed = scrub_wire_note(body, agent)
+    assert "sam@example.org" not in repr(scrubbed) and scrubbed["messages"][0]["content"] == "hi\n\n" + NOTE
+    assert "sam@example.org" in repr(body)  # the request itself is untouched
+    assert scrub_wire_note(body, _Agent(_turn_final_note=NOTE, _turn_wire_note="")) is body

@@ -1397,6 +1397,9 @@ def dump_api_request_debug(
     """Dump the request body from api_kwargs (minus transport keys) for debugging provider 4xx failures."""
     try:
         body = {k: v for k, v in copy.deepcopy(api_kwargs).items() if v is not None and k != "timeout"}
+        # A dump records the request; the person's profile in this turn's note is sent, never kept.
+        from agent.turn_sender import scrub_wire_note
+        body = scrub_wire_note(body, agent)
         api_key = None
         # anthropic_messages keeps its SDK client on ``_anthropic_client`` (``client`` is None):
         # read the key from there so the dump does not say "Bearer None" (#24293).

@@ -33,8 +33,9 @@ def session_context_engaged() -> bool:
 # * CRON_SESSION: tri-state — _UNSET = legacy env fallback; "1" = cron; "" = non-cron, masks env.
 # * USER_EMAIL / USER_LOCALE / USER_TIMEZONE / USER_GROUPS: the signed-in person's profile as their
 #   identity provider asserted it (``agent/person_profile.py``), bound beside USER_ID / USER_NAME by the
-#   dashboard gateway only for a turn a signed-in connection submitted; "" everywhere else. GROUPS is
-#   comma-separated. Each value is one cleaned line.
+#   dashboard gateway only for a turn a signed-in connection submitted; "" everywhere else. GROUPS is a
+#   JSON array string (``["admin"]``) so a comma inside a group name stays unambiguous. Each value is
+#   one cleaned line.
 _SESSION_VARS = (
     _SESSION_PLATFORM, _SESSION_SOURCE, _SESSION_CHAT_ID, _SESSION_CHAT_TYPE,
     _SESSION_CHAT_NAME, _SESSION_THREAD_ID, _SESSION_USER_ID, _SESSION_USER_ID_ALT,

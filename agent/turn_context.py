@@ -32,7 +32,10 @@ from agent.model_metadata import estimate_messages_tokens_rough, estimate_reques
 from agent.image_token_cost import bind_image_token_cost
 from agent.usage_anchor import anchored_context_tokens, restore_usage_anchor
 from agent.turn_author import parse_turn_author
-from agent.turn_sender import relabel_note_lookalikes, relabel_text_parts, take_turn_sender_note
+from agent.turn_sender import (
+    relabel_note_lookalikes, relabel_text_parts, take_turn_sender_note, take_turn_sender_wire_note, wire_turn_note,
+    with_wire_note,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1145,10 +1148,15 @@ def build_turn_context(
     # Who the turn is for goes LAST and on the wire only (agent/turn_sender.py). MoA and
     # codex_app_server never stamp the sidecar, so the note could not be replayed and would break
     # the cached prefix on every later request; those modes get none (as the surface-switch note).
+    # ``final_note`` is the STORED copy (the sidecar keeps it, later requests replay it): name only.
+    # ``_turn_wire_note`` carries the person's profile and only ever replaces it in this turn's request
+    # copy (``build_api_messages``), so the profile is never persisted or replayed to anyone.
     final_note = take_turn_sender_note(agent)
+    wire_note = take_turn_sender_wire_note(agent)
     if moa_active or getattr(agent, "provider", None) == "moa" or getattr(agent, "api_mode", None) == "codex_app_server":
-        final_note = ""
+        final_note = wire_note = ""
     agent._turn_final_note = final_note
+    agent._turn_wire_note = wire_note if final_note else ""
 
     _bind_interrupt_scope(agent, ra)
     ext_prefetch_cache = _memory_turn_start_and_prefetch(agent, original_user_message, turn_author)
@@ -1270,11 +1278,14 @@ def build_api_messages(
         # Inject ephemeral context (memory prefetch + pre_llm_call user hooks)
         # at API time only; `messages` is untouched beyond the api_content stamp.
         if msg is current_turn_message and msg.get("role") == "user":
-            _final_note = getattr(agent, "_turn_final_note", "") or ""
+            # The wire copy of the note (with the person's profile) when there is one: request-only,
+            # never the stored sidecar (agent/turn_sender.py).
+            _final_note = wire_turn_note(agent)
             if isinstance(_api_content, str) and _api_content:
                 # Reuse the prologue's stamp so sidecar and wire cannot drift
-                # and every pass this turn sends identical bytes.
-                api_msg["content"] = _api_content
+                # and every pass this turn sends identical bytes; only its trailing note is swapped
+                # for the wire copy.
+                api_msg["content"] = with_wire_note(_api_content, agent)
             elif isinstance(api_msg.get("content"), list):
                 # Multimodal: the turn note is a trailing part of the request copy only, never of
                 # the live list (which is what the row, the title and every backfill read).

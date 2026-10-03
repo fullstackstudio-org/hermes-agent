@@ -2224,7 +2224,7 @@ updates:
 #     self_hosted:
 #       issuer: "https://auth.example.com/application/o/hermes/"  # required
 #       client_id: "hermes-dashboard"                             # required
-#       scopes: "openid profile email"                            # optional; unset = these + "groups" when the IDP advertises it
+#       scopes: "openid profile email"                            # optional; add groups / phone / address to pass them to the agent
 #
 #       # OPTIONAL — set ONLY if your IDP registered the client as
 #       # *confidential* (Authentik / Keycloak often default to this). When

@@ -5,7 +5,10 @@ the rest of what the same verified ID token says about that person (email, job t
 time zone, ...). It travels as ONE object with the login it belongs to, from the token to the turn:
 
     ID token -> Session.profile -> WS ticket / PTY credential -> auth_identity["profile"]
-             -> AuthUser(login, name, profile) -> the turn's sender note and HERMES_SESSION_USER_*
+             -> AuthUser(login, name, profile) -> the turn's WIRE note and HERMES_SESSION_USER_*
+
+The wire note is sent with that turn's request only; the stored note the sidecar keeps (and every later
+request replays, to whoever speaks next) names the person and nothing else (``agent/turn_sender.py``).
 
 Every value is untrusted text. :func:`coerce_profile` is the one gate: it keeps only the allowlisted
 keys, runs each string through ``clean_value`` (NFKC, no control / bidi / zero-width / line-separator
@@ -19,6 +22,7 @@ A leaf module, stdlib only, so the auth layer, the gateway and the agent can all
 
 from __future__ import annotations
 
+import json
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -158,11 +162,12 @@ def profile_note_sentence(profile: Mapping[str, Any], *, shown_name: str = "") -
 
 def profile_env(profile: Mapping[str, Any]) -> dict[str, str]:
     """The profile fields tools receive as ``HERMES_SESSION_USER_*``; every value one clean line, ""
-    when absent (so a binding always clears what an earlier turn set)."""
+    when absent (so a binding always clears what an earlier turn set). ``user_groups`` is a JSON array
+    string (``["admin", "sales, north"]``), so a comma inside a group name stays unambiguous."""
     profile = coerce_profile(profile)
     return {
         "user_email": str(profile.get("email") or ""),
         "user_locale": str(profile.get("locale") or ""),
         "user_timezone": str(profile.get("zoneinfo") or ""),
-        "user_groups": ",".join(profile.get(GROUPS_KEY) or ()),
+        "user_groups": json.dumps(profile[GROUPS_KEY], ensure_ascii=False) if profile.get(GROUPS_KEY) else "",
     }

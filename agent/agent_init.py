@@ -651,7 +651,10 @@ _STREAM_STATE: Dict[str, Any] = {
     # Who the turn is for (agent/turn_sender.py): staged by a gateway, the note's wire-only copy for
     # this turn, and the person a steer or redirect is compared against. None = not attributed.
     "_turn_sender_note": "",
+    "_turn_sender_wire_note": "",
     "_turn_final_note": "",
+    # The current-request-only copy of the note with the person's profile; never stored or replayed.
+    "_turn_wire_note": "",
     "_turn_person_id": None,
     # Image-to-text fallbacks cached per payload/URL so one tool loop doesn't re-run vision.
     "_anthropic_image_fallback_cache": dict,

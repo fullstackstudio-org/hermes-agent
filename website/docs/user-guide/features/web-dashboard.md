@@ -891,7 +891,7 @@ dashboard:
     self_hosted:
       issuer: https://auth.example.com/application/o/hermes/   # required
       client_id: hermes-dashboard                              # required
-      scopes: "openid profile email"                           # optional (default: these, plus groups when advertised)
+      scopes: "openid profile email"                           # optional (this is the default)
 ```
 
 **Environment variables** — operator overrides (env wins over `config.yaml` when set non-empty; an empty value is treated as unset):
@@ -900,7 +900,7 @@ dashboard:
 |---------|-----------|-------|
 | `HERMES_DASHBOARD_OIDC_ISSUER` | `dashboard.oauth.self_hosted.issuer` | OIDC issuer URL — required |
 | `HERMES_DASHBOARD_OIDC_CLIENT_ID` | `dashboard.oauth.self_hosted.client_id` | Public client id — required |
-| `HERMES_DASHBOARD_OIDC_SCOPES` | `dashboard.oauth.self_hosted.scopes` | Defaults to `openid profile email`, plus `groups` when the IdP lists it in `scopes_supported`. A configured value is sent as written; add `phone` / `address` here to pass a verified phone number or address to the agent |
+| `HERMES_DASHBOARD_OIDC_SCOPES` | `dashboard.oauth.self_hosted.scopes` | Defaults to `openid profile email`. Add `groups`, `phone` or `address` (for example `openid profile email groups`) to pass the person's groups, verified phone number or address to the agent each turn; the client must be allowed those scopes at the identity provider. A refresh keeps the scope the person signed in with, so a newly added scope applies from their next sign-in |
 
 In your IDP, register a **public** application/client with the authorization-code + PKCE (S256) grant and add the dashboard's callback as an allowed redirect URI. The callback is `<dashboard public URL>/auth/callback` (see [Public URL override](#public-url-override) for how the dashboard derives its public URL behind a proxy).
 

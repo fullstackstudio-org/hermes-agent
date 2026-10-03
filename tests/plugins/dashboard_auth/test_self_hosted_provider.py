@@ -809,47 +809,40 @@ class TestSessionProfile:
 
 
 class TestDefaultScopes:
-    """``groups`` is asked for by default only when the IDP advertises it; ``phone`` / ``address`` never
-    by default (they can put a consent screen in front of every login); configured scopes are sent as
-    written."""
+    """The default stays ``openid profile email`` whatever discovery advertises (``scopes_supported`` is
+    what the IDP knows, not what this client may ask for); ``groups`` / ``phone`` / ``address`` come only
+    from configuration. A refresh never asks for more than the grant it renews."""
 
     def _scope(self, provider) -> str:
         url = provider.start_login(redirect_uri="https://hermes.example/auth/callback").redirect_url
         return dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query))["scope"]
 
-    def test_advertised_groups_is_added(self, rsa_keypair):
+    def test_advertised_scopes_are_not_added(self, rsa_keypair):
         provider = _make_provider(rsa_keypair)
         provider._discovery["scopes_supported"] = [
             "openid", "profile", "email", "phone", "address", "groups", "offline_access"]
-        assert self._scope(provider) == "openid profile email groups"
-
-    def test_not_advertised_means_not_asked(self, rsa_keypair):
-        provider = _make_provider(rsa_keypair)
-        provider._discovery["scopes_supported"] = ["openid", "profile", "email"]
         assert self._scope(provider) == "openid profile email"
 
-    def test_configured_scopes_are_authoritative(self, rsa_keypair):
-        provider = _make_provider(rsa_keypair, scopes="openid  profile phone address")
-        provider._discovery["scopes_supported"] = ["openid", "profile", "groups", "phone", "address"]
-        assert self._scope(provider) == "openid profile phone address"
+    def test_configured_scopes_are_sent_as_written(self, rsa_keypair):
+        provider = _make_provider(rsa_keypair, scopes="openid  profile email groups")
+        assert self._scope(provider) == "openid profile email groups"
 
-    def test_refresh_asks_for_the_same_scopes(self, rsa_keypair):
-        provider = _make_provider(rsa_keypair)
-        provider._discovery["scopes_supported"] = ["groups"]
-        data, _headers = provider._refresh_request("rt")
-        assert data["scope"] == "openid profile email groups"
-
-    def test_discovery_keeps_scopes_supported(self, rsa_keypair):
-        provider = _make_provider(rsa_keypair)
-        doc = {**_DISCOVERY_DOC, "scopes_supported": ["openid", "groups", 7]}
-        resp = MagicMock(spec=httpx.Response)
-        resp.status_code = 200
-        resp.url = f"{_ISSUER}/.well-known/openid-configuration"
-        resp.headers = {"content-type": "application/json"}
-        resp.text = json.dumps(doc)
-        resp.json = MagicMock(return_value=doc)
-        with patch("plugins.dashboard_auth.self_hosted.httpx.get", return_value=resp):
-            assert provider._fetch_discovery()["scopes_supported"] == ["openid", "groups", "7"]
+    def test_refresh_never_widens_the_grant(self, rsa_keypair):
+        """A person signed in before the operator added ``groups``: their refresh token stands for a grant
+        without it, so the refresh must not ask for it (an IDP answers ``invalid_scope`` and logs them out).
+        The refresh omits ``scope``, which RFC 6749 §6 reads as the scope originally granted."""
+        before = _make_provider(rsa_keypair)
+        after = _make_provider(rsa_keypair, scopes="openid profile email groups")
+        id_token = _mint_id_token(rsa_keypair)
+        for provider in (before, after):
+            data, _headers = provider._refresh_request("rt_granted_without_groups")
+            assert "scope" not in data and data["grant_type"] == "refresh_token"
+            with patch("plugins.dashboard_auth.self_hosted.httpx.post", return_value=_mock_post(
+                    200, {"id_token": id_token, "refresh_token": "rt_rotated", "scope": "openid profile email"})
+                    ) as post:
+                session = provider.refresh_session(refresh_token="rt_granted_without_groups")
+            assert "scope" not in post.call_args.kwargs["data"]
+            assert session.user_id == "usr_abc" and session.refresh_token == "rt_rotated"
 
 
 # ---------------------------------------------------------------------------
@@ -905,8 +898,7 @@ class TestPluginRegister:
         assert isinstance(registered, oidc_plugin.SelfHostedOIDCProvider)
         assert registered._issuer == _ISSUER
         assert registered._client_id == _CLIENT_ID
-        # Unconfigured: the default set plus the optional scopes the IDP advertises, decided at login.
-        assert registered._configured_scopes == ""
+        assert registered._scopes == "openid profile email"
         assert oidc_plugin.LAST_SKIP_REASON == ""
 
 

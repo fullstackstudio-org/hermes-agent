@@ -11,6 +11,9 @@ says that nobody signed in sent it, names what did, and names the chat's owner o
 authority tools act under, because that is what the tool variables will say. A ``/goal``
 continuation says nobody typed it. A turn on a gateway that attributes nothing gets no note.
 
+The person's profile (``agent/person_profile.py``) is never part of the stored note: :func:`turn_notes`
+returns it as a separate wire copy that only the current request sends.
+
 A leaf module, like ``row_author``: the turn helpers are re-bound against ``server.py``'s globals,
 so callers import from here inside the function that needs it.
 """
@@ -65,9 +68,31 @@ def _writers(contributors) -> str:
     return ", ".join(shown[:-1]) + (" and " if len(shown) > 1 else "") + shown[-1] if shown else ""
 
 
-def turn_sender(scope, *, origin: str = "", record_login=None, display_metadata: dict | None = None,
-                turn_author: dict | None = None, contributors=()) -> tuple[str, str | None]:
-    """``(note, person id)`` for one turn.
+def _with_profile(sentence: str, scope, name: str, login) -> tuple[str, str | None, str]:
+    """``(stored note, person id, wire note)`` for a turn told the person's profile.
+
+    The stored note names the person only -- it is what the sidecar keeps and every later request
+    replays, to whoever speaks next. The wire note adds the profile and is sent with this turn's request
+    alone (``agent/turn_sender.py``); it is "" when the pair carries no profile."""
+    stored = _note(sentence)
+    profile = profile_note_sentence(profile_of(scope), shown_name=name)
+    return stored, login, (_note(sentence, profile, data=PROFILE_DATA_SENTENCE) if profile else "")
+
+
+def turn_sender(scope, **kwargs) -> tuple[str, str | None]:
+    """``(note, person id)`` for one turn -- the stored note; see :func:`turn_notes` for the wire copy."""
+    note, person, _wire = turn_notes(scope, **kwargs)
+    return note, person
+
+
+def turn_notes(scope, *, origin: str = "", record_login=None, display_metadata: dict | None = None,
+               turn_author: dict | None = None, contributors=()) -> tuple[str, str | None, str]:
+    """``(note, person id, wire note)`` for one turn, in ``stage_turn_sender``'s argument order.
+
+    ``note`` is the stored, replayed copy and never carries a profile. ``wire note`` is the same note with
+    the person's profile, for this turn's request only, and exists only for a turn that person sent alone
+    after signing in, or a ``/goal`` continuation of their own work (the tool variables name them there
+    too); "" for every other turn.
 
     ``scope`` is ``_acting_auth_user(session)``: who the turn works for, which for a turn nobody signed
     in submitted is the fallback the tool variables bind. ``record_login`` is the login the session record
@@ -85,33 +110,32 @@ def turn_sender(scope, *, origin: str = "", record_login=None, display_metadata:
     written = person_label(*writer) if writer is not None else ""
     if origin == "unsigned":
         if not gated:
-            return "", None
+            return "", None, ""
         if written:  # a /retry pressed on a connection without a login: the words stay their writer's
             return _note(f"Its words are {written}'s; someone on a connection that is not signed in asked "
-                         "for it to run again.", tools), ""
+                         "for it to run again.", tools), "", ""
         return _note("Someone typed this turn from a connection that is not signed in; the gateway cannot "
-                     "name them.", tools), ""
+                     "name them.", tools), "", ""
     if origin == "several" and (writers := _writers(contributors)):
         return _note(f"Several people wrote this turn together: {writers}; the gateway cannot credit its "
-                     "words to one of them.", tools), ""
+                     "words to one of them.", tools), "", ""
     if origin in ("unattributed", "several"):
         if not (gated or turn_author):
-            return "", None
-        return _note("No signed-in person sent this turn.", _origin(turn_author), tools), ""
+            return "", None, ""
+        return _note("No signed-in person sent this turn.", _origin(turn_author), tools), "", ""
     if not label:
-        return "", None
+        return "", None, ""
+    # The profile rides on the very pair the label came from (``AuthUser``), so it can only ever be this
+    # person's. It is told for their own turn and for the ``/goal`` continuation of their own work (whose
+    # pair is the same submitter's); never for an unsigned, several-writer, gateway-started or replayed
+    # turn, and never in the stored note.
     if origin == "continuation":
-        return _note(f"Nobody typed this turn; the gateway started it to continue work for {label}."), login
+        return _with_profile(
+            f"Nobody typed this turn; the gateway started it to continue work for {label}.", scope, name, login)
     if "replayed_by" not in metadata and (writer is None or writer[0] == login):
-        # The one turn that carries the person's profile: they signed in, they alone sent it, and the profile
-        # rides on the very pair the label came from (``AuthUser``), so it can only ever be theirs. Every
-        # other kind of turn -- unsigned, several writers, gateway-started, a continuation, a replay -- says
-        # who it is for by name only.
-        profile = profile_note_sentence(profile_of(scope), shown_name=name)
-        return _note(f"In this turn you are working for {label}, who sent this message; "
-                     "the gateway verified this sign-in.", profile,
-                     data=PROFILE_DATA_SENTENCE if profile else NOTE_DATA_SENTENCE), login
+        return _with_profile(f"In this turn you are working for {label}, who sent this message; "
+                             "the gateway verified this sign-in.", scope, name, login)
     words = (f"Its words, including 'I' and 'me', are {written}'s; you act for {label}." if written
              else f"Its words were written by someone the gateway cannot name; you act for {label}.")
     return _note(f"In this turn you are working for {label}, who asked for this message to run again; "
-                 "the gateway verified this sign-in.", words), login
+                 "the gateway verified this sign-in.", words), login, ""

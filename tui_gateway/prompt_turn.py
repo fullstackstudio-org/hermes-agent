@@ -731,8 +731,8 @@ def _invoke_agent(
     # as the last block of the turn's user message, on the wire only. Staged every turn, "" included, so
     # nothing staged for a turn that died before its prologue reaches the next person's turn.
     from agent.turn_sender import stage_turn_sender
-    from tui_gateway.turn_sender_note import turn_sender
-    stage_turn_sender(agent, *turn_sender(
+    from tui_gateway.turn_sender_note import turn_notes
+    stage_turn_sender(agent, *turn_notes(
         _acting_auth_user(session), origin=origin, record_login=_session_auth_user_id(session),
         display_metadata=display_metadata, turn_author=turn_author, contributors=contributors))
     # Live-rename hook: auto-titling fires inside the turn prologue.

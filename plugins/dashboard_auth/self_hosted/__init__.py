@@ -41,13 +41,12 @@ logger = logging.getLogger(__name__)
 _TAG = "dashboard-auth-self-hosted"
 
 # ``openid`` is mandatory (no ID token without it); profile/email populate display_name/email.
+# ``groups``, ``phone`` and ``address`` (more of the person's profile for the turn note) are asked for
+# only when an operator configures them: discovery's ``scopes_supported`` lists what the IDP knows,
+# not what this client is registered for, and an IDP rejects an unregistered scope (fosite-style
+# servers advertise ``groups`` globally and answer ``invalid_scope``) or puts a consent screen in front
+# of every login (phone, address).
 _DEFAULT_SCOPES = "openid profile email"
-# Added to the default scopes only when the IDP's discovery document lists them in ``scopes_supported``,
-# so a provider that does not know them is never sent one (some answer an unknown scope with
-# ``invalid_scope``). ``groups`` gives the person's groups to the turn note. ``phone`` and ``address``
-# are deliberately absent: an IDP may put a consent screen in front of every login for them, so they
-# are asked for only when an operator configures the scopes explicitly.
-_OPTIONAL_DEFAULT_SCOPES = ("groups",)
 
 # RS256 is the OIDC default; ES256 is common on modern IDPs (Zitadel, newer Keycloak).
 # HS256 is deliberately excluded: it implies a shared secret we don't hold in the
@@ -86,7 +85,7 @@ class SelfHostedOIDCProvider(JwtOAuthProvider):
     name = "self-hosted"
     display_name = "Self-Hosted OIDC"
 
-    def __init__(self, *, issuer: str, client_id: str, scopes: str = "", client_secret: str = "") -> None:
+    def __init__(self, *, issuer: str, client_id: str, scopes: str = _DEFAULT_SCOPES, client_secret: str = "") -> None:
         if not issuer:
             raise ValueError("issuer is required")
         if not client_id:
@@ -96,9 +95,7 @@ class SelfHostedOIDCProvider(JwtOAuthProvider):
         self._issuer = issuer.rstrip("/")
         _require_https_or_loopback(self._issuer, field="issuer")
         self._client_id = client_id
-        # Configured scopes are authoritative and sent as written. Unconfigured means the default set
-        # plus the optional ones the IDP advertises (``_scopes_for``).
-        self._configured_scopes = " ".join(scopes.split())
+        self._scopes = " ".join(scopes.split()) or _DEFAULT_SCOPES
         # Empty/whitespace secret ⇒ public client, so a provisioned-but-blank secret
         # can't flip us into a broken confidential mode.
         self._client_secret = (client_secret or "").strip()
@@ -114,16 +111,7 @@ class SelfHostedOIDCProvider(JwtOAuthProvider):
         validate_redirect_uri(redirect_uri)
         disco = self._get_discovery()
         return pkce_login_start(
-            disco["authorization_endpoint"], client_id=self._client_id, scope=self._scopes_for(disco),
-            redirect_uri=redirect_uri)
-
-    def _scopes_for(self, disco: Dict[str, Any]) -> str:
-        """The scopes to ask for: the configured ones as written, else the default set plus the optional
-        scopes ``disco`` advertises."""
-        if self._configured_scopes:
-            return self._configured_scopes
-        supported = set(disco.get("scopes_supported") or ())
-        return " ".join([_DEFAULT_SCOPES, *(s for s in _OPTIONAL_DEFAULT_SCOPES if s in supported)])
+            disco["authorization_endpoint"], client_id=self._client_id, scope=self._scopes, redirect_uri=redirect_uri)
 
     def revoke_session(self, *, refresh_token: str) -> None:
         # Best-effort RFC 7009 revocation when the IDP advertises an endpoint.
@@ -164,11 +152,13 @@ class SelfHostedOIDCProvider(JwtOAuthProvider):
         return {}, {"Authorization": f"Basic {base64.b64encode(userpass.encode('utf-8')).decode('ascii')}"}
 
     def _refresh_request(self, refresh_token: str) -> tuple[Dict[str, str], Optional[Dict[str, str]]]:
-        # Re-request the same scopes so the rotated ID token keeps its identity claims
-        # (some IDPs narrow scope on refresh otherwise).
+        # No ``scope``: RFC 6749 §6 treats an omitted scope as the scope originally granted, which is
+        # exactly what the refresh token stands for. Sending the configured scopes instead would ask to
+        # WIDEN the grant whenever an operator adds a scope after the person signed in, and an IDP
+        # rejects that refresh (``invalid_scope``) and logs them out; the gateway keeps no per-session
+        # state in which the granted scope could be remembered.
         return (
-            {"grant_type": "refresh_token", "client_id": self._client_id, "refresh_token": refresh_token,
-             "scope": self._scopes_for(self._get_discovery())},
+            {"grant_type": "refresh_token", "client_id": self._client_id, "refresh_token": refresh_token},
             None)
 
     def _grant(
@@ -253,14 +243,12 @@ class SelfHostedOIDCProvider(JwtOAuthProvider):
             _require_https_or_loopback(url, field=key)
         # Absent/garbage auth-methods → [] → OIDC default (basic) applies.
         auth_methods_raw = payload.get("token_endpoint_auth_methods_supported")
-        scopes_raw = payload.get("scopes_supported")
         return {
             "issuer": advertised_issuer or self._issuer,
             **endpoints,
             "revocation_endpoint": field("revocation_endpoint"),
             "token_endpoint_auth_methods_supported": (
-                [str(m) for m in auth_methods_raw] if isinstance(auth_methods_raw, list) else []),
-            "scopes_supported": [str(m) for m in scopes_raw] if isinstance(scopes_raw, list) else []}
+                [str(m) for m in auth_methods_raw] if isinstance(auth_methods_raw, list) else [])}
 
     # ---- JwtOAuthProvider hooks: verification + mapping -------------------
 
@@ -337,8 +325,8 @@ def _settings() -> dict:
             % (bool(issuer), bool(client_id)))
     return {
         "issuer": issuer, "client_id": client_id,
-        # Empty = the default set plus what the IDP advertises of ``_OPTIONAL_DEFAULT_SCOPES``.
-        "scopes": setting("HERMES_DASHBOARD_OIDC_SCOPES", "scopes"),
+        # Add ``groups`` (and ``phone`` / ``address``) here to give them to the turn note.
+        "scopes": setting("HERMES_DASHBOARD_OIDC_SCOPES", "scopes") or _DEFAULT_SCOPES,
         # Credential: canonical home is the env var / ~/.hermes/.env. Empty ⇒ public client.
         "client_secret": setting("HERMES_DASHBOARD_OIDC_CLIENT_SECRET", "client_secret")}
 
@@ -351,8 +339,7 @@ def register(ctx) -> None:
     if kw is not None:
         logger.info(
             "dashboard-auth-self-hosted: registered provider (issuer=%s, client_id=%s, scopes=%r, confidential=%s)",
-            kw["issuer"], kw["client_id"], kw["scopes"] or f"{_DEFAULT_SCOPES} (+ advertised: {', '.join(_OPTIONAL_DEFAULT_SCOPES)})",
-            bool(kw["client_secret"]))  # never log the secret itself
+            kw["issuer"], kw["client_id"], kw["scopes"], bool(kw["client_secret"]))  # never log the secret itself
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

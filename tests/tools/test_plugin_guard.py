@@ -8,10 +8,12 @@ content (credential-store exfiltration, reverse shells, prompt injection
 in docs) is flagged or blocked.
 """
 
+import random
 from pathlib import Path
 
 import pytest
 
+from tools.plugin_guard_context import JsLexError, JsSinkInventory, lex_js
 from tools.plugin_guard import (
     scan_plugin,
     should_allow_plugin_install,
@@ -671,33 +673,51 @@ class TestIntakeFalsePositiveClasses:
 class TestMinifiedBundleSudoData:
     """A built web client relays Hermes' own ``sudo`` server request (the masked sudo-password
     prompt): its minified bundle names the method as an object key and compares it in a
-    ``switch``. Minified lines are kilobytes long and carry template literals and ``.call(``, so
-    the whole-line "executes nothing" test never held there and every such bundle scored
-    ``caution``. In JS the context is judged where the token sits: a whole ``"sudo"`` string or a
-    ``sudo:`` key that nothing on the line hands to a process, a module load or a command slot is
-    data (a note). Every way of running or loading ``sudo`` keeps ``high``."""
+    ``switch``. Lines are kilobytes long, carry template literals and ``.call(``, and often begin
+    inside a template a previous line opened, so the per-line tests never held and every such
+    bundle scored ``caution``. ``.js`` files are now lexed whole and a ``sudo`` token is judged by
+    its own context: a key, a comparison or a plain property value that nothing hands on, in a
+    plugin whose JavaScript cannot run anything, is ``low`` (still reported). Every way of
+    running, loading, building or smuggling ``sudo`` keeps ``high``."""
 
+    BUNDLE = "dashboard/app/assets/index-abc123.js"
     # Noise a minified line always carries: a template literal and a `.call(`.
     NOISE = "const lm=t=>`not supported by this client: ${t}`;fn.call(this,lm);"
 
-    def _sev(self, tmp_path, lines):
+    def _scan(self, tmp_path, lines=None, extra=None, raw=None):
         files = dict(BASE_FILES)
-        files["dashboard/app/assets/index-abc123.js"] = "".join(f"{self.NOISE}{line}\n" for line in lines)
+        files[self.BUNDLE] = raw if raw is not None else "".join(f"{self.NOISE}{line}\n" for line in lines)
+        files.update(extra or {})
         result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
-        sev = {f.line: f.severity for f in result.findings if f.pattern_id == "sudo_usage"}
+        sev = {f.line: f.severity for f in result.findings if f.pattern_id == "sudo_usage" and f.file == self.BUNDLE}
         return sev, result
 
-    def test_protocol_names_in_a_minified_bundle_are_notes(self, tmp_path):
-        sev, result = self._sev(tmp_path, [
+    # ── data: low ──────────────────────────────────────────────────────────────────────────
+
+    def test_protocol_names_in_a_minified_bundle_are_low(self, tmp_path):
+        sev, result = self._scan(tmp_path, [
             'const dm=Object.freeze({secret:"secret",sudo:"sudo","vault.code":"vault_code"}),'
             'pm=Object.freeze({secret:3e5,sudo:12e4});',
             'function ask(t,e){switch(t){case"secret":return{kind:"secret"};'
             'case"sudo":return{kind:"sudo",command:P(e.command,fm)}}}',
             'function Te(s){const{ask:t}=s.prompt;if(t.kind!=="sudo")return null;return u.jsx(P,{...s})}',
             "const k={ 'sudo' : 1 };if('sudo'===m)go();",
+            'const v=a.return/2,w={sudo:"sudo"};',                      # `.return /` is a division
         ])
-        assert sev == {1: "medium", 2: "medium", 3: "medium", 4: "medium"}
+        assert sev == {1: "low", 2: "low", 3: "low", 4: "low", 5: "low"}
         assert result.verdict == "safe"
+        assert should_allow_plugin_install(result)[0] is True
+
+    def test_a_line_that_begins_inside_a_multi_line_template(self, tmp_path):
+        """The shape that defeated the per-line rule: the line opens with the tail of a template."""
+        sev, result = self._scan(tmp_path, raw=(
+            'const a=`first ${b+`inner\n'
+            '`} line`;const dm={sudo:"sudo"};const r=/["`]/g;if(x)/^s/.test(y);\n'
+            'const s="it\'s";/* "` */switch(k){case"sudo":break}\n'))
+        assert sev == {2: "low", 3: "low"}
+        assert result.verdict == "safe"
+
+    # ── true positives: high ───────────────────────────────────────────────────────────────
 
     @pytest.mark.parametrize("line", [
         'require("child_process").execSync(`sudo ${cmd}`);',      # a shell string
@@ -710,26 +730,69 @@ class TestMinifiedBundleSudoData:
         'const s=require("sudo");',                              # the `sudo` npm package
         'import("sudo").then(m=>m.exec(c));',
         'import x from"sudo";x.exec(c);',
+        'export*from"sudo";',
         'sudo.exec(cmd,{name:"app"},cb);',                       # sudo-prompt's API
         'x.sudo(cmd);',
         "$`sudo rm -rf /`;",                                    # zx runs tagged templates
         "await $`sudo`;",
         'const m={sudo:"sudo"};cp.spawn("sudo",[]);',            # one executed hit taints the line
         'cp.exec(["x",{sudo:true}]);',                           # an option of an exec call
+        # tricky shapes
+        'const c=`sudo ${a}`;w.exec(c);',                        # sudo in a template passed to exec
+        'const t=`${"sudo"}`;',                                  # inside a substitution: never data
+        'const p={sudo:"sudo"};const c=p.sudo+" -n true";cp.spawn(c);',   # built, then spawned
+        '/* {sudo:"sudo"} */const x=eval(y);',                   # in a comment, real exec after it
+        'w.run(x.return/1,{sudo:"sudo"});',                      # `.return /` cannot hide the run(
+        'w.run(()=>{switch(m){case"sudo":go()}});',              # data inside a callback that run( calls
+        '(0,w.exec)({kind:"sudo"});',                            # esbuild's (0,x.y)(…) call
+        'w[k]({kind:"sudo"});',                                  # a computed callee: unsure
+        'f()({kind:"sudo"});',
+        '["approval","sudo"].includes(m);',                      # an array element is not judged
+        'cmd="sudo";',
+        'x={}/1;const k={sudo:"sudo"};w.spawn(k.sudo)/1;',       # `}/` read as a regex hides nothing
+        'const r=/"/;const k={sudo:"sudo"};globalThis["ev"+"al"](k.sudo);',
+        '/*"*/const k={sudo:"sudo"};/*"*/(0,eval)(k.sudo);',
+        'const k={sudo:"sudo"};[]["filter"]["constructor"](k.sudo)();',
+        'const k={sudo:"sudo"};x.constructor.constructor(k.sudo)();',
+        'const k={sudo:"sudo"};setTimeout("go(k.sudo)",1);',
+        'const k={sudo:"sudo"};import(k.sudo);',
+        'const k={sudo:"sudo"};\\u0065val(k.sudo);',             # an identifier escape: unsure
+        "const t=`${`${\"`\"}`}`;const k={sudo:\"sudo\"};new Function(k.sudo)();",
+        'const k={sudo:"sudo"};Bun.$`${k.sudo}`;',
+        'const k={sudo:"sudo"};process.binding("spawn_sync").spawn(k);',
     ])
-    def test_running_or_loading_sudo_keeps_high(self, tmp_path, line):
-        sev, result = self._sev(tmp_path, [line])
+    def test_running_loading_or_smuggling_sudo_keeps_high(self, tmp_path, line):
+        sev, result = self._scan(tmp_path, [line])
         assert sev == {1: "high"}, line
         assert result.verdict != "safe"
 
-    @pytest.mark.xfail(strict=True, reason="literals are lexed per line: a line that begins inside a "
-                       "multi-line template literal pairs the wrong backticks (what a real bundle does)")
-    def test_line_that_begins_inside_a_template(self, tmp_path):
-        files = dict(BASE_FILES)
-        files["dashboard/app/assets/index-abc123.js"] = 'const a=`first\n`;const dm={sudo:"sudo"};const b=`x`;\n'
-        result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
-        sev = {f.line: f.severity for f in result.findings if f.pattern_id == "sudo_usage"}
-        assert sev == {2: "medium"}
+    def test_a_sink_on_another_line_keeps_high(self, tmp_path):
+        sev, _ = self._scan(tmp_path, ['const m={kind:"sudo"};', 'require("child_process").spawn(m.kind,["-n"]);'])
+        assert sev == {1: "high"}
+
+    @pytest.mark.parametrize("path, content", [
+        ("dashboard/app/assets/run.js", 'import{spawn}from"node:child_process";import{m}from"./index-abc123.js";spawn(m.sudo);\n'),
+        ("dashboard/src/run.ts", "import { m } from './index'\nexport const go = () => \\u0065val(m.sudo)\n"),
+        ("dashboard/src/Run.tsx", "export const Run = () => <b onClick={() => w.spawn(m.sudo)}>run</b>\n"),
+        ("dashboard/app/index.html", '<script>fetch("x").then(r=>r.text()).then(eval)</script>\n'),
+        ("dashboard/app/assets/broken.js", "const s = `never closed\n"),
+    ])
+    def test_a_sink_or_a_doubt_in_another_file_keeps_high(self, tmp_path, path, content):
+        sev, result = self._scan(tmp_path, ['const m={sudo:"sudo"};'], extra={path: content})
+        assert sev == {1: "high"}, path
+        assert result.verdict != "safe"
+
+    @pytest.mark.parametrize("raw", [
+        'const k={sudo:"sudo"};const t=`never closed\n',           # unterminated template
+        'const k={sudo:"sudo"};const s="never closed\n',           # newline in a string
+        'const k={sudo:"sudo"};const r=/never closed\n',           # unterminated regex
+        'const k={sudo:"sudo"};/* never closed\n',                 # unterminated comment
+        'const k={sudo:"sudo"};f(]);\n',                           # unbalanced brackets
+        'const k={sudo:"sudo"};{\n',                               # unclosed block
+    ])
+    def test_a_file_the_lexer_cannot_read_keeps_the_line_rules(self, tmp_path, raw):
+        sev, _ = self._scan(tmp_path, raw=raw)
+        assert sev == {1: "high"}
 
     def test_python_keeps_the_whole_line_rule(self, tmp_path):
         files = dict(BASE_FILES)
@@ -737,3 +800,195 @@ class TestMinifiedBundleSudoData:
         result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
         sev = {f.file: f.severity for f in result.findings if f.pattern_id == "sudo_usage"}
         assert sev == {"run.py": "high"}
+
+
+class TestJsLexer:
+    """The whole-file lexer behind the JS token rule."""
+
+    def _kinds(self, text):
+        return [(t.kind, t.text) for t in lex_js(text)]
+
+    def test_templates_span_lines_and_nest(self):
+        toks = self._kinds('a=`x\n${b+`y${"}"}z`}\nw`;c')
+        assert ("tpl", "`x\n${") in toks and ("str", '"}"') in toks and ("tpl", "}\nw`") in toks
+        assert toks[-1] == ("id", "c")
+
+    def test_regex_versus_division(self):
+        assert ("re", "/x/g") in self._kinds("f(/x/g)")
+        assert ("re", "/^s/") in self._kinds("if(a)/^s/.test(b)")
+        assert ("re", "/a/") in self._kinds("return/a/")
+        assert ("re", "/a/") in self._kinds("x={};/a/.test(y)")
+        assert ("p", "/") in self._kinds("a.return/2")
+        assert ("p", "/") in self._kinds("f(a)/2")
+        assert ("p", "/") in self._kinds("x=({})/2")
+        assert ("re", '/["`]/') in self._kinds('r=/["`]/')
+        assert ("re", "/[/]/") in self._kinds("r=/[/]/")
+
+    def test_comments_and_strings_hide_nothing_they_do_not_hold(self):
+        toks = self._kinds("a='//'+\"/*\"; // c `\nb=1 /* ' */")
+        assert toks == [("id", "a"), ("p", "="), ("str", "'//'"), ("p", "+"), ("str", '"/*"'), ("p", ";"),
+                        ("id", "b"), ("p", "="), ("num", "1")]
+
+    @pytest.mark.parametrize("text", [
+        "`open", "'open", '"a\nb"', "/open", "/* open", "f(]", "{", "}", "a\\u0062", "`${`", "x=@#",
+        "f(function(){}/a/g)", "x={}/2", "for(x of/a/)y()", "a=yield/2", "a<!--b", "a\n--> b", "/**/--> b",
+    ])
+    def test_errors_instead_of_guesses(self, text):
+        with pytest.raises(JsLexError):
+            lex_js(text)
+
+
+class TestJsLexerKeepsWhatItCanDecide:
+    def test_a_decrement_before_a_comparison_is_code(self):
+        assert [t.text for t in lex_js("for(;n-->0;)go()")][3:6] == ["n", "--", ">"]
+
+
+class TestMinifiedBundleRegexExec:
+    """``exec_string`` (``exec("``, HIGH) reads a script run from a string. A highlighter calls
+    ``RegExp.prototype.exec`` with one (``re.exec("")``). A member ``.exec("…")`` on a regex
+    literal is ``low``; on any other receiver it is ``low`` while no JavaScript in the plugin can
+    run anything (so no receiver can be a ``child_process`` binding). A bare ``exec("…")`` and
+    every receiver in a plugin that loads a process module keep ``high``."""
+
+    BUNDLE = "dashboard/app/assets/Highlight-abc123.js"
+    NOISE = "const lm=t=>`x ${t}`;fn.call(this,lm);"
+
+    def _scan(self, tmp_path, lines, extra=None):
+        files = dict(BASE_FILES)
+        files[self.BUNDLE] = "".join(f"{self.NOISE}{line}\n" for line in lines)
+        files.update(extra or {})
+        result = scan_plugin(_mk_plugin(tmp_path, files), source="owner/repo")
+        sev = {f.line: f.severity for f in result.findings if f.pattern_id == "exec_string" and f.file == self.BUNDLE}
+        return sev, result
+
+    def test_regexp_exec_is_low(self, tmp_path):
+        sev, result = self._scan(tmp_path, [
+            "const re=/a|b/g;re.exec('');",
+            '/x/.exec("a");',
+            'class M{constructor(){this.matcherRe=/y/}exec(s){this.matcherRe.lastIndex=0;return this.matcherRe.exec("")}}',
+            'const n=new RegExp(s+"|").exec("").length-1;',
+            'm[i].exec("");r?.exec("");',
+            'const o={exec(s){return s}};o.exec("x");',
+        ])
+        assert sev == {1: "low", 2: "low", 3: "low", 4: "low", 5: "low", 6: "low"}
+        assert result.verdict == "safe"
+
+    def test_a_regex_literal_receiver_is_low_even_beside_child_process(self, tmp_path):
+        sev, _ = self._scan(tmp_path, ['/x/.exec("a");', 're.exec("a");', 'const cp=require("child_process");'])
+        assert sev == {1: "low", 2: "high"}
+
+    @pytest.mark.parametrize("line", [
+        'import{exec}from"child_process";exec("ls");',            # the imported child_process.exec
+        'const{exec}=require("child_process");exec("rm -rf /");',
+        'const cp=require("node:child_process");cp.exec("ls");',  # a child_process binding
+        'child_process.exec("ls");',
+        'import*as cp from"child_process";cp.exec("ls");',
+        'exec("ls");',                                           # bare: never judged
+        'const x=exec("ls");',
+        "this.exec('ls');",                                      # `this` as receiver, but eval below
+        'x.exec("ls");\u0065val(y);',                           # a lexer doubt
+    ])
+    def test_process_exec_keeps_high(self, tmp_path, line):
+        if line == "this.exec('ls');":
+            line += "eval(y);"
+        sev, result = self._scan(tmp_path, [line])
+        assert sev == {1: "high"}, line
+        assert result.verdict != "safe"
+
+    @pytest.mark.parametrize("path, content", [
+        ("dashboard/app/assets/run.js", 'export{exec}from"node:child_process";\n'),
+        ("dashboard/src/run.ts", "import { exec } from 'child_process'\n"),
+        ("dashboard/app/assets/broken.js", "const s = `never closed\n"),
+    ])
+    def test_a_process_module_or_a_doubt_elsewhere_keeps_high(self, tmp_path, path, content):
+        sev, _ = self._scan(tmp_path, ['re.exec("a");'], extra={path: content})
+        assert sev == {1: "high"}, path
+
+    @pytest.mark.parametrize("line", [
+        'const cp=require("child_process");cp.execSync("ls");',
+        'const cp=require("child_process");cp.execFile("ls",[]);',
+        'const cp=require("child_process");cp.spawn("ls");',
+        'import{execSync as x}from"child_process";x("ls");',
+    ])
+    def test_the_rule_lowers_nothing_in_process_code(self, tmp_path, line, monkeypatch):
+        files = dict(BASE_FILES)
+        files[self.BUNDLE] = line + "\n"
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        new = scan_plugin(_mk_plugin(tmp_path / "a", files), source="owner/repo")
+        monkeypatch.setattr(JsSinkInventory, "js_data", lambda *a, **k: False)
+        old = scan_plugin(_mk_plugin(tmp_path / "b", files), source="owner/repo")
+        assert [(f.pattern_id, f.severity) for f in new.findings] == [(f.pattern_id, f.severity) for f in old.findings]
+
+
+class TestJsTokenRuleFuzz:
+    """Random token streams: the scanner never crashes, the JS rule never raises a severity, and
+    whenever the stream holds anything that runs code it lowers nothing at all."""
+
+    DATA = ['{sudo:"sudo"}', "{sudo:12e4}", 'case"sudo":', 'x!=="sudo"', '{kind:"sudo"}', "'sudo'", "sudo",
+            '"sudo"', "`sudo`", "${", "}", "{", "(", ")", "[", "]", ",", ":", ";", "/", "/x/", "`", "'", '"',
+            "//", "/*", "*/", "\n", " ", "a", "b.c", "return", "case", "=", "===", "=>", "?", "\\", "+", "0"]
+    SINKS = ['cp.spawn("sudo")', "eval(a)", 'require("x")', "execSync(c)", 'import(c)', "new Function(a)",
+             'globalThis["e"+"val"](a)', "$`sudo`", 'import "child_process"', "x.constructor.constructor(a)"]
+    RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+    def _severities(self, tmp_path, name, text, monkeypatch, rule_on):
+        files = dict(BASE_FILES)
+        files["dashboard/app/assets/x.js"] = text
+        with monkeypatch.context() as m:
+            if not rule_on:
+                m.setattr(JsSinkInventory, "js_data", lambda *a, **k: False)
+            result = scan_plugin(_mk_plugin(tmp_path / name, files), source="owner/repo")
+        return {(f.pattern_id, f.file, f.line): f.severity for f in result.findings}
+
+    STATEMENTS = [
+        'const v{i}={{sudo:"sudo",kind:"sudo",n:12e4}};', 'switch(m){{case"sudo":f({i});break}}',
+        'if(a!=="sudo")g({i});', "const t{i}=`x${{y+`z{i}`}}\n${{\"`\"}}`;", "const r{i}=/[\"'`/]/g;",
+        "/* \" ' ` {i} */", "// ' \" `\n", "x{i}=a.return/2;", "w.call(this,{{sudo:{i}}});", '["sudo"].map(f{i});',
+        "const s{i}=\"it's\";", 'h(()=>{{return{{kind:"sudo"}}}});', '/x/.exec("{i}");', 're{i}.exec("");',
+        'o.exec("{i}");', 'class C{i}{{exec(s){{return s}}}}', "for(;n{i}-->0;)go();", "if(x)/^s{i}/.test(y);",
+        "const k{i}=f(a)/2;", "x{i}=`a\nb`;",
+    ]
+
+    def test_structured_programs(self, tmp_path, monkeypatch):
+        """Valid programs built from bundle-shaped statements, with and without a sink: the rule
+        lowers some lines (so the property is not vacuous) and never anything beside a sink."""
+        rng = random.Random(4242)
+        lowered = 0
+        for n in range(60):
+            parts = [rng.choice(self.STATEMENTS).format(i=j) for j in range(rng.randint(1, 12))]
+            has_sink = rng.random() < 0.5
+            if has_sink:
+                parts.insert(rng.randint(0, len(parts)), rng.choice(self.SINKS) + ";")
+            text = rng.choice(["", "\n"]).join(parts) + "\n"
+            (tmp_path / f"s{n}").mkdir()
+            (tmp_path / f"s{n}b").mkdir()
+            new = self._severities(tmp_path, f"s{n}", text, monkeypatch, rule_on=True)
+            old = self._severities(tmp_path, f"s{n}b", text, monkeypatch, rule_on=False)
+            assert new.keys() == old.keys(), text
+            for key, sev in new.items():
+                assert self.RANK[sev] <= self.RANK[old[key]], (text, key)
+                if has_sink and not (key[0] == "exec_string" and "/x/.exec" in text.split("\n")[key[2] - 1]
+                                     and "re" not in text.split("\n")[key[2] - 1].replace("/x/.exec", "")):
+                    assert sev == old[key], (text, key)
+                lowered += sev != old[key]
+        assert lowered > 0
+
+    @pytest.mark.parametrize("seed", range(8))
+    def test_random_streams(self, tmp_path, monkeypatch, seed):
+        rng = random.Random(seed)
+        for n in range(40):
+            parts = [rng.choice(self.DATA) for _ in range(rng.randint(1, 30))]
+            has_sink = rng.random() < 0.5
+            if has_sink:
+                parts.insert(rng.randint(0, len(parts)), rng.choice(self.SINKS))
+            text = "".join(parts) + "\n"
+            (tmp_path / f"{n}").mkdir()
+            (tmp_path / f"{n}b").mkdir()
+            new = self._severities(tmp_path, f"{n}", text, monkeypatch, rule_on=True)
+            old = self._severities(tmp_path, f"{n}b", text, monkeypatch, rule_on=False)
+            assert new.keys() == old.keys(), text
+            for key, sev in new.items():
+                assert self.RANK[sev] <= self.RANK[old[key]], (text, key)
+                if has_sink:
+                    assert sev == old[key], (text, key)

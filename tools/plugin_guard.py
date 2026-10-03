@@ -17,13 +17,13 @@ from typing import Iterator, List, Optional, Tuple
 
 from tools.plugin_guard_context import (
     STEP_DOWN, is_agent_facing, is_base64_media, is_ci_workflow, is_data_decode, is_doc_prose,
-    is_inert_fixture_line, is_js_data_token, is_loopback_only, is_pip_install_in_prose_literal,
+    JsSinkInventory, is_inert_fixture_line, is_loopback_only, is_pip_install_in_prose_literal,
     is_regex_alternation_token, is_self_uninstall_doc, is_test_tree, prose_cap)
 from tools.skills_guard import (
     Finding, ScanResult, SUSPICIOUS_BINARY_EXTENSIONS, _determine_verdict, format_scan_report,
     scan_file)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-v8.1"
+PLUGIN_SCANNER_VERSION = "plugin-guard-fork-1"
 
 # Never scanned: VCS internals, caches, vendored envs.
 EXCLUDED_DIRS = {
@@ -155,8 +155,10 @@ def _main_guard_body_lines(file_path: Path) -> set[int]:
     return lines
 
 
-def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path) -> List[Finding]:
-    """Apply plugin-specific exemptions and severity remaps to raw findings."""
+def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path,
+                     js: Optional[JsSinkInventory] = None) -> List[Finding]:
+    """Apply plugin-specific exemptions and severity remaps to raw findings. *js* is the scan's
+    JavaScript inventory (``plugin_guard_context`` (5b)); without it no JS token rule applies."""
     is_code = Path(rel_path).suffix.lower() in CODE_FILE_EXTENSIONS
     main_guard_lines = _main_guard_body_lines(file_path) if file_path.suffix.lower() == ".py" else set()
     is_js = Path(rel_path).suffix.lower() in {".js", ".ts"}
@@ -174,7 +176,8 @@ def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path) ->
         if doc_prose and f.pattern_id in DOC_PROSE_DEMOTIONS:
             f.severity = DOC_PROSE_DEMOTIONS[f.pattern_id]
         line = lines[f.line - 1] if 0 < f.line <= len(lines) else f.match
-        f.severity = _context_severity(f, rel_path, line, doc_prose, is_code)
+        js_data = js is not None and js.js_data(f, rel_path, f.line, line)
+        f.severity = _context_severity(f, rel_path, line, doc_prose, is_code, js_data)
         if _is_defensive_documentation(f, rel_path):
             f.severity = _comment_severity(f)
         # Last and critical-only: a one-step cap that can never re-raise a finding an
@@ -212,7 +215,8 @@ def _file_lines(file_path: Path) -> List[str]:
         return []
 
 
-def _context_severity(f: Finding, rel_path: str, line: str, doc_prose: bool, is_code: bool) -> str:
+def _context_severity(f: Finding, rel_path: str, line: str, doc_prose: bool, is_code: bool,
+                      js_data: bool = False) -> str:
     """Severity after the inert-context demotions (``plugin_guard_context``). Each rule only
     ever lowers, and every finding stays in the report; the order runs from the broadest
     context (where the text lives) to the narrowest (what the token sits inside)."""
@@ -228,14 +232,16 @@ def _context_severity(f: Finding, rel_path: str, line: str, doc_prose: bool, is_
         sev = _at_most(sev, "medium") if inert else STEP_DOWN.get(sev, sev)
     if f.pattern_id == "encoded_exfil" and is_base64_media(line):
         sev = "low"
-    if is_code and (is_regex_alternation_token(f, line) or is_js_data_token(f, line, rel_path)):
-        sev = STEP_DOWN.get(sev, sev)    # `|sudo|` in a pattern; `case"sudo":` / `{sudo:12e4}` in JS
+    if is_code and is_regex_alternation_token(f, line):
+        sev = STEP_DOWN.get(sev, sev)
     if f.pattern_id == "base64_decode_pipe" and is_data_decode(line):
         sev = STEP_DOWN.get(sev, sev)
     if is_loopback_only(f, line):
         sev = "low"    # 127.0.0.0/8 is a local service, not egress
     if is_code and is_pip_install_in_prose_literal(f, line):
         sev = "low"    # "no pip install is needed" in a user-facing message
+    if js_data:
+        sev = _at_most(sev, "low")    # `case"sudo":`, `/re/.exec("")`: data (context (5b))
     return sev
 
 
@@ -314,9 +320,10 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
     all_findings: List[Finding] = []
     if plugin_dir.is_dir():
         all_findings.extend(_check_plugin_structure(plugin_dir))
+        js = JsSinkInventory(plugin_dir, frozenset(EXCLUDED_DIRS))
         for f, rel in sorted(_walk(plugin_dir)):
             if f.is_file() and not f.is_symlink():
-                all_findings.extend(_filter_findings(scan_file(f, rel_path=rel), rel, f))
+                all_findings.extend(_filter_findings(scan_file(f, rel_path=rel), rel, f, js))
     verdict = _determine_verdict(all_findings)
     if all_findings:
         categories = sorted({f.category for f in all_findings})

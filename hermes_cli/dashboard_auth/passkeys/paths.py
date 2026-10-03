@@ -1,7 +1,9 @@
 """Where passkey stores live, for the code that must never copy, restore, overwrite or delete one.
 
 A store is ``<home>/dashboard_auth/passkeys.db`` plus its ``-wal`` / ``-shm`` / ``-journal`` siblings, for
-the active home, the default root and each profile. Names are compared case-folded and directories by
+the active home, the default root and each profile. The MCP grant registry (``dashboard_auth/mcp.db``,
+fork) is held to the same rules: a copy on another host would accept this gateway's MCP tokens there, and
+an imported one would carry grants nobody consented to here. Names are compared case-folded and directories by
 ``os.path.samestat``, because macOS (APFS) and Windows file systems ignore case: ``Dashboard_Auth/Passkeys.db``
 in an archive, or ``<home>/../.HERMES`` in a request, names the same file or folder. Standard library only:
 backups, profiles and the file manager import this.
@@ -15,11 +17,18 @@ from typing import Iterable
 
 STORE_DIR = "dashboard_auth"
 STORE_PREFIX = "passkeys.db"
+#: Every store file name (and its ``-wal`` / ``-shm`` / ``-journal`` siblings) these rules cover.
+STORE_PREFIXES = (STORE_PREFIX, "mcp.db")
+
+
+def is_store_file_name(file_name: str) -> bool:
+    """*file_name* (a base name, any letter case) is (part of) a store, wherever it sits."""
+    return file_name.casefold().startswith(STORE_PREFIXES)
 
 
 def is_store_name(directory_name: str, file_name: str) -> bool:
-    """A file *file_name* in a directory named *directory_name* is (part of) a passkey store."""
-    return directory_name.casefold() == STORE_DIR and file_name.casefold().startswith(STORE_PREFIX)
+    """A file *file_name* in a directory named *directory_name* is (part of) a store."""
+    return directory_name.casefold() == STORE_DIR and is_store_file_name(file_name)
 
 
 def is_store_member(rel_path: PurePath) -> bool:
@@ -57,7 +66,7 @@ def store_dirs() -> list[Path]:
     for home in _homes():
         directory = home / STORE_DIR
         try:
-            if any(e.name.casefold().startswith(STORE_PREFIX) for e in os.scandir(directory)):
+            if any(is_store_file_name(e.name) for e in os.scandir(directory)):
                 real = Path(os.path.realpath(directory))
                 if real not in found:
                     found.append(real)

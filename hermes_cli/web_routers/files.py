@@ -80,8 +80,10 @@ _SENSITIVE_MANAGED_DIR_NAMES = frozenset({"mcp-tokens", "pairing"})
 
 def _is_passkey_store(name: str) -> bool:
     """The passkey store (``passkeys.db`` and its ``-wal`` / ``-shm`` / ``-journal`` siblings): its rows
-    decide who can confirm at level ``passkey``, so the file manager neither shows nor writes it."""
-    return name.lower().startswith("passkeys.db")
+    decide who can confirm at level ``passkey``, so the file manager neither shows nor writes it. The MCP
+    grant registry (``mcp.db``, fork) likewise: its rows decide which MCP tokens act as a person."""
+    from hermes_cli.dashboard_auth.passkeys.paths import is_store_file_name
+    return is_store_file_name(name)
 
 
 def _is_sensitive_filename(name: str) -> bool:
@@ -99,7 +101,7 @@ def _refuse_passkey_store_write(target: Path) -> None:
     """Write-side guard for the passkey store only (upload, mkdir, delete, spot editor): replacing it or
     planting a ``-wal`` beside it would enrol a key, and these endpoints otherwise write anywhere."""
     if _is_passkey_store(target.name):
-        raise HTTPException(status_code=403, detail="The passkey store cannot be changed from the dashboard")
+        raise HTTPException(status_code=403, detail="The passkey and MCP stores cannot be changed from the dashboard")
 
 
 def _refuse_passkey_store_parent_delete(target: Path) -> None:
@@ -108,7 +110,7 @@ def _refuse_passkey_store_parent_delete(target: Path) -> None:
     identity, so a case variant (macOS, Windows) or a symbolic link to such a directory is refused too."""
     from hermes_cli.dashboard_auth.passkeys.paths import holds_store
     if holds_store(target):
-        raise HTTPException(status_code=403, detail="This folder holds the passkey store")
+        raise HTTPException(status_code=403, detail="This folder holds the passkey or MCP store")
 
 
 def _is_sensitive_path(path: Path) -> bool:

@@ -678,6 +678,22 @@ with contextlib.suppress(Exception):
     _confirm_tool.set_bridge(_confirm_bridge)
 
 
+def _register_strong_confirm(sid: str, key: str) -> None:
+    """Fork: register this session's strong-confirm callback for its conversation *key*, beside the
+    approval notifier: the operator's passkey rules (``tools/passkey_policy.py``) ask through it. A
+    conversation without one (CLI, messaging, cron) has every matched command and tool call blocked."""
+    with contextlib.suppress(Exception):
+        from tools.passkey_policy import register_strong_confirm
+        from tui_gateway import confirm as _confirm
+        register_strong_confirm(key, _confirm.strong_confirm(sid))
+
+
+def _unregister_strong_confirm(key: str) -> None:
+    with contextlib.suppress(Exception):
+        from tools.passkey_policy import unregister_strong_confirm
+        unregister_strong_confirm(key)
+
+
 # Live WS peer transports (maintained by tui_gateway.ws): the only route for session-less background
 # events, which write_json would otherwise drop on stdio (see _broadcast_global_event).
 _live_transports: set[Transport] = set()
@@ -1016,6 +1032,7 @@ def _wire_session_agent(sid: str, key: str, agent) -> bool:
         register_gateway_notify(key, lambda data: _emit_approval_request(sid, data))
         notify_registered = True
         load_permanent_allowlist()
+    _register_strong_confirm(sid, key)
     _wire_callbacks(sid)
     with contextlib.suppress(Exception):  # bare agents without the attribute must not break startup
         agent.background_review_callback = lambda message, _sid=sid: _emit("review.summary", _sid, {"text": str(message)})
@@ -1084,6 +1101,8 @@ def _finish_agent_build(sid: str, key: str, current: dict, *, notify_registered:
         with contextlib.suppress(Exception):
             from tools.approval import unregister_gateway_notify
             unregister_gateway_notify(key)
+    if replaced:  # fork: registered whether or not the notifier was
+        _unregister_strong_confirm(key)
     # Dedicated profile handle: hand it to the agent that will be torn down, else close it (build
     # failed, or `replaced`: this agent is discarded and _teardown_session never reaches it).
     if session_db is not None and not _transfer_db_to_agent(None if replaced else current.get("agent"), session_db):

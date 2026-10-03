@@ -60,6 +60,9 @@ class AuditEvent(enum.Enum):
     PASSKEY_BASE_URLS_CHANGED = "passkey_base_urls_changed"
     CONFIRM_PASSKEY_VERIFIED = "confirm_passkey_verified"
     CONFIRM_PASSKEY_REFUSED = "confirm_passkey_refused"
+    # An operator rule (confirm.passkey.require) forced a passkey confirmation (tools/passkey_policy.py): the
+    # rule, the operator's pattern, session, user, outcome and reason; never the command text.
+    CONFIRM_FORCED = "confirm_forced"
     # A dashboard or RPC config write that would have changed a protected section (confirm.passkey).
     PROTECTED_SETTING_REFUSED = "protected_setting_refused"
 

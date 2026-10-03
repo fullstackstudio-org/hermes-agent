@@ -199,6 +199,7 @@ def _status(args, *, out, err, store, settings, public_urls, isatty, sign_in_pro
     print("Sign-in providers: " + (", ".join(sign_in_providers) or "none"), file=out)
     print(f"User invites: {'allowed' if settings.user_invites else 'off'}; "
           f"receipts kept {settings.receipts_days} days", file=out)
+    print("Operator rules: " + _rules(settings.require), file=out)
     for problem in settings.problems:
         print(f"Config: {problem}", file=out)
     for reason in reasons:
@@ -207,6 +208,16 @@ def _status(args, *, out, err, store, settings, public_urls, isatty, sign_in_pro
         print("Available to signed-in users with an enrolled passkey. Session-token and loopback connections "
               "have no signed-in user and never get it.", file=out)
     return 0
+
+
+def _rules(require) -> str:
+    """``confirm.passkey.require`` in one line: what forces a passkey confirmation (enforced whether or not
+    the level is enabled; with it off, a match is blocked)."""
+    parts = [f"commands {', '.join(require.commands)}" if require.commands else "",
+             f"tools {', '.join(require.tools)}" if require.tools else "",
+             "every dangerous-command approval" if require.approvals else "",
+             "smart-approval DENY overrides" if require.smart_denied else ""]
+    return "; ".join(p for p in parts if p) or "none (only the agent asks for a passkey)"
 
 
 def _serialised_or_none(entry) -> Optional[str]:

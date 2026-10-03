@@ -729,6 +729,10 @@ class CodexAppServerSession:
             return "decline"
 
     def _decide_exec_approval(self, params: dict) -> str:
+        # fork: the floor (hardline, approvals.deny, the operator's passkey rules) before any auto-accept.
+        if (floor := _exec_floor(params.get("command"), params.get("cwd") or self._cwd)) is not None:
+            return floor
+
         def prompt() -> tuple[str, str]:
             # ``cwd`` is Optional on codex's side; fall back so the prompt is never empty.
             description = f"Codex requests exec in {params.get('cwd') or self._cwd or '<unknown>'}"
@@ -763,6 +767,32 @@ class CodexAppServerSession:
             self._pending_file_changes.pop(item_id, None)
         elif method == "item/started":
             self._pending_file_changes[item_id] = _summarize_file_changes(item.get("changes") or [])
+
+
+def _exec_floor(command: Any, cwd: Any = None) -> str | None:
+    """Fork: the command gate's floor for a codex exec request (``tools.approval._floor_block``: the
+    hardline blocklist, the ``sudo -S`` guard, ``approvals.deny`` and the operator's passkey rules), which
+    the auto-accept under yolo / ``approvals.mode: off`` would otherwise skip. None: no floor applies, route
+    as before; else the codex decision. Fails closed. Commands codex's own sandbox runs without asking never
+    reach here. A request without a command is declined while any operator command rule is set (there is
+    nothing to match it against)."""
+    if isinstance(command, (list, tuple)):
+        import shlex
+        command = shlex.join(str(part) for part in command)
+    try:
+        from tools import passkey_policy
+        from tools.approval import _floor_block
+        if not isinstance(command, str) or not command:
+            rules = passkey_policy.require()
+            return "decline" if rules.commands or rules.approvals else None
+        with passkey_policy.command_cwd(cwd if isinstance(cwd, str) else None):
+            result = _floor_block(command, sudo_guard=True)
+    except Exception:
+        logger.exception("codex exec floor check failed; declining")
+        return "decline"
+    if result is None:
+        return None
+    return "accept" if result.get("approved") else "decline"
 
 
 def _summarize_file_changes(raw_changes: list) -> str:

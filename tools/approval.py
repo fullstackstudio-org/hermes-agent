@@ -37,6 +37,7 @@ from tools.approval_floors import (
 from tools.approval_gateway_wait import _await_gateway_decision
 from tools.approval_prompt import _present_with_selected_transport, _transport_choice, prompt_dangerous_approval
 from tools.approval_smart import _smart_verdict
+from tools import passkey_policy  # fork: operator passkey rules, see FORK.md "Where the passkey policy touches core"
 
 logger = logging.getLogger(__name__)
 
@@ -811,6 +812,10 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
                                            session_key, human_present=is_cli or is_gateway or is_ask)
         if result is not None:
             return result
+    if (forced := passkey_policy.human_decision(  # fork: confirm.passkey.require (approvals, smart_denied)
+            noun=spec.noun, command=command, description=description, pattern_key=pattern_key,
+            smart_denied=smart_denied)) is not None:
+        return forced
     pending_body = pending_body() if pending_body else None
     allow_permanent = permanent_capable and not smart_denied
 
@@ -1044,7 +1049,7 @@ def _user_deny_block(command: str) -> dict | None:
     agent may DO, not what it can reach, so they are evaluated before the container fast path."""
     deny_pattern = _match_user_deny_rule(command)
     if deny_pattern is None:
-        return None
+        return passkey_policy.command_floor(command)  # fork: confirm.passkey.require (commands, approvals)
     logger.warning("User deny rule %r blocked command: %s", deny_pattern, command[:200])
     return _user_deny_block_result(deny_pattern)
 

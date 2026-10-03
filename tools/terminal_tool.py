@@ -1325,7 +1325,9 @@ def terminal_tool(
             ))
         # Pre-exec security checks (tirith + dangerous command detection);
         # force=True means the user already confirmed.
-        verdict = _run_approval_guards(command, env_type, plan.config, force=force)
+        from tools.passkey_policy import command_cwd  # fork: where, for a forced passkey confirmation
+        with command_cwd(cwd):
+            verdict = _run_approval_guards(command, env_type, plan.config, force=force)
 
         pty_disabled = pty and _command_requires_pipe_stdin(command)
         if plan.promoted_from_foreground_timeout is not None:

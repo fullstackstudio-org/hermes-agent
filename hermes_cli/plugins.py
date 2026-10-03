@@ -1982,9 +1982,25 @@ def _dispatch_pre_tool_call_hooks(
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """Invoke ``pre_tool_call`` hooks once; return ``(block_message, modified_args)`` — the resolved
     block/approve message (``None`` to proceed) and merged ``modify`` args (``None`` if none)."""
-    details = _get_pre_tool_call_directive_details(tool_name, args, **hook_kwargs)
-    block_msg = _resolve_block_from_details(
-        details, tool_name, **{k: hook_kwargs.get(k, "") for k in ("turn_id", "tool_call_id", "session_id")})
+    try:
+        from tools.passkey_policy import tool_call_block  # fork: confirm.passkey.require (tools), see FORK.md
+    except Exception:
+        # Every caller proceeds when this function raises: an unloadable policy must not open the rules.
+        logger.exception("passkey policy could not be loaded; blocking the tool call")
+        return ("BLOCKED: the gateway's passkey policy could not be loaded, so no tool call can be checked "
+                "against its rules. Do NOT retry; tell the person the gateway needs attention.", None)
+    try:
+        details = _get_pre_tool_call_directive_details(tool_name, args, **hook_kwargs)
+        block_msg = _resolve_block_from_details(
+            details, tool_name, **{k: hook_kwargs.get(k, "") for k in ("turn_id", "tool_call_id", "session_id")})
+    except Exception:
+        # fork: decided apart from the hook pipeline: every caller proceeds when this raises, so a raising
+        # hook must not let a matched tool through.
+        if (forced := tool_call_block(tool_name, args)) is not None:
+            return (forced, None)
+        raise
+    if block_msg is None:
+        block_msg = tool_call_block(tool_name, details.modified_args if details.modified_args is not None else args)
     return (block_msg, details.modified_args)
 
 

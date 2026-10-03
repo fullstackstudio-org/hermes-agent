@@ -104,6 +104,16 @@ def test_status_when_available(store):
     assert "Available to signed-in users" in out and "Unavailable" not in out and "Hint" not in out
     assert "Web RPs: gw.example.com" in out and "Native RPs: confirm.hermie.dev" in out
     assert "open codes: 1" in out and "Sign-in providers: basic" in out
+    assert "Operator rules: none" in out
+
+
+def test_status_lists_the_operator_rules(store):
+    cfg = _enabled()
+    cfg["confirm"]["passkey"]["require"] = {"commands": ["git push*"], "tools": ["send_*"], "approvals": True,
+                                            "smart_denied": True}
+    _, out, _ = _run(store, ["status"], cfg=cfg)
+    assert ("Operator rules: commands git push*; tools send_*; every dangerous-command approval; "
+            "smart-approval DENY overrides") in out
 
 
 def test_sign_in_providers_follow_the_config(_isolate_hermes_home, monkeypatch):

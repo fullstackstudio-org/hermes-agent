@@ -1713,7 +1713,10 @@ DEFAULT_CONFIG = {
             "receipts_days": 90,
             # Accept listed base URLs that are not public (http://, private addresses, .local, ...).
             "allow_private_base_urls": False,
-            # Operator rules that force level passkey (enforced once the policy lands; read-only today).
+            # Operator rules that force a passkey confirmation (tools/passkey_policy.py), whatever yolo or
+            # approvals.mode say: commands = shell globs (approvals.deny matching, plus eval / here-string / xargs); tools = tool-name globs;
+            # approvals = every dangerous-command approval; smart_denied = an owner override of a guardian
+            # DENY. Enforced even while `enabled` is false (then a match is blocked).
             "require": {"commands": [], "smart_denied": False, "approvals": False, "tools": []},
         },
     },

@@ -17,7 +17,10 @@ What this module adds on top of ``server_requests.send_gated``:
   ``timeout`` (120 s, ``request.cancel {reason: timeout}``);
 - ``verified`` decided by the gateway, never taken from the client;
 - a per-conversation rate limit: one open confirmation at a time and at most
-  :data:`MAX_PER_WINDOW` sent per :data:`WINDOW_SECONDS`;
+  :data:`MAX_PER_WINDOW` sent per :data:`WINDOW_SECONDS`. A confirmation the gateway forces for an operator
+  rule (``tools/passkey_policy.py``, :func:`request` with ``forced=True``) counts under its own key
+  (``forced:<conversation>``, same limits), so an agent asking voluntarily cannot use up the operator's
+  floor, and the operator's floor cannot use up the agent's confirmations;
 - no downgrade: once a ``passkey`` request in a conversation ends in a failure a third party can cause
   after sending (declined, timeout, verification failed, an error response, withdrawn, no capable client:
   :func:`opens_downgrade_window`), ``plain`` requests in that conversation are ``unavailable
@@ -196,11 +199,40 @@ def _clean(text: object, *, multiline: bool) -> str:
     return "\n".join(kept)
 
 
+def verbatim_problem(text: str) -> str:
+    """Why *text* cannot be shown VERBATIM (no cleaning at all), or "": a character :func:`_clean` would
+    drop or rewrite (a control character other than newline, a tab, a format, surrogate or private-use
+    character, a line or paragraph separator, whitespace other than space, an invisible letter, more than
+    :data:`MAX_COMBINING_MARKS` combining marks on one character), or whitespace at the end of a line or of
+    the text, which no rendering shows."""
+    marks = 0
+    for ch in text:
+        category = unicodedata.category(ch)
+        if category in ("Mn", "Me"):
+            marks += 1
+            if marks > MAX_COMBINING_MARKS:
+                return "too many combining marks on one character"
+            continue
+        marks = 0
+        if ch in ("\n", " "):
+            continue
+        if category in ("Cc", "Cf", "Cs", "Co", "Zl", "Zp", "Zs") or ch in _INVISIBLE_LETTERS or ch.isspace():
+            return f"character U+{ord(ch):04X} cannot be shown as it is"
+    if any(line != line.rstrip() for line in text.split("\n")) or text != text.rstrip():
+        return "whitespace at the end of a line or of the text cannot be seen"
+    return ""
+
+
 def build_params(*, summary: object, detail: object = None, title: object = None,
-                 level: object = "plain") -> dict:
+                 level: object = "plain", verbatim_detail: bool = False) -> dict:
     """The ``confirm`` params (without ``session_id``), cleaned and bounded. Raises
     :class:`ConfirmParamsError` instead of truncating: the person must see the whole of what the agent
-    asks, so text over a bound goes back to the agent to shorten."""
+    asks, so text over a bound goes back to the agent to shorten.
+
+    *verbatim_detail* (a confirmation the gateway forces for an operator rule): the detail is the command
+    exactly as it runs and is NOT cleaned (no whitespace collapsing, no stripping, indentation kept); text
+    :func:`verbatim_problem` refuses raises instead. Clients render the detail monospaced with whitespace
+    preserved."""
     level = str(level or "").strip()
     if level not in LEVELS:
         raise ConfirmParamsError(f"level must be one of: {', '.join(sorted(LEVELS))}")
@@ -210,7 +242,12 @@ def build_params(*, summary: object, detail: object = None, title: object = None
     if len(summary_text) > CONFIRM_SUMMARY_MAX:
         raise ConfirmParamsError(f"summary is {len(summary_text)} characters; the limit is {CONFIRM_SUMMARY_MAX}. "
                                  "Shorten it and put specifics in detail.")
-    detail_text = _clean(detail, multiline=True) if detail is not None else ""
+    if verbatim_detail and detail is not None:
+        detail_text = detail if isinstance(detail, str) else str(detail)
+        if problem := verbatim_problem(detail_text):
+            raise ConfirmParamsError(f"detail cannot be shown verbatim: {problem}")
+    else:
+        detail_text = _clean(detail, multiline=True) if detail is not None else ""
     if len(detail_text) > CONFIRM_DETAIL_MAX:
         raise ConfirmParamsError(f"detail is {len(detail_text)} characters; the limit is {CONFIRM_DETAIL_MAX}.")
     title_text = _clean(title, multiline=False) if title is not None else ""
@@ -319,8 +356,10 @@ def _connection(transport) -> tuple[str, str]:
 class _Audit:
     """The two audit records of one confirm request. Fields name who and what, never the text."""
 
-    def __init__(self, sid: str, level: str) -> None:
+    def __init__(self, sid: str, level: str, *, forced: bool = False) -> None:
         self.sid, self.level, self.request_id, self.reached = sid, level, "", 0
+        # Only set on a forced request, so the records of every other request keep their shape.
+        self.extra = {"forced": True} if forced else {}
         self.acting = "-"
         try:
             from tui_gateway import server
@@ -330,10 +369,10 @@ class _Audit:
 
     def opened(self, request_id: str, reached: int) -> None:
         self.request_id, self.reached = request_id, reached
-        audit.info("confirm request session=%s request=%s level=%s acting_user=%s reached=%d",
-                   self.sid, request_id, self.level, self.acting, reached)
+        audit.info("confirm request session=%s request=%s level=%s acting_user=%s reached=%d forced=%s",
+                   self.sid, request_id, self.level, self.acting, reached, bool(self.extra))
         _audit_sink("confirm_request", session_id=self.sid, request_id=request_id, level=self.level,
-                    acting_user=self.acting, reached=reached)
+                    acting_user=self.acting, reached=reached, **self.extra)
 
     def outcome(self, outcome: ConfirmOutcome, *, request_id: str = "", answered_by=None) -> ConfirmOutcome:
         user, peer = _connection(answered_by)
@@ -343,7 +382,8 @@ class _Audit:
                    outcome.method or "-", outcome.reason or "-", user, peer)
         _audit_sink("confirm_outcome", session_id=self.sid, request_id=request_id, level=self.level,
                     acting_user=self.acting, outcome=outcome.outcome, method=outcome.method or "",
-                    reason=outcome.reason, verified=outcome.verified, answered_by=user, answered_from=peer)
+                    reason=outcome.reason, verified=outcome.verified, answered_by=user, answered_from=peer,
+                    **self.extra)
         return outcome
 
 
@@ -360,22 +400,30 @@ def _fire_pre_confirm_request(**kwargs) -> None:
     threading.Thread(target=fire, name="confirm-hook", daemon=True).start()
 
 
-def request(sid: str, params: dict, *, timeout: float = TIMEOUT_SECONDS) -> ConfirmOutcome:
+def forced_rate_key(key: str) -> str:
+    """The rate-limit key of a confirmation forced by an operator rule in conversation *key*."""
+    return f"forced:{key}"
+
+
+def request(sid: str, params: dict, *, timeout: float = TIMEOUT_SECONDS, forced: bool = False) -> ConfirmOutcome:
     """Ask the clients of *sid* that advertised ``params["level"]`` to confirm, and block for the outcome.
     *params* come from :func:`build_params`. Never raises for a client-side failure: every way of not
     getting a valid answer is ``unavailable`` or ``timeout``, never ``declined`` and never ``confirmed``.
     A ``passkey`` request that ends in one of the post-send failures (:func:`opens_downgrade_window`) opens
-    the no-downgrade window."""
-    outcome = _request(sid, params, timeout=timeout)
+    the no-downgrade window of the conversation, forced or not. *forced*: the gateway asks for an operator
+    rule (level ``passkey`` only); it counts under :func:`forced_rate_key` and is audited as forced."""
+    if forced and params["level"] != "passkey":
+        raise ValueError("a forced confirmation is at level passkey")
+    outcome = _request(sid, params, timeout=timeout, forced=forced)
     if params["level"] == "passkey" and opens_downgrade_window(outcome):
         _note_passkey_failed(_rate_key(sid), time.monotonic())
     return outcome
 
 
-def _request(sid: str, params: dict, *, timeout: float) -> ConfirmOutcome:
+def _request(sid: str, params: dict, *, timeout: float, forced: bool = False) -> ConfirmOutcome:
     level_name = params["level"]
     level = LEVELS[level_name]
-    log = _Audit(sid, level_name)
+    log = _Audit(sid, level_name, forced=forced)
     if not level.implemented:
         return log.outcome(ConfirmOutcome("unavailable", reason="level_not_implemented"))
     if os.environ.get("HERMES_COMPUTE_HOST_CHILD") == "1":
@@ -393,7 +441,7 @@ def _request(sid: str, params: dict, *, timeout: float) -> ConfirmOutcome:
         except confirm_passkey.Unavailable as exc:
             return log.outcome(ConfirmOutcome("unavailable", reason=exc.reason))
         log.acting = verification.user_id
-    refused = _reserve(key, time.monotonic())
+    refused = _reserve(forced_rate_key(key) if forced else key, time.monotonic())
     if refused:
         return log.outcome(ConfirmOutcome("unavailable", reason=refused))
     if verification is not None:
@@ -420,9 +468,9 @@ def _request(sid: str, params: dict, *, timeout: float) -> ConfirmOutcome:
         if result.status == "unavailable" and result.reason in ("no_capable_client", "write_failed"):
             sent_at = None  # nothing reached a person: it does not count against the window
     except BaseException:
-        _release(key, sent_at=sent_at)
+        _release(forced_rate_key(key) if forced else key, sent_at=sent_at)
         raise
-    _release(key, sent_at=sent_at)
+    _release(forced_rate_key(key) if forced else key, sent_at=sent_at)
     rid = result.request_id
     if result.status == "answered":
         answer = result.result or {}
@@ -442,6 +490,20 @@ def _request(sid: str, params: dict, *, timeout: float) -> ConfirmOutcome:
     if result.reason == "too_many_attempts":
         return log.outcome(ConfirmOutcome("unavailable", reason="verification_failed"), request_id=rid)
     return log.outcome(ConfirmOutcome("unavailable", reason=result.reason or "unavailable"), request_id=rid)
+
+
+def strong_confirm(sid: str):
+    """The strong-confirm callback this gateway registers for session *sid*
+    (``tools.passkey_policy.register_strong_confirm``, keyed by the conversation): a forced ``passkey``
+    confirmation of the gateway-built ``{title, summary, detail}``. It runs on the thread of the guarded
+    command or tool call, inside the turn's context, so the request binds to the turn's submitter. Raises
+    :class:`ConfirmParamsError` for text over the contract's bounds."""
+    def ask(text: dict) -> ConfirmOutcome:
+        params = build_params(level="passkey", title=text.get("title"), summary=text.get("summary"),
+                              detail=text.get("detail"), verbatim_detail=True)
+        return request(sid, params, timeout=TIMEOUT_SECONDS, forced=True)
+
+    return ask
 
 
 def request_from_tool(sid: str, *, summary: object, detail: object = None, title: object = None,

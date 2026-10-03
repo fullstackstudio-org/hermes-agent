@@ -34,7 +34,8 @@ def test_unusable_entries_are_dropped_and_named():
     assert dict(s.native_rps) == {"confirm.hermie.dev": ("https://confirm.hermie.dev",),
                                   "ok.example": ("https://ok.example",)}
     assert s.require == ps.Require(commands=("git push*",))
-    assert len(s.problems) == 5
+    # Five for the other keys, three for the operator rules (commands entries, tools, approvals).
+    assert len(s.problems) == 8
 
 
 def test_an_empty_origin_list_removes_a_native_rp_even_the_default_one():

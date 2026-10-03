@@ -88,7 +88,7 @@ def is_protected_key(key: str) -> bool:
 
 @dataclass(frozen=True)
 class Require:
-    """The operator rules (``confirm.passkey.require``). Read here, enforced from CP-6 on."""
+    """The operator rules (``confirm.passkey.require``), enforced by ``tools/passkey_policy.py``."""
 
     commands: tuple[str, ...] = ()
     smart_denied: bool = False
@@ -167,14 +167,47 @@ def settings_from_config(cfg: Any) -> PasskeySettings:
     if isinstance(days, bool) or not isinstance(days, int) or not low <= days <= high:
         problems.append(f"receipts_days must be a whole number from {low} to {high}; using 90")
         days = 90
-    req: Mapping = raw["require"] if isinstance(raw.get("require"), Mapping) else {}
-    require = Require(commands=_strings(req.get("commands")), smart_denied=req.get("smart_denied") is True,
-                      approvals=req.get("approvals") is True, tools=_strings(req.get("tools")))
     return PasskeySettings(enabled=flag("enabled"), base_urls=_base_urls(raw.get("base_urls"), problems),
                            native_rps=_native_rps(raw.get("native_rps"), problems),
                            user_invites=flag("user_invites"), receipts_days=days,
-                           allow_private_base_urls=flag("allow_private_base_urls"), require=require,
-                           problems=tuple(problems))
+                           allow_private_base_urls=flag("allow_private_base_urls"),
+                           require=_require(raw, problems), problems=tuple(problems))
+
+
+def _require(raw: Mapping, problems: list[str]) -> Require:
+    """``require`` as the policy applies it: a glob list that is not a list, or an entry that is not a
+    non-empty string, is dropped (and named in *problems*); a flag that is not ``true`` is off."""
+    req = raw.get("require")
+    if not isinstance(req, Mapping):
+        problems.append("require is not a mapping; no operator rules apply")
+        return Require()
+    for name in ("commands", "tools"):
+        value = req.get(name)
+        if value is not None and not isinstance(value, list):
+            problems.append(f"require.{name} is not a list; ignored")
+        elif isinstance(value, list) and len(_strings(value)) != len(value):
+            problems.append(f"require.{name}: entries that are not non-empty strings are ignored")
+    for name in ("smart_denied", "approvals"):
+        if req.get(name) not in (None, True, False):
+            problems.append(f"require.{name} is not true or false; using false")
+    return Require(commands=_strings(req.get("commands")), smart_denied=req.get("smart_denied") is True,
+                   approvals=req.get("approvals") is True, tools=_strings(req.get("tools")))
+
+
+_logged_require_problems: set[str] = set()
+
+
+def require_from_config(cfg: Any) -> Require:
+    """Only the operator rules, read the same way: the per-command and per-tool-call path, which must not
+    pay for parsing base URLs and RPs. Each problem is logged once per process (a scalar
+    ``commands: "git push*"`` would otherwise silently mean no rule)."""
+    problems: list[str] = []
+    require = _require(effective_section(cfg), problems)
+    for problem in problems:
+        if problem not in _logged_require_problems:
+            _logged_require_problems.add(problem)
+            _log.warning("confirm.passkey.%s", problem)
+    return require
 
 
 def load_settings() -> PasskeySettings:

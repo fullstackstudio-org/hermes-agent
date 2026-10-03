@@ -6,8 +6,10 @@ order the runtime guard (``check_all_command_guards``) applies them:
 
 1. container-skip gate (isolated backends bypass all guards), 2. hardline blocklist (never
 bypassable, fires before yolo/off), 3. sudo-stdin guard (unconditional), 4. user ``approvals.deny``
-rules (fire before yolo/off), 5. yolo / ``approvals.mode: off`` bypass, 6. permanent
-``command_allowlist``, 7. dangerous-pattern detection (would prompt).
+rules (fire before yolo/off), 4b. the operator's passkey rules (``confirm.passkey.require``: a
+``commands`` glob, or with ``approvals`` a dangerous command; fire before yolo/off and in isolated
+containers too), 5. yolo / ``approvals.mode: off`` bypass, 6. permanent ``command_allowlist``,
+7. dangerous-pattern detection (would prompt).
 """
 
 from __future__ import annotations
@@ -21,8 +23,19 @@ EXIT_DENY = 3
 
 _VERDICT_EXIT = {
     "allow": EXIT_ALLOW, "ask-approval": EXIT_ASK, "hardline-deny": EXIT_DENY,
-    "user-deny": EXIT_DENY,
+    "user-deny": EXIT_DENY, "ask-passkey": EXIT_ASK,
 }
+
+
+def _passkey_verdict(command: str):
+    """``(rule, detail)`` when an operator passkey rule covers *command*, else None."""
+    from tools import passkey_policy
+    match = passkey_policy.match_command(command)
+    if match is None:
+        return None
+    rule = f"confirm.passkey.require.{match.rule}: {match.pattern}"
+    return rule, ("an operator rule requires a passkey confirmation in the Hermie app (no ordinary approval, "
+                  "not skipped by --yolo / mode=off; blocked where the conversation cannot ask for one)")
 
 
 def evaluate_command(command: str, env_type: str = "local") -> dict:
@@ -60,10 +73,12 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
                 detail="matches a user-defined approvals.deny rule in config.yaml "
                        "(blocked even in an isolated container, under --yolo / mode=off)",
             )
+        if (passkey := _passkey_verdict(command)) is not None:
+            return result("ask-passkey", rule=passkey[0], detail=passkey[1])
         return result(
             "allow",
             detail=(f"env_type '{env_type}' is an isolated container backend; "
-                    "the runtime skips all command guards for it except approvals.deny"),
+                    "the runtime skips all command guards for it except approvals.deny and passkey rules"),
         )
 
     # 2. Hardline blocklist — never bypassable, even under yolo.
@@ -88,6 +103,8 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
             detail="matches a user-defined approvals.deny rule in "
                    "config.yaml (blocked even under --yolo / mode=off)",
         )
+    if (passkey := _passkey_verdict(command)) is not None:
+        return result("ask-passkey", rule=passkey[0], detail=passkey[1])
 
     # 5. Yolo / approvals.mode=off bypass.
     if (approval._YOLO_MODE_FROZEN

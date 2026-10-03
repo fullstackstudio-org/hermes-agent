@@ -470,6 +470,7 @@ def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") ->
         # One approval callback per key: after a takeover it is the new runtime's registration.
         if (key := session.get("session_key")) and not session.get("_lease_taken_over"):
             unregister_gateway_notify(key)
+            _unregister_strong_confirm(key)
     # agent.close() → shutdown_memory_provider reads the provider's config/credentials at call time; same
     # scope rule as _finalize_session (every caller here is an unscoped reaper/atexit/pool thread).
     with contextlib.suppress(Exception), _session_profile_runtime_scope(session):

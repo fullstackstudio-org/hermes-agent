@@ -237,39 +237,52 @@ def is_regex_alternation_token(finding: Finding, line: str) -> bool:
 #
 # For ``.js``/``.mjs``/``.cjs`` the file is lexed whole (strings, templates spanning lines with
 # nested ``${…}``, comments, regex literals by the usual "a regex may follow an operator, an
-# opener or a keyword" rule; where that rule cannot decide, or the file is otherwise doubtful,
-# the lexer raises and nothing changes) and each hit is judged by its token. The finding drops
-# to ``low`` (still reported) only when EVERY hit of the pattern on the line qualifies:
-#   ``sudo_usage``
-#     1. The token is an object key (``{sudo:`` / ``,"sudo":``), a whole quoted string compared
-#        with ``===``/``!==``/``==``/``!=`` or after ``case``, or a whole quoted string that is the
-#        entire value of a property whose key is not command-shaped (``kind:"sudo"``; never
-#        ``cmd:``/``shell:``/``args:``). Never a template, a comment, an assignment to a
-#        variable, an array element or a module specifier.
-#     2. No bracket around it hands it on: no enclosing call whose callee runs or loads code
-#        (``spawn``, ``exec*``, ``run*``, ``call``/``apply``/``bind``, ``eval``, ``Function``,
-#        ``require``, ``import``, ``open``, ``setTimeout`` …) or is computed (``x[y](``,
-#        ``f()(``), no enclosing ``${…}``, no enclosing array/object bound to a command name.
-#     3. No JavaScript in the plugin can run anything (``JsSinkInventory``, below).
-#   ``exec_string``
-#     - ``/x/.exec("…")``: the receiver is a regex literal, so this is ``RegExp.prototype.exec``;
-#     - ``re.exec("…")``, ``this.matcherRe.exec("…")``, ``new RegExp(s).exec("…")``: a member
-#       call on any other receiver, and no JavaScript in the plugin can run anything, so there
-#       is no ``child_process`` binding for the receiver to be.
-#     A bare ``exec("…")`` (an imported ``child_process.exec``) is never judged.
+# opener or a keyword" rule). Where the lexer cannot decide or the text is doubtful (a ``/``
+# after ``}`` or after of/yield/await, an HTML-like comment, U+2028/U+2029 outside a string or
+# template, an identifier escape, an unterminated literal, an unbalanced bracket, a character it
+# cannot read) it raises, and the finding keeps the severity the line rules give it. Every
+# failure of this code, of any kind, counts as a doubt: it never lowers on an error and never
+# raises into the scan.
+#
+# A finding drops to ``low`` (still reported) only when EVERY hit of the pattern on the line
+# qualifies AND ``JsSinkInventory`` finds nothing in the plugin's JavaScript that can run code:
+#   ``sudo_usage``: the token is an object key (``{sudo:`` / ``,"sudo":``), a whole quoted string
+#     compared with ``===``/``!==``/``==``/``!=`` or after ``case``, or a whole quoted string that
+#     is the entire value of a property whose key is not command-shaped (``kind:"sudo"``; never
+#     ``cmd:``/``shell:``/``args:``); never a template, a comment, an assignment to a variable, an
+#     array element or a module specifier. No bracket around it hands it on: no enclosing call
+#     whose callee runs or loads code (``spawn``, ``exec*``, ``run*``, ``call``/``apply``/``bind``,
+#     ``eval``, ``Function``, ``require``, ``import``, ``open``, ``setTimeout`` …; ``f?.(`` is
+#     judged by ``f``) or is computed (``x[y](``, ``f()(``), no enclosing ``${…}``, no enclosing
+#     array/object bound to a command name.
+#   ``exec_string``: a member call ``.exec("…")``, on a regex literal or any other receiver. A
+#     bare ``exec("…")`` (an imported ``child_process.exec``) is never judged.
+#
 # ``JsSinkInventory`` answers "can any JavaScript in this plugin run something". Lexed files are
 # judged by token, so a keyword list in a string (a highlighter's ``"eval require …"``) is not a
-# sink: a sink-named identifier (``eval``, ``require``, ``Function``, ``spawn``, ``execSync``,
-# ``child_process``, ``importScripts``, ``Worker`` …), a bare ``exec(`` call, a module specifier
-# naming a process module (``"child_process"``, ``"node:vm"``, ``"zx"``, ``"execa"`` …), a
-# non-literal ``import(``, a string handed to ``setTimeout``, computed access on a global
-# (``globalThis[…]``), ``constructor.constructor`` / ``["constructor"]``, ``process.binding``
-# and a ``$`…```/``sh`…``` shell tag. Every other JS/TS/HTML file is searched as raw text,
-# strings and comments included, and a ``\u`` escape there is a doubt. An unreadable file, a
-# symlink or a lexing error anywhere is a doubt too, and one doubt answers "yes".
-# What stays out of reach is a sink built without any of those names (and so a value that
-# flows through a variable into such a disguised call). Like every rule here this one only
-# ever lowers a finding, and only to ``low``: it stays in the report.
+# sink. Sinks: a sink-named identifier (``eval``, ``require``, ``Function``, ``spawn``,
+# ``execSync``, ``child_process``, ``importScripts``, ``Worker``, ``getBuiltinModule``, ``_load``
+# …), a bare ``exec(`` call that is not a method definition, a module specifier naming a process
+# or code-loading module (``child_process``, ``vm``, ``worker_threads``, ``inspector``, ``wasi``,
+# ``module``, ``zx``, ``execa`` …, with or without ``node:``) or a ``data:``/``blob:``/
+# ``http(s):`` URL, a non-literal ``import(``, a string handed to ``setTimeout``, computed
+# access on a global (``globalThis[…]``), ``constructor.constructor``, ``module.constructor``,
+# ``["constructor"]``, ``process.binding``, a ``$`…```/``sh`…``` shell tag, and any replacement
+# of ``exec`` (``X.prototype.exec =``, ``x["exec"]``, ``defineProperty(…, "exec", …)``). Every
+# other JS/TS/HTML file is searched as raw text, strings and comments included, and a ``\u``
+# escape there is a doubt. An unreadable file, a symlink or a lexing error anywhere is a doubt
+# too, and one doubt answers "yes".
+#
+# Accepted limits (the rule only ever lowers, and only to a ``low`` that stays in the report):
+#   - The inventory reads JavaScript only. A Python or shell file of the plugin that hands JS
+#     data to a process is not counted; those files are judged by their own rules.
+#   - Directories the scanner never reads (``EXCLUDED_DIRS``: ``node_modules``, ``.venv`` …) are
+#     invisible to the inventory as they are to the scan.
+#   - A sink built without any of the names above, and a value that reaches such a disguised
+#     call through a variable, cannot be seen. So "can run it" means "can run it by a route the
+#     inventory names".
+#   - This rule is not the only demotion: the per-line rule (5) already lowers a whole-literal
+#     ``"sudo"`` on a line that executes nothing to ``medium``, with no inventory at all.
 JS_DATA_PATTERN_IDS = {"sudo_usage", "exec_string"}
 JS_LEXED_SUFFIXES = {".js", ".mjs", ".cjs"}
 JS_FAMILY_SUFFIXES = JS_LEXED_SUFFIXES | {".jsx", ".ts", ".mts", ".cts", ".tsx", ".html", ".htm", ".svg"}
@@ -295,12 +308,28 @@ _JS_NUMBER = re.compile(r"0[xXbBoO][\da-fA-F_]+n?|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[
 _JS_PUNCT = re.compile(
     r">>>=|\.\.\.|===|!==|\*\*=|<<=|>>=|>>>|&&=|\|\|=|\?\?=|=>|==|!=|<=|>=|&&|\|\||\?\?|\?\.(?!\d)"
     r"|\+\+|--|\+=|-=|\*=|/=|%=|&=|\|=|\^=|\*\*|<<|>>|[{}()\[\];,<>+\-*/%&|^!~?:=.@]")
-_JS_SPACE = frozenset(" \t\r\n\v\f﻿      　") | frozenset(
+_JS_SPACE = frozenset(" \t\r\n\v\f\ufeff\xa0\u1680\u202f\u205f\u3000") | frozenset(
     chr(c) for c in range(0x2000, 0x200b))
 _RE_AFTER_KEYWORDS = frozenset({"return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw",
                                 "case", "do", "else", "yield", "await", "extends"})
 _OBJECT_AFTER_KEYWORDS = _RE_AFTER_KEYWORDS - {"do", "else", "extends"}
 _REGEX_FLAGS = re.compile(r"[A-Za-z]*")
+_ASCII_DIGITS = frozenset("0123456789")
+# U+2028/U+2029 end a line for the engine (a ``//`` comment, an Annex B ``-->``) but not for
+# ``str.split("\n")``; outside a string or template they are a doubt, never whitespace.
+_SEPARATORS = frozenset("\u2028\u2029")
+_LINE_END = re.compile(r"[\n\r\u2028\u2029]")
+_NOT_IN_A_NAME = re.compile("[" + re.escape("".join(sorted(_JS_SPACE | _SEPARATORS))) + "]")
+
+
+def _line_comment_end(text: str, i: int) -> int:
+    """Where a ``//`` (or ``#!``) comment starting at ``i`` ends: at ``\n`` or ``\r``."""
+    m = _LINE_END.search(text, i)
+    if m is None:
+        return len(text)
+    if m.group(0) in _SEPARATORS:
+        raise JsLexError("a line or paragraph separator outside a string")
+    return m.start()
 
 
 def _template_chunk(text: str, i: int) -> tuple[int, bool]:
@@ -372,8 +401,7 @@ def lex_js(text: str) -> list:
     toks: list = []
     stack: list = []
     n = len(text)
-    i = text.find("\n") if text.startswith("#!") else 0
-    i = n if i < 0 else i
+    i = _line_comment_end(text, 0) if text.startswith("#!") else 0
     prev: Optional[_Tok] = None
 
     def emit(tok: _Tok) -> _Tok:
@@ -383,17 +411,20 @@ def lex_js(text: str) -> list:
 
     while i < n:
         c = text[i]
+        if c in _SEPARATORS:
+            raise JsLexError("a line or paragraph separator outside a string")
         if c in _JS_SPACE:
             i += 1
             continue
         if text.startswith("//", i):
-            j = text.find("\n", i)
-            i = n if j < 0 else j
+            i = _line_comment_end(text, i)
             continue
         if text.startswith("/*", i):
             j = text.find("*/", i + 2)
             if j < 0:
                 raise JsLexError("unterminated comment")
+            if any(sep in text[i:j] for sep in _SEPARATORS):
+                raise JsLexError("a line or paragraph separator outside a string")
             i = j + 2
             continue
         if c in "'\"":
@@ -427,7 +458,7 @@ def lex_js(text: str) -> list:
         if c == "/" and _regex_allowed(toks, prev):
             j, in_class = i + 1, False
             while True:
-                if j >= n or text[j] in "\r\n":
+                if j >= n or text[j] in "\r\n\u2028\u2029":
                     raise JsLexError("unterminated regex literal")
                 d = text[j]
                 if d == "\\":
@@ -444,15 +475,23 @@ def lex_js(text: str) -> list:
             prev = emit(_Tok("re", i, j, text[i:j]))
             i = j
             continue
-        if c.isdigit() or (c == "." and text[i + 1:i + 2].isdigit()):
+        if c in _ASCII_DIGITS or (c == "." and i + 1 < n and text[i + 1] in _ASCII_DIGITS):
             m = _JS_NUMBER.match(text, i)
+            if m is None:
+                raise JsLexError("unreadable number")
             prev = emit(_Tok("num", i, m.end(), m.group(0)))
             i = m.end()
             continue
         m = _JS_IDENT.match(text, i + 1 if c == "#" else i)
         if m and (c != "#" or m.start() == i + 1):
-            prev = emit(_Tok("id", i, m.end(), text[i:m.end()]))
-            i = m.end()
+            end = m.end()
+            stop = _NOT_IN_A_NAME.search(text, i, end)    # a space or separator ends a name
+            if stop is not None:
+                if text[stop.start()] in _SEPARATORS:
+                    raise JsLexError("a line or paragraph separator outside a string")
+                end = stop.start()
+            prev = emit(_Tok("id", i, end, text[i:end]))
+            i = end
             continue
         m = _JS_PUNCT.match(text, i)
         if m is None:
@@ -461,7 +500,7 @@ def lex_js(text: str) -> list:
         # Annex B: in a classic script ``<!--`` and a line-leading ``-->`` open a comment the
         # engine skips and this lexer would read as code (and as the start of a template).
         if (t == "<" and text.startswith("!--", i + 1)) or (
-                t == "--" and text.startswith(">", i + 2) and (prev is None or "\n" in text[prev.end:i])):
+                t == "--" and text.startswith(">", i + 2) and (prev is None or any(nl in text[prev.end:i] for nl in "\n\r"))):
             raise JsLexError("an HTML-like comment")
         tok = _Tok("p", i, i + len(t), t)
         if t in ("(", "[", "{"):
@@ -524,14 +563,18 @@ def _chain_runs(names: list) -> bool:
 
 
 def _call_runs(toks: list, p: int) -> bool:
-    """The ``(`` at ``p`` calls something that runs code, or something this lexer cannot name."""
-    b = toks[p - 1] if p > 0 else None
+    """The ``(`` at ``p`` calls something that runs code, or something this lexer cannot name.
+    ``f?.(…)`` is judged by ``f``."""
+    bi = p - 1
+    if bi >= 1 and _is_p(toks[bi], "?."):
+        bi -= 1
+    b = toks[bi] if bi >= 0 else None
     if b is None:
         return False
     if b.kind == "id":
-        return b.text not in _JS_NOT_A_CALL and _chain_runs(_member_chain(toks, p - 1))
+        return b.text not in _JS_NOT_A_CALL and _chain_runs(_member_chain(toks, bi))
     if _is_p(b, ")"):
-        inner = toks[b.match + 1:p - 1]    # esbuild's ``(0,x.y)(…)``: judge ``x.y``
+        inner = toks[b.match + 1:bi]    # esbuild's ``(0,x.y)(…)``: judge ``x.y``
         if (len(inner) >= 3 and inner[0].kind == "num" and _is_p(inner[1], ",") and inner[-1].kind == "id"
                 and all((t.kind == "id") if k % 2 == 0 else _is_p(t, ".", "?.") for k, t in enumerate(inner[2:]))):
             return _chain_runs([t.text for t in inner[2::2]])
@@ -584,29 +627,35 @@ def _is_data_token(toks: list, k: int, start: int, end: int) -> bool:
 
 
 # Files this module does not lex (TS, JSX, HTML) are searched as raw text, strings included.
+_REMOTE_SPECIFIER = r"[\"'`](?:data|blob|https?):"
 _JS_SINK_TEXT = re.compile(
     r"\b(?:eval|require|child_process|worker_threads|spawn|spawnSync|execSync|execFile|execFileSync|fork"
     r"|createRequire|dlopen|importScripts|runInNewContext|runInThisContext|runInContext|compileFunction"
-    r"|execa|shelljs|Deno|Bun)\b(?!-[A-Za-z])"    # not `require-trusted-types-for` in a CSP
+    r"|getBuiltinModule|_load|execa|shelljs|Deno|Bun)\b(?!-[A-Za-z])"    # not `require-trusted-types-for` (CSP)
     r"|(?<![.\w$])exec\s*\(|\bFunction\s*\(|\bnew\s+Function\b|\b(?:Shared)?Worker\s*\("
     r"|\bprocess\s*\.\s*(?:binding|dlopen|mainModule)\b|\bconstructor\s*\.\s*constructor\b"
-    r"|\[\s*[\"'`]constructor[\"'`]\s*\]"
+    r"|\b[Mm]odule\s*\.\s*(?:constructor|_\w+)\b|\[\s*[\"'`](?:constructor|exec)[\"'`]\s*\]"
+    r"|\bprototype\s*\.\s*exec\s*=(?!=)|\bdefine(?:Property|Properties)\b[^;\n]*[\"'`]exec[\"'`]"
     r"|\b(?:globalThis|window|self|global|top|parent|frames)\s*\["
     r"|\bset(?:Timeout|Interval|Immediate)\s*\(\s*[\"'`]"
-    r"|\bimport\s*\(\s*(?![\"'][^\"'`\\\n]*[\"']\s*[,)])"
-    r"|[\"'`](?:node:(?:vm|cluster|module|child_process|worker_threads)|vm|cluster|zx(?:/[\w-]+)?|sudo-prompt"
-    r"|@vscode/sudo-prompt|cross-spawn)[\"'`]")
+    r"|\bimport\s*\(\s*(?![\"'][^\"'`\\\n]*[\"']\s*[,)])|\bimport\s*\(\s*" + _REMOTE_SPECIFIER
+    + r"|\b(?:from|import)\s*" + _REMOTE_SPECIFIER
+    + r"|[\"'`](?:node:(?:vm|cluster|module|child_process|worker_threads|inspector|wasi)|vm|cluster|inspector|wasi"
+    r"|worker_threads|zx(?:/[\w-]+)?|sudo-prompt|@vscode/sudo-prompt|cross-spawn)[\"'`]")
 _JS_ESCAPE = re.compile(r"\\u[0-9a-fA-F{]")
 
 # Lexed files are judged by token.
 _JS_SINK_IDS = frozenset({
     "eval", "require", "Function", "child_process", "worker_threads", "spawn", "spawnSync", "execSync", "execFile",
     "execFileSync", "fork", "createRequire", "dlopen", "importScripts", "runInNewContext", "runInThisContext",
-    "runInContext", "compileFunction", "execa", "shelljs", "Deno", "Bun", "Worker", "SharedWorker"})
+    "runInContext", "compileFunction", "getBuiltinModule", "_load", "execa", "shelljs", "Deno", "Bun", "Worker",
+    "SharedWorker"})
 _JS_PROCESS_MODULES = re.compile(
-    r"^(?:node:)?(?:child_process|vm|cluster|module|worker_threads)$|^(?:zx(?:/[\w-]+)?|execa|shelljs|cross-spawn"
-    r"|sudo|sudo-prompt|@vscode/sudo-prompt)$")
+    r"^(?:node:)?(?:child_process|vm|cluster|module|worker_threads|inspector|wasi)$"
+    r"|^(?:zx(?:/[\w-]+)?|execa|shelljs|cross-spawn|sudo|sudo-prompt|@vscode/sudo-prompt)$"
+    r"|^(?:data|blob|https?):", re.IGNORECASE)
 _JS_GLOBALS = frozenset({"globalThis", "window", "self", "global", "top", "parent", "frames"})
+_JS_DEFINERS = frozenset({"defineProperty", "defineProperties", "__defineGetter__", "__defineSetter__", "set"})
 
 
 def _is_method_definition(toks: list, k: int, closer_of: dict) -> bool:
@@ -617,6 +666,13 @@ def _is_method_definition(toks: list, k: int, closer_of: dict) -> bool:
             and toks[k].parent >= 0 and _is_p(toks[toks[k].parent], "{")
             and (_is_p(before, "{", "}", ",", ";", "*")
                  or (before is not None and before.kind == "id" and before.text in ("static", "async", "get", "set"))))
+
+
+def _computed_member(toks: list, k: int) -> bool:
+    """The ``[`` at ``k`` indexes a value (``x["exec"]``), not an array literal."""
+    b = toks[k - 1] if k else None
+    return b is not None and ((b.kind == "id" and b.text not in (_JS_NOT_A_CALL | _RE_AFTER_KEYWORDS))
+                              or _is_p(b, ")", "]") or b.kind == "str")
 
 
 def _js_token_sink(toks: list) -> bool:
@@ -631,6 +687,9 @@ def _js_token_sink(toks: list) -> bool:
             member = _is_p(prev, ".", "?.")
             if t.text == "exec" and not member and _is_p(nxt, "(") and not _is_method_definition(toks, k, closer_of):
                 return True
+            if t.text == "exec" and member and k >= 2 and toks[k - 2].kind == "id" and toks[k - 2].text == "prototype" \
+                    and _is_p(nxt, *_JS_BINDING):
+                return True    # RegExp.prototype.exec = … : every /re/.exec("…") would call it
             if t.text == "import" and _is_p(nxt, "("):
                 arg = toks[k + 2] if k + 2 < len(toks) else None
                 after = toks[k + 3] if k + 3 < len(toks) else None
@@ -643,18 +702,21 @@ def _js_token_sink(toks: list) -> bool:
                 if arg is not None and arg.kind in ("str", "tpl"):
                     return True
             if t.text == "constructor" and member and k >= 2 and toks[k - 2].kind == "id" and (
-                    toks[k - 2].text == "constructor"):
+                    toks[k - 2].text in ("constructor", "module", "Module")):
                 return True
             if t.text == "process" and _is_p(nxt, ".", "?.") and k + 2 < len(toks) and toks[k + 2].text in (
                     "binding", "dlopen", "mainModule"):
                 return True
-            if t.kind == "id" and nxt is not None and nxt.kind == "tpl" and nxt.text.startswith("`") and (
+            if nxt is not None and nxt.kind == "tpl" and nxt.text.startswith("`") and (
                     t.text not in (_JS_NOT_A_CALL | _RE_AFTER_KEYWORDS)) and _chain_runs(_member_chain(toks, k)):
                 return True    # a shell tag: zx's $`…`, Bun.$`…`, sh`…`
         elif t.kind == "str":
             value = t.text[1:-1]
-            if value == "constructor" and _is_p(prev, "["):
+            if value in ("constructor", "exec") and _is_p(prev, "[") and _computed_member(toks, k - 1):
                 return True
+            if value == "exec" and t.parent >= 1 and _is_p(toks[t.parent], "(") and toks[t.parent - 1].kind == "id" \
+                    and toks[t.parent - 1].text in _JS_DEFINERS:
+                return True    # Object.defineProperty(RegExp.prototype, "exec", …)
             specifier = (prev is not None and prev.kind == "id" and prev.text in ("from", "import")) or (
                 _is_p(prev, "(") and k >= 2 and toks[k - 2].kind == "id" and toks[k - 2].text in ("require", "import"))
             if specifier and _JS_PROCESS_MODULES.match(value):
@@ -684,19 +746,27 @@ class JsSinkInventory:
                 yield f, "/".join(parts)
 
     def tokens(self, rel_path: str) -> Optional[tuple]:
-        """``(text, tokens, token starts)`` of a lexed file, or None when it cannot be lexed."""
+        """``(tokens, token starts, lines, line offsets)`` of a lexed file, or None when it cannot
+        be read or lexed, or anything at all goes wrong: a doubt, never an exception."""
         if rel_path not in self._tokens:
             try:
                 text = (self.plugin_dir / rel_path).read_text(encoding="utf-8-sig")
                 toks = lex_js(text)
-                self._tokens[rel_path] = (text, toks, [t.start for t in toks])
-            except (OSError, UnicodeDecodeError, JsLexError, RecursionError):
+                lines = text.split("\n")
+                offsets = [0] * len(lines)
+                for i in range(1, len(lines)):
+                    offsets[i] = offsets[i - 1] + len(lines[i - 1]) + 1
+                self._tokens[rel_path] = (toks, [t.start for t in toks], lines, offsets)
+            except Exception:    # noqa: BLE001 - any failure is a doubt: nothing is lowered
                 self._tokens[rel_path] = None
         return self._tokens[rel_path]
 
     def anything_runs(self) -> bool:
         if self._unsafe is None:
-            self._unsafe = self._scan()
+            try:
+                self._unsafe = self._scan()
+            except Exception:    # noqa: BLE001 - a scan that fails answers "yes"
+                self._unsafe = True
         return self._unsafe
 
     def _scan(self) -> bool:
@@ -705,7 +775,7 @@ class JsSinkInventory:
                 return True
             if f.suffix.lower() in JS_LEXED_SUFFIXES:
                 lexed = self.tokens(rel)
-                if lexed is None or _js_token_sink(lexed[1]):
+                if lexed is None or _js_token_sink(lexed[0]):
                     return True
                 continue
             try:
@@ -717,7 +787,14 @@ class JsSinkInventory:
         return False
 
     def js_data(self, finding: Finding, rel_path: str, line_no: int, line: str) -> bool:
-        """Every hit of the finding's pattern on line ``line_no`` is data (see the rule above)."""
+        """Every hit of the finding's pattern on line ``line_no`` is data (see the rule above).
+        Any failure answers False: the finding keeps its severity."""
+        try:
+            return self._js_data(finding, rel_path, line_no, line)
+        except Exception:    # noqa: BLE001 - never lower on an error, never raise into the scan
+            return False
+
+    def _js_data(self, finding: Finding, rel_path: str, line_no: int, line: str) -> bool:
         if finding.pattern_id not in JS_DATA_PATTERN_IDS or Path(rel_path).suffix.lower() not in JS_LEXED_SUFFIXES:
             return False
         rx = _PATTERN_BY_ID.get(finding.pattern_id)
@@ -725,11 +802,10 @@ class JsSinkInventory:
         lexed = self.tokens(rel_path) if hits else None
         if lexed is None:
             return False
-        text, toks, starts = lexed
-        lines = text.split("\n")
+        toks, starts, lines, offsets = lexed
         if not 0 < line_no <= len(lines) or lines[line_no - 1] != line:
             return False
-        base = sum(len(x) + 1 for x in lines[:line_no - 1])
+        base = offsets[line_no - 1]
         judge = _is_sudo_data if finding.pattern_id == "sudo_usage" else _is_regex_exec
         for h in hits:
             s, e = base + h.start(), base + h.end()
@@ -743,9 +819,10 @@ class JsSinkInventory:
 
 
 def _is_regex_exec(toks: list, k: int, start: int, end: int) -> Optional[bool]:
-    """An ``exec_string`` hit (``exec("``): True for ``/re/.exec("…")``, None (data unless some
-    JavaScript in the plugin can run code) for a member ``.exec("…")`` on any other receiver,
-    False for anything else, a bare ``exec("…")`` above all."""
+    """An ``exec_string`` hit (``exec("``): None (data unless some JavaScript in the plugin can run
+    code) for a member ``.exec("…")``, whether the receiver is a regex literal or anything else;
+    False for anything else, a bare ``exec("…")`` above all. A regex receiver is not enough on its
+    own: ``RegExp.prototype.exec`` can be replaced."""
     tok = toks[k]
     if tok.kind != "id" or tok.text != "exec" or tok.start != start:
         return False
@@ -754,9 +831,7 @@ def _is_regex_exec(toks: list, k: int, start: int, end: int) -> Optional[bool]:
     if not (_is_p(nxt, "(") and arg is not None and arg.kind == "str") or k < 2 or not _is_p(toks[k - 1], ".", "?."):
         return False
     receiver = toks[k - 2]
-    if receiver.kind == "re":
-        return True
-    return None if receiver.kind == "id" or _is_p(receiver, ")", "]") else False
+    return None if receiver.kind in ("re", "id") or _is_p(receiver, ")", "]") else False
 
 
 def _is_sudo_data(toks: list, k: int, start: int, end: int) -> Optional[bool]:

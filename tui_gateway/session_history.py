@@ -200,9 +200,13 @@ _HISTORY_ROLES = frozenset({"user", "assistant", "tool", "system"})
 def _history_to_messages(history: list[dict], *, profile_home=None) -> list[dict]:
     from agent.history_commentary import project_history_commentary
 
+    from tui_gateway.row_identity import annotate_tool_rows
+
     messages = []
     tool_call_args = {}
-    for m in history:
+    # Annotated BEFORE projection: an assistant row whose only content is its tool calls projects to nothing,
+    # yet its row id is the identity every one of its tool rows carries.
+    for m in annotate_tool_rows(history):
         if not isinstance(m, dict):
             continue
         m = project_compaction_message_for_display(m)
@@ -240,8 +244,11 @@ def _history_to_messages(history: list[dict], *, profile_home=None) -> list[dict
                              # Edit cards need the original result; other tool outputs
                              # remain omitted from this compact display projection.
                              **({"content": m.get("content")} if name in {"write_file", "patch", "skill_manage"} else {}),
-                             **{key: m[key] for key in ("tool_call_id", "timestamp", "display_metadata")
+                             **{key: m[key] for key in ("tool_call_id", "timestamp", "display_metadata",
+                                                        "call_row_id", "call_index")
                                 if m.get(key) is not None},
+                             # The committed tool row's id (the non-tool path below does the same).
+                             **({"row_id": m["_row_id"]} if m.get("_row_id") is not None else {}),
                              **({"args": args} if args else {}), **({"labels": labels} if labels else {})})
             continue
         # Assistant detail sidecars can carry the only visible reply or reasoning after resume/reload.

@@ -34732,6 +34732,42 @@
             ],
             "default": null,
             "title": "Labels"
+          },
+          "call_row_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Call Row Id"
+          },
+          "call_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Call Index"
+          },
+          "row_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Row Id"
           }
         },
         "required": [
@@ -34836,6 +34872,30 @@
           "redacted": {
             "title": "Redacted",
             "type": "boolean"
+          },
+          "call_row_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Call Row Id"
+          },
+          "call_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Call Index"
           }
         },
         "required": [
@@ -34964,6 +35024,30 @@
             ],
             "default": null,
             "title": "Labels"
+          },
+          "call_row_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Call Row Id"
+          },
+          "call_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Call Index"
           }
         },
         "required": [
@@ -35395,7 +35479,7 @@
       },
       "TranscriptMessage": {
         "additionalProperties": true,
-        "description": "One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``):\n``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id``\nrewind targets, and for tool rows raw ``content``, ``tool_call_id``, ``name``, ``context`` and ``args``.\nAssistant detail sidecars (``reasoning``, \u2026) ride as extra keys.",
+        "description": "One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``):\n``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id``\nrewind targets (tool rows carry theirs too), and for tool rows raw ``content``, ``tool_call_id``, ``name``,\n``context`` and ``args``.\nAssistant detail sidecars (``reasoning``, \u2026) ride as extra keys.",
         "properties": {
           "role": {
             "title": "Role",
@@ -35544,6 +35628,30 @@
             ],
             "default": null,
             "title": "Reasoning"
+          },
+          "call_row_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Call Row Id"
+          },
+          "call_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Call Index"
           }
         },
         "required": [

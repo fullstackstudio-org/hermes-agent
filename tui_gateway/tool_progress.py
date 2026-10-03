@@ -235,7 +235,18 @@ def _emit_tool_lifecycle(event, sid, name, args, payload):
     transport.write(frame)
 
 
-def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
+def _call_identity_payload(call_row_id, call_index) -> dict[str, int]:
+    """The call identity (``agent/tool_call_identity.py``) as payload keys: both ints or neither, so a frame
+    never names a position without the row that position is in."""
+    from agent.tool_call_identity import positive_row_id
+
+    row = positive_row_id(call_row_id)
+    if row is None or type(call_index) is not int or call_index < 0:
+        return {}
+    return {"call_row_id": row, "call_index": call_index}
+
+
+def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict, *, call_row_id=None, call_index=None):
     if _connector_lifecycle_is_stale(sid, name, args):
         return
     session = _sessions.get(sid)
@@ -252,7 +263,8 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
         session.setdefault("tool_result_metadata", {}).pop(tool_call_id, None)
     if (_tool_progress_enabled(sid) or _tool_lifecycle_required_for_ui(name)
             or _connector_tool_lifecycle(name, args)):
-        payload: dict[str, object] = {"tool_id": tool_call_id, "name": name, "context": _tool_ctx(name, args)}
+        payload: dict[str, object] = {"tool_id": tool_call_id, "name": name, "context": _tool_ctx(name, args),
+                                      **_call_identity_payload(call_row_id, call_index)}
         if (labels := _tool_labels(name, args)) is not None:
             payload["labels"] = labels
         # Full args (not just the 80-char `context` preview) so the desktop's expanded tool row is complete
@@ -283,14 +295,21 @@ def _prepare_tool_result_metadata(sid: str, tool_call_id: str, name: str, args: 
     return {"tool_result_metadata": metadata} if metadata else {}
 
 
-def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result: str):
+def _on_tool_complete(
+    sid: str, tool_call_id: str, name: str, args: dict, result: str, *,
+    call_row_id=None, call_index=None, row_id=None,
+):
     session = _sessions.get(sid)
     prepared = session.setdefault("tool_result_metadata", {}) if session is not None else {}
     # Consume the pre-flush preview even when this completion is dropped as stale.
     metadata = prepared.pop(tool_call_id, None)
     if _connector_lifecycle_is_stale(sid, name, args):
         return
-    payload = {"tool_id": tool_call_id, "name": name, "args": args}
+    payload = {"tool_id": tool_call_id, "name": name, "args": args, **_call_identity_payload(call_row_id, call_index)}
+    # The committed tool RESULT row, so a client settles the card onto the row the history will carry.
+    from agent.tool_call_identity import positive_row_id
+    if (result_row_id := positive_row_id(row_id)) is not None:
+        payload["row_id"] = result_row_id
     if (labels := _tool_labels(name, args)) is not None:
         payload["labels"] = labels
     if metadata is None:
@@ -335,6 +354,7 @@ def _progress_output_risk(sid, name, preview, kw):
         _emit("tool.output_risk", sid, {
             "tool_id": str(kw.get("tool_call_id") or ""), "name": str(name), "risk": str(metadata.get("risk") or "low"),
             "findings": [str(item) for item in metadata.get("findings", [])], "redacted": bool(metadata.get("redacted", False)),
+            **_call_identity_payload(kw.get("call_row_id"), kw.get("call_index")),
         })
 
 

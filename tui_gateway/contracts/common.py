@@ -155,7 +155,8 @@ class ToolLabel(Payload):
 class TranscriptMessage(OpenModel):
     """One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``):
     ``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id``
-    rewind targets, and for tool rows raw ``content``, ``tool_call_id``, ``name``, ``context`` and ``args``.
+    rewind targets (tool rows carry theirs too), and for tool rows raw ``content``, ``tool_call_id``, ``name``,
+    ``context`` and ``args``.
     Assistant detail sidecars (``reasoning``, …) ride as extra keys."""
 
     role: str
@@ -171,6 +172,10 @@ class TranscriptMessage(OpenModel):
     args: dict[str, JsonValue] | None = None
     labels: list[ToolLabel] | None = None
     reasoning: str | None = None
+    # Tool rows: the assistant row holding the call and the call's position in it, the same pair the
+    # tool.start / tool.complete frames of that call carried. Absent when the row cannot be tied to one.
+    call_row_id: int | None = None
+    call_index: int | None = None
 
 
 class SubagentStatus(WireEnum):

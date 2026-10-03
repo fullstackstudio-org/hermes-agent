@@ -32,6 +32,7 @@ from agent.display import (
 )
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
 from agent.message_sanitization import coalesce_tool_call_id
+from agent.tool_call_identity import callback_identity_kwargs, claim_call_identity, positive_row_id
 from agent.inline_tool_executors import (
     INLINE_TOOL_EXECUTORS,
     InlineToolContext,
@@ -276,13 +277,23 @@ class _ToolCallRef:
     task_id: str
     call_id: str
     trace: list
+    # Which persisted assistant row holds this call and where (``agent/tool_call_identity.py``); ``None``
+    # outside a tool round. Unlike ``call_id`` this is unique whatever the provider's ids look like.
+    call_row_id: int | None = None
+    call_index: int | None = None
 
     def middleware_kwargs(self) -> dict[str, Any]:
-        """Keyword form ``_run_agent_tool_execution_middleware`` (and tests patching it) expect."""
+        """Keyword form ``_run_agent_tool_execution_middleware`` (and tests patching it) expect. The call
+        identity rides along only when there is one."""
         return {
             "function_name": self.name, "function_args": self.args, "effective_task_id": self.task_id,
-            "tool_call_id": self.call_id, "middleware_trace": self.trace,
+            "tool_call_id": self.call_id, "middleware_trace": self.trace, **self.identity_kwargs(),
         }
+
+    def identity_kwargs(self) -> dict[str, int]:
+        if self.call_row_id is None or self.call_index is None:
+            return {}
+        return {"call_row_id": self.call_row_id, "call_index": self.call_index}
 
     def emit_post(self, agent, result, *, trace=None, **outcome) -> None:
         """Emit the one terminal ``post_tool_call`` for this call (``outcome`` = status /
@@ -445,9 +456,14 @@ class _ParsedCall:
     middleware_trace: list
     parse_error: Optional[str]
     scope_block: Optional[str]
+    call_row_id: int | None = None
+    call_index: int | None = None
 
     def ref(self, task_id: str) -> _ToolCallRef:
-        return _ToolCallRef(self.name, self.args, task_id, _pairing_tool_call_id(self.tool_call), self.middleware_trace)
+        return _ToolCallRef(
+            self.name, self.args, task_id, _pairing_tool_call_id(self.tool_call), self.middleware_trace,
+            self.call_row_id, self.call_index,
+        )
 
 
 def _parse_tool_call(agent, tool_call, *, flatten_probe: bool = False) -> _ParsedCall:
@@ -456,7 +472,9 @@ def _parse_tool_call(agent, tool_call, *, flatten_probe: bool = False) -> _Parse
     scope_block = None
     if parse_error is None:
         name, args, scope_block = _unwrap_tool_search_call(agent, name, args, flatten_probe=flatten_probe)
-    return _ParsedCall(tool_call, name, args, [], parse_error, scope_block)
+    # Claimed here, in call order on the parsing thread, so no worker thread decides an index.
+    call_row_id, call_index = claim_call_identity(agent, tool_call)
+    return _ParsedCall(tool_call, name, args, [], parse_error, scope_block, call_row_id, call_index)
 
 
 @dataclass
@@ -759,6 +777,8 @@ def _run_agent_tool_execution_middleware(
     middleware_trace: list[dict[str, Any]] | None = None,
     begin_execution=None,
     authorization_gate: _ConcurrentToolAuthorizationGate | None = None,
+    call_row_id: int | None = None,
+    call_index: int | None = None,
 ) -> _ManagedToolResult:
     """Run Relay rewrites before Hermes policy and dispatch exactly once."""
     from agent import relay_tools
@@ -781,7 +801,7 @@ def _run_agent_tool_execution_middleware(
         return _dispatch_authorized_once(
             agent,
             state,
-            _ToolCallRef(function_name, final_args, effective_task_id, tool_call_id, trace),
+            _ToolCallRef(function_name, final_args, effective_task_id, tool_call_id, trace, call_row_id, call_index),
             execute=execute,
             scope_block=scope_block,
             display_index=display_index,
@@ -897,6 +917,8 @@ def _run_sequential_tool_execution_middleware(
     scope_block: str | None = None,
     display_index: int | None = None,
     middleware_trace: list[dict[str, Any]] | None = None,
+    call_row_id: int | None = None,
+    call_index: int | None = None,
 ) -> _ManagedToolResult:
     """Run one sequential call on a worker thread under the concurrent executor's deadline.
     Interactive tools (``clarify``) own their wait via ``agent.clarify_timeout``; the
@@ -904,7 +926,7 @@ def _run_sequential_tool_execution_middleware(
     are ``_NEVER_PARALLEL_TOOLS`` and run inline below, before any deadline is armed, so
     they need no ``_SEQUENTIAL_DEADLINE_EXEMPT_TOOLS`` entry."""
     timeout_s = None if function_name in _SEQUENTIAL_DEADLINE_EXEMPT_TOOLS else _resolve_sequential_tool_timeout()
-    ref = _ToolCallRef(function_name, function_args, effective_task_id, tool_call_id, middleware_trace)
+    ref = _ToolCallRef(function_name, function_args, effective_task_id, tool_call_id, middleware_trace, call_row_id, call_index)
     kwargs = dict(ref.middleware_kwargs(), execute=execute, scope_block=scope_block, display_index=display_index)
     from agent.terminal_approval_batch import take_prepared_call
     prepared = take_prepared_call(tool_call_id)
@@ -1014,7 +1036,10 @@ def _begin_tool_execution(agent, ref: _ToolCallRef, display_index: int | None) -
             logging.debug("Tool progress callback error: %s", callback_error)
         else:
             _safe_callback(agent.tool_progress_callback, "Tool progress", "tool.started", function_name, preview, display_args)
-    _safe_callback(agent.tool_start_callback, "Tool start", tool_call_id, function_name, display_args)
+    _safe_callback(
+        agent.tool_start_callback, "Tool start", tool_call_id, function_name, display_args,
+        **callback_identity_kwargs(agent.tool_start_callback, **ref.identity_kwargs()),
+    )
 
     if not agent._checkpoint_mgr.enabled:
         return
@@ -1031,19 +1056,26 @@ def _begin_tool_execution(agent, ref: _ToolCallRef, display_index: int | None) -
                     agent._checkpoint_mgr.ensure_checkpoint(cwd, f"before terminal: {command[:60]}")
 
 
-def _emit_tool_complete_and_risk(agent, ref: _ToolCallRef, result, risk_metadata, blocked: bool) -> None:
-    """Fire ``tool_complete_callback`` (unless blocked) then the ``tool.output_risk`` projection."""
+def _emit_tool_complete_and_risk(
+    agent, ref: _ToolCallRef, result, risk_metadata, blocked: bool, row_id: int | None = None,
+) -> None:
+    """Fire ``tool_complete_callback`` (unless blocked) then the ``tool.output_risk`` projection.
+    ``row_id`` is the committed tool result row; it and the call identity reach only callbacks that take them."""
     if not blocked and agent.tool_complete_callback:
         try:
             display_args = _redact_tool_args_for_display(ref.name, ref.args) or ref.args
         except Exception as cb_err:
             logging.debug("Tool complete callback error: %s", cb_err)
         else:
-            _safe_callback(agent.tool_complete_callback, "Tool complete", ref.call_id, ref.name, display_args, result)
+            _safe_callback(
+                agent.tool_complete_callback, "Tool complete", ref.call_id, ref.name, display_args, result,
+                **callback_identity_kwargs(agent.tool_complete_callback, row_id=row_id, **ref.identity_kwargs()),
+            )
     if risk_metadata is not None and risk_metadata.get("risk") != "low":
         _safe_callback(
             agent.tool_progress_callback, "Tool output risk",
             "tool.output_risk", ref.name, None, None, tool_call_id=ref.call_id, risk_metadata=risk_metadata,
+            **ref.identity_kwargs(),
         )
 
 
@@ -1068,8 +1100,9 @@ def _commit_tool_result(
 
     Blocked calls never ran, so they are neither guardrail-observed nor fed to the file-
     mutation verifier; ``success_log_chars`` (sequential path) also logs the completion line.
-    Returns ``(persisted_result, display_result, risk_metadata)`` (``display_result`` =
-    pre-persist content for UI previews) or ``None`` when the flush failed (stop the batch).
+    Returns ``(persisted_result, display_result, risk_metadata, tool_row_id)`` (``display_result`` =
+    pre-persist content for UI previews; ``tool_row_id`` = the committed result row's ``messages.id``,
+    ``None`` when the flush stamped none) or ``None`` when the flush failed (stop the batch).
     """
     function_name, function_args, tool_call_id, effective_task_id = ref.name, ref.args, ref.call_id, ref.task_id
     if observed:
@@ -1148,7 +1181,7 @@ def _commit_tool_result(
         )
     if isinstance(function_result, str) and len(function_result) >= _LARGE_TOOL_RESULT_TRIM_CHARS:
         agent._trim_after_tool_batch = True
-    return persisted_result, function_result, tool_message.get("_tool_output_risk")
+    return persisted_result, function_result, tool_message.get("_tool_output_risk"), positive_row_id(tool_message.get("_row_id"))
 
 
 def _persist_multimodal_text_parts(result: dict, tool_name: str, tool_call_id: str, env, budget: BudgetConfig) -> dict:
@@ -1526,7 +1559,7 @@ def _append_batch_results(agent, messages: list, effective_task_id: str, batch: 
         )
         if committed is None:
             return False
-        _persisted, display_function_result, risk_metadata = committed
+        _persisted, display_function_result, risk_metadata, tool_row_id = committed
 
         if agent._should_emit_quiet_tool_messages():
             cute_msg = _get_cute_tool_message_impl(ref.name, ref.args, tool_duration, result=display_function_result)
@@ -1534,7 +1567,7 @@ def _append_batch_results(agent, messages: list, effective_task_id: str, batch: 
         elif _tool_progress_enabled(agent):
             _print_tool_completed(agent, i + 1, tool_duration, _multimodal_text_summary(display_function_result))
 
-        _emit_tool_complete_and_risk(agent, ref, display_function_result, risk_metadata, blocked)
+        _emit_tool_complete_and_risk(agent, ref, display_function_result, risk_metadata, blocked, tool_row_id)
     return True
 
 
@@ -1799,9 +1832,9 @@ def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed
     )
     if committed is None:
         return False
-    function_result, display_function_result, risk_metadata = committed
+    function_result, display_function_result, risk_metadata, tool_row_id = committed
 
-    _emit_tool_complete_and_risk(agent, ref, display_function_result, risk_metadata, managed.blocked)
+    _emit_tool_complete_and_risk(agent, ref, display_function_result, risk_metadata, managed.blocked, tool_row_id)
     if _tool_progress_enabled(agent):
         _print_tool_completed(agent, index, tool_duration, function_result)
     return True

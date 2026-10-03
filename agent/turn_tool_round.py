@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from agent.message_metadata import append_message
 from agent.message_sanitization import coalesce_tool_call_id
+from agent.tool_call_identity import call_row_for
 from agent.turn_preflight import compress_after_tool_results
 from agent.turn_tool_validation import validate_tool_calls
 
@@ -99,6 +100,9 @@ def run_tool_round(
         agent, assistant_message=assistant_message, finish_reason=finish_reason, messages=messages
     )
     append_message(messages, assistant_msg)
+    # Every call the row holds, in the order the row lists them: the call identity indexes into this list,
+    # and the invalid-batch filter below narrows ``assistant_message.tool_calls`` but not the row.
+    _staged_calls = list(assistant_message.tool_calls)
 
     # Mixed batch: error-result invalid calls and drop them from execution.
     if _invalid_batch_calls:
@@ -151,7 +155,13 @@ def run_tool_round(
         with suppress(Exception):
             agent.stream_delta_callback(None)
 
-    agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+    # The row is durable and carries its id: from here every tool frame of this round names its call as
+    # (this row, position in it), which no provider's reuse of ``tool_call_id`` can make ambiguous.
+    agent._current_call_row = call_row_for(assistant_msg, _staged_calls)
+    try:
+        agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+    finally:
+        agent._current_call_row = None
 
     if getattr(agent, "_incremental_persistence_failed", False):
         # Tool result could not be made canonical: never send the in-memory result to

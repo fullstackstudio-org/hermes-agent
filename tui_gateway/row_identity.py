@@ -70,3 +70,40 @@ def turn_id_of(display_metadata) -> str | None:
         return None
     value = display_metadata.get("turn_id")
     return value if isinstance(value, str) and value else None
+
+
+def annotate_tool_rows(messages) -> list:
+    """``messages`` with every tool row that can be tied to its call carrying ``call_row_id`` and
+    ``call_index``: the assistant row that holds the ``tool_calls`` and the position of the call in it.
+
+    ``tool_call_id`` cannot say which call a row answers (llama.cpp sends one constant id, other backends
+    restart at ``call_0`` each turn); the assistant row and the index can. Works on the stored shape
+    (``_row_id`` on a message from ``get_messages_as_conversation``, ``id`` on a REST row) and so
+    serves ``session.history`` and the REST routes alike. A tool row takes the first call of its id
+    that no earlier tool row took, among the calls of the NEAREST preceding assistant row with calls; a
+    later assistant row ends the earlier one's claim, so a call that never got a result cannot absorb the
+    next turn's row. Rows with no such assistant row, or whose id that row never held, are returned as
+    they came. The same list length and order; annotated tool rows are copies, nothing is mutated."""
+    from agent.message_sanitization import coalesce_tool_call_id
+    from agent.tool_call_identity import ToolRowPairing, positive_row_id
+
+    annotated: list = []
+    active: ToolRowPairing | None = None
+    for message in messages or ():
+        if not isinstance(message, dict):
+            annotated.append(message)
+            continue
+        role = message.get("role")
+        if role == "assistant":
+            calls = message.get("tool_calls")
+            row_id = positive_row_id(message.get("_row_id")) or positive_row_id(message.get("id"))
+            active = (ToolRowPairing(row_id, [coalesce_tool_call_id(tc) for tc in calls])
+                      if row_id is not None and isinstance(calls, list) and calls else None)
+        elif role == "tool" and active is not None:
+            raw_id = message.get("tool_call_id")
+            pairing_id = raw_id.split("|", 1)[0].strip() if isinstance(raw_id, str) else ""
+            index = active.take(pairing_id)
+            if index is not None:
+                message = {**message, "call_row_id": active.row_id, "call_index": index}
+        annotated.append(message)
+    return annotated

@@ -270,6 +270,10 @@ class ToolStartPayload(Payload):
     args_text: str | None = None
     preview: str | None = None
     labels: list[ToolLabel] | None = None
+    # The persisted assistant row that holds this call and the call's position in it: unique per session
+    # whatever the provider's ``tool_id`` looks like. Both or neither; absent from mirrored child rows.
+    call_row_id: int | None = None
+    call_index: int | None = None
 
 
 event("tool.start", ToolStartPayload, doc="A tool call began (stable id + full args).")
@@ -289,6 +293,9 @@ class ToolCompletePayload(Payload):
     todos: list[JsonValue] | None = None
     revision: int | None = None
     labels: list[ToolLabel] | None = None
+    call_row_id: int | None = None  # same identity as the tool.start of this call
+    call_index: int | None = None
+    row_id: int | None = None  # the committed tool RESULT row (``messages.id``)
 
 
 event("tool.complete", ToolCompletePayload, doc="A tool call finished: parsed result, summary, optional diff / todo snapshot.")
@@ -311,6 +318,8 @@ class ToolOutputRiskPayload(Payload):
     risk: str
     findings: list[str]
     redacted: bool
+    call_row_id: int | None = None  # same identity as the tool.start of this call
+    call_index: int | None = None
 
 
 event("tool.output_risk", ToolOutputRiskPayload, doc="Tool output was classified as risky (prompt-injection / secret findings).")

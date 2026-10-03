@@ -2815,7 +2815,7 @@ export interface SessionCreateResult {
   messages: TranscriptMessage[]
   info: SessionLiveInfo
 }
-/** One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``): ``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id`` rewind targets, and for tool rows raw ``content``, ``tool_call_id``, ``name``, ``context`` and ``args``. Assistant detail sidecars (``reasoning``, …) ride as extra keys. */
+/** One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``): ``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id`` rewind targets (tool rows carry theirs too), and for tool rows raw ``content``, ``tool_call_id``, ``name``, ``context`` and ``args``. Assistant detail sidecars (``reasoning``, …) ride as extra keys. */
 export interface TranscriptMessage {
   role: string
   text?: string | null
@@ -2830,6 +2830,8 @@ export interface TranscriptMessage {
   args?: Record<string, unknown> | null
   labels?: ToolLabel[] | null
   reasoning?: string | null
+  call_row_id?: number | null
+  call_index?: number | null
   [key: string]: unknown
 }
 /** ``tools.tool_labels.ToolLabel`` — what one call executed through the tool_search bridge is, in words. Clients render ``text`` (or ``app``/``action`` in their own columns) and never parse the tool name themselves. */
@@ -4508,6 +4510,8 @@ export interface ToolStartPayload {
   args_text?: string | null
   preview?: string | null
   labels?: ToolLabel[] | null
+  call_row_id?: number | null
+  call_index?: number | null
 }
 /** ``tool_progress._on_tool_complete``; ``todos``/``revision`` merged in for the todo tools. */
 export interface ToolCompletePayload {
@@ -4522,6 +4526,9 @@ export interface ToolCompletePayload {
   todos?: unknown[] | null
   revision?: number | null
   labels?: ToolLabel[] | null
+  call_row_id?: number | null
+  call_index?: number | null
+  row_id?: number | null
 }
 /** ``agent_callbacks`` tool_gen_callback. */
 export interface ToolGeneratingPayload {
@@ -4534,6 +4541,8 @@ export interface ToolOutputRiskPayload {
   risk: string
   findings: string[]
   redacted: boolean
+  call_row_id?: number | null
+  call_index?: number | null
 }
 /** ``tool_progress._normalize_todo_state`` — full task snapshot. */
 export interface TodoUpdatedPayload {

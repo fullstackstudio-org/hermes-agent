@@ -583,8 +583,12 @@ def _project_for_display(messages: list, *, home=None) -> list:
     from agent.history_commentary import project_history_commentary
     from agent.turn_failure_copy import untyped_failed_turn_display_kind
 
+    from tui_gateway.row_identity import annotate_tool_rows
+
     projected_messages = []
-    for message in messages:
+    # Tool rows learn which assistant row and which of its calls they answer (the stored ``tool_call_id`` is
+    # not unique across providers). A page that starts after the assistant row leaves its tool rows plain.
+    for message in annotate_tool_rows(messages):
         message = _with_tool_call_labels(_without_wire_copy(message))
         # Same read-side typing as session.resume (tui_gateway/session_history.py).
         failed_turn = not message.get("display_kind") and untyped_failed_turn_display_kind(

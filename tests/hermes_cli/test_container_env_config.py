@@ -894,6 +894,23 @@ def test_write_origin_check_invalid(home):
         _run(home, {cec.WRITE_ORIGIN_CHECK: "sometimes"})
 
 
+@pytest.mark.parametrize("raw, stored", [("true", True), ("1", True), ("FALSE", False)])
+def test_mcp_enabled_is_what_the_mcp_settings_read(home, raw, stored):
+    from hermes_cli.dashboard_auth.mcp.settings import parse
+
+    _run(home, {cec.MCP_ENABLED: raw})
+    settings, problems = parse(_cfg(home))
+    assert (settings.enabled, problems) == (stored, [])
+    before = (home / "config.yaml").read_bytes()
+    assert _run(home, {cec.MCP_ENABLED: raw}) == []
+    assert (home / "config.yaml").read_bytes() == before
+
+
+def test_mcp_enabled_invalid(home):
+    with pytest.raises(cec.EnvConfigError, match=cec.MCP_ENABLED):
+        _run(home, {cec.MCP_ENABLED: "sometimes"})
+
+
 class TestMessagingGatewaySwitch:
     """HERM-131: HERMES_MESSAGING_GATEWAY is validated here but never written to config.yaml — it is
     a live container switch read by hermes_cli.container_boot and `hermes gateway start`."""

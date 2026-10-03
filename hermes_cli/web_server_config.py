@@ -234,7 +234,7 @@ def _build_schema_from_config(config: Dict[str, Any], prefix: str = "") -> Dict[
     schema: Dict[str, Dict[str, Any]] = {}
     for key, value in config.items():
         full_key = f"{prefix}.{key}" if prefix else key
-        if full_key in ("_config_version", "confirm.passkey"):  # confirm.passkey: operator-only, no form
+        if full_key in ("_config_version", "confirm.passkey", "dashboard.mcp"):  # operator-only sections: no form
             continue
         if isinstance(value, dict):
             schema.update(_build_schema_from_config(value, full_key))

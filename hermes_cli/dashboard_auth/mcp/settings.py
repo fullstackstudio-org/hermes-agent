@@ -4,6 +4,8 @@ Pure: no file, no logging. :func:`parse` takes a config mapping (raw or defaulte
 settings plus a list of problems (a key with a value of the wrong type or out of range keeps its
 default); the caller decides whether to log them. The section is operator-only (config file or the
 container env), like ``confirm.passkey``: a stolen dashboard session must not be able to switch it on.
+The dashboard's config writers (``PUT /api/config``, ``PUT /api/config/raw``) refuse a write that would
+change what the gateway reads here (:func:`changes_protected`); ``config.set`` has no setter for it.
 """
 
 from __future__ import annotations
@@ -90,6 +92,49 @@ def parse(cfg: Any) -> tuple[MCPSettings, list[str]]:
     if settings.access_token_ttl > settings.grant_max_age:
         problems.append("dashboard.mcp.access_token_ttl is longer than grant_max_age; tokens end with the grant")
     return settings, problems
+
+
+PROTECTED_KEY = ".".join(SECTION_PATH)
+PROTECTED_DETAIL = ("protected_setting: dashboard.mcp can only be changed on the gateway host "
+                    "(config.yaml, `hermes config set` or HERMES_DASHBOARD_MCP_ENABLED)")
+
+
+def effective_section(cfg: Any) -> dict[str, Any]:
+    """``dashboard.mcp`` as the gateway reads it from *cfg*: the defaults with the file's section merged
+    over them (``None`` keeps a default, like the config loader), so echoing the defaulted section back
+    unchanged is not a change."""
+    out = default_section()
+    raw = _section(cfg)
+    if raw is None:
+        dashboard = cfg.get("dashboard") if isinstance(cfg, Mapping) else None
+        if isinstance(dashboard, Mapping) and dashboard.get("mcp") is not None:
+            return {"__not_a_mapping__": dashboard.get("mcp")}
+        return out
+    for key, value in raw.items():
+        if value is not None:
+            out[key] = value
+    return out
+
+
+def changes_protected(before: Any, after: Any) -> bool:
+    """True when *after* would make the gateway read a different ``dashboard.mcp`` than *before*."""
+    return effective_section(before) != effective_section(after)
+
+
+def audit_refusal_for_request(surface: str, request: Any) -> None:
+    """One ``protected_setting_refused`` line for a refused REST config write: the surface, the gate's
+    verified session and the settled client address."""
+    from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
+    from hermes_cli.dashboard_auth.request_utils import client_ip
+
+    session = getattr(getattr(request, "state", None), "session", None)
+    user_id = f"{session.provider}:{session.user_id}" if session is not None else ""
+    try:
+        ip = client_ip(request)
+    except Exception:  # noqa: BLE001 - an audit line must not fail the refusal
+        ip = ""
+    audit_log(AuditEvent.PROTECTED_SETTING_REFUSED, surface=surface, key=PROTECTED_KEY, user_id=user_id, ip=ip,
+              path=str(getattr(getattr(request, "url", None), "path", "")))
 
 
 def from_config(cfg: Any) -> MCPSettings:

@@ -67,6 +67,8 @@ DASHBOARD_HOST = "HERMES_DASHBOARD_HOST"
 DASHBOARD_PORT = "HERMES_DASHBOARD_PORT"
 # New variables: the fork had no environment surface for these settings.
 TRUSTED_PROXIES = "HERMES_DASHBOARD_TRUSTED_PROXIES"
+# Fork: the remote MCP endpoint (dashboard.mcp.enabled), operator-only like the rest of this list.
+MCP_ENABLED = "HERMES_DASHBOARD_MCP_ENABLED"
 PROFILES_MAX = "HERMES_PROFILES_MAX"
 HERMIE_PLUGIN = "HERMIE_PLUGIN"
 # HERM-131: keep the messaging gateway (and its cron scheduler) off for this container regardless of
@@ -81,7 +83,7 @@ MESSAGING_GATEWAY = "HERMES_MESSAGING_GATEWAY"
 MANAGED_ENV_NAMES = (
     PUBLIC_URL, PUBLIC_URLS, WRITE_ORIGIN_CHECK, BASIC_USERNAME, BASIC_PASSWORD, BASIC_PASSWORD_HASH, BASIC_SECRET,
     OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_SCOPES, DASHBOARD_HOST, DASHBOARD_PORT,
-    TRUSTED_PROXIES, PROFILES_MAX, HERMIE_PLUGIN, MESSAGING_GATEWAY,
+    TRUSTED_PROXIES, PROFILES_MAX, HERMIE_PLUGIN, MESSAGING_GATEWAY, MCP_ENABLED,
 )
 
 HERMIE_PLUGIN_REPO = "https://github.com/fullstackstudio-org/hermie-plugin.git"
@@ -359,6 +361,16 @@ def parse_environment(environ: Mapping[str, str]) -> Plan:
         value = check(lambda: _validate_trusted_proxies(raw))
         if value is not None:
             plan.assignments.append(("dashboard.trusted_proxies", value, TRUSTED_PROXIES))
+
+    # -- dashboard.mcp.enabled (true | false), written as a YAML boolean
+    raw = _env(environ, MCP_ENABLED)
+    if raw:
+        if raw.lower() in _TRUTHY:
+            plan.assignments.append(("dashboard.mcp.enabled", True, MCP_ENABLED))
+        elif raw.lower() in _FALSY:
+            plan.assignments.append(("dashboard.mcp.enabled", False, MCP_ENABLED))
+        else:
+            problems.append(f"{MCP_ENABLED} must be true or false")
 
     # -- profiles.max
     raw = _env(environ, PROFILES_MAX)

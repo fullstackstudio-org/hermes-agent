@@ -1044,6 +1044,21 @@ DEFAULT_CONFIG = {
         # HERMES_DASHBOARD_DRAIN_SECRET; no-op unless >=256-bit, weak secrets rejected
         # (fail-closed). scope = capability label; min_secret_chars in url-safe-b64 chars.
         "drain_auth": {"scope": "drain", "min_secret_chars": 43},
+        # Fork: the remote MCP endpoint (/mcp) and the authorization server MCP clients sign in through
+        # (hermes_cli/dashboard_auth/mcp). Off by default; needs the sign-in gate and dashboard.public_url
+        # (the issuer and the token audience are built from the primary public URL). Operator-only, like
+        # confirm.passkey: the dashboard's config writers refuse changes (env HERMES_DASHBOARD_MCP_ENABLED).
+        # Read at startup. Grants live in $HERMES_HOME/dashboard_auth/mcp.db (`hermes dashboard mcp`).
+        "mcp": {
+            "enabled": False,
+            "access_token_ttl": 3600,  # seconds
+            "refresh_token_ttl": 2592000,  # 30 days, sliding: every refresh starts it again
+            "grant_max_age": 7776000,  # 90 days, absolute: then the person consents again
+            "answer_clarify": True,  # an agent may answer a bot's clarify question (marked as the agent's)
+            "max_running_turns_per_grant": 3,
+            "max_grants_per_user": 5,
+            "label": "",  # the server name in the add command Settings › MCP shows; "" = from the dashboard label
+        },
         # Public URL (env HERMES_DASHBOARD_PUBLIC_URL): full authority (scheme + host + optional
         # prefix, e.g. https://example.com/hermes) for the OAuth redirect_uri; its hostname is
         # trusted by Host/Origin guards and engages the auth gate when non-loopback. For proxies

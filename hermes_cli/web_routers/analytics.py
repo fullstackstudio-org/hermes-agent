@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from hermes_cli.config import get_config_path, read_raw_config
 from hermes_cli.dashboard_auth.passkeys import settings as _passkey_settings
+from hermes_cli.dashboard_auth.mcp import settings as _mcp_settings
 from hermes_cli.web_deps import late
 from hermes_cli.web_routers._common import corrupt_store_as_status
 from hermes_cli.web_server_profiles import (
@@ -65,6 +66,9 @@ async def update_config_raw(body: RawConfigUpdate, request: Request, profile: Op
             if _passkey_settings.changes_protected(existing, parsed):
                 _passkey_settings.audit_refusal_for_request("config_raw", request)
                 raise HTTPException(status_code=403, detail=_passkey_settings.PROTECTED_DETAIL)
+            if _mcp_settings.changes_protected(existing, parsed):  # dashboard.mcp: operator-only too
+                _mcp_settings.audit_refusal_for_request("config_raw", request)
+                raise HTTPException(status_code=403, detail=_mcp_settings.PROTECTED_DETAIL)
             approvals_mode_changed = _approval_mode_of(parsed) != _approval_mode_of(existing)
             save_config(parsed, merge_existing=False)
         # Same indicator refresh as the schema-driven save.

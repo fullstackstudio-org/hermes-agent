@@ -25,6 +25,7 @@ from hermes_cli.web_server_profiles import (
 )
 from fastapi import HTTPException, Request
 from hermes_cli.dashboard_auth.passkeys import settings as _passkey_settings
+from hermes_cli.dashboard_auth.mcp import settings as _mcp_settings
 from hermes_cli.config import DEFAULT_CONFIG, OPTIONAL_ENV_VARS, read_raw_config, require_readable_config_before_write, custom_endpoint_key_env, coerce_provider_id, find_provider_entry, get_compatible_custom_providers, _ENV_REF_RE, _deep_merge
 from hermes_cli.config_providers import _canonical_api_mode, _custom_provider_entry_to_provider_config
 from hermes_cli.web_models import ConfigUpdate, EnvVarUpdate, EnvVarDelete, EnvVarReveal, CustomEndpointUpdate
@@ -137,6 +138,9 @@ async def update_config(
                 if _passkey_settings.changes_protected(existing, merged):
                     _passkey_settings.audit_refusal_for_request("config_put", request)
                     raise HTTPException(status_code=403, detail=_passkey_settings.PROTECTED_DETAIL)
+                if _mcp_settings.changes_protected(existing, merged):  # dashboard.mcp: operator-only too
+                    _mcp_settings.audit_refusal_for_request("config_put", request)
+                    raise HTTPException(status_code=403, detail=_mcp_settings.PROTECTED_DETAIL)
                 # Compare normalized approvals.mode across the in-memory
                 # documents, not config blocks and not cache re-reads: the page
                 # PUTs the defaulted GET record while disk holds sparse YAML (a

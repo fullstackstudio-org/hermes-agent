@@ -36,7 +36,7 @@ _KNOWN_MANIFEST_FIELDS: Set[str] = {
     "pip_dependencies", "provides_browser_providers", "provides_web_providers",
     "manifest_version", "api_version", "requires_plugins", "python_dependencies", "config_schema",
     "license", "homepage", "tags", "capabilities", "emits", "listens", "hermes", "depends",
-    "requires_hermes", "python_runtime",
+    "requires_hermes", "python_runtime", "optional_hooks",
 }
 
 # Highest manifest schema version this Hermes understands.
@@ -388,6 +388,10 @@ class PluginManifest:
     # ``<key>:``; ``listens`` fully-qualified ``<plugin>:<event>`` names.
     emits: List[str] = field(default_factory=list)
     listens: List[str] = field(default_factory=list)
+    # Fork: hooks the plugin registers only when this Hermes names them in VALID_HOOKS, so ``provides_hooks``
+    # (the hooks it always registers) would be wrong for either Hermes. ``hermes plugins validate`` and
+    # ``doctor`` accept a hook listed here whether or not it was registered; an unknown name is still reported.
+    optional_hooks: List[str] = field(default_factory=list)
 
 
 # ── requires_hermes version gate ─────────────────────────────────────────────
@@ -517,7 +521,7 @@ def parse_manifest_file(
             kind=kind, key=key, requires_hermes=str(data.get("requires_hermes") or "").strip(),
             capabilities=_parse_declared_capabilities(data.get("capabilities"), name),
             **_parse_manifest_v2_fields(data, key), emits=data.get("emits") or [],
-            listens=data.get("listens") or [],
+            listens=data.get("listens") or [], optional_hooks=data.get("optional_hooks") or [],
         )
     except Exception as exc:
         logger.warning("Failed to parse %s: %s", manifest_file, exc, exc_info=_plugins_debug())

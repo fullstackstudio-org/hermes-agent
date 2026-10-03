@@ -352,10 +352,14 @@ def doctor_plugin(target: str | os.PathLike[str] | None = None) -> DoctorReport:
             from hermes_cli.plugins import VALID_HOOKS
 
             declared_hooks = host.manifest.provides_hooks
+            optional_hooks = host.manifest.optional_hooks
             declared_tools = host.manifest.provides_tools
             if not isinstance(declared_hooks, list):
                 report.error("provides_hooks must be a list")
                 declared_hooks = []
+            if not isinstance(optional_hooks, list):
+                report.error("optional_hooks must be a list")
+                optional_hooks = []
             if not isinstance(declared_tools, list):
                 report.error("provides_tools must be a list")
                 declared_tools = []
@@ -365,6 +369,12 @@ def doctor_plugin(target: str | os.PathLike[str] | None = None) -> DoctorReport:
                     report.error("provides_hooks entries must be strings")
                 elif name not in VALID_HOOKS:
                     report.error(f"unknown hook {name!r} in provides_hooks")
+
+            for name in optional_hooks:
+                if not isinstance(name, str):
+                    report.error("optional_hooks entries must be strings")
+                elif name not in VALID_HOOKS:
+                    report.error(f"unknown hook {name!r} in optional_hooks")
 
             for hook_name, callbacks in host.manager._hooks.items():
                 if hook_name not in VALID_HOOKS:
@@ -376,16 +386,18 @@ def doctor_plugin(target: str | os.PathLike[str] | None = None) -> DoctorReport:
                             f"hook callback {callback_name!r} for {hook_name!r} "
                             "must accept **kwargs for forward compatibility")
 
-            for kind, declared, registered in (
-                ("hook", declared_hooks, host.registered_hooks),
-                ("tool", declared_tools, host.registered_tools),
+            optional_names = {name for name in optional_hooks if isinstance(name, str)}
+            for kind, declared, registered, optional in (
+                ("hook", declared_hooks, host.registered_hooks, optional_names),
+                ("tool", declared_tools, host.registered_tools, set()),
             ):
                 declared_names = {name for name in declared if isinstance(name, str)}
                 registered_names = set(registered)
                 for name in sorted(declared_names - registered_names):
                     report.warning(f"manifest declares {kind} {name!r} but registration did not add it")
-                for name in sorted(registered_names - declared_names):
-                    report.warning(f"registration adds {kind} {name!r} not listed in provides_{kind}s")
+                listed = "provides_hooks or optional_hooks" if kind == "hook" else "provides_tools"
+                for name in sorted(registered_names - declared_names - optional):
+                    report.warning(f"registration adds {kind} {name!r} not listed in {listed}")
 
             _check_manifest_v2(report, host.manifest)
     except _DoctorLoadError as exc:

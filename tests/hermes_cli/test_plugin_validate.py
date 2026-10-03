@@ -364,3 +364,85 @@ class TestDesktopSurface:
             "remote import outside the SDK (desktop/plugin.js:3)",
             "remote import outside the SDK (desktop/plugin.js:4)",
         ]
+
+
+# ── optional_hooks (fork) ────────────────────────────────────────────────────
+
+_OPTIONAL_REGISTER = (
+    "def cb(**kwargs):\n    return None\n\n"
+    "def register(ctx):\n"
+    "    ctx.register_hook('pre_tool_call', cb)\n"
+    "    ctx.register_hook('pre_confirm_request', cb)\n"
+)
+
+
+def _optional_manifest(**extra):
+    return dict(BASE_MANIFEST, provides_hooks=["pre_tool_call"], optional_hooks=["pre_confirm_request"], **extra)
+
+
+def test_optional_hook_that_is_registered_counts_as_declared(tmp_path):
+    d = _make_plugin(tmp_path, manifest=_optional_manifest(), init_py=_OPTIONAL_REGISTER)
+
+    report = validate_plugin_dir(d)
+
+    assert report.ok, report.failures
+    assert any(name == "declared hooks" and ok for name, ok, _ in report.checks)
+    assert any(name == "optional hooks" and ok for name, ok, _ in report.checks)
+    assert report.warnings == []
+
+
+def test_optional_hook_that_is_not_registered_is_not_warned_about(tmp_path):
+    init_py = (
+        "def cb(**kwargs):\n    return None\n\n"
+        "def register(ctx):\n    ctx.register_hook('pre_tool_call', cb)\n"
+    )
+    d = _make_plugin(tmp_path, manifest=_optional_manifest(), init_py=init_py)
+
+    report = validate_plugin_dir(d)
+
+    assert report.ok, report.failures
+    assert report.warnings == []
+
+
+def test_provides_hooks_still_warns_when_not_registered_beside_optional_hooks(tmp_path):
+    init_py = (
+        "def cb(**kwargs):\n    return None\n\n"
+        "def register(ctx):\n    ctx.register_hook('pre_confirm_request', cb)\n"
+    )
+    d = _make_plugin(tmp_path, manifest=_optional_manifest(), init_py=init_py)
+
+    report = validate_plugin_dir(d)
+
+    assert report.ok, report.failures
+    assert any("pre_tool_call" in w and "did not register" in w for w in report.warnings)
+    assert not any("pre_confirm_request" in w for w in report.warnings)
+
+
+def test_hook_in_neither_list_is_still_undeclared(tmp_path):
+    init_py = _OPTIONAL_REGISTER + "    ctx.register_hook('on_session_start', cb)\n"
+    d = _make_plugin(tmp_path, manifest=_optional_manifest(), init_py=init_py)
+
+    report = validate_plugin_dir(d)
+
+    assert not report.ok
+    assert any("undeclared hooks registered" in f and "on_session_start" in f for f in report.failures)
+    assert not any("pre_confirm_request" in f for f in report.failures)
+
+
+def test_unknown_name_in_optional_hooks_fails(tmp_path):
+    manifest = dict(BASE_MANIFEST, optional_hooks=["pre_confirm_request", "no_such_hook"])
+    d = _make_plugin(tmp_path, manifest=manifest)
+
+    report = validate_plugin_dir(d)
+
+    assert not report.ok
+    assert any("unknown hook 'no_such_hook' in optional_hooks" in f for f in report.failures)
+
+
+def test_optional_hooks_must_be_a_list_of_strings(tmp_path):
+    report = validate_plugin_dir(_make_plugin(tmp_path, manifest=dict(BASE_MANIFEST, optional_hooks="pre_tool_call")))
+    assert any("optional_hooks must be a list" in f for f in report.failures)
+
+    report = validate_plugin_dir(
+        _make_plugin(tmp_path / "b", manifest=dict(BASE_MANIFEST, optional_hooks=[3])))
+    assert any("optional_hooks entries must be strings" in f for f in report.failures)

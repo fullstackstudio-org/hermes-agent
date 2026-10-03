@@ -251,3 +251,67 @@ def test_doctor_loads_model_provider_plugins_through_provider_discovery(tmp_path
     report = doctor_plugin(plugin)
     assert not report.ok
     assert any("registered no ProviderProfile" in f.message for f in report.findings)
+
+
+# ── optional_hooks (fork) ────────────────────────────────────────────────────
+
+
+def _optional_plugin(tmp_path: Path, *, provides, optional, register_lines) -> Path:
+    plugin = tmp_path / "optional-plugin"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.yaml").write_text(
+        "\n".join(
+            ["name: optional-plugin", "version: 0.1.0", "description: optional hooks",
+             "provides_hooks: " + repr(provides), "optional_hooks: " + repr(optional)]
+        ) + "\n",
+        encoding="utf-8",
+    )
+    (plugin / "__init__.py").write_text(
+        "def cb(**kwargs):\n    return None\n\n"
+        "def register(ctx):\n    pass\n"
+        + "".join(f"    ctx.register_hook({name!r}, cb)\n" for name in register_lines),
+        encoding="utf-8",
+    )
+    return plugin
+
+
+def test_doctor_accepts_an_optional_hook_whether_or_not_it_is_registered(tmp_path: Path) -> None:
+    from hermes_cli.plugin_dev import doctor_plugin
+
+    registered = doctor_plugin(_optional_plugin(
+        tmp_path / "a", provides=["pre_tool_call"], optional=["pre_confirm_request"],
+        register_lines=["pre_tool_call", "pre_confirm_request"]))
+    absent = doctor_plugin(_optional_plugin(
+        tmp_path / "b", provides=["pre_tool_call"], optional=["pre_confirm_request"],
+        register_lines=["pre_tool_call"]))
+
+    for report in (registered, absent):
+        assert report.ok, report.format_text()
+        assert [f.message for f in report.findings] == []
+
+
+def test_doctor_still_warns_for_provides_hooks_not_registered_and_hooks_in_neither_list(tmp_path: Path) -> None:
+    from hermes_cli.plugin_dev import doctor_plugin
+
+    report = doctor_plugin(_optional_plugin(
+        tmp_path, provides=["pre_tool_call"], optional=["pre_confirm_request"],
+        register_lines=["on_session_start"]))
+
+    messages = [f.message for f in report.findings]
+    assert report.ok, report.format_text()  # warnings, not errors
+    assert "manifest declares hook 'pre_tool_call' but registration did not add it" in messages
+    assert ("registration adds hook 'on_session_start' not listed in provides_hooks or optional_hooks"
+            in messages)
+    assert not any("pre_confirm_request" in m for m in messages)
+
+
+def test_doctor_reports_an_unknown_name_in_optional_hooks(tmp_path: Path) -> None:
+    from hermes_cli.plugin_dev import doctor_plugin
+
+    report = doctor_plugin(_optional_plugin(
+        tmp_path, provides=[], optional=["pre_confirm_request", "no_such_hook"], register_lines=[]))
+
+    messages = [f.message for f in report.findings]
+    assert report.ok is False
+    assert "unknown hook 'no_such_hook' in optional_hooks" in messages
+    assert not any("pre_confirm_request" in m for m in messages)

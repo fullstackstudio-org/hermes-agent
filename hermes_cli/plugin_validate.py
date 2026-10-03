@@ -370,6 +370,26 @@ def _declared_list(manifest: dict, key: str) -> List[str]:
     return [str(item) for item in raw if isinstance(item, str)]
 
 
+def _check_optional_hooks(report: ValidationReport, manifest: dict) -> None:
+    """The manifest's ``optional_hooks`` (fork): a list of strings, each a name in ``VALID_HOOKS``."""
+    raw = manifest.get("optional_hooks")
+    if raw in (None, []):
+        report.add("optional hooks", True, "not declared")
+        return
+    if not isinstance(raw, list):
+        report.add("optional hooks", False, "optional_hooks must be a list")
+        return
+    from hermes_cli.plugins import VALID_HOOKS
+
+    problems = ["optional_hooks entries must be strings" for name in raw if not isinstance(name, str)][:1]
+    problems += [f"unknown hook {name!r} in optional_hooks" for name in raw
+                 if isinstance(name, str) and name not in VALID_HOOKS]
+    if problems:
+        report.add("optional hooks", False, "; ".join(problems))
+    else:
+        report.add("optional hooks", True, f"{len(raw)} named, all known")
+
+
 def _check_capabilities(
     report: ValidationReport, manifest: dict, plugin_dir: Path
 ) -> Optional[dict]:
@@ -404,7 +424,10 @@ def _check_capabilities(
     ):
         declared = set(_declared_list(manifest, manifest_key))
         actual = set(recorded.get(kind) or [])
-        undeclared = sorted(actual - declared)
+        # ``optional_hooks`` (fork): hooks the plugin registers only on a Hermes that names them. Registering
+        # one is declared; not registering one is fine.
+        optional = set(_declared_list(manifest, "optional_hooks")) if kind == "hooks" else set()
+        undeclared = sorted(actual - declared - optional)
         unregistered = sorted(declared - actual)
         if undeclared:
             report.add(
@@ -510,6 +533,7 @@ def validate_plugin_dir(plugin_dir: Path) -> ValidationReport:
     _check_requires_hermes(report, manifest)
     _check_config_spec(report, manifest)
     _check_requires_env(report, manifest)
+    _check_optional_hooks(report, manifest)
     _check_loadable(report, plugin_dir)
     _check_python_dependencies(report, plugin_dir)
     recorded = _check_capabilities(report, manifest, plugin_dir)

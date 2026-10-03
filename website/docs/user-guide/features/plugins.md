@@ -90,6 +90,28 @@ Drop both files into `~/.hermes/plugins/hello-world/`, restart Hermes, and the m
 
 The model-facing tool description belongs in `schema["description"]`. The optional `ctx.register_tool(description=...)` value is separate `ToolEntry` registry metadata: when omitted, it defaults to the schema description, but Hermes does not copy it back into a schema that lacks `description`. Prefer defining the text once in the schema. If you provide both values, keep them synchronized; the model sees the schema value.
 
+### Declaring hooks in the manifest
+
+`provides_hooks` lists the hooks `register()` always registers. `hermes plugins validate` and `hermes plugins doctor` compare it with what `register()` did: a hook that was registered but is not listed is an error (`validate`) or a warning (`doctor`), and a listed hook that was not registered is a warning.
+
+A plugin that runs on more than one Hermes cannot list a hook only some of them have: on a Hermes that does not know it, `ctx.register_hook` logs a warning for the name and `doctor` reports it as an unknown hook. List those hooks under `optional_hooks` instead, a sibling of `provides_hooks`:
+
+```yaml
+provides_hooks:
+  - pre_tool_call
+optional_hooks:        # registered only where this Hermes names them in VALID_HOOKS
+  - pre_confirm_request
+  - pre_server_request
+```
+
+A hook named in `optional_hooks` is declared whether `register()` added it or not, so neither command warns about it either way. The plugin decides at run time, for example by checking `hermes_cli.plugins.VALID_HOOKS`. The other rules are unchanged:
+
+- a name in `optional_hooks` that is not in `VALID_HOOKS` is reported, like an unknown name in `provides_hooks` (`doctor`: an error; `validate`: a failed `optional hooks` check);
+- a hook that `register()` adds and that is in neither list is still reported;
+- a hook in `provides_hooks` that `register()` did not add still warns, so a hook the plugin always needs stays a hook it must register.
+
+Both lists must be lists of strings. `optional_hooks` is a fork key: upstream Hermes ignores it (with a log line at manifest version 2).
+
 Project-local plugins under `./.hermes/plugins/` are disabled by default. Enable them only for trusted repositories by setting `HERMES_ENABLE_PROJECT_PLUGINS=true` before starting Hermes.
 
 ## What plugins can do

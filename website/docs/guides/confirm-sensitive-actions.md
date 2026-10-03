@@ -193,7 +193,13 @@ match the security scanner still runs first: its findings are added to the summa
 desktop app's batch of commands, the call's own `workdir`, or that the directory is the session's when
 the command's turn comes). The detail travels verbatim: indentation, runs of spaces and line breaks are
 kept. Because no rendering shows them, a command with whitespace at the end of a line, or with tabs, is
-refused rather than shown.
+refused rather than shown. So is a command spaced so that part of it could sit out of view: apps keep
+every space and scroll long lines sideways, so `git status` followed by 300 spaces and `; curl … | sh`
+would show as `git status`. The bounds are more than 16 spaces in a row after a line's first non-space
+character, a line indented more than 32 spaces (8 levels of 4-space Python, 16 levels of 2-space YAML),
+more than 3 blank lines in a row, and a line over 2,000 characters. Ordinary indented scripts, manifests
+and heredocs stay well inside them. Nothing is collapsed to fit: the passkey signs the exact text, so the
+command is blocked (`padding`), and the agent is told that a confirmation shows it only without the padding.
 
 - It never enters the approval queue: `/approve`, `/approve all`, `approval.respond` and messaging
   surfaces cannot answer it.
@@ -205,8 +211,8 @@ refused rather than shown.
   `no_acting_user`), a conversation that cannot ask for one (the terminal CLI, a messaging platform, a
   scheduled job), a command longer than the 2,000 characters a confirmation can show (counted on the
   command as it runs), a command with invisible, control or tab characters or with whitespace at the end
-  of a line, a command with a secret in it (`redacted`), or a security-scanner block. It never falls back to an
-  ordinary approval.
+  of a line, a command padded so that part of it could sit out of view (`padding`), a command with a
+  secret in it (`redacted`), or a security-scanner block. It never falls back to an ordinary approval.
 - In the desktop app's batch of terminal commands, the confirmation is asked once, while the batch
   prepares its approvals, and its outcome holds for that command in that batch only: declined stays
   declined when the command's turn comes, and a stopped batch takes a confirmation with it.
@@ -276,7 +282,8 @@ Consequences to know before you turn a rule on:
 | `settings_unavailable`, `store_unavailable` | `passkey` | The gateway could not read its passkey settings or store. |
 
 A forced confirmation (an operator rule) can also end blocked for `no_callback` (the conversation cannot
-ask), `too_long`, `hidden_characters`, `trailing_whitespace`, `redacted` (the command holds a secret),
+ask), `too_long`, `hidden_characters`, `trailing_whitespace`, `padding` (spacing that could hide part of the
+command), `redacted` (the command holds a secret),
 `not_showable`, `scanner_block` or `error`.
 
 ## Limits
@@ -346,5 +353,8 @@ checks, test vectors):
   the agent asked for, so handle more than one open `confirm` per conversation, by request id. Its
   `detail` is the command verbatim: render `detail` monospaced with whitespace preserved (`white-space:
   pre` or the platform's equivalent; scroll long lines rather than reflow them), never collapsed or trimmed.
+  The gateway never sends a detail with more than 16 spaces in a row inside a line, an indent over 32
+  spaces, more than 3 blank lines in a row or a line over 2,000 characters, so spacing alone cannot push
+  part of a command far outside the visible part of the sheet.
 - `confirm_passkey` in the second call is checked by the gateway, not by the contract: unknown extra keys
   are allowed, and a shape it does not accept only drops `passkey`.

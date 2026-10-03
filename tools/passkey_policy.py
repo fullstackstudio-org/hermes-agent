@@ -35,8 +35,9 @@ Where they are decided, so no session setting skips them:
 A forced confirmation is a ``confirm`` request at level ``passkey`` that the gateway builds itself
 (:func:`forced_text`: title "Approve a command", summary the redacted description plus the security
 scanner's findings, detail the command AS IT WILL RUN). A detail the secret redactor would change, one
-over the contract's 2,000 characters, or one with characters a confirmation cannot show as they are is
-never shown in part: the operation is blocked. On a command match the security scanner (tirith) still
+over the contract's 2,000 characters, one with characters a confirmation cannot show as they are, or one
+spaced so that part of it could sit out of view (:func:`padded`) is never shown in part: the operation is
+blocked. On a command match the security scanner (tirith) still
 runs first; its ``block`` verdict stays a block. It is asked through the STRONG-CONFIRM CALLBACK the interactive gateway registered for the
 conversation (:func:`register_strong_confirm`, keyed by the approval session key; ``tui_gateway`` does it
 per session). It never enters the approval queue, so ``approval.respond``, ``/approve``, ``/approve all``
@@ -76,8 +77,8 @@ NOUNS = {"command": "command", "code": "script", "tool": "tool call"}
 #: be imported.
 _SUMMARY_MAX, _DETAIL_MAX = 500, 2000
 #: The reasons :func:`human_decision` and :func:`command_floor` block for besides the confirm outcomes.
-OWN_REASONS = ("no_callback", "too_long", "hidden_characters", "trailing_whitespace", "redacted", "not_showable",
-               "scanner_block", "error")
+OWN_REASONS = ("no_callback", "too_long", "hidden_characters", "trailing_whitespace", "padding", "redacted",
+               "not_showable", "scanner_block", "error")
 
 
 # ── rules ─────────────────────────────────────────────────────────────────────────────────────────
@@ -254,7 +255,8 @@ def reset_for_tests() -> None:
 
 
 class NotShowable(ValueError):
-    """The text cannot be shown in full and as it is: ``reason`` is ``too_long`` or ``hidden_characters``."""
+    """The text cannot be shown in full and as it is: ``reason`` is ``too_long``, ``hidden_characters``,
+    ``trailing_whitespace``, ``padding`` or ``redacted`` (:func:`forced_text`)."""
 
     def __init__(self, reason: str, limit: int = 0) -> None:
         super().__init__(reason)
@@ -271,8 +273,11 @@ def _bounds() -> tuple[int, int]:
 
 # Characters a ``confirm`` text drops or rewrites (``tui_gateway.confirm._clean``) or that read as something
 # else than what the shell gets: what the person sees would not be what runs.
-_INVISIBLE_LETTERS = frozenset({"ᅟ", "ᅠ", "ㅤ", "ﾠ", "⠀"})
+_INVISIBLE_LETTERS = frozenset({"ᅟ", "ᅠ", "ㅤ", "ﾠ", "⠀", "\U0001d159"})
 _MAX_COMBINING_MARKS = 4
+# The layout bounds of a verbatim detail (``tui_gateway.confirm.MAX_SPACE_RUN`` and the rest, which say
+# why): spacing beyond them could park part of the detail outside what the person sees.
+_MAX_SPACE_RUN, _MAX_INDENT, _MAX_BLANK_LINES, _MAX_LINE_CHARS = 16, 32, 3, 2000
 
 
 def hidden_characters(text: str) -> bool:
@@ -296,6 +301,27 @@ def hidden_characters(text: str) -> bool:
     return False
 
 
+def padded(text: str) -> bool:
+    """True when the spacing of *text* could push part of it out of view in a confirmation: more than 16
+    spaces in a row after a line's first non-space character, a line indented more than 32 spaces, more
+    than 3 blank lines in a row, or a line over 2,000 characters. Clients show the detail monospaced with
+    every space kept and scroll long lines sideways, so ``git status`` + 300 spaces + ``; curl … | sh``
+    would show as ``git status``."""
+    blank = 0
+    for line in text.split("\n"):
+        if not line.strip(" "):
+            blank += 1
+            if blank > _MAX_BLANK_LINES:
+                return True
+            continue
+        blank = 0
+        body = line.lstrip(" ")
+        if (len(line) > _MAX_LINE_CHARS or len(line) - len(body) > _MAX_INDENT
+                or " " * (_MAX_SPACE_RUN + 1) in body):
+            return True
+    return False
+
+
 def _redact(text: str) -> str:
     from agent.redact import redact_sensitive_text
     return redact_sensitive_text(text)
@@ -307,7 +333,8 @@ def forced_text(*, kind: str, description: str, detail: str) -> dict:
     when longer), and *detail* exactly as it will run. Raises :class:`NotShowable` instead of cutting the
     detail or showing anything other than what runs: ``too_long`` (measured on the raw text),
     ``hidden_characters`` (tabs too: their width depends on the renderer), ``trailing_whitespace`` (no
-    rendering shows it), or ``redacted`` when the secret redactor would change it. The redactor swallows
+    rendering shows it), ``padding`` (:func:`padded`: spacing that could push part of it out of view), or
+    ``redacted`` when the secret redactor would change it. The redactor swallows
     whole regions (a fake key block, a shortened token), so a redacted detail could hide a second command
     behind what the person signs. The detail travels verbatim (``confirm.build_params(verbatim_detail=True)``:
     no whitespace collapsing, indentation kept), and clients render it monospaced with whitespace kept."""
@@ -318,6 +345,8 @@ def forced_text(*, kind: str, description: str, detail: str) -> dict:
         raise NotShowable("hidden_characters")
     if any(line != line.rstrip() for line in detail.split("\n")) or detail != detail.rstrip():
         raise NotShowable("trailing_whitespace")
+    if padded(detail):
+        raise NotShowable("padding")
     if _redact(detail) != detail:
         raise NotShowable("redacted")
     shown = detail
@@ -425,6 +454,10 @@ _WHY = {
     "hidden_characters": "the {noun} contains invisible, control or tab characters a confirmation cannot show "
                          "as they are",
     "trailing_whitespace": "the {noun} has whitespace at the end of a line, which a confirmation cannot show",
+    "padding": "the {noun} is spaced so that part of it could sit out of view in the confirmation (more than "
+               "16 spaces in a row inside a line, a line indented more than 32 spaces, more than 3 blank lines "
+               "in a row, or a line over 2000 characters); a confirmation shows a {noun} only when it is "
+               "written without the padding",
     "not_showable": "the {noun} cannot be shown in full and exactly as it runs",
     "redacted": "the {noun} contains what looks like a secret (a key, token or password), and a confirmation "
                 "shows exactly what runs, so it cannot be shown; reference secrets through environment "
@@ -682,6 +715,6 @@ def tool_call_block(tool_name: str, args: Any = None) -> str | None:
 
 
 __all__ = ["Forced", "Match", "NotShowable", "RULES", "block_message", "command_floor", "forced_text",
-           "hidden_characters", "human_decision", "match_command", "match_command_globs", "match_tool",
+           "hidden_characters", "human_decision", "match_command", "match_command_globs", "match_tool", "padded",
            "register_strong_confirm", "require", "strong_confirm_callback", "tool_call_block",
            "unregister_strong_confirm", "user_summary"]

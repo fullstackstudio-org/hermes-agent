@@ -42,6 +42,7 @@ from __future__ import annotations
 import collections
 import logging
 import os
+import re
 import threading
 import time
 import unicodedata
@@ -152,12 +153,31 @@ class ConfirmParamsError(ValueError):
 # ── text ──────────────────────────────────────────────────────────────────────────────────────
 
 
-# Letters that render as nothing (Hangul fillers, the blank Braille pattern): text built from them looks
-# empty or hides where a line really ends.
-_INVISIBLE_LETTERS = frozenset({"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800"})
+# Letters and symbols that render as nothing (Hangul fillers, the blank Braille pattern, the musical null
+# notehead): text built from them looks empty or hides where a line really ends.
+_INVISIBLE_LETTERS = frozenset({"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800", "\U0001d159"})
 _LINE_BREAKS = frozenset({"\n", "\u2028", "\u2029"})
 #: At most this many combining marks (Mn, Me) on one base character; more stack into unreadable glyphs.
 MAX_COMBINING_MARKS = 4
+
+# The layout of a VERBATIM detail (:func:`verbatim_problem`). Clients show it monospaced with every space
+# kept and scroll long lines sideways instead of wrapping them (web: ``white-space: pre``); a phone in
+# portrait shows about 40 columns and a dozen lines of it. Spacing beyond these bounds is padding that
+# can park a second command outside that view (``git status`` + 300 spaces + ``; curl … | sh``, or 80
+# blank lines before it); ordinary code stays well inside them. The text is refused, never rewritten:
+# the passkey challenge covers the exact characters.
+#: Spaces in a row after a line's first non-space character. Column-aligned comments and arguments
+#: rarely need more than a few; 16 still leaves the next word on a 40-column screen after a short command.
+MAX_SPACE_RUN = 16
+#: Spaces at the start of a line: 8 levels of 4-space Python, 16 levels of 2-space YAML or JSON (a
+#: Kubernetes manifest's secret reference sits at 18). Deeper is a jump to the right, not structure.
+MAX_INDENT = 32
+#: Empty lines in a row. PEP 8 puts two between top-level definitions; more than three only pushes what
+#: follows down the sheet.
+MAX_BLANK_LINES = 3
+#: Characters on one line, whatever the detail's own bound (``CONFIRM_DETAIL_MAX``) becomes.
+MAX_LINE_CHARS = 2_000
+_SPACE_RUN = re.compile(" +")
 
 
 def _clean(text: object, *, multiline: bool) -> str:
@@ -199,12 +219,36 @@ def _clean(text: object, *, multiline: bool) -> str:
     return "\n".join(kept)
 
 
+def _layout_problem(text: str) -> str:
+    """Why the spacing of *text* could hide part of it from the person confirming it, or "" (see
+    :data:`MAX_SPACE_RUN`, :data:`MAX_INDENT`, :data:`MAX_BLANK_LINES`, :data:`MAX_LINE_CHARS`). Tabs and
+    every other kind of whitespace are refused before this runs, so only spaces and newlines count."""
+    blank = 0
+    for number, line in enumerate(text.split("\n"), start=1):
+        if not line.strip(" "):
+            blank += 1
+            if blank > MAX_BLANK_LINES:
+                return f"line {number - blank + 1} starts more than {MAX_BLANK_LINES} blank lines in a row"
+            continue
+        blank = 0
+        if len(line) > MAX_LINE_CHARS:
+            return f"line {number} is {len(line)} characters (at most {MAX_LINE_CHARS})"
+        body = line.lstrip(" ")
+        if (indent := len(line) - len(body)) > MAX_INDENT:
+            return f"line {number} is indented {indent} spaces (at most {MAX_INDENT})"
+        if " " * (MAX_SPACE_RUN + 1) in body:
+            longest = max(len(run) for run in _SPACE_RUN.findall(body))
+            return f"line {number} has {longest} spaces in a row (at most {MAX_SPACE_RUN})"
+    return ""
+
+
 def verbatim_problem(text: str) -> str:
     """Why *text* cannot be shown VERBATIM (no cleaning at all), or "": a character :func:`_clean` would
     drop or rewrite (a control character other than newline, a tab, a format, surrogate or private-use
     character, a line or paragraph separator, whitespace other than space, an invisible letter, more than
-    :data:`MAX_COMBINING_MARKS` combining marks on one character), or whitespace at the end of a line or of
-    the text, which no rendering shows."""
+    :data:`MAX_COMBINING_MARKS` combining marks on one character), whitespace at the end of a line or of
+    the text, which no rendering shows, or spacing that could push part of it out of view
+    (:func:`_layout_problem`)."""
     marks = 0
     for ch in text:
         category = unicodedata.category(ch)
@@ -220,6 +264,8 @@ def verbatim_problem(text: str) -> str:
             return f"character U+{ord(ch):04X} cannot be shown as it is"
     if any(line != line.rstrip() for line in text.split("\n")) or text != text.rstrip():
         return "whitespace at the end of a line or of the text cannot be seen"
+    if problem := _layout_problem(text):
+        return f"{problem}, which can put part of it out of view; present it without padding"
     return ""
 
 
@@ -231,7 +277,8 @@ def build_params(*, summary: object, detail: object = None, title: object = None
 
     *verbatim_detail* (a confirmation the gateway forces for an operator rule): the detail is the command
     exactly as it runs and is NOT cleaned (no whitespace collapsing, no stripping, indentation kept); text
-    :func:`verbatim_problem` refuses raises instead. Clients render the detail monospaced with whitespace
+    :func:`verbatim_problem` refuses (hidden characters, trailing whitespace, padding that could push part
+    of it out of view) raises instead, never rewritten. Clients render the detail monospaced with whitespace
     preserved."""
     level = str(level or "").strip()
     if level not in LEVELS:

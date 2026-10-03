@@ -23,6 +23,8 @@ method("ping", params=PingParams, result=PingResult,
 
 class GatewayCapabilitiesResult(Result):
     per_session_exclusive_submit: bool
+    per_message_author: bool | None = None
+    transcript_row_identity: bool | None = None
 
 
 method("gateway.capabilities", params=PingParams, result=GatewayCapabilitiesResult,

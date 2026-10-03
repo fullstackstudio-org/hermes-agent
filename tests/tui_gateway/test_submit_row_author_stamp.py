@@ -302,7 +302,9 @@ def test_a_turn_writing_its_own_row_carries_its_submitter(turn_room):
     assert server._run_prompt_submit(
         "rid", "sid", session, "later", turn_auth_user=("oidc:user-b", "Sam"),
         row_auth_user=("oidc:user-b", "Sam")) is not False
-    assert agent.persisted_metadata == {"author": {"id": "oidc:user-b", "name": "Sam"}}
+    # The turn also names itself (test_turn_identity.py); the author is untouched beside it.
+    assert {k: v for k, v in agent.persisted_metadata.items() if k != "turn_id"} == {
+        "author": {"id": "oidc:user-b", "name": "Sam"}}
 
 
 def test_a_turn_nobody_submitted_writes_no_author_on_its_own_row_either(turn_room):
@@ -312,7 +314,8 @@ def test_a_turn_nobody_submitted_writes_no_author_on_its_own_row_either(turn_roo
     server._run_prompt_submit(
         "rid", "sid", session, "resume", display_kind="auto_continue",
         display_metadata={"notification_category": "diagnostic"})
-    assert agent.persisted_metadata == {"notification_category": "diagnostic"}
+    assert {k: v for k, v in agent.persisted_metadata.items() if k != "turn_id"} == {
+        "notification_category": "diagnostic"}
 
 
 # ---------------------------------------------------------------------------

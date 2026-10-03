@@ -13762,6 +13762,30 @@
           "per_session_exclusive_submit": {
             "title": "Per Session Exclusive Submit",
             "type": "boolean"
+          },
+          "per_message_author": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Per Message Author"
+          },
+          "transcript_row_identity": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Transcript Row Identity"
           }
         },
         "required": [

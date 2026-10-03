@@ -1667,6 +1667,8 @@ export interface PingResult {
 }
 export interface GatewayCapabilitiesResult {
   per_session_exclusive_submit: boolean
+  per_message_author?: boolean | null
+  transcript_row_identity?: boolean | null
 }
 export interface ClientCapabilitiesParams {
   server_requests?: boolean

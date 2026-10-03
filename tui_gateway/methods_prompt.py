@@ -524,6 +524,12 @@ def _run_after_agent_ready(
     # The wait delivers the prompt when the still-running build completes, honors a cancel promptly, notices
     # the user once past the slow threshold, and only errors when the build itself fails or the bounded cap
     # expires. See #63078.
+    from tui_gateway.row_identity import turn_id_of
+    # A turn that never reaches ``_run_prompt_submit`` (the build failed, or it was cancelled first) still
+    # ends with an ``error`` frame, and that frame belongs to the turn whose row was persisted at submit.
+    turn_id = turn_id_of(display_metadata)
+    if turn_id:
+        session["turn_id"] = turn_id
     err = _wait_agent_for_prompt(session, rid, sid)
     if err:
         # Terminal frame + retained snapshot (not a bare "error" event): the snapshot is
@@ -532,6 +538,8 @@ def _run_after_agent_ready(
             sid, session, (err.get("error") or {}).get("message", "agent initialization failed"),
             error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True})
         with session["history_lock"]:
+            if session.get("turn_id") == turn_id:
+                session.pop("turn_id", None)
             session["running"] = False
             session["last_active"] = time.time()
         _emit("session.info", sid, _session_info(session.get("agent"), session))
@@ -545,6 +553,8 @@ def _run_after_agent_ready(
                 "Turn cancelled before the agent was ready"
                 if session.get("_turn_cancel_requested")
                 else "Session no longer running before the agent was ready")})
+            if session.get("turn_id") == turn_id:
+                session.pop("turn_id", None)
             return
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
@@ -739,6 +749,11 @@ def _(rid, params: dict) -> dict:
         submitter, row_submitter, replay = resubmitted_row_identity(
             text, replaced["row"], replaced["live_view"], submitter)
         display_metadata = replayed_row_metadata(display_metadata, row_submitter, submitter if replay else None)
+    # ONE id for this turn, minted here so the row persisted below carries it (``display_metadata`` is what
+    # ``_persist_submit_user_row`` writes) and the turn that runs next stamps it on every frame. Always
+    # overwritten: nothing a client sent is ever the id.
+    from tui_gateway.row_identity import mint_turn_id, with_turn_id
+    display_metadata = with_turn_id(display_metadata, mint_turn_id())
     if turn_isolation:
         if turn_author:
             logger.debug("isolated compute turns carry no author yet; the turn from %s runs unattributed",

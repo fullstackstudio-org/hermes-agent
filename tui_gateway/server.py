@@ -648,6 +648,13 @@ def write_json(obj: dict) -> bool:
 def _event_frame(event: str, sid: str, payload: dict | None = None) -> dict:
     _contracts.check_payload(event, payload)
     params: dict = {"type": event, "session_id": sid, **({"payload": payload} if payload is not None else {})}
+    # The turn this frame belongs to, on the envelope rather than in nine payload models: one stamp at the
+    # funnel every emit goes through, and the replay ring stores ``params``, so a replayed frame keeps it.
+    from tui_gateway.row_identity import TURN_STREAM_EVENTS
+    if event in TURN_STREAM_EVENTS and sid:
+        turn_id = (_sessions.get(sid) or {}).get("turn_id")
+        if isinstance(turn_id, str) and turn_id:
+            params["turn_id"] = turn_id
     return {"jsonrpc": "2.0", "method": "event", "params": params}
 
 

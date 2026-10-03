@@ -110,6 +110,8 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             session["_auto_continue_attempt"], session["_auto_continue_prompt"] = attempt, marker["prompt"]
         try:
             from gateway.warning_notifications import render_notification
+            from tui_gateway.row_identity import begin_turn_id
+            begin_turn_id(session)  # before message.start, so that frame names its turn too
             diagnostic = marker.get("notification_category") == "diagnostic"
             with _session_profile_runtime_scope(session):
                 def announce():

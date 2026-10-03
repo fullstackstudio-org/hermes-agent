@@ -84,6 +84,21 @@ def test_events_since_returns_client_dispatchable_event_objects():
     assert "params" not in event
 
 
+def test_replayed_frames_keep_the_turn_id_stamped_on_their_envelope():
+    """``turn_id`` is on ``params``, and the ring stores ``params``: a frame replayed after a reconnect
+    names its turn exactly as the live one did. ``seq`` is stamped beside it, not instead of it."""
+    live = _frame("s1")
+    live["params"]["turn_id"] = "a" * 32
+    chrome = _frame("s1", "session.info")
+    event_replay._stamp_event(live)
+    event_replay._stamp_event(chrome)
+
+    replayed = events_since("s1", 0)
+    assert [(e["type"], e.get("turn_id"), e["seq"]) for e in replayed] == [
+        ("message.delta", "a" * 32, 1), ("session.info", None, 2)]
+    assert events_since("s1", 1) == [chrome["params"]]
+
+
 def test_unknown_session_returns_empty():
     assert events_since("nope", 0) == []
     assert latest_seq("nope") == 0

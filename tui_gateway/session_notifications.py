@@ -142,6 +142,8 @@ _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = _BOT_DELIVERY_POLL_SECONDS = 5.0
 
 def _notif_release_turn(session: dict) -> None:
     with session["history_lock"]:
+        # A turn that failed before ``_run_prompt_submit`` adopted a pre-minted id leaves it behind.
+        session.pop("turn_id", None)
         session["running"] = False
 
 
@@ -162,6 +164,8 @@ def _notif_submit(rid: str, sid: str, session: dict, text: str, what: str, **kwa
     """message.start + _run_prompt_submit for a claimed (running=True) turn; releases on failure."""
     try:
         from gateway.warning_notifications import render_notification
+        from tui_gateway.row_identity import begin_turn_id
+        begin_turn_id(session)  # before message.start, so that frame names its turn too
         with _session_profile_runtime_scope(session):
             render_notification(lambda: _emit("message.start", sid), platform="tui",
                                 diagnostic=(kwargs.get("display_metadata") or {}).get("notification_category") == "diagnostic")
@@ -291,6 +295,8 @@ def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
         if wakeup.lstrip().startswith("/"):
             _notif_slash_loop_tick(rid, sid, session, mgr, wakeup)
         else:
+            from tui_gateway.row_identity import begin_turn_id
+            begin_turn_id(session)  # before message.start, so that frame names its turn too
             _emit("message.start", sid)
             _run_prompt_submit(rid, sid, session, wakeup)
     except Exception as exc:

@@ -419,6 +419,9 @@ def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str
     so it is SCOPED to them (memory, tools, permissions) and not re-resolved from the session record.
     It is not authored by them: nobody typed a continuation, so its row names no author."""
     try:
+        # The turn's id exists before its first frame: ``message.start`` goes out before ``_run_prompt_submit``.
+        from tui_gateway.row_identity import begin_turn_id
+        begin_turn_id(session)
         _emit("message.start", sid)
         _run_prompt_submit(rid, sid, session, prompt, turn_auth_user=turn_auth_user, origin="continuation")
         if on_done is not None:
@@ -428,6 +431,7 @@ def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str
             on_error()
         _hook_failure(what, exc)
         with session["history_lock"]:
+            session.pop("turn_id", None)
             session["running"] = False
 
 
@@ -1022,7 +1026,14 @@ def _run_prompt_submit(
     # row's author comes from that alone, never from the scope. prompt.submit merged its author into
     # ``display_metadata`` already (and an isolated child receives it there, stamped by the parent).
     from tui_gateway.row_author import with_row_author
+    from tui_gateway.row_identity import mint_turn_id, turn_id_of, with_turn_id
     display_metadata = with_row_author(display_metadata, row_auth_user)
+    # THIS turn's id. ``prompt.submit`` minted one and persisted it on the user row; a turn the gateway starts
+    # itself (queued drain, continuation, auto-continue, wake-up) arrives without one, and a caller that has
+    # to emit ``message.start`` before it gets here pre-minted it on the session (``begin_turn_id``). Either
+    # way the row and the frames name the same turn.
+    turn_id = turn_id_of(display_metadata) or session.get("turn_id") or mint_turn_id()
+    display_metadata = with_turn_id(display_metadata, turn_id)
     # How the turn came about, for what the model is told (``turn_sender_note``). A turn no connection
     # submitted and no caller described is one the gateway started itself.
     origin = origin or ("" if turn_auth_user else "unattributed")
@@ -1037,8 +1048,13 @@ def _run_prompt_submit(
     admitted = _admit_prompt_turn(
         sid, session, text, image_paths, queued_prompt_generation, display_kind, display_metadata)
     if admitted is None:
+        if session.get("turn_id") == turn_id:
+            session.pop("turn_id", None)
         return False
     images, agent = admitted
+    # Set BEFORE the first ``message.start``, so every frame of the turn (that one included) is stamped by
+    # ``_event_frame``; cleared in the ``finally`` that releases ``running``.
+    session["turn_id"] = turn_id
     from gateway.warning_notifications import diagnostic_turn_muted
     from agent.notification_presentation import notification_config_snapshot
     with _session_profile_runtime_scope(session):
@@ -1124,6 +1140,10 @@ def _run_prompt_submit(
             # A stale interim closure must not fire during a later turn.
             st.agent.interim_assistant_callback = None
             with session["history_lock"]:
+                # Only a turn's own id: the session is free the moment ``running`` drops, and the next turn
+                # may already have set its own.
+                if session.get("turn_id") == turn_id:
+                    session.pop("turn_id", None)
                 session["running"] = False
                 session["last_active"] = time.time()
                 if not st.error_retained:
@@ -1174,6 +1194,8 @@ def _run_prompt_submit(
             can_start = _start_session_work(run, name=f"prompt-turn-{sid}", session=session) is not None
     if not can_start:
         with session["history_lock"]:
+            if session.get("turn_id") == turn_id:
+                session.pop("turn_id", None)
             session["running"] = False
     return can_start
 

@@ -430,6 +430,34 @@ def test_bot_interrupt_says_why_an_isolated_queued_turn_cannot_be_stopped(monkey
         "the running turn was not started by this agent"
 
 
+def test_one_person_holds_at_most_ten_new_chats_across_their_grants(bridge):
+    """Review X1c: a person with five grants could hold 25 drafts. The per-person cap evicts only the calling
+    grant's own oldest, like the other caps, and leaves other people alone."""
+    from tui_gateway.mcp_bridge.transport import AgentTransport
+
+    from .conftest import identity
+
+    def draft(grant):
+        return tools._Draft(AgentTransport(identity(grant=grant)), grant, threading.Timer(3600, lambda: None))
+
+    assert tools.DRAFTS_PER_PERSON == 10
+    others = {(ROBIN.login, f"chat-{i}"): draft("grant-g9") for i in range(tools.DRAFTS_PER_PERSON)}
+    tools._drafts.update(others)
+    # Robin's other grant holds ten: this grant holds none to give up, so it is refused and nothing is evicted.
+    assert _fail(tools.chat_new, bridge, ROBIN, "default").code == "busy"
+    assert set(tools._drafts) == set(others)
+    # Another person is not held to Robin's count.
+    sams = tools.chat_new(bridge, SAM, "default")["chat_id"]
+    assert (SAM.login, sams) in tools._drafts
+    # With one draft of its own among Robin's ten, this grant's oldest makes room.
+    tools._drafts.pop((ROBIN.login, "chat-0"))
+    mine = (ROBIN.login, "chat-mine")
+    tools._drafts[mine] = draft(ROBIN.grant_id)
+    new = tools.chat_new(bridge, ROBIN, "default")["chat_id"]
+    assert mine not in tools._drafts and (ROBIN.login, new) in tools._drafts
+    assert sum(1 for (login, _c) in tools._drafts if login == ROBIN.login) == tools.DRAFTS_PER_PERSON
+
+
 def test_without_a_verified_token_a_tool_is_unauthenticated(bridge, monkeypatch):
     monkeypatch.setattr(bridge_server, "caller_from_token", lambda: None)
     result = anyio.run(lambda: bridge_server.Endpoint(bridge).run(None, "whoami", None, tools.whoami))

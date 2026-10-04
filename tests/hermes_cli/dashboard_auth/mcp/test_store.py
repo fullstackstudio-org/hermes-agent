@@ -644,6 +644,36 @@ def test_a_file_without_the_added_columns_gains_them(tmp_path, clock):
     assert db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "1"
 
 
+def test_a_file_of_the_schema_before_the_exact_rotation_time_gains_it_and_rotates(tmp_path, clock):
+    """A file written by the build before ``rotated_at_exact`` (``parent_hash`` and ``reused_at`` present, the
+    exact time not): opened by this build it gains the column, keeps its tokens, and a rotation stamps it."""
+    path = tmp_path / "dashboard_auth" / "mcp.db"
+    old = MCPStore(path, clock=clock)
+    _client(old)
+    clock.t = 1_790_000_000.5
+    issued = _grant(old)
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE tokens DROP COLUMN rotated_at_exact")
+    db.commit()
+    assert [r[1] for r in db.execute("PRAGMA table_info(tokens)")] == [
+        "token_hash", "kind", "grant_id", "family", "created_at", "expires_at", "rotated_at", "revoked_at", "scopes",
+        "parent_hash"]
+    assert "reused_at" in {r[1] for r in db.execute("PRAGMA table_info(codes)")}
+    db.close()
+    store = MCPStore(path, clock=clock)
+    rotated = store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    db = sqlite3.connect(path)
+    assert "rotated_at_exact" in {r[1] for r in db.execute("PRAGMA table_info(tokens)")}
+    assert db.execute("SELECT rotated_at, rotated_at_exact FROM tokens WHERE token_hash = ?",
+                      (hash_secret(issued.refresh_token),)).fetchone() == (1_790_000_000, 1_790_000_000.5)
+    assert db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "1"
+    db.close()
+    clock.t += 4.9
+    with pytest.raises(Raced):
+        store.load_refresh(issued.refresh_token, client_id="client-1")
+    assert store.rotate_refresh(rotated.refresh_token, client_id="client-1", scopes=None, **TTL).refresh_token
+
+
 @pytest.mark.parametrize("load", [True, False], ids=["load", "rotate"])
 def test_a_late_copy_four_seconds_after_its_rotation_is_raced_with_its_grant(store, clock, load):
     """Plan D3 amendment: the window is 5 s, and a raced refusal names its grant (for the audit line)."""

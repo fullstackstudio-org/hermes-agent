@@ -20,6 +20,9 @@ from urllib.parse import urlsplit
 
 CHALLENGE_TAG = "hermie-confirm-v1"
 TEXT_TAG = "hermie-confirm-text-v1"
+TEXT_TAG_V2 = "hermie-confirm-text-v2"
+#: The strings of one structured field of a ``confirm`` (README §4.1), in the order the digest takes them.
+FIELD_PARTS = ("id", "kind", "label", "value", "currency")
 USER_HANDLE_TAG = b"user-handle-v1"
 PURPOSES = frozenset({"confirm", "register", "invite", "revoke"})
 
@@ -189,6 +192,22 @@ class GatewayContext:
 def text_digest(title: str, summary: str, detail: str | None) -> bytes:
     """README §4."""
     return hashlib.sha256(S(TEXT_TAG) + S(title) + S(summary) + S(detail or "")).digest()
+
+
+def field_tuple(field: Mapping) -> tuple[str, str, str, str, str]:
+    """One field of a ``confirm`` frame as the digest takes it: ``(id, kind, label, value, currency or "")``."""
+    return tuple(str(field.get(part) or "") if part == "currency" else str(field[part])  # type: ignore[return-value]
+                 for part in FIELD_PARTS)
+
+
+def text_digest_v2(title: str, summary: str, detail: str | None,
+                   fields: "tuple[tuple[str, str, str, str, str], ...]") -> bytes:
+    """README §4.1: the text of a ``confirm`` that carries structured fields, in the frame's order. *fields*
+    are :func:`field_tuple` values."""
+    data = S(TEXT_TAG_V2) + S(title) + S(summary) + S(detail or "")
+    for field_id, kind, label, value, currency in fields:
+        data += S(field_id) + S(kind) + S(label) + S(value) + S(currency)
+    return hashlib.sha256(data).digest()
 
 
 def challenge_preimage(*, purpose: str, base_url: str, gateway_id: bytes, user_id: str, session_id: str,

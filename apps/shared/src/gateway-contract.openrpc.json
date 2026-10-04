@@ -7634,6 +7634,18 @@
             ],
             "default": null
           },
+          "confirm_fields": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Confirm Fields"
+          },
           "requests": {
             "anyOf": [
               {
@@ -7681,6 +7693,18 @@
               }
             ],
             "default": null
+          },
+          "confirm_fields": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Confirm Fields"
           },
           "requests": {
             "items": {
@@ -8830,6 +8854,68 @@
         "title": "ConfirmDecision",
         "type": "string"
       },
+      "ConfirmField": {
+        "additionalProperties": false,
+        "description": "One structured field of a ``confirm`` (``fields``), built and checked by the gateway\n(``tui_gateway/confirm.py``): ``label`` and ``value`` (and ``currency``) are ONE line each, shown exactly as\nsent, and hold nothing a renderer shows as nothing (the verbatim rules of ``contract/requests`` \u00a76.2, no\nwhitespace at either end). ``id`` is unique within the request. ``currency`` only with ``kind: amount``.\nAt level ``passkey`` the fields are part of the signed text (``text_digest_v2``, in this order).",
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ConfirmFieldKind"
+          },
+          "label": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "maxLength": 16,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Currency"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "label",
+          "value"
+        ],
+        "title": "ConfirmField",
+        "type": "object"
+      },
+      "ConfirmFieldKind": {
+        "description": "How a client renders one structured field of a ``confirm``. ``amount``: the value large and bold, with\n``currency`` beside it; ``domain`` and ``recipient``: monospaced, never a link; ``text``, ``model``,\n``count``, ``date``: plain. Every kind is shown as the text it carries: a client never parses, converts,\nrounds or localises a value.",
+        "enum": [
+          "amount",
+          "text",
+          "recipient",
+          "domain",
+          "model",
+          "count",
+          "date"
+        ],
+        "title": "ConfirmFieldKind",
+        "type": "string"
+      },
       "ConfirmLevel": {
         "description": "What a confirmation proves. ``plain``: someone tapped Confirm in a connected client; nothing more,\nand the gateway cannot check even that. ``passkey``: the gateway verified a WebAuthn assertion with\nuser verification, made by a passkey enrolled for the person the turn acts for, over a challenge that\ncommits to this gateway, session, request and text (``contract/confirm-passkey/README.md``). Sent only\nto connections signed in as that person that advertised the level with an accepted RP. The set is open:\na later level is one more value here.",
         "enum": [
@@ -8850,7 +8936,7 @@
       },
       "ConfirmPasskeyAdvertisement": {
         "additionalProperties": true,
-        "description": "Second ``client.capabilities`` call, with ``passkey`` in ``confirm``: how this client runs the\nceremony, ``{v: 1, kind, rp_id}``. ``kind``: ``native`` (an app under a native RP) or ``web`` (a browser;\n``rp_id`` is its host). Deliberately permissive here (any value, extra keys allowed) and checked in code\n(``confirm_passkey.accept_advertisement``): a shape this gateway does not accept, including a later\nclient's extra field, only drops ``passkey`` and never fails the call (and ``plain`` with it).",
+        "description": "Second ``client.capabilities`` call, with ``passkey`` in ``confirm``: how this client runs the\nceremony, ``{v, kind, rp_id}``. ``v``: ``1``, or ``2`` from a client that also computes the version-2 text\ndigest of a request with ``fields`` (contract \u00a74.1; send it only when the result's\n``confirm_passkey.versions`` lists 2). A ``v: 2`` client takes ``v: 1`` and ``v: 2`` frames; a ``v: 1``\nclient is never sent a ``v: 2`` frame. ``kind``: ``native`` (an app under a native RP) or ``web`` (a browser;\n``rp_id`` is its host). Deliberately permissive here (any value, extra keys allowed) and checked in code\n(``confirm_passkey.accept_advertisement``): a shape this gateway does not accept, including a later\nclient's extra field, only drops ``passkey`` and never fails the call (and ``plain`` with it).",
         "properties": {
           "v": {
             "default": null,
@@ -8870,7 +8956,7 @@
       },
       "ConfirmPasskeyAssertion": {
         "additionalProperties": false,
-        "description": "The WebAuthn assertion of a ``passkey`` answer (contract \u00a78); binary fields are base64url. The\ngateway checks it in the order of contract \u00a79; a refusal is ``request.answer`` error 4034 with\n``data.reason``.",
+        "description": "The WebAuthn assertion of a ``passkey`` answer (contract \u00a78); binary fields are base64url. The\ngateway checks it in the order of contract \u00a79; a refusal is ``request.answer`` error 4034 with\n``data.reason``. ``v`` is the frame's ``passkey.v``.",
         "properties": {
           "v": {
             "title": "V",
@@ -8947,6 +9033,21 @@
           },
           "rp": {
             "$ref": "#/components/schemas/ConfirmPasskeyRps"
+          },
+          "versions": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Versions"
           }
         },
         "required": [
@@ -8984,9 +9085,13 @@
       },
       "ConfirmPasskeyParams": {
         "additionalProperties": false,
-        "description": "Level ``passkey`` only (contract \u00a78). ``nonce`` (32 bytes) and ``gateway_id`` (16 bytes) are base64url;\n``base_url`` is informative (a client always hashes the base URL it dialed); ``expires_at`` is Unix\nseconds.",
+        "description": "Level ``passkey`` only (contract \u00a78). ``nonce`` (32 bytes) and ``gateway_id`` (16 bytes) are base64url;\n``base_url`` is informative (a client always hashes the base URL it dialed); ``expires_at`` is Unix\nseconds. ``v`` is the version of the text the challenge commits to: ``1`` (``text_digest``) without\n``fields``, ``2`` (``text_digest_v2``) with them; a ``v: 2`` frame goes only to connections that advertised\n``confirm_passkey {v: 2}``, and the answer's ``passkey.v`` repeats the frame's.",
         "properties": {
           "v": {
+            "enum": [
+              1,
+              2
+            ],
             "title": "V",
             "type": "integer"
           },
@@ -9109,6 +9214,23 @@
           },
           "level": {
             "$ref": "#/components/schemas/ConfirmLevel"
+          },
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ConfirmField"
+                },
+                "maxItems": 8,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fields"
           },
           "passkey": {
             "anyOf": [

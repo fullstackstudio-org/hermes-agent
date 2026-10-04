@@ -219,6 +219,12 @@ server_request("tour", params=TourRequestParams, result=ValueResult,
 CONFIRM_TITLE_MAX = 80
 CONFIRM_SUMMARY_MAX = 500
 CONFIRM_DETAIL_MAX = 2_000
+#: Structured fields of one ``confirm`` (plan request-types-v2 D8, ``contract/confirm-passkey`` §4.1).
+CONFIRM_FIELDS_MAX = 8
+CONFIRM_FIELD_ID = r"^[a-z][a-z0-9_]{0,31}$"
+CONFIRM_FIELD_LABEL_MAX = 40
+CONFIRM_FIELD_VALUE_MAX = 200
+CONFIRM_FIELD_CURRENCY_MAX = 16
 
 
 class ConfirmLevel(WireEnum):
@@ -264,9 +270,11 @@ class ConfirmPasskeyCredentials(Params):
 class ConfirmPasskeyParams(Params):
     """Level ``passkey`` only (contract §8). ``nonce`` (32 bytes) and ``gateway_id`` (16 bytes) are base64url;
     ``base_url`` is informative (a client always hashes the base URL it dialed); ``expires_at`` is Unix
-    seconds."""
+    seconds. ``v`` is the version of the text the challenge commits to: ``1`` (``text_digest``) without
+    ``fields``, ``2`` (``text_digest_v2``) with them; a ``v: 2`` frame goes only to connections that advertised
+    ``confirm_passkey {v: 2}``, and the answer's ``passkey.v`` repeats the frame's."""
 
-    v: int
+    v: Literal[1, 2]
     nonce: str
     gateway_id: str
     base_url: str
@@ -278,7 +286,7 @@ class ConfirmPasskeyParams(Params):
 class ConfirmPasskeyAssertion(Result):
     """The WebAuthn assertion of a ``passkey`` answer (contract §8); binary fields are base64url. The
     gateway checks it in the order of contract §9; a refusal is ``request.answer`` error 4034 with
-    ``data.reason``."""
+    ``data.reason``. ``v`` is the frame's ``passkey.v``."""
 
     v: int
     rp_id: str
@@ -288,6 +296,35 @@ class ConfirmPasskeyAssertion(Result):
     client_data_json: str
     signature: str
     user_handle: str | None = None
+
+
+class ConfirmFieldKind(WireEnum):
+    """How a client renders one structured field of a ``confirm``. ``amount``: the value large and bold, with
+    ``currency`` beside it; ``domain`` and ``recipient``: monospaced, never a link; ``text``, ``model``,
+    ``count``, ``date``: plain. Every kind is shown as the text it carries: a client never parses, converts,
+    rounds or localises a value."""
+
+    amount = "amount"
+    text = "text"
+    recipient = "recipient"
+    domain = "domain"
+    model = "model"
+    count = "count"
+    date = "date"
+
+
+class ConfirmField(Params):
+    """One structured field of a ``confirm`` (``fields``), built and checked by the gateway
+    (``tui_gateway/confirm.py``): ``label`` and ``value`` (and ``currency``) are ONE line each, shown exactly as
+    sent, and hold nothing a renderer shows as nothing (the verbatim rules of ``contract/requests`` §6.2, no
+    whitespace at either end). ``id`` is unique within the request. ``currency`` only with ``kind: amount``.
+    At level ``passkey`` the fields are part of the signed text (``text_digest_v2``, in this order)."""
+
+    id: str = Field(pattern=CONFIRM_FIELD_ID)
+    kind: ConfirmFieldKind
+    label: str = Field(min_length=1, max_length=CONFIRM_FIELD_LABEL_MAX)
+    value: str = Field(min_length=1, max_length=CONFIRM_FIELD_VALUE_MAX)
+    currency: str | None = Field(default=None, min_length=1, max_length=CONFIRM_FIELD_CURRENCY_MAX)
 
 
 class ConfirmRequestParams(ServerRequestParams):
@@ -303,6 +340,11 @@ class ConfirmRequestParams(ServerRequestParams):
     summary: str = Field(min_length=1, max_length=CONFIRM_SUMMARY_MAX)
     detail: str | None = Field(default=None, max_length=CONFIRM_DETAIL_MAX)
     level: ConfirmLevel
+    #: Structured facts of the action (1 to ``CONFIRM_FIELDS_MAX``, in display order), shown apart from the
+    #: summary and detail. Sent only to connections that advertised ``confirm_fields: true``; a request with
+    #: fields and no such connection is ``unavailable (no_capable_client)``, never sent without them. At level
+    #: ``passkey`` a request with fields is version 2 (``passkey.v: 2``, ``text_digest_v2``).
+    fields: list[ConfirmField] | None = Field(default=None, min_length=1, max_length=CONFIRM_FIELDS_MAX)
     #: Level ``passkey`` only: what the client needs to compute the challenge and run the ceremony.
     passkey: ConfirmPasskeyParams | None = None
 

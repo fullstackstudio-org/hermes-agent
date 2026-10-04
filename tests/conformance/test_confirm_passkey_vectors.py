@@ -93,7 +93,7 @@ def test_the_gateways_own_verifier_gives_every_labelled_result(vectors):
     """The production verifier (``hermes_cli/dashboard_auth/passkeys``), not the generator's reference
     evaluator, against every assertion and registration vector."""
     from tests.hermes_cli.test_passkeys_webauthn import _assertion_verdict, _registration_verdict
-    for vector in vectors["assertion_vectors"]:
+    for vector in vectors["assertion_vectors"] + vectors["assertion_vectors_v2"]:
         assert _assertion_verdict(vector) == vector["expect"], vector["name"]
     for vector in vectors["registration_vectors"]:
         assert _registration_verdict(vector) == vector["expect"], vector["name"]
@@ -154,3 +154,43 @@ def test_the_self_enrolment_wire_examples_are_all_there(vectors):
     assert "use_secret" not in web and "use_secret" in native
     assert "use_secret" in examples["native_token_reauth_fresh"]["reauth"]
     assert "use_secret" not in examples["native_token_reauth_failed"]["reauth"]
+
+
+# ── version 2: structured fields (README §4.1) ───────────────────────────────────────────────────
+
+
+def test_text_digest_v2_vectors_cover_the_promised_cases(gen, vectors):
+    texts = {v["name"]: v for v in vectors["text_digest_v2_vectors"]}
+    amount = texts["amount with a non-ASCII currency symbol in the label"]
+    assert not amount["fields"][0]["label"].isascii() and amount["fields"][0]["kind"] == "amount"
+    swapped = texts["same fields, order swapped (differs)"]
+    assert swapped["fields"] == list(reversed(amount["fields"])) and swapped["text_digest"] != amount["text_digest"]
+    assert texts["label and value boundary: ab|c"]["text_digest"] != texts["label and value boundary: a|bc (differs)"][
+        "text_digest"]
+    assert len({v["text_digest"] for v in texts.values()}) == len(texts)
+    for v in texts.values():
+        assert v["text_digest"] != v["text_digest_v1"]
+        assert gen.b64u(gen.sha256(bytes.fromhex(v["preimage_hex"]))) == v["text_digest"], v["name"]
+
+
+def test_version_2_assertion_vectors(vectors):
+    by_name = {v["name"]: v for v in vectors["assertion_vectors_v2"]}
+    accepted = by_name["version 2: fields signed in the frame's order"]
+    assert accepted["expect"]["ok"] and accepted["answer"]["passkey"]["v"] == 2 and accepted["request"]["fields"]
+    assert by_name["version 2: signed over the text without the fields"]["expect"]["reason"] == "challenge_mismatch"
+    assert by_name["version 2: fields signed in another order"]["expect"]["reason"] == "challenge_mismatch"
+    assert by_name["version 2 request answered with v 1"]["expect"]["reason"] == "bad_shape"
+    assert by_name["version 1 request answered with v 2"]["expect"]["reason"] == "bad_shape"
+    # The version-1 list is unchanged in kind: no fields, every answer v 1.
+    for vector in vectors["assertion_vectors"]:
+        assert "fields" not in vector["request"], vector["name"]
+
+
+def test_the_wire_examples_validate_against_the_gateways_models(vectors):
+    from tui_gateway.contracts import registry
+    wire = vectors["wire_examples"]
+    registry.SERVER_REQUESTS["confirm"].params.model_validate(wire["confirm_request_frame_v2"]["params"])
+    registry.SERVER_REQUESTS["confirm"].params.model_validate(wire["confirm_request_frame"]["params"])
+    registry.METHODS["client.capabilities"].params.model_validate(wire["capabilities_second_call_params_v2"])
+    registry.METHODS["client.capabilities"].result.model_validate(wire["capabilities_first_result_v2"])
+    registry.METHODS["client.capabilities"].result.model_validate(wire["capabilities_second_result_v2"])

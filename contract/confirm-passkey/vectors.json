@@ -404,6 +404,191 @@
       "text_digest": "a3rr0T5HKILuTneE4R1_L7_aeT-FQPQcZhFNUd6_hPg"
     }
   ],
+  "text_digest_v2_vectors": [
+    {
+      "name": "amount with a non-ASCII currency symbol in the label",
+      "title": "Überweisung",
+      "summary": "Zahle die Rechnung 7.",
+      "detail": null,
+      "fields": [
+        {
+          "id": "amount",
+          "kind": "amount",
+          "label": "Betrag in €",
+          "value": "120,00",
+          "currency": "EUR"
+        },
+        {
+          "id": "to",
+          "kind": "recipient",
+          "label": "An",
+          "value": "Bäckerei Größe"
+        }
+      ],
+      "preimage_hex": "000000166865726d69652d636f6e6669726d2d746578742d76320000000cc39c62657277656973756e67000000155a61686c652064696520526563686e756e6720372e0000000000000006616d6f756e7400000006616d6f756e740000000d42657472616720696e20e282ac000000063132302c30300000000345555200000002746f00000009726563697069656e7400000002416e0000001142c3a4636b65726569204772c3b6c39f6500000000",
+      "text_digest": "UVRMtXZpQo3A4ISI8ESHgoSU1I3dJknNyVVKkN3v2cY",
+      "text_digest_v1": "wK0Pl4JSQOgytfAP3SeYLum_IugR1fiU-WSFrTnNLAc"
+    },
+    {
+      "name": "same fields, order swapped (differs)",
+      "title": "Überweisung",
+      "summary": "Zahle die Rechnung 7.",
+      "detail": null,
+      "fields": [
+        {
+          "id": "to",
+          "kind": "recipient",
+          "label": "An",
+          "value": "Bäckerei Größe"
+        },
+        {
+          "id": "amount",
+          "kind": "amount",
+          "label": "Betrag in €",
+          "value": "120,00",
+          "currency": "EUR"
+        }
+      ],
+      "preimage_hex": "000000166865726d69652d636f6e6669726d2d746578742d76320000000cc39c62657277656973756e67000000155a61686c652064696520526563686e756e6720372e0000000000000002746f00000009726563697069656e7400000002416e0000001142c3a4636b65726569204772c3b6c39f650000000000000006616d6f756e7400000006616d6f756e740000000d42657472616720696e20e282ac000000063132302c303000000003455552",
+      "text_digest": "9HKeBp1ar4wxAyWRwKEMiyO3LPLQmqBaqgshmj7HyU4",
+      "text_digest_v1": "wK0Pl4JSQOgytfAP3SeYLum_IugR1fiU-WSFrTnNLAc"
+    },
+    {
+      "name": "currency absent",
+      "title": "Send",
+      "summary": "Send it.",
+      "detail": "",
+      "fields": [
+        {
+          "id": "a",
+          "kind": "recipient",
+          "label": "An",
+          "value": "Bäckerei Größe"
+        }
+      ],
+      "preimage_hex": "000000166865726d69652d636f6e6669726d2d746578742d76320000000453656e640000000853656e642069742e00000000000000016100000009726563697069656e7400000002416e0000001142c3a4636b65726569204772c3b6c39f6500000000",
+      "text_digest": "3gAXUyA9nwvGmP_zOM8DfYIHnc2NF-_jrEkVcn2__CE",
+      "text_digest_v1": "MijjqldYDPNJZnuZzuPbqjkdwAVJZ4fa1y3NGaD_WDQ"
+    },
+    {
+      "name": "label and value boundary: ab|c",
+      "title": "T",
+      "summary": "S",
+      "detail": null,
+      "fields": [
+        {
+          "id": "f",
+          "kind": "text",
+          "label": "ab",
+          "value": "c"
+        }
+      ],
+      "preimage_hex": "000000166865726d69652d636f6e6669726d2d746578742d7632000000015400000001530000000000000001660000000474657874000000026162000000016300000000",
+      "text_digest": "MfriX4mqM65TRZbl3XmKSkRH66I5Jvq2AQhveloCA_M",
+      "text_digest_v1": "WSlVLsWp3sOvjBUI5oqNTzUDZ_j-rJGmzvuQknDFIvg"
+    },
+    {
+      "name": "label and value boundary: a|bc (differs)",
+      "title": "T",
+      "summary": "S",
+      "detail": null,
+      "fields": [
+        {
+          "id": "f",
+          "kind": "text",
+          "label": "a",
+          "value": "bc"
+        }
+      ],
+      "preimage_hex": "000000166865726d69652d636f6e6669726d2d746578742d7632000000015400000001530000000000000001660000000474657874000000016100000002626300000000",
+      "text_digest": "NFxhi3kH0Al52X1zhZh15Z1bX4XtRfhcHt0CyWEy74I",
+      "text_digest_v1": "WSlVLsWp3sOvjBUI5oqNTzUDZ_j-rJGmzvuQknDFIvg"
+    },
+    {
+      "name": "spending preset",
+      "title": "Run with a large model",
+      "summary": "Run the quarterly analysis with a large model.",
+      "detail": null,
+      "fields": [
+        {
+          "id": "cost",
+          "kind": "amount",
+          "label": "Geschätzte Kosten (€)",
+          "value": "4,20",
+          "currency": "€"
+        },
+        {
+          "id": "tokens",
+          "kind": "count",
+          "label": "tokens",
+          "value": "1.200.000"
+        },
+        {
+          "id": "model",
+          "kind": "model",
+          "label": "Model",
+          "value": "claude-opus-5-5"
+        }
+      ],
+      "preimage_hex": "000000166865726d69652d636f6e6669726d2d746578742d76320000001652756e20776974682061206c61726765206d6f64656c0000002e52756e2074686520717561727465726c7920616e616c7973697320776974682061206c61726765206d6f64656c2e0000000000000004636f737400000006616d6f756e74000000184765736368c3a4747a7465204b6f7374656e2028e282ac2900000004342c323000000003e282ac00000006746f6b656e7300000005636f756e7400000006746f6b656e7300000009312e3230302e30303000000000000000056d6f64656c000000056d6f64656c000000054d6f64656c0000000f636c617564652d6f7075732d352d3500000000",
+      "text_digest": "byhs7NaD4XwpEmsstpqiFXUuty1laJfuTGJanm4dhV0",
+      "text_digest_v1": "K2rI7j_A8ytNnZOkqzYlh1ZiGBPkj_BDrIuG1T9sZNo"
+    },
+    {
+      "name": "every kind, multi-byte",
+      "title": "Prüfen",
+      "summary": "Alles prüfen 🧾",
+      "detail": "日本語の詳細",
+      "fields": [
+        {
+          "id": "a",
+          "kind": "amount",
+          "label": "Summe",
+          "value": "¥12,000",
+          "currency": "JPY"
+        },
+        {
+          "id": "b",
+          "kind": "text",
+          "label": "Notiz",
+          "value": "naïve café"
+        },
+        {
+          "id": "c",
+          "kind": "recipient",
+          "label": "To",
+          "value": "alex@example.com"
+        },
+        {
+          "id": "d",
+          "kind": "domain",
+          "label": "Domain",
+          "value": "xn--bcher-kva.example"
+        },
+        {
+          "id": "e",
+          "kind": "model",
+          "label": "Model",
+          "value": "claude-opus-5-5"
+        },
+        {
+          "id": "f",
+          "kind": "count",
+          "label": "Dateien",
+          "value": "3"
+        },
+        {
+          "id": "g",
+          "kind": "date",
+          "label": "Datum",
+          "value": "2026-10-04"
+        }
+      ],
+      "preimage_hex": "000000166865726d69652d636f6e6669726d2d746578742d7632000000075072c3bc66656e00000012416c6c6573207072c3bc66656e20f09fa7be00000012e697a5e69cace8aa9ee381aee8a9b3e7b4b0000000016100000006616d6f756e740000000553756d6d6500000008c2a531322c303030000000034a505900000001620000000474657874000000054e6f74697a0000000c6e61c3af766520636166c3a900000000000000016300000009726563697069656e7400000002546f00000010616c6578406578616d706c652e636f6d00000000000000016400000006646f6d61696e00000006446f6d61696e00000015786e2d2d62636865722d6b76612e6578616d706c65000000000000000165000000056d6f64656c000000054d6f64656c0000000f636c617564652d6f7075732d352d3500000000000000016600000005636f756e74000000074461746569656e0000000133000000000000000167000000046461746500000005446174756d0000000a323032362d31302d303400000000",
+      "text_digest": "Z2sZwCaD-2FUA4LYMboGw_g8KnkLQYNxU7z83fxRTas",
+      "text_digest_v1": "bap14oWtrgrKfXNeuUbnJOTdL2Myi_xv5Iogv0q9OCw"
+    }
+  ],
   "challenge_vectors": [
     {
       "name": "confirm, https default port",
@@ -10115,6 +10300,925 @@
       }
     }
   ],
+  "assertion_vectors_v2": [
+    {
+      "name": "version 2: fields signed in the frame's order",
+      "description": "A request with fields; the answer carries v 2 and the challenge commits to text_digest_v2.",
+      "context": "main",
+      "request": {
+        "session_id": "sess-7Q2xK",
+        "request_id": "srq-7c2e5a90b4f1",
+        "nonce": "HydGMPZZQ9QH75NbQodnxFarKC3wl9yTzTe5SCSUi8E",
+        "title": "Run with a large model",
+        "summary": "Run the quarterly analysis with a large model.",
+        "detail": null,
+        "user_id": "self_hosted:7c1f0e2a",
+        "expires_at": 1790000120,
+        "fields": [
+          {
+            "id": "cost",
+            "kind": "amount",
+            "label": "Geschätzte Kosten (€)",
+            "value": "4,20",
+            "currency": "€"
+          },
+          {
+            "id": "tokens",
+            "kind": "count",
+            "label": "tokens",
+            "value": "1.200.000"
+          },
+          {
+            "id": "model",
+            "kind": "model",
+            "label": "Model",
+            "value": "claude-opus-5-5"
+          }
+        ]
+      },
+      "store": [
+        {
+          "credential_id": "A8IUBl84vRTMaBj6dOc0nTQa9s8D9cYvLoqdAfgcaRo",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "jGeldYxxGbGSEK_J1SsKJ2iKw54",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "gw.example.com",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 10,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        },
+        {
+          "credential_id": "pmm8wJK3bBwWOo-UrKeZrDeS6Gs",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "old.example.org",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 0,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        },
+        {
+          "credential_id": "EfhxwkaOmQEKqEucdJe0HXV13XLov_iRHIHJWbULeYw",
+          "user_id": "self_hosted:91b44d03",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "v1WnU0yRUJdh7Xo3YDdi2qGk52_Rf9miQPqK2NKM6GM",
+            "y": "PDHka8dRIXhUq6yLcx_u7yvj7vplaw4wkvnTf2p1g18"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "4Z_I9KYcQ0vtCT0ZzcU2j96tuwMQHPGMgmC91k2zzSc",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": false
+        },
+        {
+          "credential_id": "zixQLotdfYEYu6fhYUVjmJ6i2bQeomKlE1KwKB_2VNg",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 10,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "INeglC8TTQu7PI5Hp0PvUnzhpTs",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "shared.example",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 0,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        }
+      ],
+      "answer": {
+        "decision": "confirmed",
+        "method": "passkey",
+        "passkey": {
+          "v": 2,
+          "rp_id": "confirm.hermie.dev",
+          "base_url": "https://gw.example.com",
+          "credential_id": "A8IUBl84vRTMaBj6dOc0nTQa9s8D9cYvLoqdAfgcaRo",
+          "authenticator_data": "K-iELZGLYNpyk0up1VA1qB7_xMTX-E46vPZFA-69xsAdAAAAAA",
+          "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiT0hzaU5rYVUzanVCamdJbmFFWlhxNXhfLWFlMUZ1VnRvWmNiejlHZGY5NCIsIm9yaWdpbiI6Imh0dHBzOi8vY29uZmlybS5oZXJtaWUuZGV2IiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+          "user_handle": "eNOpJbV5iejrl7BamTUxOwpIzm3Bu2S2vNEK3eo3ZJs",
+          "signature": "MEUCIH9skgzKRyuyIGF0qo-w5T5x-3Yd0cemdTd-Ne8o_0LyAiEA6ZxuOvulTfMx7VVjqzgjV3Zro0jBg4pFmVY0IychLJo"
+        }
+      },
+      "signed_by": "credential-a",
+      "expect": {
+        "ok": true,
+        "sign_count": 0,
+        "backup_eligible": true,
+        "backed_up": true,
+        "counter_warning": false
+      }
+    },
+    {
+      "name": "version 2: signed over the text without the fields",
+      "description": "A client that hashed the version-1 text (it ignored the fields) is refused.",
+      "context": "main",
+      "request": {
+        "session_id": "sess-7Q2xK",
+        "request_id": "srq-7c2e5a90b4f1",
+        "nonce": "HydGMPZZQ9QH75NbQodnxFarKC3wl9yTzTe5SCSUi8E",
+        "title": "Run with a large model",
+        "summary": "Run the quarterly analysis with a large model.",
+        "detail": null,
+        "user_id": "self_hosted:7c1f0e2a",
+        "expires_at": 1790000120,
+        "fields": [
+          {
+            "id": "cost",
+            "kind": "amount",
+            "label": "Geschätzte Kosten (€)",
+            "value": "4,20",
+            "currency": "€"
+          },
+          {
+            "id": "tokens",
+            "kind": "count",
+            "label": "tokens",
+            "value": "1.200.000"
+          },
+          {
+            "id": "model",
+            "kind": "model",
+            "label": "Model",
+            "value": "claude-opus-5-5"
+          }
+        ]
+      },
+      "store": [
+        {
+          "credential_id": "A8IUBl84vRTMaBj6dOc0nTQa9s8D9cYvLoqdAfgcaRo",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "jGeldYxxGbGSEK_J1SsKJ2iKw54",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "gw.example.com",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 10,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        },
+        {
+          "credential_id": "pmm8wJK3bBwWOo-UrKeZrDeS6Gs",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "old.example.org",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 0,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        },
+        {
+          "credential_id": "EfhxwkaOmQEKqEucdJe0HXV13XLov_iRHIHJWbULeYw",
+          "user_id": "self_hosted:91b44d03",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "v1WnU0yRUJdh7Xo3YDdi2qGk52_Rf9miQPqK2NKM6GM",
+            "y": "PDHka8dRIXhUq6yLcx_u7yvj7vplaw4wkvnTf2p1g18"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "4Z_I9KYcQ0vtCT0ZzcU2j96tuwMQHPGMgmC91k2zzSc",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": false
+        },
+        {
+          "credential_id": "zixQLotdfYEYu6fhYUVjmJ6i2bQeomKlE1KwKB_2VNg",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 10,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "INeglC8TTQu7PI5Hp0PvUnzhpTs",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "shared.example",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 0,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        }
+      ],
+      "answer": {
+        "decision": "confirmed",
+        "method": "passkey",
+        "passkey": {
+          "v": 2,
+          "rp_id": "confirm.hermie.dev",
+          "base_url": "https://gw.example.com",
+          "credential_id": "A8IUBl84vRTMaBj6dOc0nTQa9s8D9cYvLoqdAfgcaRo",
+          "authenticator_data": "K-iELZGLYNpyk0up1VA1qB7_xMTX-E46vPZFA-69xsAdAAAAAA",
+          "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiWXdGUzQyeThtVTJQaUZKMmg5UVF2UVRncF9UUWNJZDU2N3czMGNsZkJwQSIsIm9yaWdpbiI6Imh0dHBzOi8vY29uZmlybS5oZXJtaWUuZGV2IiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+          "user_handle": "eNOpJbV5iejrl7BamTUxOwpIzm3Bu2S2vNEK3eo3ZJs",
+          "signature": "MEQCIAVEKey3n1z2bSTqRYQ42azZVhATOO1P-dl8zOnsLXJdAiBV6i2RpVMb_ZiQ5ul2kFNRmRaEny9tTvy2ZrILt0BFnA"
+        }
+      },
+      "signed_by": "credential-a",
+      "expect": {
+        "ok": false,
+        "code": 4034,
+        "reason": "challenge_mismatch"
+      }
+    },
+    {
+      "name": "version 2: fields signed in another order",
+      "description": "",
+      "context": "main",
+      "request": {
+        "session_id": "sess-7Q2xK",
+        "request_id": "srq-7c2e5a90b4f1",
+        "nonce": "HydGMPZZQ9QH75NbQodnxFarKC3wl9yTzTe5SCSUi8E",
+        "title": "Run with a large model",
+        "summary": "Run the quarterly analysis with a large model.",
+        "detail": null,
+        "user_id": "self_hosted:7c1f0e2a",
+        "expires_at": 1790000120,
+        "fields": [
+          {
+            "id": "cost",
+            "kind": "amount",
+            "label": "Geschätzte Kosten (€)",
+            "value": "4,20",
+            "currency": "€"
+          },
+          {
+            "id": "tokens",
+            "kind": "count",
+            "label": "tokens",
+            "value": "1.200.000"
+          },
+          {
+            "id": "model",
+            "kind": "model",
+            "label": "Model",
+            "value": "claude-opus-5-5"
+          }
+        ]
+      },
+      "store": [
+        {
+          "credential_id": "A8IUBl84vRTMaBj6dOc0nTQa9s8D9cYvLoqdAfgcaRo",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "jGeldYxxGbGSEK_J1SsKJ2iKw54",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "gw.example.com",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 10,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        },
+        {
+          "credential_id": "pmm8wJK3bBwWOo-UrKeZrDeS6Gs",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "old.example.org",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 0,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        },
+        {
+          "credential_id": "EfhxwkaOmQEKqEucdJe0HXV13XLov_iRHIHJWbULeYw",
+          "user_id": "self_hosted:91b44d03",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "v1WnU0yRUJdh7Xo3YDdi2qGk52_Rf9miQPqK2NKM6GM",
+            "y": "PDHka8dRIXhUq6yLcx_u7yvj7vplaw4wkvnTf2p1g18"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "4Z_I9KYcQ0vtCT0ZzcU2j96tuwMQHPGMgmC91k2zzSc",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": false
+        },
+        {
+          "credential_id": "zixQLotdfYEYu6fhYUVjmJ6i2bQeomKlE1KwKB_2VNg",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 10,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "INeglC8TTQu7PI5Hp0PvUnzhpTs",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "shared.example",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 0,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        }
+      ],
+      "answer": {
+        "decision": "confirmed",
+        "method": "passkey",
+        "passkey": {
+          "v": 2,
+          "rp_id": "confirm.hermie.dev",
+          "base_url": "https://gw.example.com",
+          "credential_id": "A8IUBl84vRTMaBj6dOc0nTQa9s8D9cYvLoqdAfgcaRo",
+          "authenticator_data": "K-iELZGLYNpyk0up1VA1qB7_xMTX-E46vPZFA-69xsAdAAAAAA",
+          "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoibXNFcW9CZ0FtTDhXSnk2SllJR0FTSURuWGl3b3hJVnBEcWZ5TUl2aTVKUSIsIm9yaWdpbiI6Imh0dHBzOi8vY29uZmlybS5oZXJtaWUuZGV2IiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+          "user_handle": "eNOpJbV5iejrl7BamTUxOwpIzm3Bu2S2vNEK3eo3ZJs",
+          "signature": "MEYCIQCjnY1MB4t9iDMCjgggfkNQw1K2LWiI7Vcy3-F9lJaCTwIhAJ_lAi82woJfl7jpzFz-uiSc-P72uxzaF3Uc0MG_sKOn"
+        }
+      },
+      "signed_by": "credential-a",
+      "expect": {
+        "ok": false,
+        "code": 4034,
+        "reason": "challenge_mismatch"
+      }
+    },
+    {
+      "name": "version 2: another value",
+      "description": "",
+      "context": "main",
+      "request": {
+        "session_id": "sess-7Q2xK",
+        "request_id": "srq-7c2e5a90b4f1",
+        "nonce": "HydGMPZZQ9QH75NbQodnxFarKC3wl9yTzTe5SCSUi8E",
+        "title": "Run with a large model",
+        "summary": "Run the quarterly analysis with a large model.",
+        "detail": null,
+        "user_id": "self_hosted:7c1f0e2a",
+        "expires_at": 1790000120,
+        "fields": [
+          {
+            "id": "cost",
+            "kind": "amount",
+            "label": "Geschätzte Kosten (€)",
+            "value": "4,20",
+            "currency": "€"
+          },
+          {
+            "id": "tokens",
+            "kind": "count",
+            "label": "tokens",
+            "value": "1.200.000"
+          },
+          {
+            "id": "model",
+            "kind": "model",
+            "label": "Model",
+            "value": "claude-opus-5-5"
+          }
+        ]
+      },
+      "store": [
+        {
+          "credential_id": "A8IUBl84vRTMaBj6dOc0nTQa9s8D9cYvLoqdAfgcaRo",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "jGeldYxxGbGSEK_J1SsKJ2iKw54",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "gw.example.com",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 10,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        },
+        {
+          "credential_id": "pmm8wJK3bBwWOo-UrKeZrDeS6Gs",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "old.example.org",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 0,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        },
+        {
+          "credential_id": "EfhxwkaOmQEKqEucdJe0HXV13XLov_iRHIHJWbULeYw",
+          "user_id": "self_hosted:91b44d03",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "v1WnU0yRUJdh7Xo3YDdi2qGk52_Rf9miQPqK2NKM6GM",
+            "y": "PDHka8dRIXhUq6yLcx_u7yvj7vplaw4wkvnTf2p1g18"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "4Z_I9KYcQ0vtCT0ZzcU2j96tuwMQHPGMgmC91k2zzSc",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": false
+        },
+        {
+          "credential_id": "zixQLotdfYEYu6fhYUVjmJ6i2bQeomKlE1KwKB_2VNg",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 10,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "INeglC8TTQu7PI5Hp0PvUnzhpTs",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "shared.example",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 0,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        }
+      ],
+      "answer": {
+        "decision": "confirmed",
+        "method": "passkey",
+        "passkey": {
+          "v": 2,
+          "rp_id": "confirm.hermie.dev",
+          "base_url": "https://gw.example.com",
+          "credential_id": "A8IUBl84vRTMaBj6dOc0nTQa9s8D9cYvLoqdAfgcaRo",
+          "authenticator_data": "K-iELZGLYNpyk0up1VA1qB7_xMTX-E46vPZFA-69xsAdAAAAAA",
+          "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiQk9oa3haek5vZE81VFpUR1FoS19SUEJoX0pvU0RvdndUX3Q5RmRfNnlkdyIsIm9yaWdpbiI6Imh0dHBzOi8vY29uZmlybS5oZXJtaWUuZGV2IiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+          "user_handle": "eNOpJbV5iejrl7BamTUxOwpIzm3Bu2S2vNEK3eo3ZJs",
+          "signature": "MEUCIQCz9KtU9tiZr0BBleUH5kMwuqXnCj9vk16cxx9dVADLyQIgIp27DfHdEyAE3DOJXsvOxiI7bj-mILjSbOiuTh9NkEk"
+        }
+      },
+      "signed_by": "credential-a",
+      "expect": {
+        "ok": false,
+        "code": 4034,
+        "reason": "challenge_mismatch"
+      }
+    },
+    {
+      "name": "version 2 request answered with v 1",
+      "description": "",
+      "context": "main",
+      "request": {
+        "session_id": "sess-7Q2xK",
+        "request_id": "srq-7c2e5a90b4f1",
+        "nonce": "HydGMPZZQ9QH75NbQodnxFarKC3wl9yTzTe5SCSUi8E",
+        "title": "Run with a large model",
+        "summary": "Run the quarterly analysis with a large model.",
+        "detail": null,
+        "user_id": "self_hosted:7c1f0e2a",
+        "expires_at": 1790000120,
+        "fields": [
+          {
+            "id": "cost",
+            "kind": "amount",
+            "label": "Geschätzte Kosten (€)",
+            "value": "4,20",
+            "currency": "€"
+          },
+          {
+            "id": "tokens",
+            "kind": "count",
+            "label": "tokens",
+            "value": "1.200.000"
+          },
+          {
+            "id": "model",
+            "kind": "model",
+            "label": "Model",
+            "value": "claude-opus-5-5"
+          }
+        ]
+      },
+      "store": [
+        {
+          "credential_id": "A8IUBl84vRTMaBj6dOc0nTQa9s8D9cYvLoqdAfgcaRo",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "jGeldYxxGbGSEK_J1SsKJ2iKw54",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "gw.example.com",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 10,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        },
+        {
+          "credential_id": "pmm8wJK3bBwWOo-UrKeZrDeS6Gs",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "old.example.org",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 0,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        },
+        {
+          "credential_id": "EfhxwkaOmQEKqEucdJe0HXV13XLov_iRHIHJWbULeYw",
+          "user_id": "self_hosted:91b44d03",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "v1WnU0yRUJdh7Xo3YDdi2qGk52_Rf9miQPqK2NKM6GM",
+            "y": "PDHka8dRIXhUq6yLcx_u7yvj7vplaw4wkvnTf2p1g18"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "4Z_I9KYcQ0vtCT0ZzcU2j96tuwMQHPGMgmC91k2zzSc",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": false
+        },
+        {
+          "credential_id": "zixQLotdfYEYu6fhYUVjmJ6i2bQeomKlE1KwKB_2VNg",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 10,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "INeglC8TTQu7PI5Hp0PvUnzhpTs",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "shared.example",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 0,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        }
+      ],
+      "answer": {
+        "decision": "confirmed",
+        "method": "passkey",
+        "passkey": {
+          "v": 1,
+          "rp_id": "confirm.hermie.dev",
+          "base_url": "https://gw.example.com",
+          "credential_id": "A8IUBl84vRTMaBj6dOc0nTQa9s8D9cYvLoqdAfgcaRo",
+          "authenticator_data": "K-iELZGLYNpyk0up1VA1qB7_xMTX-E46vPZFA-69xsAdAAAAAA",
+          "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiT0hzaU5rYVUzanVCamdJbmFFWlhxNXhfLWFlMUZ1VnRvWmNiejlHZGY5NCIsIm9yaWdpbiI6Imh0dHBzOi8vY29uZmlybS5oZXJtaWUuZGV2IiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+          "user_handle": "eNOpJbV5iejrl7BamTUxOwpIzm3Bu2S2vNEK3eo3ZJs",
+          "signature": "MEUCIH9skgzKRyuyIGF0qo-w5T5x-3Yd0cemdTd-Ne8o_0LyAiEA6ZxuOvulTfMx7VVjqzgjV3Zro0jBg4pFmVY0IychLJo"
+        }
+      },
+      "signed_by": "credential-a",
+      "expect": {
+        "ok": false,
+        "code": 4034,
+        "reason": "bad_shape"
+      }
+    },
+    {
+      "name": "version 1 request answered with v 2",
+      "description": "",
+      "context": "main",
+      "request": {
+        "session_id": "sess-7Q2xK",
+        "request_id": "srq-3f9a0c41d2e8",
+        "nonce": "JoDXrWOBtXAQ03q6p6v8CWUqjILWZuB8P14MVpCY7qA",
+        "title": "Pay invoice",
+        "summary": "Pay 120.00 EUR to Example Plumbing B.V. for invoice 2026-114.",
+        "detail": "IBAN NL00 TEST 0123 4567 89\nReference 2026-114",
+        "user_id": "self_hosted:7c1f0e2a",
+        "expires_at": 1790000120
+      },
+      "store": [
+        {
+          "credential_id": "A8IUBl84vRTMaBj6dOc0nTQa9s8D9cYvLoqdAfgcaRo",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "jGeldYxxGbGSEK_J1SsKJ2iKw54",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "gw.example.com",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 10,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        },
+        {
+          "credential_id": "pmm8wJK3bBwWOo-UrKeZrDeS6Gs",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "old.example.org",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 0,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        },
+        {
+          "credential_id": "EfhxwkaOmQEKqEucdJe0HXV13XLov_iRHIHJWbULeYw",
+          "user_id": "self_hosted:91b44d03",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "v1WnU0yRUJdh7Xo3YDdi2qGk52_Rf9miQPqK2NKM6GM",
+            "y": "PDHka8dRIXhUq6yLcx_u7yvj7vplaw4wkvnTf2p1g18"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "4Z_I9KYcQ0vtCT0ZzcU2j96tuwMQHPGMgmC91k2zzSc",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 0,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": false
+        },
+        {
+          "credential_id": "zixQLotdfYEYu6fhYUVjmJ6i2bQeomKlE1KwKB_2VNg",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "confirm.hermie.dev",
+          "alg": -7,
+          "public_key": {
+            "x": "OOu4wHStWP42olDWGCIiHEAAWL7cTT8suiroxQtKUjc",
+            "y": "oen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA"
+          },
+          "sign_count": 10,
+          "backup_eligible": true,
+          "backed_up": true,
+          "active": true
+        },
+        {
+          "credential_id": "INeglC8TTQu7PI5Hp0PvUnzhpTs",
+          "user_id": "self_hosted:7c1f0e2a",
+          "rp_id": "shared.example",
+          "alg": -7,
+          "public_key": {
+            "x": "fl-5xdP1v-_DGEOixMH-YCv7vAPiS4tEvnI8Mdi0vJ8",
+            "y": "qqA-MgXvIMG8rQFzZTqssoBs1ihPk1kI3K-BA2x8FWw"
+          },
+          "sign_count": 0,
+          "backup_eligible": false,
+          "backed_up": false,
+          "active": true
+        }
+      ],
+      "answer": {
+        "decision": "confirmed",
+        "method": "passkey",
+        "passkey": {
+          "v": 2,
+          "rp_id": "confirm.hermie.dev",
+          "base_url": "https://gw.example.com",
+          "credential_id": "A8IUBl84vRTMaBj6dOc0nTQa9s8D9cYvLoqdAfgcaRo",
+          "authenticator_data": "K-iELZGLYNpyk0up1VA1qB7_xMTX-E46vPZFA-69xsAdAAAAAA",
+          "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoielU0TExKaVJPai02Y3BUZ05OMy1uSUF0LTMyQmhrODZ5RHFNbFJXYzlDdyIsIm9yaWdpbiI6Imh0dHBzOi8vY29uZmlybS5oZXJtaWUuZGV2IiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+          "user_handle": "eNOpJbV5iejrl7BamTUxOwpIzm3Bu2S2vNEK3eo3ZJs",
+          "signature": "MEQCICjAhSG1i-mDvKFG-IDkp_g5aX_wvMXO1mcUUaphj6XRAiBqmRMSduXWscwpnCthmKgh4OEyADgFhAz5IiODXqSffQ"
+        }
+      },
+      "signed_by": "credential-a",
+      "expect": {
+        "ok": false,
+        "code": 4034,
+        "reason": "bad_shape"
+      }
+    }
+  ],
   "sequence_vectors": [
     {
       "name": "fifth refusal settles the request",
@@ -11696,6 +12800,110 @@
               "rp_id": "gw.example.com",
               "ids": [
                 "jGeldYxxGbGSEK_J1SsKJ2iKw54"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "capabilities_first_result_v2": {
+      "server_requests": [
+        "approval",
+        "clarify",
+        "confirm"
+      ],
+      "confirm": [],
+      "confirm_passkey": {
+        "v": 1,
+        "enabled": true,
+        "reason": "",
+        "gateway_id": "2kvwXlBOqzLxDCPyRKi-lQ",
+        "rp": {
+          "native": [
+            "confirm.hermie.dev"
+          ],
+          "web": [
+            "gw.example.com",
+            "other.example.com"
+          ]
+        },
+        "versions": [
+          1,
+          2
+        ]
+      },
+      "confirm_fields": false
+    },
+    "capabilities_second_call_params_v2": {
+      "server_requests": true,
+      "confirm": [
+        "plain",
+        "passkey"
+      ],
+      "confirm_fields": true,
+      "confirm_passkey": {
+        "v": 2,
+        "kind": "native",
+        "rp_id": "confirm.hermie.dev"
+      }
+    },
+    "capabilities_second_result_v2": {
+      "server_requests": [
+        "approval",
+        "clarify",
+        "confirm"
+      ],
+      "confirm": [
+        "passkey",
+        "plain"
+      ],
+      "confirm_fields": true
+    },
+    "confirm_request_frame_v2": {
+      "jsonrpc": "2.0",
+      "id": "srq-7c2e5a90b4f1",
+      "method": "confirm",
+      "params": {
+        "session_id": "sess-7Q2xK",
+        "title": "Run with a large model",
+        "summary": "Run the quarterly analysis with a large model.",
+        "level": "passkey",
+        "fields": [
+          {
+            "id": "cost",
+            "kind": "amount",
+            "label": "Geschätzte Kosten (€)",
+            "value": "4,20",
+            "currency": "€"
+          },
+          {
+            "id": "tokens",
+            "kind": "count",
+            "label": "tokens",
+            "value": "1.200.000"
+          },
+          {
+            "id": "model",
+            "kind": "model",
+            "label": "Model",
+            "value": "claude-opus-5-5"
+          }
+        ],
+        "passkey": {
+          "v": 2,
+          "nonce": "HydGMPZZQ9QH75NbQodnxFarKC3wl9yTzTe5SCSUi8E",
+          "gateway_id": "2kvwXlBOqzLxDCPyRKi-lQ",
+          "base_url": "https://gw.example.com",
+          "expires_at": 1790000120,
+          "user": {
+            "id": "self_hosted:7c1f0e2a",
+            "name": "Alex Example"
+          },
+          "credentials": [
+            {
+              "rp_id": "confirm.hermie.dev",
+              "ids": [
+                "A8IUBl84vRTMaBj6dOc0nTQa9s8D9cYvLoqdAfgcaRo"
               ]
             }
           ]

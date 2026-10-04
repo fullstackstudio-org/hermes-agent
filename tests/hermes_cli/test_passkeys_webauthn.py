@@ -19,7 +19,7 @@ import pytest
 from hermes_cli.dashboard_auth.passkeys import cbor
 from hermes_cli.dashboard_auth.passkeys.challenge import (
     GatewayContext, NotABaseUrl, b64u, b64u_decode, challenge, enrolment_code_canonical, enrolment_code_hash,
-    is_private, origin_of, serialise_base_url, text_digest, user_handle)
+    field_tuple, is_private, origin_of, serialise_base_url, text_digest, text_digest_v2, user_handle)
 from hermes_cli.dashboard_auth.passkeys.webauthn import (
     ASSERTION_REASONS, REGISTRATION_REASONS, AssertionOk, AssertionRequest, PendingRegistration, RegistrationOk,
     Refusal, StoredCredential,
@@ -48,7 +48,8 @@ def _stored(record: dict) -> StoredCredential:
 
 def _request(r: dict) -> AssertionRequest:
     return AssertionRequest(user_id=r["user_id"], request_id=r["request_id"], nonce=b64u_decode(r["nonce"]),
-                            title=r["title"], summary=r["summary"], detail=r["detail"], session_id=r["session_id"])
+                            title=r["title"], summary=r["summary"], detail=r["detail"], session_id=r["session_id"],
+                            fields=tuple(field_tuple(f) for f in r.get("fields") or ()))
 
 
 def _assertion_verdict(vector: dict) -> dict:
@@ -78,7 +79,7 @@ def _registration_verdict(vector: dict) -> dict:
 # ── the vectors ─────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("vector", VECTORS["assertion_vectors"], ids=lambda v: v["name"])
+@pytest.mark.parametrize("vector", VECTORS["assertion_vectors"] + VECTORS["assertion_vectors_v2"], ids=lambda v: v["name"])
 def test_assertion_vector(vector):
     assert _assertion_verdict(vector) == vector["expect"]
 
@@ -107,6 +108,13 @@ def test_base_url_vector(vector):
 def test_construction_vectors():
     for v in VECTORS["text_digest_vectors"]:
         assert b64u(text_digest(v["title"], v["summary"], v["detail"])) == v["text_digest"], v["name"]
+    for v in VECTORS["text_digest_v2_vectors"]:
+        fields = tuple(field_tuple(f) for f in v["fields"])
+        assert b64u(text_digest_v2(v["title"], v["summary"], v["detail"], fields)) == v["text_digest"], v["name"]
+        assert b64u(text_digest(v["title"], v["summary"], v["detail"])) == v["text_digest_v1"], v["name"]
+        request = AssertionRequest(user_id="u", request_id="r", nonce=b"", title=v["title"], summary=v["summary"],
+                                   detail=v["detail"], fields=fields)
+        assert request.version == 2 and b64u(request.text_digest) == v["text_digest"], v["name"]
     for v in VECTORS["challenge_vectors"]:
         got = challenge(purpose=v["purpose"], base_url=v["base_url"], gateway_id=b64u_decode(v["gateway_id"]),
                         user_id=v["user_id"], session_id=v["session_id"], request_id=v["request_id"],

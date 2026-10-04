@@ -45,6 +45,7 @@ SUMMED = ("README.md", "generate.py", "vectors.json")
 
 CHALLENGE_TAG = "hermie-confirm-v1"
 TEXT_TAG = "hermie-confirm-text-v1"
+TEXT_TAG_V2 = "hermie-confirm-text-v2"
 USER_HANDLE_TAG = b"user-handle-v1"
 PURPOSES = ("confirm", "register", "invite", "revoke")
 
@@ -183,6 +184,29 @@ def capability_reason(context: dict, *, enabled: bool = True, identity: bool = T
 
 def text_digest(title: str, summary: str, detail: str | None) -> bytes:
     return sha256(S(TEXT_TAG) + S(title) + S(summary) + S(detail or ""))
+
+
+def text_preimage_v2(title: str, summary: str, detail: str | None, fields: list[dict]) -> bytes:
+    """README §4.1: the fields in the frame's order, each id, kind, label, value, currency (absent: "")."""
+    data = S(TEXT_TAG_V2) + S(title) + S(summary) + S(detail or "")
+    for field in fields:
+        data += S(field["id"]) + S(field["kind"]) + S(field["label"]) + S(field["value"]) + S(field.get("currency") or "")
+    return data
+
+
+def text_digest_v2(title: str, summary: str, detail: str | None, fields: list[dict]) -> bytes:
+    return sha256(text_preimage_v2(title, summary, detail, fields))
+
+
+def request_version(request: dict) -> int:
+    """README §4.1 and §8: a confirm with fields is version 2, one without is version 1."""
+    return 2 if request.get("fields") else 1
+
+
+def request_text_digest(request: dict) -> bytes:
+    if request_version(request) == 2:
+        return text_digest_v2(request["title"], request["summary"], request["detail"], request["fields"])
+    return text_digest(request["title"], request["summary"], request["detail"])
 
 
 def challenge_preimage(*, purpose: str, base_url: str, gateway_id: bytes, user_id: str, session_id: str,
@@ -425,7 +449,7 @@ def evaluate_assertion(context: dict, vector: dict) -> dict:
         p = answer["passkey"]
         if not isinstance(p, dict) or not _ASSERTION_KEYS <= set(p) <= _ASSERTION_KEYS | {"user_handle"}:
             raise ValueError
-        if type(p["v"]) is not int or p["v"] != 1:
+        if type(p["v"]) is not int or p["v"] != request_version(request):
             raise ValueError
         if not (isinstance(p["rp_id"], str) and 1 <= len(p["rp_id"]) <= 253):
             raise ValueError
@@ -450,7 +474,7 @@ def evaluate_assertion(context: dict, vector: dict) -> dict:
     _check_challenge(cd, challenge(  # 7
         purpose="confirm", base_url=p["base_url"], gateway_id=unb64u(context["gateway_id"]), user_id=user,
         session_id=request["session_id"], request_id=request["request_id"], nonce=unb64u(request["nonce"]),
-        digest=text_digest(request["title"], request["summary"], request["detail"])))
+        digest=request_text_digest(request)))
     flags = auth[32]  # 8
     if auth[:32] != sha256(p["rp_id"].encode("utf-8")) or flags & FLAG_AT or (flags & FLAG_BS and not flags & FLAG_BE):
         raise Refuse("bad_authenticator_data")
@@ -620,11 +644,23 @@ REQUEST: dict[str, Any] = {
 }
 
 
+#: A version-2 request (README §4.1): the spending preset of the gateway's ``confirm_action`` tool.
+FIELDS_V2: list[dict] = [
+    {"id": "cost", "kind": "amount", "label": "Geschätzte Kosten (€)", "value": "4,20", "currency": "€"},
+    {"id": "tokens", "kind": "count", "label": "tokens", "value": "1.200.000"},
+    {"id": "model", "kind": "model", "label": "Model", "value": "claude-opus-5-5"},
+]
+REQUEST_V2: dict[str, Any] = dict(REQUEST, request_id="srq-7c2e5a90b4f1", nonce=b64u(det("request v2 nonce", 32)),
+                                  title="Run with a large model",
+                                  summary="Run the quarterly analysis with a large model.", detail=None,
+                                  fields=FIELDS_V2)
+
+
 def request_challenge(req: dict, base_url: str, **override) -> bytes:
     fields: dict[str, Any] = dict(purpose="confirm", base_url=base_url, gateway_id=GATEWAY_ID, user_id=req["user_id"],
                                   session_id=req["session_id"], request_id=req["request_id"],
                                   nonce=unb64u(req["nonce"]),
-                                  digest=text_digest(req["title"], req["summary"], req["detail"]))
+                                  digest=request_text_digest(req))
     fields.update(override)
     return challenge(**fields)
 
@@ -667,7 +703,7 @@ class A:
         self.ad = auth_data(ad_rp or rp_id, flags, sign_count, ad_tail)
         self.key = KEYS[key]
         self.signature = signature
-        self.passkey = {"v": 1, "rp_id": rp_id, "base_url": base_url, "credential_id": credential_id,
+        self.passkey = {"v": request_version(self.request), "rp_id": rp_id, "base_url": base_url, "credential_id": credential_id,
                         "authenticator_data": b64u(self.ad), "client_data_json": b64u(self.cdj)}
         if user_handle_for is not None:
             self.passkey["user_handle"] = b64u(user_handle(HANDLE_KEY, user_handle_for))
@@ -715,6 +751,29 @@ def _pad(field):
         answer["passkey"][field] = value + "=" * (-len(value) % 4 or 4)
         return answer
     return patch
+
+
+def assertion_cases_v2() -> list[A]:
+    """README §4.1: requests with fields. Kept under their own key so a client that does not do version 2 yet
+    keeps passing ``assertion_vectors``."""
+    swapped = [FIELDS_V2[1], FIELDS_V2[0], FIELDS_V2[2]]
+    v1_digest = text_digest(REQUEST_V2["title"], REQUEST_V2["summary"], REQUEST_V2["detail"])
+    return [
+        A("version 2: fields signed in the frame's order", expect="accept", request=REQUEST_V2,
+          description="A request with fields; the answer carries v 2 and the challenge commits to text_digest_v2."),
+        A("version 2: signed over the text without the fields", expect="refuse", reason="challenge_mismatch",
+          request=REQUEST_V2, chal_override={"digest": v1_digest},
+          description="A client that hashed the version-1 text (it ignored the fields) is refused."),
+        A("version 2: fields signed in another order", expect="refuse", reason="challenge_mismatch",
+          request=REQUEST_V2, chal_override={"digest": text_digest_v2(REQUEST_V2["title"], REQUEST_V2["summary"],
+                                                                       REQUEST_V2["detail"], swapped)}),
+        A("version 2: another value", expect="refuse", reason="challenge_mismatch", request=REQUEST_V2,
+          chal_override={"digest": text_digest_v2(REQUEST_V2["title"], REQUEST_V2["summary"], REQUEST_V2["detail"],
+                                                  [dict(FIELDS_V2[0], value="42,00"), *FIELDS_V2[1:]])}),
+        A("version 2 request answered with v 1", expect="refuse", reason="bad_shape", request=REQUEST_V2,
+          patch=_set(("passkey", "v"), 1)),
+        A("version 1 request answered with v 2", expect="refuse", reason="bad_shape", patch=_set(("passkey", "v"), 2)),
+    ]
 
 
 def assertion_cases() -> list[A]:
@@ -1066,6 +1125,37 @@ TEXT_CASES = [
 ]
 
 
+_AMOUNT = {"id": "amount", "kind": "amount", "label": "Betrag in €", "value": "120,00", "currency": "EUR"}
+_TO = {"id": "to", "kind": "recipient", "label": "An", "value": "Bäckerei Größe"}
+TEXT_V2_CASES = [
+    ("amount with a non-ASCII currency symbol in the label", "Überweisung", "Zahle die Rechnung 7.", None,
+     [_AMOUNT, _TO]),
+    ("same fields, order swapped (differs)", "Überweisung", "Zahle die Rechnung 7.", None, [_TO, _AMOUNT]),
+    ("currency absent", "Send", "Send it.", "", [dict(_TO, id="a")]),
+    ("label and value boundary: ab|c", "T", "S", None, [{"id": "f", "kind": "text", "label": "ab", "value": "c"}]),
+    ("label and value boundary: a|bc (differs)", "T", "S", None,
+     [{"id": "f", "kind": "text", "label": "a", "value": "bc"}]),
+    ("spending preset", REQUEST_V2["title"], REQUEST_V2["summary"], REQUEST_V2["detail"], FIELDS_V2),
+    ("every kind, multi-byte", "Prüfen", "Alles prüfen 🧾", "日本語の詳細", [
+        {"id": "a", "kind": "amount", "label": "Summe", "value": "¥12,000", "currency": "JPY"},
+        {"id": "b", "kind": "text", "label": "Notiz", "value": "naïve café"},
+        {"id": "c", "kind": "recipient", "label": "To", "value": "alex@example.com"},
+        {"id": "d", "kind": "domain", "label": "Domain", "value": "xn--bcher-kva.example"},
+        {"id": "e", "kind": "model", "label": "Model", "value": "claude-opus-5-5"},
+        {"id": "f", "kind": "count", "label": "Dateien", "value": "3"},
+        {"id": "g", "kind": "date", "label": "Datum", "value": "2026-10-04"},
+    ]),
+]
+
+
+def text_vectors_v2() -> list[dict]:
+    """README §4.1. ``text_digest_v1`` is the same title, summary and detail without the fields: never equal."""
+    return [{"name": name, "title": t, "summary": s, "detail": d, "fields": f,
+             "preimage_hex": text_preimage_v2(t, s, d, f).hex(), "text_digest": b64u(text_digest_v2(t, s, d, f)),
+             "text_digest_v1": b64u(text_digest(t, s, d))}
+            for name, t, s, d, f in TEXT_V2_CASES]
+
+
 def text_vectors() -> list[dict]:
     return [{"name": name, "title": t, "summary": s, "detail": d, "text_digest": b64u(text_digest(t, s, d))}
             for name, t, s, d in TEXT_CASES]
@@ -1308,6 +1398,24 @@ def wire_examples() -> dict:
                                    "user": {"id": USER, "name": USER_NAME},
                                    "credentials": [{"rp_id": NATIVE_RP, "ids": [CRED_NATIVE]},
                                                    {"rp_id": WEB_RP, "ids": [CRED_WEB]}]}}},
+        "capabilities_first_result_v2": {
+            "server_requests": ["approval", "clarify", "confirm"], "confirm": [],
+            "confirm_passkey": {"v": 1, "enabled": True, "reason": "", "gateway_id": b64u(GATEWAY_ID),
+                                "rp": main["derived"]["accepted_rps"], "versions": [1, 2]},
+            "confirm_fields": False},
+        "capabilities_second_call_params_v2": {
+            "server_requests": True, "confirm": ["plain", "passkey"], "confirm_fields": True,
+            "confirm_passkey": {"v": 2, "kind": "native", "rp_id": NATIVE_RP}},
+        "capabilities_second_result_v2": {"server_requests": ["approval", "clarify", "confirm"],
+                                          "confirm": ["passkey", "plain"], "confirm_fields": True},
+        "confirm_request_frame_v2": {
+            "jsonrpc": "2.0", "id": REQUEST_V2["request_id"], "method": "confirm",
+            "params": {"session_id": REQUEST_V2["session_id"], "title": REQUEST_V2["title"],
+                       "summary": REQUEST_V2["summary"], "level": "passkey", "fields": FIELDS_V2,
+                       "passkey": {"v": 2, "nonce": REQUEST_V2["nonce"], "gateway_id": b64u(GATEWAY_ID),
+                                   "base_url": GW, "expires_at": REQUEST_V2["expires_at"],
+                                   "user": {"id": USER, "name": USER_NAME},
+                                   "credentials": [{"rp_id": NATIVE_RP, "ids": [CRED_NATIVE]}]}}},
         "result_declined": {"decision": "declined", "method": "tap"},
         "error_cannot_run_ceremony": {"jsonrpc": "2.0", "id": REQUEST["request_id"],
                                       "error": {"code": 4040, "message": "passkey ceremony unavailable",
@@ -1339,8 +1447,9 @@ def _verdict(fn, context: dict, vector: dict, refusal: dict) -> dict:
 def build() -> tuple[dict, list[str]]:
     problems: list[str] = []
     assertions = [case.build() for case in assertion_cases()]
+    assertions_v2 = [case.build() for case in assertion_cases_v2()]
     registrations = registration_vectors()
-    for vector in assertions:
+    for vector in assertions + assertions_v2:
         got = _verdict(evaluate_assertion, CONTEXTS[vector["context"]], vector, {"ok": False, "code": 4034})
         if got != vector["expect"]:
             problems.append(f"assertion {vector['name']!r}: labelled {vector['expect']}, the README gives {got}")
@@ -1360,6 +1469,12 @@ def build() -> tuple[dict, list[str]]:
     missing = set(REAUTH_FAILURE_ORDER) - {v["expect"].get("failure") for v in freshness}
     if missing:
         problems.append(f"no freshness vector for {sorted(missing)}")
+    texts_v2 = text_vectors_v2()
+    digests = [v["text_digest"] for v in texts_v2]
+    if len(digests) != len(set(digests)) or any(v["text_digest"] == v["text_digest_v1"] for v in texts_v2):
+        problems.append("two version-2 text vectors share a digest, or one equals its version-1 digest")
+    if {v["name"] for v in assertions} & {v["name"] for v in assertions_v2}:
+        problems.append("an assertion vector name is used in both lists")
     for label, vectors, order in (("assertion", assertions, REFUSAL_ORDER),
                                   ("registration", registrations, REGISTRATION_REFUSAL_ORDER)):
         names = [v["name"] for v in vectors]
@@ -1376,11 +1491,13 @@ def build() -> tuple[dict, list[str]]:
         "contexts": CONTEXTS,
         "base_url_vectors": base_url_vectors(),
         "text_digest_vectors": text_vectors(),
+        "text_digest_v2_vectors": texts_v2,
         "challenge_vectors": challenge_vectors(),
         "user_handle_vectors": handle_vectors(),
         "enrolment_code_vectors": enrolment_code_vectors(),
         "assertion_refusal_order": REFUSAL_ORDER + ["too_many_attempts"],
         "assertion_vectors": assertions,
+        "assertion_vectors_v2": assertions_v2,
         "sequence_vectors": [{
             "name": "fifth refusal settles the request",
             "steps": ["challenge for other text", "challenge for another request", "signature by another key",

@@ -15,6 +15,12 @@ request is `unavailable` and nothing is sent. Nothing here changes level `plain`
 fresh sign-in as an enrolment authority, §7.2 and §8) is an additive part of version 1: optional fields,
 one new route and no change to any cryptographic construction or vector.
 
+Structured fields (§4.1) add a second TEXT version: a `confirm` with `fields` carries `passkey.v: 2` and
+its challenge commits to `text_digest_v2`. It is additive and opt-in on both sides: the gateway sends a
+version-2 frame only to a connection that advertised `confirm_passkey {v: 2}` and `confirm_fields: true`
+(§8), every version-1 vector and construction is unchanged, and the version-2 vectors live under keys of
+their own (§13), so a client that does not do version 2 yet keeps passing the file.
+
 Normative words: MUST, MUST NOT, SHOULD as in RFC 2119. Where this document and `vectors.json`
 disagree, that is a bug in one of them; report it rather than picking one.
 
@@ -23,7 +29,8 @@ disagree, that is a bug in one of them; report it rather than picking one.
 A `confirmed` answer with `verified: true` means: a credential enrolled for this gateway user signed,
 with user presence and user verification as reported by its authenticator, a challenge that commits to
 this gateway's base URL and id, this session, this request id, a fresh nonce, and the SHA-256 of the
-exact title, summary and detail the gateway sent.
+exact title, summary and detail the gateway sent (and, for a request with structured fields, those fields in
+their order: §4.1).
 
 "Enrolled for this gateway user" means one of three things (§7): the operator gave a code, the user
 minted a code with an earlier passkey of their own, or the user signed in again, the identity provider
@@ -90,6 +97,55 @@ text_digest = SHA-256( S("hermie-confirm-text-v1") ‖ S(title) ‖ S(summary) �
 `detail` absent, `null` and `""` give the same digest. For a `confirm`, title, summary and detail are
 the strings in the request frame's params, which are also exactly what the client renders. A client
 MUST compute the digest from the values its sheet displays, never from a second copy.
+
+### 4.1 Structured fields (text version 2)
+
+A `confirm` MAY carry `fields`: the key facts of the action (an amount, a recipient, a model…), shown apart
+from the summary and detail. The gateway builds them; the agent never passes a frame through.
+
+```json
+"fields": [ { "id": "cost",   "kind": "amount", "label": "Estimated cost", "value": "4.20", "currency": "€" },
+            { "id": "tokens", "kind": "count",  "label": "tokens",         "value": "1,200,000" },
+            { "id": "model",  "kind": "model",  "label": "Model",          "value": "claude-opus-5-5" } ]
+```
+
+| Key | Rule |
+| --- | --- |
+| `fields` | absent, or 1 to **8** objects, in display order; never an empty list |
+| `id` | `^[a-z][a-z0-9_]{0,31}$`, unique within the request |
+| `kind` | `amount`, `text`, `recipient`, `domain`, `model`, `count`, `date` |
+| `label` | 1 to **40** code points |
+| `value` | 1 to **200** code points |
+| `currency` | optional, 1 to **16** code points, only with `kind: amount` |
+
+Lengths count Unicode code points (§6.3 of `contract/requests`). `label`, `value` and `currency` are each ONE
+line and follow the verbatim character rules of `contract/requests` §6.2: no line break of any kind, no
+control or format character (bidi marks, embeddings, overrides and isolates, zero-width characters), no
+whitespace other than U+0020, no invisible letter, no default-ignorable code point, no unassigned code point,
+at most 4 combining marks in a row, no run of more than 16 spaces, and no space at either end. The gateway
+removes U+0020 at either end of what the agent wrote and REFUSES everything else above (the agent is told to
+fix it); it rewrites nothing else, so what a client shows is exactly what was hashed.
+
+Rendering (both levels): every field is shown, in order, as its label and its value, as plain text; a client
+never parses, converts, rounds, localises or links a value. `amount`: the value large and bold with
+`currency` beside it; `recipient` and `domain`: monospaced, never a link; the other kinds plain. A client
+that cannot show a field shows none of the request: it does not advertise `confirm_fields`.
+
+Gating: a `confirm` with `fields` goes only to connections that advertised `confirm_fields: true` (§8) and,
+at level `passkey`, also `confirm_passkey {v: 2}`. When none is attached the request is `unavailable
+(no_capable_client)` and NOTHING is sent: a client that would drop the fields would ask the person to confirm
+less than the agent asked.
+
+At level `passkey` such a request is **version 2**: `passkey.v` is 2 and the challenge (§5) commits to
+
+```
+text_digest_v2 = SHA-256( S("hermie-confirm-text-v2") ‖ S(title) ‖ S(summary) ‖ S(detail or "") ‖ FIELDS )
+FIELDS         = for each field, in the frame's order: S(id) ‖ S(kind) ‖ S(label) ‖ S(value) ‖ S(currency or "")
+```
+
+`currency` absent gives `S("")`. The order is part of the text: the same fields in another order give another
+digest. A request without `fields` is version 1 and uses §4 unchanged. `text_digest_v2_vectors` give the
+preimage, the digest and, for contrast, the version-1 digest of the same title, summary and detail.
 
 ## 5. Challenge
 
@@ -241,8 +297,13 @@ Examples of every object are in `vectors.json` → `wire_examples`.
    ```json
    "confirm_passkey": { "v": 1, "enabled": true, "reason": "",
                         "gateway_id": "<b64u 16 bytes>",
-                        "rp": { "native": ["confirm.hermie.dev"], "web": ["gw.example.com"] } }
+                        "rp": { "native": ["confirm.hermie.dev"], "web": ["gw.example.com"] },
+                        "versions": [1, 2] }
    ```
+
+   `versions` (absent from a gateway that knows version 1 only) lists the `confirm_passkey.v` values the
+   gateway accepts in the second call. A gateway that knows structured fields (§4.1) also adds
+   `"confirm_fields": false` to every result (true once it accepted this connection's `confirm_fields`).
 
    `reason` is `""` when enabled, else one of: `disabled` (the operator has not enabled the level),
    `no_base_url` (the operator listed no base URL), `private_origin` (every listed base URL is private,
@@ -259,10 +320,17 @@ Examples of every object are in `vectors.json` → `wire_examples`.
    The result's `confirm` lists the levels accepted. `passkey` is accepted only when the level is
    enabled, the connection is signed in, and `rp_id` is accepted for `kind` (§10). Whether the user has a
    credential is decided per request.
+3. Version 2 (§4.1). A client that shows structured fields adds `confirm_fields: true` to the second call
+   when the first result carried the key `confirm_fields`; it is accepted together with at least one
+   accepted level and echoed as `confirm_fields: true`. A client that also computes `text_digest_v2` sends
+   `confirm_passkey {v: 2, kind, rp_id}` when the first result's `versions` lists 2 (a gateway without
+   `versions` refuses `v: 2` and the level with it). A `v: 2` client takes `v: 1` and `v: 2` frames; a `v: 1`
+   client is never sent a `v: 2` frame. A client sends `v: 2` only together with `confirm_fields: true`: the
+   gateway needs both to send it a request with fields.
 
 ### `confirm` request params at level `passkey`
 
-The PG-7 params (`session_id`, `title`, `summary`, `detail?`, `level`) plus:
+The PG-7 params (`session_id`, `title`, `summary`, `detail?`, `level`, `fields?` (§4.1)) plus:
 
 ```json
 "passkey": { "v": 1, "nonce": "<b64u 32>", "gateway_id": "<b64u 16>", "base_url": "https://gw.example.com",
@@ -273,9 +341,10 @@ The PG-7 params (`session_id`, `title`, `summary`, `detail?`, `level`) plus:
 
 `base_url` is informative (the base URL the gateway would accept from this connection); the client
 always uses the base URL it dialed. `expires_at` is Unix seconds. `credentials` lists the bound user's
-active credentials per RP. A client MUST pass a non-empty `allowCredentials` for its own RP and MUST
-refuse (error 4040) a request without one, with an unknown `v`, or whose `gateway_id` breaks the pinning
-rule in §10.
+active credentials per RP. `v` is 1 for a request without `fields` (§4) and 2 for one with them
+(§4.1); a client hashes the text of that version. A client MUST pass a non-empty `allowCredentials` for its
+own RP and MUST refuse (error 4040) a request without one, with an unknown `v` (or `v: 2` without `fields`,
+`v: 1` with them), or whose `gateway_id` breaks the pinning rule in §10.
 
 ### Answer (through `request.answer {id, result}`)
 
@@ -286,7 +355,8 @@ rule in §10.
                "user_handle": "…" } }
 ```
 
-`user_handle` is optional. `verified` is never sent by a client.
+`user_handle` is optional. `verified` is never sent by a client. `v` repeats the request's `passkey.v` (1, or 2
+for a request with fields); any other value is a `bad_shape` (§9 step 1).
 
 A decline is exactly `{ "decision": "declined", "method": "tap" }`, with no `passkey` object. It does not
 go through §9: it needs no assertion, it is not a `bad_shape`, it does not count toward the five
@@ -393,7 +463,7 @@ the token answer, a browser from `reauth_invalid` with its cookie.
 
 ## 9. Verifying an assertion (gateway)
 
-Inputs: the open request (user `U`, session id, request id, nonce, the title/summary/detail it sent),
+Inputs: the open request (user `U`, session id, request id, nonce, the title/summary/detail and fields it sent),
 the gateway context (`gateway_id`, `handle_key`, the listed base URLs, the private opt-in,
 `native_rps`), and a snapshot of `U`'s stored credentials taken when the request opened. The check is a
 pure function of these and the answer: no I/O, no logging of inputs. Steps run in this order; the first
@@ -408,7 +478,7 @@ the level; otherwise 4033) reach §9, and only their refusals count toward the f
    client-sent `verified` is a `bad_shape`); `decision` = `"confirmed"`, `method` = `"passkey"`;
    `passkey` is an object with exactly the keys `v`, `rp_id`, `base_url`, `credential_id`,
    `authenticator_data`, `client_data_json`, `signature` and optionally `user_handle`; `v` is the integer
-   1; `rp_id` a string of 1–253 characters, `base_url` a string of 1–512; the binary fields are valid
+   version of the request (1, or 2 for a request with fields, §4.1); `rp_id` a string of 1–253 characters, `base_url` a string of 1–512; the binary fields are valid
    base64url (§2) and decode to: `credential_id` 1–1,023 bytes, `authenticator_data` 37–1,024,
    `client_data_json` 1–4,096, `signature` 8–72, `user_handle` 1–64.
 2. **`unknown_credential`** — the snapshot has a credential with this `credential_id` whose user is `U`,
@@ -542,12 +612,14 @@ encodings are accepted.
 | `contexts` | the gateways under test (`main`, `private_allowed`, `only_private`, `prefixed`): `gateway_id`, `handle_key`, `base_urls`, `allow_private_base_urls`, `native_rps`, `user`, and `derived` (accepted base URLs and RPs, capability reason) |
 | `base_url_vectors` | §3 and §10: `input` → `base_url`, `origin`, `private`; or `error: "not_a_base_url"` |
 | `text_digest_vectors`, `challenge_vectors`, `user_handle_vectors`, `enrolment_code_vectors` | §4–§7 with expected outputs (`preimage_hex` for debugging) |
+| `text_digest_v2_vectors` | §4.1: `title`, `summary`, `detail`, `fields` → `preimage_hex`, `text_digest`, and `text_digest_v1` (the same text without the fields, never equal). Includes an amount with a non-ASCII currency symbol in its label, the same fields in swapped order (another digest), a label/value boundary shift (another digest), a field without `currency`, and every kind |
+| `assertion_vectors_v2` | as `assertion_vectors`, for a version-2 request (its `request` carries `fields`; the answer carries `v: 2`): accepted, signed over the version-1 text, over the fields in another order or with another value (`challenge_mismatch`), and the wrong `v` either way (`bad_shape`) |
 | `assertion_refusal_order`, `registration_refusal_order` | §9's and §11's reasons in order |
 | `assertion_vectors` | `context` (a key of `contexts`), `request`, `store` (credential records of several users, one revoked), `answer`, `signed_by` (informative), `expect`: `{ok: true, sign_count, backup_eligible, backed_up, counter_warning}` or `{ok: false, code: 4034, reason}` |
 | `sequence_vectors` | multi-answer behaviour (`too_many_attempts`); steps name assertion vectors |
 | `registration_vectors` | `context`, `begin` (the open registration), `finish` (the body), `expect` |
 | `reauth_freshness_vectors` | §7.2: a `grant` (`provider`, `user_id`, `created_at`), the `session` its sign-in returned (`provider`, `user_id`, `auth_time`, 0 for none), `accept_missing_auth_time`, and `expect`: `{state: "fresh", auth_time_assumed}` or `{state: "failed", failure}`. A timestamp rule, not a construction: nothing here is signed |
-| `wire_examples` | one example of each wire object in §8, including both second-call forms, the status route's `self_enrol`, `reauth/begin` for both client kinds, the binding cookie, the native token route's two `reauth` answers, `register/begin` and `register/finish` with a grant for both client kinds, the error answers of the self-enrolment routes, and the refusal pages of the sign-in routes (400 and 429 with `Retry-After`) |
+| `wire_examples` | one example of each wire object in §8, including both second-call forms, the version-2 capability, second call and request frame (`*_v2`), the status route's `self_enrol`, `reauth/begin` for both client kinds, the binding cookie, the native token route's two `reauth` answers, `register/begin` and `register/finish` with a grant for both client kinds, the error answers of the self-enrolment routes, and the refusal pages of the sign-in routes (400 and 429 with `Retry-After`) |
 
 Take `U`'s active credentials from `store` as the snapshot. Run every vector against the context it names.
 A freshness vector needs no context: apply §7.2 to its `grant` and `session`.

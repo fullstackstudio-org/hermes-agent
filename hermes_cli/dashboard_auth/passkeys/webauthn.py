@@ -26,7 +26,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from hermes_cli.dashboard_auth.passkeys import cbor
 from hermes_cli.dashboard_auth.passkeys.challenge import (
-    GatewayContext, b64u, b64u_decode, challenge, host_of, origin_of, text_digest, user_handle)
+    GatewayContext, b64u, b64u_decode, challenge, host_of, origin_of, text_digest, text_digest_v2, user_handle)
 
 FLAG_UP, FLAG_UV, FLAG_BE, FLAG_BS, FLAG_AT, FLAG_ED = 0x01, 0x04, 0x08, 0x10, 0x40, 0x80
 ALG_ES256 = -7
@@ -67,7 +67,9 @@ class StoredCredential:
 class AssertionRequest:
     """What the assertion must commit to (README §5). For ``confirm``: the frame's session id, JSON-RPC id,
     nonce and text. For a step-up (``invite`` / ``revoke``): ``session_id`` ``""``, ``request_id`` the
-    step-up id, title and detail ``""``, summary the subject."""
+    step-up id, title and detail ``""``, summary the subject. *fields* (``confirm`` only, README §4.1):
+    the frame's structured fields as ``challenge.field_tuple`` values, in the frame's order; a request with
+    fields is version 2 (``text_digest_v2``, and the answer's ``passkey.v`` is 2), one without is version 1."""
 
     user_id: str
     request_id: str
@@ -77,9 +79,16 @@ class AssertionRequest:
     detail: str | None
     session_id: str = ""
     purpose: str = "confirm"
+    fields: tuple[tuple[str, str, str, str, str], ...] = ()
+
+    @property
+    def version(self) -> int:
+        return 2 if self.fields else 1
 
     @property
     def text_digest(self) -> bytes:
+        if self.fields:
+            return text_digest_v2(self.title, self.summary, self.detail, self.fields)
         return text_digest(self.title, self.summary, self.detail)
 
 
@@ -251,7 +260,8 @@ def _verify_assertion(ctx: GatewayContext, request: AssertionRequest, credential
         p = answer["passkey"]
         if not isinstance(p, Mapping) or not _PASSKEY_KEYS <= set(p) <= _PASSKEY_KEYS | _PASSKEY_OPTIONAL:
             raise ValueError
-        if type(p["v"]) is not int or p["v"] != 1:
+        # The answer carries the version of the request it answers (README §8): 1, or 2 with fields.
+        if type(p["v"]) is not int or p["v"] != request.version:
             raise ValueError
         rp_id, base_url = p["rp_id"], p["base_url"]
         if not (isinstance(rp_id, str) and 1 <= len(rp_id) <= 253):

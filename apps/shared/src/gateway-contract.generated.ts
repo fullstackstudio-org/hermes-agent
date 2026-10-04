@@ -1675,9 +1675,10 @@ export interface ClientCapabilitiesParams {
   server_requests?: boolean
   confirm?: string[] | null
   confirm_passkey?: ConfirmPasskeyAdvertisement | null
+  confirm_fields?: boolean | null
   requests?: string[] | null
 }
-/** Second ``client.capabilities`` call, with ``passkey`` in ``confirm``: how this client runs the ceremony, ``{v: 1, kind, rp_id}``. ``kind``: ``native`` (an app under a native RP) or ``web`` (a browser; ``rp_id`` is its host). Deliberately permissive here (any value, extra keys allowed) and checked in code (``confirm_passkey.accept_advertisement``): a shape this gateway does not accept, including a later client's extra field, only drops ``passkey`` and never fails the call (and ``plain`` with it). */
+/** Second ``client.capabilities`` call, with ``passkey`` in ``confirm``: how this client runs the ceremony, ``{v, kind, rp_id}``. ``v``: ``1``, or ``2`` from a client that also computes the version-2 text digest of a request with ``fields`` (contract §4.1; send it only when the result's ``confirm_passkey.versions`` lists 2). A ``v: 2`` client takes ``v: 1`` and ``v: 2`` frames; a ``v: 1`` client is never sent a ``v: 2`` frame. ``kind``: ``native`` (an app under a native RP) or ``web`` (a browser; ``rp_id`` is its host). Deliberately permissive here (any value, extra keys allowed) and checked in code (``confirm_passkey.accept_advertisement``): a shape this gateway does not accept, including a later client's extra field, only drops ``passkey`` and never fails the call (and ``plain`` with it). */
 export interface ConfirmPasskeyAdvertisement {
   v?: unknown
   kind?: unknown
@@ -1688,6 +1689,7 @@ export interface ClientCapabilitiesResult {
   server_requests: string[]
   confirm?: ConfirmLevel[]
   confirm_passkey?: ConfirmPasskeyCapability | null
+  confirm_fields?: boolean | null
   requests?: string[]
 }
 /** What a confirmation proves. ``plain``: someone tapped Confirm in a connected client; nothing more, and the gateway cannot check even that. ``passkey``: the gateway verified a WebAuthn assertion with user verification, made by a passkey enrolled for the person the turn acts for, over a challenge that commits to this gateway, session, request and text (``contract/confirm-passkey/README.md``). Sent only to connections signed in as that person that advertised the level with an accepted RP. The set is open: a later level is one more value here. */
@@ -1699,6 +1701,7 @@ export interface ConfirmPasskeyCapability {
   reason: string
   gateway_id: string
   rp: ConfirmPasskeyRps
+  versions?: number[] | null
 }
 export interface ConfirmPasskeyRps {
   native: string[]
@@ -4281,11 +4284,22 @@ export interface ConfirmRequestParams {
   summary: string
   detail?: string | null
   level: ConfirmLevel
+  fields?: ConfirmField[] | null
   passkey?: ConfirmPasskeyParams | null
 }
-/** Level ``passkey`` only (contract §8). ``nonce`` (32 bytes) and ``gateway_id`` (16 bytes) are base64url; ``base_url`` is informative (a client always hashes the base URL it dialed); ``expires_at`` is Unix seconds. */
+/** One structured field of a ``confirm`` (``fields``), built and checked by the gateway (``tui_gateway/confirm.py``): ``label`` and ``value`` (and ``currency``) are ONE line each, shown exactly as sent, and hold nothing a renderer shows as nothing (the verbatim rules of ``contract/requests`` §6.2, no whitespace at either end). ``id`` is unique within the request. ``currency`` only with ``kind: amount``. At level ``passkey`` the fields are part of the signed text (``text_digest_v2``, in this order). */
+export interface ConfirmField {
+  id: string
+  kind: ConfirmFieldKind
+  label: string
+  value: string
+  currency?: string | null
+}
+/** How a client renders one structured field of a ``confirm``. ``amount``: the value large and bold, with ``currency`` beside it; ``domain`` and ``recipient``: monospaced, never a link; ``text``, ``model``, ``count``, ``date``: plain. Every kind is shown as the text it carries: a client never parses, converts, rounds or localises a value. */
+export type ConfirmFieldKind = 'amount' | 'text' | 'recipient' | 'domain' | 'model' | 'count' | 'date'
+/** Level ``passkey`` only (contract §8). ``nonce`` (32 bytes) and ``gateway_id`` (16 bytes) are base64url; ``base_url`` is informative (a client always hashes the base URL it dialed); ``expires_at`` is Unix seconds. ``v`` is the version of the text the challenge commits to: ``1`` (``text_digest``) without ``fields``, ``2`` (``text_digest_v2``) with them; a ``v: 2`` frame goes only to connections that advertised ``confirm_passkey {v: 2}``, and the answer's ``passkey.v`` repeats the frame's. */
 export interface ConfirmPasskeyParams {
-  v: number
+  v: 1 | 2
   nonce: string
   gateway_id: string
   base_url: string
@@ -4313,7 +4327,7 @@ export interface ConfirmResult {
 export type ConfirmDecision = 'confirmed' | 'declined'
 /** How the client obtained the decision. ``tap``: a button, nothing proven (every decline is a tap). ``passkey``: a WebAuthn assertion, carried in ``ConfirmResult.passkey`` and verified by the gateway. */
 export type ConfirmMethod = 'tap' | 'passkey'
-/** The WebAuthn assertion of a ``passkey`` answer (contract §8); binary fields are base64url. The gateway checks it in the order of contract §9; a refusal is ``request.answer`` error 4034 with ``data.reason``. */
+/** The WebAuthn assertion of a ``passkey`` answer (contract §8); binary fields are base64url. The gateway checks it in the order of contract §9; a refusal is ``request.answer`` error 4034 with ``data.reason``. ``v`` is the frame's ``passkey.v``. */
 export interface ConfirmPasskeyAssertion {
   v: number
   rp_id: string

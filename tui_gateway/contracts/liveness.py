@@ -35,14 +35,17 @@ method("gateway.capabilities", params=PingParams, result=GatewayCapabilitiesResu
 
 class ConfirmPasskeyAdvertisement(Params):
     """Second ``client.capabilities`` call, with ``passkey`` in ``confirm``: how this client runs the
-    ceremony, ``{v: 1, kind, rp_id}``. ``kind``: ``native`` (an app under a native RP) or ``web`` (a browser;
+    ceremony, ``{v, kind, rp_id}``. ``v``: ``1``, or ``2`` from a client that also computes the version-2 text
+    digest of a request with ``fields`` (contract §4.1; send it only when the result's
+    ``confirm_passkey.versions`` lists 2). A ``v: 2`` client takes ``v: 1`` and ``v: 2`` frames; a ``v: 1``
+    client is never sent a ``v: 2`` frame. ``kind``: ``native`` (an app under a native RP) or ``web`` (a browser;
     ``rp_id`` is its host). Deliberately permissive here (any value, extra keys allowed) and checked in code
     (``confirm_passkey.accept_advertisement``): a shape this gateway does not accept, including a later
     client's extra field, only drops ``passkey`` and never fails the call (and ``plain`` with it)."""
 
     model_config = Params.model_config | {"extra": "allow"}
 
-    #: ``1``.
+    #: ``1`` or ``2``.
     v: JsonValue = None
     #: ``"native"`` or ``"web"``.
     kind: JsonValue = None
@@ -65,6 +68,12 @@ class ClientCapabilitiesParams(Params):
     #: Required for ``passkey`` to be accepted (contract §8). Send it only after a result carried
     #: ``confirm_passkey`` with ``enabled: true``.
     confirm_passkey: ConfirmPasskeyAdvertisement | None = None
+    #: This connection shows a ``confirm``'s structured ``fields`` (every ``ConfirmFieldKind``). Optional and
+    #: additive: absent or false means a ``confirm`` with fields is never sent to it. Only read together with
+    #: ``server_requests: true`` and at least one accepted ``confirm`` level. Send it only after a result
+    #: carried the key ``confirm_fields`` (a backend that knows it always sends it): an older one rejects
+    #: the unknown key (4000) and the whole call.
+    confirm_fields: bool | None = None
     #: The interactive request methods (``input.form``, ``input.file``, ``review.draft``, …) this connection
     #: can SHOW on this device; it lists nothing it cannot do. Optional and additive: absent means none, and
     #: the gateway never sends such a method to this connection. Only read together with
@@ -91,6 +100,9 @@ class ConfirmPasskeyCapability(Result):
     reason: str
     gateway_id: str
     rp: ConfirmPasskeyRps
+    #: The ``confirm_passkey.v`` values this backend accepts in an advertisement (``[1, 2]``); absent from a
+    #: backend that knows version 1 only (send ``v: 1`` to it).
+    versions: list[int] | None = None
 
 
 class ClientCapabilitiesResult(Result):
@@ -100,6 +112,9 @@ class ClientCapabilitiesResult(Result):
     confirm: list[ConfirmLevel] = Field(default_factory=list)
     #: The level ``passkey`` as this connection sees it (a build that knows the level always sends it).
     confirm_passkey: ConfirmPasskeyCapability | None = None
+    #: Whether this backend accepted this connection's ``confirm_fields: true`` (false until it did). A backend
+    #: that knows the key always sends it; one that does not omits it.
+    confirm_fields: bool | None = None
     #: The interactive request methods this backend accepted from this connection's ``requests`` (``[]``
     #: when none, or from a backend older than the key).
     requests: list[str] = Field(default_factory=list)

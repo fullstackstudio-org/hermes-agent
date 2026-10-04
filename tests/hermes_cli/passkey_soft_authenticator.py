@@ -91,7 +91,8 @@ class SoftAuthenticator:
         cdj = self._client_data("webauthn.get", chal)
         auth = hashlib.sha256(self.rp_id.encode()).digest() + bytes([self.flags]) + struct.pack(">I", self.sign_count)
         signature = self.key.sign(auth + hashlib.sha256(cdj).digest(), ec.ECDSA(hashes.SHA256()))
-        passkey = {"v": 1, "rp_id": self.rp_id, "base_url": base_url, "credential_id": b64u(self.credential_id),
+        passkey = {"v": request.version, "rp_id": self.rp_id, "base_url": base_url,
+                   "credential_id": b64u(self.credential_id),
                    "authenticator_data": b64u(auth), "client_data_json": b64u(cdj), "signature": b64u(signature)}
         if with_user_handle:
             passkey["user_handle"] = b64u(user_handle(handle_key, request.user_id))

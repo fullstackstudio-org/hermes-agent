@@ -37,6 +37,7 @@ from tui_gateway.contracts.registry import SERVER_REQUESTS
 from tui_gateway.contracts.server_requests import (
     CANNOT_SHOW,
     INTERACTIVE_METHODS,
+    CalendarStatus,
     FormField,
     FormFieldKind,
     InputFormResult,
@@ -58,6 +59,13 @@ REASONS: dict[str, re.Pattern[str]] = {
                              r"file:(0|[1-9][0-9]*):(outside_dir|too_large))$"),
     "review.draft": re.compile(r"^(bad_shape|text:(not_verbatim|edited))$"),
     "review.diff": re.compile(r"^(bad_shape|hunk:h[1-9][0-9]{0,2}:(unknown|missing)|decision:inconsistent)$"),
+    "input.signature": re.compile(r"^(bad_shape|not_optional|file:(0|1):(outside_dir|too_large)|files:too_large|"
+                                  r"files:not_png_and_svg|statement:mismatch)$"),
+    "device.location": re.compile(r"^(bad_shape|not_optional|precision:too_precise)$"),
+    "device.contact": re.compile(r"^(bad_shape|not_optional|contact:(name|phones|emails|postal|birthday|organization)"
+                                 r":not_requested|contact:birthday:invalid|contact:empty)$"),
+    "device.calendar": re.compile(r"^(bad_shape|not_optional)$"),
+    "device.scan": re.compile(r"^(bad_shape|not_optional|symbology:not_requested|scan:empty)$"),
 }
 #: The discriminator of each method's result and the values every one must have a valid example of.
 STATUSES = {
@@ -65,6 +73,11 @@ STATUSES = {
     "input.file": ("status", {s.value for s in InputStatus}),
     "review.draft": ("decision", {d.value for d in ReviewDecision}),
     "review.diff": ("decision", {d.value for d in ReviewDecision}),
+    "input.signature": ("status", {s.value for s in InputStatus}),
+    "device.location": ("status", {s.value for s in InputStatus}),
+    "device.contact": ("status", {s.value for s in InputStatus}),
+    "device.calendar": ("status", {s.value for s in CalendarStatus}),
+    "device.scan": ("status", {s.value for s in InputStatus}),
 }
 
 
@@ -204,6 +217,26 @@ def test_validator_cases_are_consistent_with_their_frames():
         elif reason == "files:too_large":
             assert all(f["bytes"] <= params["upload"]["max_bytes"] for f in result["files"]), reason
             assert sum(f["bytes"] for f in result["files"]) > params["upload"]["max_total_bytes"], reason
+        elif reason == "files:not_png_and_svg":
+            assert sorted(f["mime"] for f in result["files"]) != ["image/png", "image/svg+xml"], reason
+        elif reason == "statement:mismatch":
+            import hashlib as _hashlib
+            assert result["statement_sha256"] != _hashlib.sha256(params["statement"].encode()).hexdigest(), reason
+        elif reason == "precision:too_precise":
+            assert params["precision"] == "approximate" and result["precision"] == "precise", reason
+        elif reason.startswith("contact:") and reason.endswith(":not_requested"):
+            key = reason.split(":")[1]
+            assert key in result["contact"] and key not in params["fields"], reason
+        elif reason == "contact:empty":
+            shown = [v for k, val in result["contact"].items() if k in params["fields"] and val
+                     for v in (val if isinstance(val, list) else [val])]
+            assert not any(str(v).strip("\u200b\u202e \n") for v in shown), reason
+        elif reason == "contact:birthday:invalid":
+            assert "birthday" in params["fields"] and "birthday" in result["contact"], reason
+        elif reason == "symbology:not_requested":
+            assert params.get("formats") and result["symbology"] not in params["formats"], reason
+        elif reason == "scan:empty":
+            assert not result["value"].strip("\u200b\u202e \n"), reason
         elif reason == "text:edited":
             assert params["editable"] is False and result["text"] != params["text"], reason
         elif reason.startswith("hunk:"):
@@ -493,3 +526,120 @@ def test_only_the_last_hunk_can_be_anchored_at_the_end():
     assert _parses(model, _diff_params([{**first, "anchor": "start"}, last]))
     assert _parses(model, _diff_params([{**first, "anchor": "start"}, {**last, "anchor": "both"}]))
     assert _parses(model, _diff_params([{**first, "anchor": "end"}])), "a single hunk is the last one"
+
+
+# ── input.signature and the device requests ─────────────────────────────────────────────────────
+
+
+def _env(**extra) -> dict:
+    return {"session_id": "s_example", "v": 1, "title": "T", "summary": "S", "expires_at": 0, "optional": True, **extra}
+
+
+UPLOAD2 = {"dir": "/w/uploads/hermie/2026-10-04", "max_bytes": 1048576, "max_total_bytes": 2097152, "max_files": 2,
+           "strip_metadata": False}
+PNG = {"path": "/w/uploads/hermie/2026-10-04/aa-s.png", "name": "s.png", "mime": "image/png", "bytes": 1,
+       "sha256": "0" * 64}
+SVG = {**PNG, "path": "/w/uploads/hermie/2026-10-04/bb-s.svg", "name": "s.svg", "mime": "image/svg+xml"}
+
+
+def test_the_phase_three_methods_are_interactive_and_in_the_contract_in_this_order():
+    assert INTERACTIVE_METHODS[4:] == ("input.signature", "device.location", "device.contact", "device.calendar",
+                                       "device.scan")
+    assert list(EXAMPLES["methods"]) == list(INTERACTIVE_METHODS)
+
+
+def test_a_signature_is_a_bounded_statement_and_two_files():
+    params, result = SERVER_REQUESTS["input.signature"].params, SERVER_REQUESTS["input.signature"].result
+    assert _parses(params, _env(statement="x" * 500, upload=UPLOAD2))
+    assert not _parses(params, _env(statement="x" * 501, upload=UPLOAD2))
+    assert not _parses(params, _env(statement="", upload=UPLOAD2))
+    assert _parses(params, _env(statement="x", signer_name="n" * 80, upload=UPLOAD2))
+    assert not _parses(params, _env(statement="x", signer_name="n" * 81, upload=UPLOAD2))
+    assert not _parses(params, _env(statement="x", signer_name="a\nb", upload=UPLOAD2))
+    assert not _parses(params, _env(statement="x", upload={**UPLOAD2, "max_files": 1}))
+    good = {"status": "answered", "files": [PNG, SVG], "signed_at": 0, "statement_sha256": "a" * 64}
+    assert _parses(result, good)
+    for bad in ({**good, "files": [PNG]}, {**good, "files": [PNG, SVG, SVG]}, {**good, "signed_at": -1},
+                {**good, "signed_at": 1.5}, {**good, "signed_at": True}, {**good, "statement_sha256": "A" * 64},
+                {**good, "statement_sha256": "a" * 63}, {**good, "statement_sha256": "a" * 64 + "\n"},
+                {**good, "text": "x"}):
+        assert not _parses(result, bad), bad
+
+
+def test_a_location_is_bounded_numbers_and_never_text():
+    params, result = SERVER_REQUESTS["device.location"].params, SERVER_REQUESTS["device.location"].result
+    assert _parses(params, _env(precision="approximate")) and _parses(params, _env(precision="precise"))
+    assert not _parses(params, _env(precision="exact")) and not _parses(params, _env())
+    good = {"status": "answered", "lat": 0, "lon": 0, "accuracy_m": 0, "at": 0, "precision": "precise"}
+    assert _parses(result, good)
+    assert _parses(result, {**good, "lat": 90, "lon": 180, "accuracy_m": 10_000_000})
+    assert _parses(result, {**good, "lat": -90, "lon": -180})
+    for bad in ({**good, "lat": 90.0001}, {**good, "lat": -90.0001}, {**good, "lon": 180.0001},
+                {**good, "lon": -180.0001}, {**good, "accuracy_m": -0.1}, {**good, "accuracy_m": 10_000_001},
+                {**good, "lat": "1"}, {**good, "lat": True}, {**good, "lat": None}, {**good, "at": -1},
+                {**good, "at": 1.0}, {**good, "precision": "exact"}, {**good, "altitude": 1}):
+        assert not _parses(result, bad), bad
+
+
+def test_a_contact_asks_for_one_to_six_distinct_fields_and_is_bounded():
+    params, result = SERVER_REQUESTS["device.contact"].params, SERVER_REQUESTS["device.contact"].result
+    every = ["name", "phones", "emails", "postal", "birthday", "organization"]
+    assert _parses(params, _env(fields=every)) and _parses(params, _env(fields=["name"]))
+    assert not _parses(params, _env(fields=[])) and not _parses(params, _env(fields=every + ["name"]))
+    assert not _parses(params, _env(fields=["name", "name"])) and not _parses(params, _env(fields=["nickname"]))
+    contact = lambda **c: {"status": "answered", "contact": c}  # noqa: E731
+    assert _parses(result, contact())     # the model takes it; ``contact:empty`` is the validator's
+    assert _parses(result, contact(phones=["1"] * 5, emails=["e@x.nl"] * 5, postal=["a"] * 3, name="n" * 200,
+                                   organization="o" * 200, birthday="--02-29"))
+    for bad in (contact(phones=["1"] * 6), contact(emails=["e"] * 6), contact(postal=["a"] * 4),
+                contact(name="n" * 201), contact(phones=["1" * 41]), contact(emails=["e" * 255]),
+                contact(postal=["a" * 301]), contact(name=""), contact(phones=[""]), contact(birthday="2026-13-01"),
+                contact(birthday="2026-00-10"), contact(birthday="2026-01-32"), contact(birthday="--1-1"),
+                contact(birthday="2026-02-03\n"), contact(nickname="x")):
+        assert not _parses(result, bad), bad
+
+
+def test_a_calendar_item_is_bounded_and_consistent():
+    params = SERVER_REQUESTS["device.calendar"].params
+    timed = {"title": "T", "start": "2026-10-12T09:30+02:00", "end": "2026-10-12T10:00:30+02:00"}
+    assert _parses(params, _env(kind="event", item=timed))
+    assert _parses(params, _env(kind="event", item={"title": "T"}))
+    assert _parses(params, _env(kind="reminder", item={"title": "T", "start": "2026-10-12T09:30+02:00",
+                                                       "alarm_minutes": 40320}))
+    assert _parses(params, _env(kind="event", item={"title": "T", "all_day": True, "start": "2026-10-12",
+                                                    "end": "2026-10-12"}))
+    assert _parses(params, _env(kind="event", item={"title": "T" * 120, "notes": "n" * 2000, "location": "l" * 200,
+                                                    "url": "https://example.com/" + "a" * 270}))
+    for bad in ({"title": "T" * 121}, {"title": "T", "notes": "n" * 2001}, {"title": "T", "location": "l" * 201},
+                {"title": "T", "url": "https://example.com/" + "a" * 290}, {"title": "T", "url": "ftp://x"},
+                {"title": "T", "url": "https://x y"}, {"title": "T", "url": "https://x\ny"},
+                {"title": "T", "alarm_minutes": 5}, {"title": "T", "alarm_minutes": True, **timed},
+                {**timed, "alarm_minutes": 40321}, {**timed, "alarm_minutes": 1.5},
+                {**timed, "end": "2026-10-12T09:00+02:00"}, {"title": "T", "end": timed["end"]},
+                {**timed, "all_day": True}, {"title": "T", "all_day": True, "start": "2026-02-30"},
+                {**timed, "start": "2026-10-12T09:30Z"}, {**timed, "start": "2026-10-12T25:30+02:00"},
+                {**timed, "start": "2026-10-12T09:30+02:00\n"}, {**timed, "tz": "Europe/Amsterdam"}):
+        assert not _parses(params, _env(kind="event", item=bad)), bad
+    assert not _parses(params, _env(kind="reminder", item=timed)), "a reminder has no end"
+    assert not _parses(params, _env(kind="task", item=timed))
+
+
+def test_a_scan_asks_for_distinct_known_symbologies_and_is_bounded():
+    params, result = SERVER_REQUESTS["device.scan"].params, SERVER_REQUESTS["device.scan"].result
+    every = ["qr", "ean13", "ean8", "code128", "pdf417", "datamatrix", "aztec"]
+    assert _parses(params, _env()) and _parses(params, _env(formats=every)) and _parses(params, _env(formats=["qr"]))
+    for bad in ([], every + ["qr"], ["qr", "qr"], ["upc"], "qr"):
+        assert not _parses(params, _env(formats=bad)), bad
+    assert _parses(result, {"status": "answered", "value": "x" * 4096, "symbology": "qr"})
+    for bad in ({"status": "answered", "value": "x" * 4097, "symbology": "qr"},
+                {"status": "answered", "value": "", "symbology": "qr"},
+                {"status": "answered", "value": "x", "symbology": "upc"}, {"status": "answered", "value": "x"},
+                {"status": "answered", "symbology": "qr"}):
+        assert not _parses(result, bad), bad
+
+
+def test_the_calendar_result_has_its_own_status():
+    result = SERVER_REQUESTS["device.calendar"].result
+    assert _parses(result, {"status": "done"}) and _parses(result, {"status": "skipped"})
+    for bad in ({"status": "answered"}, {"status": "done", "id": "x"}, {}, {"status": "Done"}):
+        assert not _parses(result, bad), bad

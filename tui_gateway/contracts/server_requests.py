@@ -384,16 +384,17 @@ server_request("confirm", params=ConfirmRequestParams, result=ConfirmResult,
 # - A client that cannot show a request answers a JSON-RPC ERROR with code ``4041`` (``cannot_show``,
 #   ``CANNOT_SHOW``) and ``data.reason`` (an open set: ``no_camera``, ``not_supported_on_device``,
 #   ``permission_denied``, ``upload_failed``, ``unsupported_version``, ``shutting_down``, ``declined`` (the person
-#   chose not to provide it), …), never a
+#   chose not to provide it), ``no_microphone``, ``location_unavailable``, …), never a
 #   made-up ``skipped`` or ``rejected``. The gateway reports that as ``unavailable``.
 # - An answer the gateway refuses is ``request.answer`` error ``4034`` with ``data.reason``: ``bad_shape``
 #   when it does not match the result model, otherwise one of the reasons in ``contract/requests/README.md``
 #   (``field:<id>:<problem>`` for a form). The request stays open; after ten refusals it is withdrawn
 #   (``request.cancel`` with reason ``too_many_attempts``).
 
-#: Server→client request methods that carry ``InteractiveRequestParams`` (phases 1 and 2). A connection gets one
+#: Server→client request methods that carry ``InteractiveRequestParams`` (phases 1 to 3). A connection gets one
 #: only after it listed it under ``client.capabilities`` ``requests``.
-INTERACTIVE_METHODS: tuple[str, ...] = ("input.form", "input.file", "review.draft", "review.diff")
+INTERACTIVE_METHODS: tuple[str, ...] = ("input.form", "input.file", "review.draft", "review.diff", "input.signature",
+                                        "device.location", "device.contact", "device.calendar", "device.scan")
 
 #: JSON-RPC error code a client answers when it cannot show an interactive request (``data.reason``).
 CANNOT_SHOW = 4041
@@ -1007,6 +1008,327 @@ class ReviewDiffResult(Result):
 server_request("review.diff", params=ReviewDiffRequestParams, result=ReviewDiffResult,
                doc="The agent shows the person the changes to a file, hunk by hunk, to approve or reject each "
                    "before it applies them. 300 s.")
+
+
+# ── input.signature ───────────────────────────────────────────────────────────────────────────
+
+SIGNATURE_STATEMENT_MAX = 500
+SIGNATURE_SIGNER_MAX = 80
+#: ``statement_sha256``, and every other SHA-256 of this contract: 64 lowercase hex digits.
+SHA256_HEX = r"^[0-9a-f]{64}$"
+#: The MIME types of the two files a signature answer carries, one each, in either order.
+SIGNATURE_MIMES = ("image/png", "image/svg+xml")
+
+
+class InputSignatureRequestParams(InteractiveRequestParams):
+    """The person signs a statement, drawn on a pad under the statement (``contract/requests`` §8). ``statement`` is
+    shown in FULL and verbatim, above the pad, with the signer's name and the time; the gateway refuses a statement it
+    cannot show as it is (the rules of §6) and never rewrites one, because the answer carries the SHA-256 of exactly
+    these characters. ``signer_name`` is display only. ``upload`` holds the two files (``max_files`` at least 2)."""
+
+    statement: str = Field(min_length=1, max_length=SIGNATURE_STATEMENT_MAX)
+    signer_name: str | None = Field(default=None, min_length=1, max_length=SIGNATURE_SIGNER_MAX, pattern=ONE_LINE)
+    upload: UploadTarget
+
+    @model_validator(mode="after")
+    def _room_for_two_files(self) -> InputSignatureRequestParams:
+        if self.upload.max_files < 2:
+            raise ValueError("input.signature: upload.max_files is below 2 (a PNG and an SVG)")
+        return self
+
+
+class InputSignatureAnswered(Result):
+    """``files``: exactly two, one ``image/png`` and one ``image/svg+xml`` (either order), uploaded like an
+    ``input.file`` answer's. ``statement_sha256`` is the SHA-256 (lowercase hex) of the UTF-8 bytes of the request's
+    ``statement`` exactly as the frame carried it (no normalisation); the gateway refuses any other value
+    (``statement:mismatch``). ``signed_at`` is the client's clock, Unix seconds."""
+
+    status: Literal[InputStatus.answered]
+    files: list[UploadedFile] = Field(min_length=2, max_length=2)
+    signed_at: StrictInt = Field(ge=0)
+    statement_sha256: str = Field(pattern=SHA256_HEX)
+
+
+class InputSignatureSkipped(Result):
+    status: Literal[InputStatus.skipped]
+
+
+class InputSignatureResult(RootModel[Annotated[InputSignatureAnswered | InputSignatureSkipped,
+                                               Field(discriminator="status")]]):
+    """``{status: answered, files, signed_at, statement_sha256}`` or ``{status: skipped}`` (only when
+    ``optional``)."""
+
+
+server_request("input.signature", params=InputSignatureRequestParams, result=InputSignatureResult,
+               doc="The agent asks the person to sign a statement; the answer is a PNG and an SVG of the signature "
+                   "and the SHA-256 of the statement that was shown. 300 s.")
+
+
+# ── device.location ───────────────────────────────────────────────────────────────────────────
+
+LOCATION_ACCURACY_MAX = 10_000_000
+#: What the gateway does to an ``approximate`` fix whatever the client sent: round to two decimals (about 1.1 km of
+#: latitude) and report at least this many metres of accuracy.
+LOCATION_APPROXIMATE_DECIMALS = 2
+LOCATION_APPROXIMATE_MIN_ACCURACY_M = 1_000
+
+
+class LocationPrecision(WireEnum):
+    approximate = "approximate"
+    precise = "precise"
+
+
+class DeviceLocationRequestParams(InteractiveRequestParams):
+    """One fix of where the device is now (``contract/requests`` §9). ``precision`` is what the agent asks for; the
+    person may share less (a ``precise`` request answered ``approximate``), never more."""
+
+    precision: LocationPrecision
+
+
+class DeviceLocationAnswered(Result):
+    """``lat`` and ``lon`` in degrees, ``accuracy_m`` the fix's horizontal accuracy in metres, ``at`` the client's
+    clock (Unix seconds) when it was taken, ``precision`` what was shared. The gateway rounds what the agent receives
+    (``approximate``: two decimals and an accuracy of at least 1,000 m; ``precise``: six decimals) whatever the
+    client sent, and refuses ``precise`` for an ``approximate`` request (``precision:too_precise``)."""
+
+    status: Literal[InputStatus.answered]
+    lat: float = Field(strict=True, ge=-90, le=90, allow_inf_nan=False)
+    lon: float = Field(strict=True, ge=-180, le=180, allow_inf_nan=False)
+    accuracy_m: float = Field(strict=True, ge=0, le=LOCATION_ACCURACY_MAX, allow_inf_nan=False)
+    at: StrictInt = Field(ge=0)
+    precision: LocationPrecision
+
+
+class DeviceLocationSkipped(Result):
+    status: Literal[InputStatus.skipped]
+
+
+class DeviceLocationResult(RootModel[Annotated[DeviceLocationAnswered | DeviceLocationSkipped,
+                                               Field(discriminator="status")]]):
+    """``{status: answered, lat, lon, accuracy_m, at, precision}`` or ``{status: skipped}`` (only when
+    ``optional``)."""
+
+
+server_request("device.location", params=DeviceLocationRequestParams, result=DeviceLocationResult,
+               doc="The agent asks the person to share where their device is now, approximately or precisely. 180 s.")
+
+
+# ── device.contact ────────────────────────────────────────────────────────────────────────────
+
+CONTACT_FIELDS_MAX = 6
+CONTACT_NAME_MAX = 200
+CONTACT_PHONE_MAX = 40
+CONTACT_EMAIL_MAX = 254
+CONTACT_POSTAL_MAX = 300
+CONTACT_PHONES_MAX = 5
+CONTACT_EMAILS_MAX = 5
+CONTACT_POSTALS_MAX = 3
+#: ``YYYY-MM-DD``, or ``--MM-DD`` for a birthday without a year (vCard's form); whether the day exists is the
+#: gateway's answer check (``contact:birthday:invalid``).
+CONTACT_BIRTHDAY = (r"^([0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])"
+                    r"|--(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]))$")
+
+
+class ContactField(WireEnum):
+    name = "name"
+    phones = "phones"
+    emails = "emails"
+    postal = "postal"
+    birthday = "birthday"
+    organization = "organization"
+
+
+class DeviceContactRequestParams(InteractiveRequestParams):
+    """One contact the person picks, reduced to the ``fields`` asked for (1-6, no repeats). The sheet lists them as
+    boxes the person can untick; the answer carries only what is ticked (``contract/requests`` §10)."""
+
+    fields: list[ContactField] = Field(min_length=1, max_length=CONTACT_FIELDS_MAX)
+
+    @model_validator(mode="after")
+    def _unique(self) -> DeviceContactRequestParams:
+        if len(set(self.fields)) != len(self.fields):
+            raise ValueError("device.contact: a field is listed twice")
+        return self
+
+
+class ContactCard(Result):
+    """The picked contact, reduced. Every key is optional; a key the request did not ask for is refused
+    (``contact:<key>:not_requested``) and so is a contact with nothing in it (``contact:empty``)."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=CONTACT_NAME_MAX)
+    phones: list[Annotated[str, Field(min_length=1, max_length=CONTACT_PHONE_MAX)]] | None = Field(
+        default=None, max_length=CONTACT_PHONES_MAX)
+    emails: list[Annotated[str, Field(min_length=1, max_length=CONTACT_EMAIL_MAX)]] | None = Field(
+        default=None, max_length=CONTACT_EMAILS_MAX)
+    postal: list[Annotated[str, Field(min_length=1, max_length=CONTACT_POSTAL_MAX)]] | None = Field(
+        default=None, max_length=CONTACT_POSTALS_MAX)
+    birthday: str | None = Field(default=None, pattern=CONTACT_BIRTHDAY)
+    organization: str | None = Field(default=None, min_length=1, max_length=CONTACT_NAME_MAX)
+
+
+class DeviceContactAnswered(Result):
+    status: Literal[InputStatus.answered]
+    contact: ContactCard
+
+
+class DeviceContactSkipped(Result):
+    status: Literal[InputStatus.skipped]
+
+
+class DeviceContactResult(RootModel[Annotated[DeviceContactAnswered | DeviceContactSkipped,
+                                              Field(discriminator="status")]]):
+    """``{status: answered, contact}`` or ``{status: skipped}`` (only when ``optional``)."""
+
+
+server_request("device.contact", params=DeviceContactRequestParams, result=DeviceContactResult,
+               doc="The agent asks the person to pick one contact and share only the fields asked for. 180 s.")
+
+
+# ── device.calendar ───────────────────────────────────────────────────────────────────────────
+
+CALENDAR_TITLE_MAX = 120
+CALENDAR_NOTES_MAX = 2_000
+CALENDAR_LOCATION_MAX = 200
+CALENDAR_URL_MAX = 300
+#: Minutes before the start; four weeks is the most a calendar app lets an alert reach back.
+CALENDAR_ALARM_MAX_MINUTES = 40_320
+#: A date (an all-day item) or an instant as :data:`FORM_DATETIME` (a timed one); which one follows ``all_day``.
+CALENDAR_WHEN = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T" + _CLOCK + _OFFSET + ")?$"
+#: ``http`` or ``https`` and no whitespace: shown to the person, never opened by the sheet.
+CALENDAR_URL = r"^https?://[^\s\x00-\x1f\x7f\u0085\u2028\u2029]+$"
+
+
+class CalendarKind(WireEnum):
+    event = "event"
+    reminder = "reminder"
+
+
+class CalendarItem(Params):
+    """What the system edit sheet is prefilled with. ``start`` / ``end``: dates (``2026-10-03``) when ``all_day``
+    (``end`` inclusive), else instants with an offset (``2026-10-03T14:30+02:00``, seconds optional). A reminder has
+    one time, ``start`` (when it is due), and no ``end``. ``end`` needs ``start`` and is not before it;
+    ``alarm_minutes`` (an alert that long before ``start``) needs ``start``. ``url`` is display only."""
+
+    title: str = Field(min_length=1, max_length=CALENDAR_TITLE_MAX, pattern=ONE_LINE)
+    notes: str | None = Field(default=None, min_length=1, max_length=CALENDAR_NOTES_MAX)
+    start: str | None = Field(default=None, pattern=CALENDAR_WHEN)
+    end: str | None = Field(default=None, pattern=CALENDAR_WHEN)
+    all_day: bool = False
+    location: str | None = Field(default=None, min_length=1, max_length=CALENDAR_LOCATION_MAX, pattern=ONE_LINE)
+    url: str | None = Field(default=None, max_length=CALENDAR_URL_MAX, pattern=CALENDAR_URL)
+    alarm_minutes: StrictInt | None = Field(default=None, ge=0, le=CALENDAR_ALARM_MAX_MINUTES)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> CalendarItem:
+        def when(text: str) -> _dt.date | _dt.datetime:
+            # ``fromisoformat`` is the calendar: a day that does not exist (2026-02-30) raises ValueError.
+            return _dt.date.fromisoformat(text) if "T" not in text else _dt.datetime.fromisoformat(text)
+
+        for name in ("start", "end"):
+            value = getattr(self, name)
+            if value is not None and ("T" not in value) != self.all_day:
+                raise ValueError(f"calendar item: {name} is {'an instant' if self.all_day else 'a date'}; "
+                                 f"{'an all-day item takes dates' if self.all_day else 'a timed item takes instants'}")
+        start = when(self.start) if self.start is not None else None
+        end = when(self.end) if self.end is not None else None
+        if end is not None and start is None:
+            raise ValueError("calendar item: end needs start")
+        if start is not None and end is not None and end < start:
+            raise ValueError("calendar item: end is before start")
+        if self.alarm_minutes is not None and start is None:
+            raise ValueError("calendar item: alarm_minutes needs start")
+        return self
+
+
+class DeviceCalendarRequestParams(InteractiveRequestParams):
+    """One calendar event or reminder, prefilled in the system sheet the person saves or cancels (``contract/requests``
+    §11). Nothing is written until the person saves in that sheet. A reminder has no ``end`` in ``item``."""
+
+    kind: CalendarKind
+    item: CalendarItem
+
+    @model_validator(mode="after")
+    def _reminder_has_one_time(self) -> DeviceCalendarRequestParams:
+        if self.kind == CalendarKind.reminder and self.item.end is not None:
+            raise ValueError("device.calendar: a reminder has one time (start), no end")
+        return self
+
+
+class CalendarStatus(WireEnum):
+    """First key of a ``device.calendar`` result: ``done`` (the person saved it in the system sheet) or ``skipped``
+    (they did not; only when the request was ``optional``)."""
+
+    done = "done"
+    skipped = "skipped"
+
+
+class DeviceCalendarDone(Result):
+    status: Literal[CalendarStatus.done]
+
+
+class DeviceCalendarSkipped(Result):
+    status: Literal[CalendarStatus.skipped]
+
+
+class DeviceCalendarResult(RootModel[Annotated[DeviceCalendarDone | DeviceCalendarSkipped,
+                                               Field(discriminator="status")]]):
+    """``{status: done}`` or ``{status: skipped}`` (only when ``optional``). No identifier: nothing to minimise."""
+
+
+server_request("device.calendar", params=DeviceCalendarRequestParams, result=DeviceCalendarResult,
+               doc="The agent asks the person to add a calendar event or a reminder, saved by them in the system "
+                   "sheet. 180 s.")
+
+
+# ── device.scan ───────────────────────────────────────────────────────────────────────────────
+
+SCAN_VALUE_MAX = 4_096
+SCAN_FORMATS_MAX = 7
+
+
+class ScanFormat(WireEnum):
+    qr = "qr"
+    ean13 = "ean13"
+    ean8 = "ean8"
+    code128 = "code128"
+    pdf417 = "pdf417"
+    datamatrix = "datamatrix"
+    aztec = "aztec"
+
+
+class DeviceScanRequestParams(InteractiveRequestParams):
+    """One code read with the camera. ``formats``: the symbologies to look for (absent: every one the device reads)."""
+
+    formats: list[ScanFormat] | None = Field(default=None, min_length=1, max_length=SCAN_FORMATS_MAX)
+
+    @model_validator(mode="after")
+    def _unique(self) -> DeviceScanRequestParams:
+        if self.formats is not None and len(set(self.formats)) != len(self.formats):
+            raise ValueError("device.scan: a format is listed twice")
+        return self
+
+
+class DeviceScanAnswered(Result):
+    """``value`` is the decoded text, UNTRUSTED: shown to the person before they send it, cleaned by the gateway
+    before it reaches the agent, never opened by the client. ``symbology`` is what was read, one of the request's
+    ``formats`` when it listed any (``symbology:not_requested``)."""
+
+    status: Literal[InputStatus.answered]
+    value: str = Field(min_length=1, max_length=SCAN_VALUE_MAX)
+    symbology: ScanFormat
+
+
+class DeviceScanSkipped(Result):
+    status: Literal[InputStatus.skipped]
+
+
+class DeviceScanResult(RootModel[Annotated[DeviceScanAnswered | DeviceScanSkipped, Field(discriminator="status")]]):
+    """``{status: answered, value, symbology}`` or ``{status: skipped}`` (only when ``optional``)."""
+
+
+server_request("device.scan", params=DeviceScanRequestParams, result=DeviceScanResult,
+               doc="The agent asks the person to scan a QR code or barcode with the camera; the decoded text is "
+                   "shown to them before it is sent. 180 s.")
 
 
 # ── withdrawal ────────────────────────────────────────────────────────────────────────────────

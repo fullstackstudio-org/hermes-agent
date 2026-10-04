@@ -4591,6 +4591,147 @@ export interface ReviewDiffResult {
 /** First key of every ``review.*`` result. */
 export type ReviewDecision = 'approved' | 'rejected'
 export type HunkDecision = 'approved' | 'rejected'
+/** The person signs a statement, drawn on a pad under the statement (``contract/requests`` §8). ``statement`` is shown in FULL and verbatim, above the pad, with the signer's name and the time; the gateway refuses a statement it cannot show as it is (the rules of §6) and never rewrites one, because the answer carries the SHA-256 of exactly these characters. ``signer_name`` is display only. ``upload`` holds the two files (``max_files`` at least 2). */
+export interface InputSignatureRequestParams {
+  session_id: string
+  v: 1
+  title: string
+  summary: string
+  detail?: string | null
+  expires_at: number
+  optional: boolean
+  acting_user?: RequestActingUser | null
+  statement: string
+  signer_name?: string | null
+  upload: UploadTarget
+}
+/** ``{status: answered, files, signed_at, statement_sha256}`` or ``{status: skipped}`` (only when ``optional``). */
+export type InputSignatureResult = InputSignatureAnswered | InputSignatureSkipped
+/** ``files``: exactly two, one ``image/png`` and one ``image/svg+xml`` (either order), uploaded like an ``input.file`` answer's. ``statement_sha256`` is the SHA-256 (lowercase hex) of the UTF-8 bytes of the request's ``statement`` exactly as the frame carried it (no normalisation); the gateway refuses any other value (``statement:mismatch``). ``signed_at`` is the client's clock, Unix seconds. */
+export interface InputSignatureAnswered {
+  status: 'answered'
+  files: UploadedFile[]
+  signed_at: number
+  statement_sha256: string
+}
+export interface InputSignatureSkipped {
+  status: 'skipped'
+}
+/** One fix of where the device is now (``contract/requests`` §9). ``precision`` is what the agent asks for; the person may share less (a ``precise`` request answered ``approximate``), never more. */
+export interface DeviceLocationRequestParams {
+  session_id: string
+  v: 1
+  title: string
+  summary: string
+  detail?: string | null
+  expires_at: number
+  optional: boolean
+  acting_user?: RequestActingUser | null
+  precision: LocationPrecision
+}
+export type LocationPrecision = 'approximate' | 'precise'
+/** ``{status: answered, lat, lon, accuracy_m, at, precision}`` or ``{status: skipped}`` (only when ``optional``). */
+export type DeviceLocationResult = DeviceLocationAnswered | DeviceLocationSkipped
+/** ``lat`` and ``lon`` in degrees, ``accuracy_m`` the fix's horizontal accuracy in metres, ``at`` the client's clock (Unix seconds) when it was taken, ``precision`` what was shared. The gateway rounds what the agent receives (``approximate``: two decimals and an accuracy of at least 1,000 m; ``precise``: six decimals) whatever the client sent, and refuses ``precise`` for an ``approximate`` request (``precision:too_precise``). */
+export interface DeviceLocationAnswered {
+  status: 'answered'
+  lat: number
+  lon: number
+  accuracy_m: number
+  at: number
+  precision: LocationPrecision
+}
+export interface DeviceLocationSkipped {
+  status: 'skipped'
+}
+/** One contact the person picks, reduced to the ``fields`` asked for (1-6, no repeats). The sheet lists them as boxes the person can untick; the answer carries only what is ticked (``contract/requests`` §10). */
+export interface DeviceContactRequestParams {
+  session_id: string
+  v: 1
+  title: string
+  summary: string
+  detail?: string | null
+  expires_at: number
+  optional: boolean
+  acting_user?: RequestActingUser | null
+  fields: ContactField[]
+}
+export type ContactField = 'name' | 'phones' | 'emails' | 'postal' | 'birthday' | 'organization'
+/** ``{status: answered, contact}`` or ``{status: skipped}`` (only when ``optional``). */
+export type DeviceContactResult = DeviceContactAnswered | DeviceContactSkipped
+export interface DeviceContactAnswered {
+  status: 'answered'
+  contact: ContactCard
+}
+/** The picked contact, reduced. Every key is optional; a key the request did not ask for is refused (``contact:<key>:not_requested``) and so is a contact with nothing in it (``contact:empty``). */
+export interface ContactCard {
+  name?: string | null
+  phones?: string[] | null
+  emails?: string[] | null
+  postal?: string[] | null
+  birthday?: string | null
+  organization?: string | null
+}
+export interface DeviceContactSkipped {
+  status: 'skipped'
+}
+/** One calendar event or reminder, prefilled in the system sheet the person saves or cancels (``contract/requests`` §11). Nothing is written until the person saves in that sheet. A reminder has no ``end`` in ``item``. */
+export interface DeviceCalendarRequestParams {
+  session_id: string
+  v: 1
+  title: string
+  summary: string
+  detail?: string | null
+  expires_at: number
+  optional: boolean
+  acting_user?: RequestActingUser | null
+  kind: CalendarKind
+  item: CalendarItem
+}
+export type CalendarKind = 'event' | 'reminder'
+/** What the system edit sheet is prefilled with. ``start`` / ``end``: dates (``2026-10-03``) when ``all_day`` (``end`` inclusive), else instants with an offset (``2026-10-03T14:30+02:00``, seconds optional). A reminder has one time, ``start`` (when it is due), and no ``end``. ``end`` needs ``start`` and is not before it; ``alarm_minutes`` (an alert that long before ``start``) needs ``start``. ``url`` is display only. */
+export interface CalendarItem {
+  title: string
+  notes?: string | null
+  start?: string | null
+  end?: string | null
+  all_day?: boolean
+  location?: string | null
+  url?: string | null
+  alarm_minutes?: number | null
+}
+/** ``{status: done}`` or ``{status: skipped}`` (only when ``optional``). No identifier: nothing to minimise. */
+export type DeviceCalendarResult = DeviceCalendarDone | DeviceCalendarSkipped
+export interface DeviceCalendarDone {
+  status: 'done'
+}
+export interface DeviceCalendarSkipped {
+  status: 'skipped'
+}
+/** One code read with the camera. ``formats``: the symbologies to look for (absent: every one the device reads). */
+export interface DeviceScanRequestParams {
+  session_id: string
+  v: 1
+  title: string
+  summary: string
+  detail?: string | null
+  expires_at: number
+  optional: boolean
+  acting_user?: RequestActingUser | null
+  formats?: ScanFormat[] | null
+}
+export type ScanFormat = 'qr' | 'ean13' | 'ean8' | 'code128' | 'pdf417' | 'datamatrix' | 'aztec'
+/** ``{status: answered, value, symbology}`` or ``{status: skipped}`` (only when ``optional``). */
+export type DeviceScanResult = DeviceScanAnswered | DeviceScanSkipped
+/** ``value`` is the decoded text, UNTRUSTED: shown to the person before they send it, cleaned by the gateway before it reaches the agent, never opened by the client. ``symbology`` is what was read, one of the request's ``formats`` when it listed any (``symbology:not_requested``). */
+export interface DeviceScanAnswered {
+  status: 'answered'
+  value: string
+  symbology: ScanFormat
+}
+export interface DeviceScanSkipped {
+  status: 'skipped'
+}
 export interface DisplayInstallSudoParams {
   session_id: string
   profile_key: string
@@ -5783,12 +5924,22 @@ export interface ServerRequestMap {
   clarify: { params: ClarifyRequestParams; result: ClarifyResult }
   /** The agent asks the person to confirm one sensitive action. 120 s. Level plain: a tap in a connected client, nothing verified. Level passkey: a WebAuthn assertion the gateway verifies. */
   confirm: { params: ConfirmRequestParams; result: ConfirmResult }
+  /** The agent asks the person to add a calendar event or a reminder, saved by them in the system sheet. 180 s. */
+  'device.calendar': { params: DeviceCalendarRequestParams; result: DeviceCalendarResult }
+  /** The agent asks the person to pick one contact and share only the fields asked for. 180 s. */
+  'device.contact': { params: DeviceContactRequestParams; result: DeviceContactResult }
+  /** The agent asks the person to share where their device is now, approximately or precisely. 180 s. */
+  'device.location': { params: DeviceLocationRequestParams; result: DeviceLocationResult }
+  /** The agent asks the person to scan a QR code or barcode with the camera; the decoded text is shown to them before it is sent. 180 s. */
+  'device.scan': { params: DeviceScanRequestParams; result: DeviceScanResult }
   /** Masked sudo password for the Bot Screen package install; app-level (empty session). */
   'display.install.sudo': { params: DisplayInstallSudoParams; result: ValueResult }
   /** The agent asks the person for one or more files (photo, scan, document, audio), uploaded to upload.dir and answered by reference. 300 s. */
   'input.file': { params: InputFileRequestParams; result: InputFileResult }
   /** The agent asks the person to fill in a form of typed fields (1-12). 300 s. */
   'input.form': { params: InputFormRequestParams; result: InputFormResult }
+  /** The agent asks the person to sign a statement; the answer is a PNG and an SVG of the signature and the SHA-256 of the statement that was shown. 300 s. */
+  'input.signature': { params: InputSignatureRequestParams; result: InputSignatureResult }
   /** Click / type / scroll / annotate inside the in-app browser preview. */
   'preview.act': { params: PreviewActRequestParams; result: ValueResult }
   /** Read the in-app browser preview's text (JSON text answer). */
@@ -5819,9 +5970,14 @@ export const SERVER_REQUEST_METHODS = [
   'approval',
   'clarify',
   'confirm',
+  'device.calendar',
+  'device.contact',
+  'device.location',
+  'device.scan',
   'display.install.sudo',
   'input.file',
   'input.form',
+  'input.signature',
   'preview.act',
   'preview.read',
   'review.diff',

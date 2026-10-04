@@ -42,6 +42,51 @@
       "result": {
         "$ref": "#/$defs/ReviewDiffResult"
       }
+    },
+    "input.signature": {
+      "summary": "The agent asks the person to sign a statement; the answer is a PNG and an SVG of the signature and the SHA-256 of the statement that was shown. 300 s.",
+      "params": {
+        "$ref": "#/$defs/InputSignatureRequestParams"
+      },
+      "result": {
+        "$ref": "#/$defs/InputSignatureResult"
+      }
+    },
+    "device.location": {
+      "summary": "The agent asks the person to share where their device is now, approximately or precisely. 180 s.",
+      "params": {
+        "$ref": "#/$defs/DeviceLocationRequestParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DeviceLocationResult"
+      }
+    },
+    "device.contact": {
+      "summary": "The agent asks the person to pick one contact and share only the fields asked for. 180 s.",
+      "params": {
+        "$ref": "#/$defs/DeviceContactRequestParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DeviceContactResult"
+      }
+    },
+    "device.calendar": {
+      "summary": "The agent asks the person to add a calendar event or a reminder, saved by them in the system sheet. 180 s.",
+      "params": {
+        "$ref": "#/$defs/DeviceCalendarRequestParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DeviceCalendarResult"
+      }
+    },
+    "device.scan": {
+      "summary": "The agent asks the person to scan a QR code or barcode with the camera; the decoded text is shown to them before it is sent. 180 s.",
+      "params": {
+        "$ref": "#/$defs/DeviceScanRequestParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DeviceScanResult"
+      }
     }
   },
   "errors": {
@@ -49,6 +94,802 @@
     "answer_refused": 4034
   },
   "$defs": {
+    "CalendarItem": {
+      "additionalProperties": false,
+      "description": "What the system edit sheet is prefilled with. ``start`` / ``end``: dates (``2026-10-03``) when ``all_day``\n(``end`` inclusive), else instants with an offset (``2026-10-03T14:30+02:00``, seconds optional). A reminder has\none time, ``start`` (when it is due), and no ``end``. ``end`` needs ``start`` and is not before it;\n``alarm_minutes`` (an alert that long before ``start``) needs ``start``. ``url`` is display only.",
+      "properties": {
+        "title": {
+          "maxLength": 120,
+          "minLength": 1,
+          "pattern": "^[^\r\n\u000b\f  ]+$",
+          "title": "Title",
+          "type": "string"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notes"
+        },
+        "start": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}(T([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}(T([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?[+-]([01][0-9]|2[0-3]):[0-5][0-9])?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End"
+        },
+        "all_day": {
+          "default": false,
+          "title": "All Day",
+          "type": "boolean"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[^\r\n\u000b\f  ]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Location"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "maxLength": 300,
+              "pattern": "^https?://[^\\s\\x00-\\x1f\\x7f\\u0085\\u2028\\u2029]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "alarm_minutes": {
+          "anyOf": [
+            {
+              "maximum": 40320,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Alarm Minutes"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "title": "CalendarItem",
+      "type": "object"
+    },
+    "CalendarKind": {
+      "enum": [
+        "event",
+        "reminder"
+      ],
+      "title": "CalendarKind",
+      "type": "string"
+    },
+    "ContactCard": {
+      "additionalProperties": false,
+      "description": "The picked contact, reduced. Every key is optional; a key the request did not ask for is refused\n(``contact:<key>:not_requested``) and so is a contact with nothing in it (``contact:empty``).",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "phones": {
+          "anyOf": [
+            {
+              "items": {
+                "maxLength": 40,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 5,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Phones"
+        },
+        "emails": {
+          "anyOf": [
+            {
+              "items": {
+                "maxLength": 254,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 5,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Emails"
+        },
+        "postal": {
+          "anyOf": [
+            {
+              "items": {
+                "maxLength": 300,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 3,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Postal"
+        },
+        "birthday": {
+          "anyOf": [
+            {
+              "pattern": "^([0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])|--(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]))$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Birthday"
+        },
+        "organization": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Organization"
+        }
+      },
+      "title": "ContactCard",
+      "type": "object"
+    },
+    "ContactField": {
+      "enum": [
+        "name",
+        "phones",
+        "emails",
+        "postal",
+        "birthday",
+        "organization"
+      ],
+      "title": "ContactField",
+      "type": "string"
+    },
+    "DeviceCalendarDone": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "done",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "DeviceCalendarDone",
+      "type": "object"
+    },
+    "DeviceCalendarRequestParams": {
+      "additionalProperties": false,
+      "description": "One calendar event or reminder, prefilled in the system sheet the person saves or cancels (``contract/requests``\n§11). Nothing is written until the person saves in that sheet. A reminder has no ``end`` in ``item``.",
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "title": "V",
+          "type": "integer"
+        },
+        "title": {
+          "maxLength": 80,
+          "minLength": 1,
+          "pattern": "^[^\r\n\u000b\f  ]+$",
+          "title": "Title",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "expires_at": {
+          "minimum": 0,
+          "title": "Expires At",
+          "type": "integer"
+        },
+        "optional": {
+          "title": "Optional",
+          "type": "boolean"
+        },
+        "acting_user": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestActingUser"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "kind": {
+          "$ref": "#/$defs/CalendarKind"
+        },
+        "item": {
+          "$ref": "#/$defs/CalendarItem"
+        }
+      },
+      "required": [
+        "session_id",
+        "v",
+        "title",
+        "summary",
+        "expires_at",
+        "optional",
+        "kind",
+        "item"
+      ],
+      "title": "DeviceCalendarRequestParams",
+      "type": "object"
+    },
+    "DeviceCalendarResult": {
+      "description": "``{status: done}`` or ``{status: skipped}`` (only when ``optional``). No identifier: nothing to minimise.",
+      "discriminator": {
+        "mapping": {
+          "done": "#/$defs/DeviceCalendarDone",
+          "skipped": "#/$defs/DeviceCalendarSkipped"
+        },
+        "propertyName": "status"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DeviceCalendarDone"
+        },
+        {
+          "$ref": "#/$defs/DeviceCalendarSkipped"
+        }
+      ],
+      "title": "DeviceCalendarResult"
+    },
+    "DeviceCalendarSkipped": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "skipped",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "DeviceCalendarSkipped",
+      "type": "object"
+    },
+    "DeviceContactAnswered": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "answered",
+          "title": "Status",
+          "type": "string"
+        },
+        "contact": {
+          "$ref": "#/$defs/ContactCard"
+        }
+      },
+      "required": [
+        "status",
+        "contact"
+      ],
+      "title": "DeviceContactAnswered",
+      "type": "object"
+    },
+    "DeviceContactRequestParams": {
+      "additionalProperties": false,
+      "description": "One contact the person picks, reduced to the ``fields`` asked for (1-6, no repeats). The sheet lists them as\nboxes the person can untick; the answer carries only what is ticked (``contract/requests`` §10).",
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "title": "V",
+          "type": "integer"
+        },
+        "title": {
+          "maxLength": 80,
+          "minLength": 1,
+          "pattern": "^[^\r\n\u000b\f  ]+$",
+          "title": "Title",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "expires_at": {
+          "minimum": 0,
+          "title": "Expires At",
+          "type": "integer"
+        },
+        "optional": {
+          "title": "Optional",
+          "type": "boolean"
+        },
+        "acting_user": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestActingUser"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/ContactField"
+          },
+          "maxItems": 6,
+          "minItems": 1,
+          "title": "Fields",
+          "type": "array"
+        }
+      },
+      "required": [
+        "session_id",
+        "v",
+        "title",
+        "summary",
+        "expires_at",
+        "optional",
+        "fields"
+      ],
+      "title": "DeviceContactRequestParams",
+      "type": "object"
+    },
+    "DeviceContactResult": {
+      "description": "``{status: answered, contact}`` or ``{status: skipped}`` (only when ``optional``).",
+      "discriminator": {
+        "mapping": {
+          "answered": "#/$defs/DeviceContactAnswered",
+          "skipped": "#/$defs/DeviceContactSkipped"
+        },
+        "propertyName": "status"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DeviceContactAnswered"
+        },
+        {
+          "$ref": "#/$defs/DeviceContactSkipped"
+        }
+      ],
+      "title": "DeviceContactResult"
+    },
+    "DeviceContactSkipped": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "skipped",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "DeviceContactSkipped",
+      "type": "object"
+    },
+    "DeviceLocationAnswered": {
+      "additionalProperties": false,
+      "description": "``lat`` and ``lon`` in degrees, ``accuracy_m`` the fix's horizontal accuracy in metres, ``at`` the client's\nclock (Unix seconds) when it was taken, ``precision`` what was shared. The gateway rounds what the agent receives\n(``approximate``: two decimals and an accuracy of at least 1,000 m; ``precise``: six decimals) whatever the\nclient sent, and refuses ``precise`` for an ``approximate`` request (``precision:too_precise``).",
+      "properties": {
+        "status": {
+          "const": "answered",
+          "title": "Status",
+          "type": "string"
+        },
+        "lat": {
+          "maximum": 90,
+          "minimum": -90,
+          "title": "Lat",
+          "type": "number"
+        },
+        "lon": {
+          "maximum": 180,
+          "minimum": -180,
+          "title": "Lon",
+          "type": "number"
+        },
+        "accuracy_m": {
+          "maximum": 10000000,
+          "minimum": 0,
+          "title": "Accuracy M",
+          "type": "number"
+        },
+        "at": {
+          "minimum": 0,
+          "title": "At",
+          "type": "integer"
+        },
+        "precision": {
+          "$ref": "#/$defs/LocationPrecision"
+        }
+      },
+      "required": [
+        "status",
+        "lat",
+        "lon",
+        "accuracy_m",
+        "at",
+        "precision"
+      ],
+      "title": "DeviceLocationAnswered",
+      "type": "object"
+    },
+    "DeviceLocationRequestParams": {
+      "additionalProperties": false,
+      "description": "One fix of where the device is now (``contract/requests`` §9). ``precision`` is what the agent asks for; the\nperson may share less (a ``precise`` request answered ``approximate``), never more.",
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "title": "V",
+          "type": "integer"
+        },
+        "title": {
+          "maxLength": 80,
+          "minLength": 1,
+          "pattern": "^[^\r\n\u000b\f  ]+$",
+          "title": "Title",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "expires_at": {
+          "minimum": 0,
+          "title": "Expires At",
+          "type": "integer"
+        },
+        "optional": {
+          "title": "Optional",
+          "type": "boolean"
+        },
+        "acting_user": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestActingUser"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "precision": {
+          "$ref": "#/$defs/LocationPrecision"
+        }
+      },
+      "required": [
+        "session_id",
+        "v",
+        "title",
+        "summary",
+        "expires_at",
+        "optional",
+        "precision"
+      ],
+      "title": "DeviceLocationRequestParams",
+      "type": "object"
+    },
+    "DeviceLocationResult": {
+      "description": "``{status: answered, lat, lon, accuracy_m, at, precision}`` or ``{status: skipped}`` (only when\n``optional``).",
+      "discriminator": {
+        "mapping": {
+          "answered": "#/$defs/DeviceLocationAnswered",
+          "skipped": "#/$defs/DeviceLocationSkipped"
+        },
+        "propertyName": "status"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DeviceLocationAnswered"
+        },
+        {
+          "$ref": "#/$defs/DeviceLocationSkipped"
+        }
+      ],
+      "title": "DeviceLocationResult"
+    },
+    "DeviceLocationSkipped": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "skipped",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "DeviceLocationSkipped",
+      "type": "object"
+    },
+    "DeviceScanAnswered": {
+      "additionalProperties": false,
+      "description": "``value`` is the decoded text, UNTRUSTED: shown to the person before they send it, cleaned by the gateway\nbefore it reaches the agent, never opened by the client. ``symbology`` is what was read, one of the request's\n``formats`` when it listed any (``symbology:not_requested``).",
+      "properties": {
+        "status": {
+          "const": "answered",
+          "title": "Status",
+          "type": "string"
+        },
+        "value": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        },
+        "symbology": {
+          "$ref": "#/$defs/ScanFormat"
+        }
+      },
+      "required": [
+        "status",
+        "value",
+        "symbology"
+      ],
+      "title": "DeviceScanAnswered",
+      "type": "object"
+    },
+    "DeviceScanRequestParams": {
+      "additionalProperties": false,
+      "description": "One code read with the camera. ``formats``: the symbologies to look for (absent: every one the device reads).",
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "title": "V",
+          "type": "integer"
+        },
+        "title": {
+          "maxLength": 80,
+          "minLength": 1,
+          "pattern": "^[^\r\n\u000b\f  ]+$",
+          "title": "Title",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "expires_at": {
+          "minimum": 0,
+          "title": "Expires At",
+          "type": "integer"
+        },
+        "optional": {
+          "title": "Optional",
+          "type": "boolean"
+        },
+        "acting_user": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestActingUser"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "formats": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/ScanFormat"
+              },
+              "maxItems": 7,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Formats"
+        }
+      },
+      "required": [
+        "session_id",
+        "v",
+        "title",
+        "summary",
+        "expires_at",
+        "optional"
+      ],
+      "title": "DeviceScanRequestParams",
+      "type": "object"
+    },
+    "DeviceScanResult": {
+      "description": "``{status: answered, value, symbology}`` or ``{status: skipped}`` (only when ``optional``).",
+      "discriminator": {
+        "mapping": {
+          "answered": "#/$defs/DeviceScanAnswered",
+          "skipped": "#/$defs/DeviceScanSkipped"
+        },
+        "propertyName": "status"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DeviceScanAnswered"
+        },
+        {
+          "$ref": "#/$defs/DeviceScanSkipped"
+        }
+      ],
+      "title": "DeviceScanResult"
+    },
+    "DeviceScanSkipped": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "skipped",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "DeviceScanSkipped",
+      "type": "object"
+    },
     "DiffAnchor": {
       "description": "Where ``git apply`` pins a hunk whatever the header's line numbers say (``contract/requests`` §7): ``start``\n(it must match at the beginning of the file), ``end`` (no context line after its last change: it must match at\nthe END of the file) or ``both`` (a whole-file hunk).",
       "enum": [
@@ -1431,6 +2272,175 @@
       "title": "InputFormSkipped",
       "type": "object"
     },
+    "InputSignatureAnswered": {
+      "additionalProperties": false,
+      "description": "``files``: exactly two, one ``image/png`` and one ``image/svg+xml`` (either order), uploaded like an\n``input.file`` answer's. ``statement_sha256`` is the SHA-256 (lowercase hex) of the UTF-8 bytes of the request's\n``statement`` exactly as the frame carried it (no normalisation); the gateway refuses any other value\n(``statement:mismatch``). ``signed_at`` is the client's clock, Unix seconds.",
+      "properties": {
+        "status": {
+          "const": "answered",
+          "title": "Status",
+          "type": "string"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/UploadedFile"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Files",
+          "type": "array"
+        },
+        "signed_at": {
+          "minimum": 0,
+          "title": "Signed At",
+          "type": "integer"
+        },
+        "statement_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Statement Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "files",
+        "signed_at",
+        "statement_sha256"
+      ],
+      "title": "InputSignatureAnswered",
+      "type": "object"
+    },
+    "InputSignatureRequestParams": {
+      "additionalProperties": false,
+      "description": "The person signs a statement, drawn on a pad under the statement (``contract/requests`` §8). ``statement`` is\nshown in FULL and verbatim, above the pad, with the signer's name and the time; the gateway refuses a statement it\ncannot show as it is (the rules of §6) and never rewrites one, because the answer carries the SHA-256 of exactly\nthese characters. ``signer_name`` is display only. ``upload`` holds the two files (``max_files`` at least 2).",
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "v": {
+          "const": 1,
+          "title": "V",
+          "type": "integer"
+        },
+        "title": {
+          "maxLength": 80,
+          "minLength": 1,
+          "pattern": "^[^\r\n\u000b\f  ]+$",
+          "title": "Title",
+          "type": "string"
+        },
+        "summary": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "expires_at": {
+          "minimum": 0,
+          "title": "Expires At",
+          "type": "integer"
+        },
+        "optional": {
+          "title": "Optional",
+          "type": "boolean"
+        },
+        "acting_user": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestActingUser"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "statement": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Statement",
+          "type": "string"
+        },
+        "signer_name": {
+          "anyOf": [
+            {
+              "maxLength": 80,
+              "minLength": 1,
+              "pattern": "^[^\r\n\u000b\f  ]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Signer Name"
+        },
+        "upload": {
+          "$ref": "#/$defs/UploadTarget"
+        }
+      },
+      "required": [
+        "session_id",
+        "v",
+        "title",
+        "summary",
+        "expires_at",
+        "optional",
+        "statement",
+        "upload"
+      ],
+      "title": "InputSignatureRequestParams",
+      "type": "object"
+    },
+    "InputSignatureResult": {
+      "description": "``{status: answered, files, signed_at, statement_sha256}`` or ``{status: skipped}`` (only when\n``optional``).",
+      "discriminator": {
+        "mapping": {
+          "answered": "#/$defs/InputSignatureAnswered",
+          "skipped": "#/$defs/InputSignatureSkipped"
+        },
+        "propertyName": "status"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/InputSignatureAnswered"
+        },
+        {
+          "$ref": "#/$defs/InputSignatureSkipped"
+        }
+      ],
+      "title": "InputSignatureResult"
+    },
+    "InputSignatureSkipped": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "skipped",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "InputSignatureSkipped",
+      "type": "object"
+    },
     "InteractiveRequestParams": {
       "additionalProperties": false,
       "description": "The envelope of every interactive request. ``v`` is ``1``: a client that does not know the version\nanswers ``4041`` with reason ``unsupported_version``. ``title`` is one line; ``summary`` is the agent's\nwords; ``detail`` is shown monospaced. ``expires_at`` (Unix seconds, set by the gateway) is when the\ngateway stops waiting: a client hides the request then, and an answer after it is refused. ``optional``\nsays whether Skip is offered (``input.*``: true by default; ``review.*``: false). ``acting_user`` is\nset when the gateway can name the person the turn acts for.\n\nSent only to connections that listed the method under ``client.capabilities`` ``requests``. A client\nthat cannot show the request answers a JSON-RPC ERROR ``4041`` (``cannot_show``) with ``data.reason``,\nnever a made-up ``skipped`` or ``rejected``; the gateway reports that as ``unavailable``. A refused\nanswer is ``request.answer`` error ``4034`` with ``data.reason`` (``bad_shape``, ``not_optional``,\n``field:<id>:<problem>``, …, ``contract/requests/README.md``) and leaves the request open.",
@@ -1501,6 +2511,14 @@
       ],
       "title": "InteractiveRequestParams",
       "type": "object"
+    },
+    "LocationPrecision": {
+      "enum": [
+        "approximate",
+        "precise"
+      ],
+      "title": "LocationPrecision",
+      "type": "string"
     },
     "RequestActingUser": {
       "additionalProperties": false,
@@ -1852,6 +2870,19 @@
         }
       ],
       "title": "ReviewDraftResult"
+    },
+    "ScanFormat": {
+      "enum": [
+        "qr",
+        "ean13",
+        "ean8",
+        "code128",
+        "pdf417",
+        "datamatrix",
+        "aztec"
+      ],
+      "title": "ScanFormat",
+      "type": "string"
     },
     "UploadTarget": {
       "additionalProperties": false,

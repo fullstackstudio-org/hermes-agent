@@ -3018,6 +3018,2202 @@
           "reason": "decision:inconsistent"
         }
       ]
+    },
+    "input.signature": {
+      "frames": [
+        {
+          "jsonrpc": "2.0",
+          "id": "req_sig_lease",
+          "method": "input.signature",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Sign the agreement",
+            "summary": "Sign to confirm you accept the rental agreement.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "statement": "I have read the rental agreement dated 3 October 2026 and agree to its terms.",
+            "signer_name": "Ada Lovelace",
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 1048576,
+              "max_total_bytes": 2097152,
+              "max_files": 2,
+              "strip_metadata": false
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_sig_required",
+          "method": "input.signature",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Sign the delivery note",
+            "summary": "The courier needs your signature on the delivery note.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "statement": "Received in good condition: one parcel, delivered 4 October 2026.",
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 1048576,
+              "max_total_bytes": 2097152,
+              "max_files": 2,
+              "strip_metadata": false
+            }
+          }
+        }
+      ],
+      "invalid_frames": [
+        {
+          "name": "one_file_slot",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Sign the agreement",
+            "summary": "Sign to confirm you accept the rental agreement.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "statement": "I have read the rental agreement dated 3 October 2026 and agree to its terms.",
+            "signer_name": "Ada Lovelace",
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 1048576,
+              "max_total_bytes": 2097152,
+              "max_files": 1,
+              "strip_metadata": false
+            }
+          },
+          "note": "A signature is a PNG and an SVG: room for two files."
+        },
+        {
+          "name": "statement_too_long",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Sign the agreement",
+            "summary": "Sign to confirm you accept the rental agreement.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "statement": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "signer_name": "Ada Lovelace",
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 1048576,
+              "max_total_bytes": 2097152,
+              "max_files": 2,
+              "strip_metadata": false
+            }
+          }
+        },
+        {
+          "name": "no_statement",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Sign the agreement",
+            "summary": "Sign to confirm you accept the rental agreement.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "signer_name": "Ada Lovelace",
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 1048576,
+              "max_total_bytes": 2097152,
+              "max_files": 2,
+              "strip_metadata": false
+            }
+          }
+        },
+        {
+          "name": "empty_statement",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Sign the agreement",
+            "summary": "Sign to confirm you accept the rental agreement.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "statement": "",
+            "signer_name": "Ada Lovelace",
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 1048576,
+              "max_total_bytes": 2097152,
+              "max_files": 2,
+              "strip_metadata": false
+            }
+          }
+        },
+        {
+          "name": "no_upload",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Sign the agreement",
+            "summary": "Sign to confirm you accept the rental agreement.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "statement": "I have read the rental agreement dated 3 October 2026 and agree to its terms.",
+            "signer_name": "Ada Lovelace"
+          }
+        },
+        {
+          "name": "signer_name_two_lines",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Sign the agreement",
+            "summary": "Sign to confirm you accept the rental agreement.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "statement": "I have read the rental agreement dated 3 October 2026 and agree to its terms.",
+            "signer_name": "Ada\nLovelace",
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 1048576,
+              "max_total_bytes": 2097152,
+              "max_files": 2,
+              "strip_metadata": false
+            }
+          }
+        },
+        {
+          "name": "signer_name_too_long",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Sign the agreement",
+            "summary": "Sign to confirm you accept the rental agreement.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "statement": "I have read the rental agreement dated 3 October 2026 and agree to its terms.",
+            "signer_name": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 1048576,
+              "max_total_bytes": 2097152,
+              "max_files": 2,
+              "strip_metadata": false
+            }
+          }
+        }
+      ],
+      "answers": [
+        {
+          "name": "signed",
+          "request": "req_sig_lease",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              }
+            ],
+            "signed_at": 1791119310,
+            "statement_sha256": "5635bd861dd1470f255d6d00877b22a5bca2bf8a844af5b6f3622289a4fbfd9b"
+          }
+        },
+        {
+          "name": "signed_other_order",
+          "request": "req_sig_lease",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              }
+            ],
+            "signed_at": 1791119310,
+            "statement_sha256": "5635bd861dd1470f255d6d00877b22a5bca2bf8a844af5b6f3622289a4fbfd9b"
+          },
+          "note": "The two files may come in either order."
+        },
+        {
+          "name": "skipped",
+          "request": "req_sig_lease",
+          "result": {
+            "status": "skipped"
+          }
+        }
+      ],
+      "invalid_answers": [
+        {
+          "name": "one_file",
+          "request": "req_sig_lease",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              }
+            ],
+            "signed_at": 1791119310,
+            "statement_sha256": "5635bd861dd1470f255d6d00877b22a5bca2bf8a844af5b6f3622289a4fbfd9b"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "three_files",
+          "request": "req_sig_lease",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              }
+            ],
+            "signed_at": 1791119310,
+            "statement_sha256": "5635bd861dd1470f255d6d00877b22a5bca2bf8a844af5b6f3622289a4fbfd9b"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "no_statement_hash",
+          "request": "req_sig_lease",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              }
+            ],
+            "signed_at": 1791119310
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "uppercase_statement_hash",
+          "request": "req_sig_lease",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              }
+            ],
+            "signed_at": 1791119310,
+            "statement_sha256": "5635BD861DD1470F255D6D00877B22A5BCA2BF8A844AF5B6F3622289A4FBFD9B"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "no_signed_at",
+          "request": "req_sig_lease",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              }
+            ],
+            "statement_sha256": "5635bd861dd1470f255d6d00877b22a5bca2bf8a844af5b6f3622289a4fbfd9b"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "signed_at_negative",
+          "request": "req_sig_lease",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              }
+            ],
+            "signed_at": -1,
+            "statement_sha256": "5635bd861dd1470f255d6d00877b22a5bca2bf8a844af5b6f3622289a4fbfd9b"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "skip_not_offered",
+          "request": "req_sig_required",
+          "layer": "validator",
+          "result": {
+            "status": "skipped"
+          },
+          "reason": "not_optional"
+        },
+        {
+          "name": "file_outside_dir",
+          "request": "req_sig_lease",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/../signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              }
+            ],
+            "signed_at": 1791119310,
+            "statement_sha256": "5635bd861dd1470f255d6d00877b22a5bca2bf8a844af5b6f3622289a4fbfd9b"
+          },
+          "reason": "file:1:outside_dir"
+        },
+        {
+          "name": "file_too_large",
+          "request": "req_sig_lease",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 1048577,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              }
+            ],
+            "signed_at": 1791119310,
+            "statement_sha256": "5635bd861dd1470f255d6d00877b22a5bca2bf8a844af5b6f3622289a4fbfd9b"
+          },
+          "reason": "file:0:too_large"
+        },
+        {
+          "name": "two_pngs",
+          "request": "req_sig_lease",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/0123456789abcdef-b.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              }
+            ],
+            "signed_at": 1791119310,
+            "statement_sha256": "5635bd861dd1470f255d6d00877b22a5bca2bf8a844af5b6f3622289a4fbfd9b"
+          },
+          "reason": "files:not_png_and_svg",
+          "note": "One PNG and one SVG, by the declared type."
+        },
+        {
+          "name": "jpeg_for_png",
+          "request": "req_sig_lease",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/jpeg",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              }
+            ],
+            "signed_at": 1791119310,
+            "statement_sha256": "5635bd861dd1470f255d6d00877b22a5bca2bf8a844af5b6f3622289a4fbfd9b"
+          },
+          "reason": "files:not_png_and_svg"
+        },
+        {
+          "name": "hash_of_another_statement",
+          "request": "req_sig_lease",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              }
+            ],
+            "signed_at": 1791119310,
+            "statement_sha256": "826ff0dab649a97ffdd7779a332accafb35cc161012253a19383db19289d6e02"
+          },
+          "reason": "statement:mismatch",
+          "note": "The hash covers the exact characters of the request's statement."
+        },
+        {
+          "name": "hash_of_statement_with_newline",
+          "request": "req_sig_lease",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              }
+            ],
+            "signed_at": 1791119310,
+            "statement_sha256": "bc7ed3f83354e7a0c6ff3d3e79b881bc19ff430fca7c14351365b019c269b07b"
+          },
+          "reason": "statement:mismatch"
+        }
+      ]
+    },
+    "device.location": {
+      "frames": [
+        {
+          "jsonrpc": "2.0",
+          "id": "req_loc_approx",
+          "method": "device.location",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Share your area",
+            "summary": "Share roughly where you are so I can look up pharmacies nearby.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "precision": "approximate"
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_loc_precise",
+          "method": "device.location",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Share your location",
+            "summary": "Share your exact position so the courier can find the entrance.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "precision": "precise"
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_loc_required",
+          "method": "device.location",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Share your area",
+            "summary": "I need your area to book the right branch.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "precision": "approximate"
+          }
+        }
+      ],
+      "invalid_frames": [
+        {
+          "name": "precision_unknown",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Share your area",
+            "summary": "Share roughly where you are so I can look up pharmacies nearby.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "precision": "exact"
+          }
+        },
+        {
+          "name": "no_precision",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Share your area",
+            "summary": "Share roughly where you are so I can look up pharmacies nearby.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            }
+          }
+        }
+      ],
+      "answers": [
+        {
+          "name": "approximate",
+          "request": "req_loc_approx",
+          "result": {
+            "status": "answered",
+            "lat": 52.3731,
+            "lon": 4.8922,
+            "accuracy_m": 35.0,
+            "at": 1791119300,
+            "precision": "approximate"
+          },
+          "note": "The gateway rounds what the agent receives: 52.37, 4.89 and an accuracy of at least 1,000 m."
+        },
+        {
+          "name": "precise",
+          "request": "req_loc_precise",
+          "result": {
+            "status": "answered",
+            "lat": 52.373123,
+            "lon": 4.892201,
+            "accuracy_m": 8.5,
+            "at": 1791119300,
+            "precision": "precise"
+          }
+        },
+        {
+          "name": "lowered_by_the_person",
+          "request": "req_loc_precise",
+          "result": {
+            "status": "answered",
+            "lat": 52.3731,
+            "lon": 4.8922,
+            "accuracy_m": 35.0,
+            "at": 1791119300,
+            "precision": "approximate"
+          },
+          "note": "The person shared less than was asked: allowed."
+        },
+        {
+          "name": "southern_hemisphere",
+          "request": "req_loc_approx",
+          "result": {
+            "status": "answered",
+            "lat": -33.8688,
+            "lon": 151.2093,
+            "accuracy_m": 35.0,
+            "at": 1791119300,
+            "precision": "approximate"
+          }
+        },
+        {
+          "name": "skipped",
+          "request": "req_loc_approx",
+          "result": {
+            "status": "skipped"
+          }
+        }
+      ],
+      "invalid_answers": [
+        {
+          "name": "latitude_out_of_range",
+          "request": "req_loc_approx",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "lat": 91.0,
+            "lon": 4.8922,
+            "accuracy_m": 35.0,
+            "at": 1791119300,
+            "precision": "approximate"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "longitude_out_of_range",
+          "request": "req_loc_approx",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "lat": 52.3731,
+            "lon": -180.5,
+            "accuracy_m": 35.0,
+            "at": 1791119300,
+            "precision": "approximate"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "latitude_as_text",
+          "request": "req_loc_approx",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "lat": "52.3731",
+            "lon": 4.8922,
+            "accuracy_m": 35.0,
+            "at": 1791119300,
+            "precision": "approximate"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "negative_accuracy",
+          "request": "req_loc_approx",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "lat": 52.3731,
+            "lon": 4.8922,
+            "accuracy_m": -1.0,
+            "at": 1791119300,
+            "precision": "approximate"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "no_timestamp",
+          "request": "req_loc_approx",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "lat": 52.3731,
+            "lon": 4.8922,
+            "accuracy_m": 35.0,
+            "precision": "approximate"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "no_precision",
+          "request": "req_loc_approx",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "lat": 52.3731,
+            "lon": 4.8922,
+            "accuracy_m": 35.0,
+            "at": 1791119300
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "extra_key",
+          "request": "req_loc_approx",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "lat": 52.3731,
+            "lon": 4.8922,
+            "accuracy_m": 35.0,
+            "at": 1791119300,
+            "precision": "approximate",
+            "altitude": 3.0
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "precise_for_an_approximate_request",
+          "request": "req_loc_approx",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "lat": 52.3731,
+            "lon": 4.8922,
+            "accuracy_m": 35.0,
+            "at": 1791119300,
+            "precision": "precise"
+          },
+          "reason": "precision:too_precise",
+          "note": "The person may share less than asked, never more."
+        },
+        {
+          "name": "skip_not_offered",
+          "request": "req_loc_required",
+          "layer": "validator",
+          "result": {
+            "status": "skipped"
+          },
+          "reason": "not_optional"
+        }
+      ]
+    },
+    "device.contact": {
+      "frames": [
+        {
+          "jsonrpc": "2.0",
+          "id": "req_contact_phone",
+          "method": "device.contact",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Share a contact",
+            "summary": "Pick the plumber from your contacts so I can message him.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "fields": [
+              "name",
+              "phones"
+            ]
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_contact_birthday",
+          "method": "device.contact",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Share a birthday",
+            "summary": "Pick Bram so I can put his birthday in the family calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "fields": [
+              "name",
+              "birthday"
+            ]
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_contact_required",
+          "method": "device.contact",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Share an address",
+            "summary": "I need the postal address of the person you want to write to.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "fields": [
+              "name",
+              "postal"
+            ]
+          }
+        }
+      ],
+      "invalid_frames": [
+        {
+          "name": "field_listed_twice",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Share a contact",
+            "summary": "Pick the plumber from your contacts so I can message him.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "fields": [
+              "name",
+              "name"
+            ]
+          }
+        },
+        {
+          "name": "no_fields",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Share a contact",
+            "summary": "Pick the plumber from your contacts so I can message him.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "fields": []
+          }
+        },
+        {
+          "name": "unknown_field",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Share a contact",
+            "summary": "Pick the plumber from your contacts so I can message him.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "fields": [
+              "name",
+              "nickname"
+            ]
+          }
+        },
+        {
+          "name": "seven_fields",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Share a contact",
+            "summary": "Pick the plumber from your contacts so I can message him.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "fields": [
+              "name",
+              "phones",
+              "emails",
+              "postal",
+              "birthday",
+              "organization",
+              "name"
+            ]
+          }
+        },
+        {
+          "name": "fields_missing",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Share a contact",
+            "summary": "Pick the plumber from your contacts so I can message him.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            }
+          }
+        }
+      ],
+      "answers": [
+        {
+          "name": "name_and_phones",
+          "request": "req_contact_phone",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "name": "Bram de Vries",
+              "phones": [
+                "+31 6 12345678",
+                "+31 20 5551234"
+              ]
+            }
+          }
+        },
+        {
+          "name": "one_field_ticked",
+          "request": "req_contact_phone",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "phones": [
+                "+31 6 12345678"
+              ]
+            }
+          },
+          "note": "The person unticked the name: only what is ticked travels."
+        },
+        {
+          "name": "birthday_without_year",
+          "request": "req_contact_birthday",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "name": "Bram de Vries",
+              "birthday": "--02-29"
+            }
+          }
+        },
+        {
+          "name": "birthday_with_year",
+          "request": "req_contact_birthday",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "birthday": "1984-03-17"
+            }
+          }
+        },
+        {
+          "name": "postal_address",
+          "request": "req_contact_required",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "name": "Bram de Vries",
+              "postal": [
+                "Keizersgracht 12\n1015 CS Amsterdam\nNetherlands"
+              ]
+            }
+          }
+        },
+        {
+          "name": "skipped",
+          "request": "req_contact_phone",
+          "result": {
+            "status": "skipped"
+          }
+        }
+      ],
+      "invalid_answers": [
+        {
+          "name": "unknown_key",
+          "request": "req_contact_phone",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "name": "Bram de Vries",
+              "phones": [
+                "+31 6 12345678",
+                "+31 20 5551234"
+              ],
+              "nickname": "Bram"
+            }
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "six_phones",
+          "request": "req_contact_phone",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "phones": [
+                "+31 6 12345670",
+                "+31 6 12345671",
+                "+31 6 12345672",
+                "+31 6 12345673",
+                "+31 6 12345674",
+                "+31 6 12345675"
+              ]
+            }
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "phone_as_text",
+          "request": "req_contact_phone",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "phones": "+31 6 12345678"
+            }
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "birthday_not_a_date",
+          "request": "req_contact_birthday",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "birthday": "17 March"
+            }
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "empty_name",
+          "request": "req_contact_phone",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "name": ""
+            }
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "no_contact",
+          "request": "req_contact_phone",
+          "layer": "model",
+          "result": {
+            "status": "answered"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "key_not_asked_for",
+          "request": "req_contact_phone",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "name": "Bram de Vries",
+              "phones": [
+                "+31 6 12345678",
+                "+31 20 5551234"
+              ],
+              "emails": [
+                "bram@example.com"
+              ]
+            }
+          },
+          "reason": "contact:emails:not_requested",
+          "note": "The request asked for name and phones only."
+        },
+        {
+          "name": "null_for_a_key_not_asked_for",
+          "request": "req_contact_phone",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "name": "Bram de Vries",
+              "phones": [
+                "+31 6 12345678",
+                "+31 20 5551234"
+              ],
+              "birthday": null
+            }
+          },
+          "reason": "contact:birthday:not_requested",
+          "note": "Even a null: the client was told what to leave out."
+        },
+        {
+          "name": "birthday_is_not_a_day",
+          "request": "req_contact_birthday",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "name": "Bram",
+              "birthday": "2026-02-30"
+            }
+          },
+          "reason": "contact:birthday:invalid"
+        },
+        {
+          "name": "nothing_in_the_contact",
+          "request": "req_contact_phone",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "contact": {}
+          },
+          "reason": "contact:empty",
+          "note": "Nothing to share: the person skips instead."
+        },
+        {
+          "name": "only_invisible_characters",
+          "request": "req_contact_phone",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "contact": {
+              "name": "\u200b\u202e"
+            }
+          },
+          "reason": "contact:empty",
+          "note": "Nothing is left once the gateway cleaned the text."
+        },
+        {
+          "name": "skip_not_offered",
+          "request": "req_contact_required",
+          "layer": "validator",
+          "result": {
+            "status": "skipped"
+          },
+          "reason": "not_optional"
+        }
+      ]
+    },
+    "device.calendar": {
+      "frames": [
+        {
+          "jsonrpc": "2.0",
+          "id": "req_cal_event",
+          "method": "device.calendar",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_cal_reminder",
+          "method": "device.calendar",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Add a reminder",
+            "summary": "Remind you to renew the passport.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "reminder",
+            "item": {
+              "title": "Renew passport",
+              "start": "2026-10-09T17:00+02:00",
+              "alarm_minutes": 0
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_cal_allday",
+          "method": "device.calendar",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Block the days of the trip.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Trip to Lisbon",
+              "start": "2026-11-14",
+              "end": "2026-11-16",
+              "all_day": true
+            }
+          }
+        }
+      ],
+      "invalid_frames": [
+        {
+          "name": "end_before_start",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T09:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "end_without_start",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "alarm_without_start",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add a reminder",
+            "summary": "Remind you to renew the passport.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "reminder",
+            "item": {
+              "title": "Renew passport",
+              "alarm_minutes": 0
+            }
+          }
+        },
+        {
+          "name": "reminder_with_an_end",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add a reminder",
+            "summary": "Remind you to renew the passport.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "reminder",
+            "item": {
+              "title": "Renew passport",
+              "start": "2026-10-09T17:00+02:00",
+              "alarm_minutes": 0,
+              "end": "2026-10-09T18:00+02:00"
+            }
+          },
+          "note": "A reminder has one time: start."
+        },
+        {
+          "name": "date_for_a_timed_item",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12",
+              "end": "2026-10-12",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "instant_for_an_all_day_item",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Block the days of the trip.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Trip to Lisbon",
+              "start": "2026-11-14T00:00+01:00",
+              "end": "2026-11-16T00:00+01:00",
+              "all_day": true
+            }
+          }
+        },
+        {
+          "name": "a_day_that_does_not_exist",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Block the days of the trip.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Trip to Lisbon",
+              "start": "2026-02-30",
+              "end": "2026-03-01",
+              "all_day": true
+            }
+          }
+        },
+        {
+          "name": "instant_without_offset",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30",
+              "end": "2026-10-12T10:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "instant_with_z",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T07:30Z",
+              "end": "2026-10-12T08:00Z",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "url_is_not_http",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "javascript:alert(1)",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "url_with_a_space",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/a b",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "title_with_a_line_break",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Den\ntist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "no_title",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "title_too_long",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "notes_too_long",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "negative_alarm",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": -5
+            }
+          }
+        },
+        {
+          "name": "alarm_over_four_weeks",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 40321
+            }
+          }
+        },
+        {
+          "name": "unknown_item_key",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 30,
+              "attendees": [
+                "a@example.com"
+              ]
+            }
+          }
+        },
+        {
+          "name": "kind_unknown",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "task",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 30
+            }
+          }
+        }
+      ],
+      "answers": [
+        {
+          "name": "event_saved",
+          "request": "req_cal_event",
+          "result": {
+            "status": "done"
+          },
+          "note": "Done means the person pressed Save in the system sheet."
+        },
+        {
+          "name": "reminder_saved",
+          "request": "req_cal_reminder",
+          "result": {
+            "status": "done"
+          }
+        },
+        {
+          "name": "skipped",
+          "request": "req_cal_event",
+          "result": {
+            "status": "skipped"
+          },
+          "note": "The person cancelled the system sheet."
+        }
+      ],
+      "invalid_answers": [
+        {
+          "name": "answered_is_not_a_calendar_status",
+          "request": "req_cal_event",
+          "layer": "model",
+          "result": {
+            "status": "answered"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "done_with_an_identifier",
+          "request": "req_cal_event",
+          "layer": "model",
+          "result": {
+            "status": "done",
+            "event_id": "ABC"
+          },
+          "reason": "bad_shape",
+          "note": "No identifier travels: nothing to minimise later."
+        },
+        {
+          "name": "no_status",
+          "request": "req_cal_event",
+          "layer": "model",
+          "result": {},
+          "reason": "bad_shape"
+        },
+        {
+          "name": "skip_not_offered",
+          "request": "req_cal_allday",
+          "layer": "validator",
+          "result": {
+            "status": "skipped"
+          },
+          "reason": "not_optional"
+        }
+      ]
+    },
+    "device.scan": {
+      "frames": [
+        {
+          "jsonrpc": "2.0",
+          "id": "req_scan_any",
+          "method": "device.scan",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Scan a code",
+            "summary": "Scan the QR code on the router so I can read its Wi-Fi name.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_scan_ean",
+          "method": "device.scan",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Scan the barcode",
+            "summary": "Scan the barcode on the box to find the product.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "formats": [
+              "ean13",
+              "ean8"
+            ]
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_scan_required",
+          "method": "device.scan",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Scan the ticket",
+            "summary": "I need the code on your ticket to check you in.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "formats": [
+              "qr",
+              "aztec"
+            ]
+          }
+        }
+      ],
+      "invalid_frames": [
+        {
+          "name": "format_listed_twice",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Scan the barcode",
+            "summary": "Scan the barcode on the box to find the product.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "formats": [
+              "ean13",
+              "ean13"
+            ]
+          }
+        },
+        {
+          "name": "no_formats",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Scan the barcode",
+            "summary": "Scan the barcode on the box to find the product.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "formats": []
+          }
+        },
+        {
+          "name": "unknown_format",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Scan the barcode",
+            "summary": "Scan the barcode on the box to find the product.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "formats": [
+              "ean13",
+              "upc"
+            ]
+          }
+        },
+        {
+          "name": "eight_formats",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Scan the barcode",
+            "summary": "Scan the barcode on the box to find the product.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "formats": [
+              "qr",
+              "ean13",
+              "ean8",
+              "code128",
+              "pdf417",
+              "datamatrix",
+              "aztec",
+              "qr"
+            ]
+          }
+        }
+      ],
+      "answers": [
+        {
+          "name": "qr",
+          "request": "req_scan_any",
+          "result": {
+            "status": "answered",
+            "value": "WIFI:T:WPA;S:Home 5G;P:correct horse;;",
+            "symbology": "qr"
+          }
+        },
+        {
+          "name": "ean13",
+          "request": "req_scan_ean",
+          "result": {
+            "status": "answered",
+            "value": "4006381333931",
+            "symbology": "ean13"
+          }
+        },
+        {
+          "name": "aztec_ticket",
+          "request": "req_scan_required",
+          "result": {
+            "status": "answered",
+            "value": "TICKET-2026-10-04-0042",
+            "symbology": "aztec"
+          }
+        },
+        {
+          "name": "skipped",
+          "request": "req_scan_any",
+          "result": {
+            "status": "skipped"
+          }
+        }
+      ],
+      "invalid_answers": [
+        {
+          "name": "no_value",
+          "request": "req_scan_any",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "symbology": "qr"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "empty_value",
+          "request": "req_scan_any",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "value": "",
+            "symbology": "qr"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "value_too_long",
+          "request": "req_scan_any",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "symbology": "qr"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "unknown_symbology",
+          "request": "req_scan_any",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "value": "012345678905",
+            "symbology": "upca"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "no_symbology",
+          "request": "req_scan_any",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "value": "x"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "symbology_not_asked_for",
+          "request": "req_scan_ean",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "value": "https://example.com/box",
+            "symbology": "qr"
+          },
+          "reason": "symbology:not_requested",
+          "note": "The request listed ean13 and ean8."
+        },
+        {
+          "name": "only_invisible_characters",
+          "request": "req_scan_any",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "value": "\u200b\u202e \u200b",
+            "symbology": "qr"
+          },
+          "reason": "scan:empty",
+          "note": "Nothing is left once the gateway cleaned the text."
+        },
+        {
+          "name": "skip_not_offered",
+          "request": "req_scan_required",
+          "layer": "validator",
+          "result": {
+            "status": "skipped"
+          },
+          "reason": "not_optional"
+        }
+      ]
     }
   },
   "form_fields": [
@@ -3613,6 +5809,66 @@
       }
     },
     {
+      "name": "cannot_show_permission_denied",
+      "direction": "client_to_gateway",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "req_loc_precise",
+        "error": {
+          "code": 4041,
+          "message": "cannot_show",
+          "data": {
+            "reason": "permission_denied"
+          }
+        }
+      }
+    },
+    {
+      "name": "cannot_show_location_unavailable",
+      "direction": "client_to_gateway",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "req_loc_approx",
+        "error": {
+          "code": 4041,
+          "message": "cannot_show",
+          "data": {
+            "reason": "location_unavailable"
+          }
+        }
+      }
+    },
+    {
+      "name": "cannot_show_declined_contact",
+      "direction": "client_to_gateway",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "req_contact_required",
+        "error": {
+          "code": 4041,
+          "message": "cannot_show",
+          "data": {
+            "reason": "declined"
+          }
+        }
+      }
+    },
+    {
+      "name": "cannot_show_not_supported_scan",
+      "direction": "client_to_gateway",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "req_scan_any",
+        "error": {
+          "code": 4041,
+          "message": "cannot_show",
+          "data": {
+            "reason": "not_supported_on_device"
+          }
+        }
+      }
+    },
+    {
       "name": "answer_refused",
       "direction": "gateway_to_client",
       "request": {
@@ -3673,7 +5929,12 @@
             "input.form",
             "input.file",
             "review.draft",
-            "review.diff"
+            "review.diff",
+            "input.signature",
+            "device.location",
+            "device.contact",
+            "device.calendar",
+            "device.scan"
           ]
         }
       },

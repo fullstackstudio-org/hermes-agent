@@ -1,9 +1,11 @@
-"""The answer checks of the interactive requests (``input.form``, ``input.file``, ``review.draft``, ``review.diff``).
+"""The answer checks of the interactive requests (``input.form``, ``input.file``, ``review.draft``, ``review.diff``,
+``input.signature``, ``device.location``, ``device.contact``, ``device.calendar``, ``device.scan``).
 
 :func:`validate_answer` is the ``validate`` ``server_requests.send_gated`` runs on every answer: it returns the
-FIRST problem as the reason string ``contract/requests/README.md`` §3-§7 names (``bad_shape``, ``not_optional``,
+FIRST problem as the reason string ``contract/requests/README.md`` §3-§12 names (``bad_shape``, ``not_optional``,
 ``field:<id>:<problem>``, ``files:too_many``, ``file:<n>:outside_dir``, ``text:not_verbatim``,
-``hunk:<id>:missing``, ...), or None for an answer that may settle the request. It runs under ``server_requests``'
+``hunk:<id>:missing``, ``statement:mismatch``, ``contact:<key>:not_requested``, ``precision:too_precise``, ...), or None
+for an answer that may settle the request. It runs under ``server_requests``'
 lock, so it is PURE and cheap: string, number and date arithmetic on the answer and the frame's own params, no I/O,
 no logging, no state. (The one exception is a datetime answer's time zone: a zone is read from its tzdata file the
 first time this process looks it up and then kept in :data:`_zones` for good, a cache bounded by the zones the host
@@ -37,10 +39,11 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from tui_gateway import currency_units
+from tui_gateway import currency_units, interactive_device
 from tui_gateway.contracts.registry import SERVER_REQUESTS
 from tui_gateway.contracts.server_requests import (
-    FORM_DATE, FORM_DATETIME_VALUE, FORM_DECIMAL, FORM_FIELD_ID, FORM_TEXT_MAX, FORM_TIME, INTERACTIVE_METHODS)
+    FORM_DATE, FORM_DATETIME_VALUE, FORM_DECIMAL, FORM_FIELD_ID, FORM_TEXT_MAX, FORM_TIME, INTERACTIVE_METHODS,
+    SIGNATURE_MIMES)
 from tui_gateway.request_text import verbatim_problem
 
 #: Characters a one-line text value may not contain (the contract's ``ONE_LINE`` set).
@@ -410,7 +413,59 @@ def _diff_problem(params: dict, result: dict) -> str | None:
     return None
 
 
+# ── input.signature and the device requests ────────────────────────────────────────────────────
+
+
+def _signature_problem(params: dict, body: dict) -> str | None:
+    """The two files (each directly in ``upload.dir`` and within the sizes, as for ``input.file``), then that they are
+    one PNG and one SVG by their declared type, then that ``statement_sha256`` is the SHA-256 of the statement the
+    request carried (``statement:mismatch``)."""
+    upload = params.get("upload") or {}
+    files = body["files"]
+    for number, file in enumerate(files):
+        if not directly_in_dir(str(file.get("path")), str(upload.get("dir"))):
+            return f"file:{number}:outside_dir"
+        if int(file.get("bytes")) > int(upload.get("max_bytes")):
+            return f"file:{number}:too_large"
+    if sum(int(file.get("bytes")) for file in files) > int(upload.get("max_total_bytes")):
+        return "files:too_large"
+    if sorted(str(file.get("mime")) for file in files) != sorted(SIGNATURE_MIMES):
+        return "files:not_png_and_svg"
+    if body["statement_sha256"] != interactive_device.statement_sha256(str(params.get("statement"))):
+        return "statement:mismatch"
+    return None
+
+
+def _location_problem(params: dict, body: dict) -> str | None:
+    return interactive_device.precision_problem(str(params.get("precision")), str(body["precision"]))
+
+
+def _contact_problem(params: dict, contact: dict) -> str | None:
+    """A key the request did not ask for (``contact:<key>:not_requested``), a birthday that is no day
+    (``contact:birthday:invalid``), then a contact that holds nothing once cleaned (``contact:empty``)."""
+    requested = list(params.get("fields") or [])
+    if key := interactive_device.unrequested_key(contact, requested):
+        return f"contact:{key}:not_requested"
+    if contact.get("birthday") is not None and (problem := interactive_device.birthday_problem(contact["birthday"])):
+        return problem
+    return None if interactive_device.present_contact(contact, requested) else "contact:empty"
+
+
+def _scan_problem(params: dict, body: dict) -> str | None:
+    """A symbology the request did not list (``symbology:not_requested``), then a value with nothing visible left once
+    the gateway cleaned it (``scan:empty``)."""
+    formats = params.get("formats")
+    if formats and body["symbology"] not in formats:
+        return "symbology:not_requested"
+    return None if interactive_device.clean_scan_value(body["value"]).strip() else "scan:empty"
+
+
 # ── entry point ────────────────────────────────────────────────────────────────────────────────
+
+#: The methods whose result is ``{status: answered | skipped}`` (``done`` for the calendar) and that may be skipped
+#: only when the request is ``optional``.
+_SKIPPABLE = ("input.form", "input.file", "input.signature", "device.location", "device.contact", "device.calendar",
+              "device.scan")
 
 
 def validate_answer(method: str, params: dict, result: Any) -> str | None:
@@ -422,13 +477,24 @@ def validate_answer(method: str, params: dict, result: Any) -> str | None:
         model = SERVER_REQUESTS[method].result.model_validate(result)
         if method == "review.diff":
             return _diff_problem(params, model.model_dump(mode="python"))
-        body = model.root.model_dump(mode="python")
-        if method in ("input.form", "input.file"):
+        # ``exclude_unset``: a contact's keys are the ones the client SENT (a ``null`` counts), not the model's defaults.
+        body = model.root.model_dump(mode="python", exclude_unset=method == "device.contact")
+        if method in _SKIPPABLE:
             if body["status"] == "skipped":
                 return None if params.get("optional") else "not_optional"
             if method == "input.form":
                 return _form_problem(params, body["values"])
-            return _file_problem(params, body["files"])
+            if method == "input.file":
+                return _file_problem(params, body["files"])
+            if method == "input.signature":
+                return _signature_problem(params, body)
+            if method == "device.location":
+                return _location_problem(params, body)
+            if method == "device.contact":
+                return _contact_problem(params, body["contact"])
+            if method == "device.scan":
+                return _scan_problem(params, body)
+            return None  # device.calendar: ``done`` says all there is
         return _draft_problem(params, body)
     except ValidationError:
         return "bad_shape"

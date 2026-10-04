@@ -2,7 +2,8 @@
 
 This directory is the written definition of the interactive server→client requests: questions the
 agent asks the person through a connected client, beyond `clarify`, `approval` and `confirm`. Phase 1
-defines three methods and phase 2 adds a fourth:
+defines three methods, phase 2 adds a fourth and phase 3 adds five more (a signature and four device
+requests):
 
 | Method | Asks for | Result |
 | --- | --- | --- |
@@ -10,6 +11,11 @@ defines three methods and phase 2 adds a fourth:
 | `input.file` | one or more files, uploaded | `{status: answered, files, text?}` or `{status: skipped}` |
 | `review.draft` | approval of a draft, optionally edited | `{decision: approved, text}` or `{decision: rejected, comment?}` |
 | `review.diff` | approval of the changes to a file, hunk by hunk | `{decision, hunks: {<id>: approved or rejected}}` |
+| `input.signature` | a statement signed on a pad | `{status: answered, files, signed_at, statement_sha256}` or `{status: skipped}` |
+| `device.location` | where the device is now, approximately or precisely | `{status: answered, lat, lon, accuracy_m, at, precision}` or `{status: skipped}` |
+| `device.contact` | one picked contact, reduced to the fields asked for | `{status: answered, contact}` or `{status: skipped}` |
+| `device.calendar` | one calendar event or reminder, saved by the person in the system sheet | `{status: done}` or `{status: skipped}` |
+| `device.scan` | one code (QR or barcode) read with the camera | `{status: answered, value, symbology}` or `{status: skipped}` |
 
 Files:
 
@@ -41,14 +47,15 @@ A connection receives a method only after it advertised it. The second `client.c
 carries `requests`, the methods this connection can SHOW on this device:
 
 ```json
-{"server_requests": true, "confirm": ["plain"], "requests": ["input.form", "input.file", "review.draft", "review.diff"]}
+{"server_requests": true, "confirm": ["plain"], "requests": ["input.form", "input.file", "review.draft", "review.diff", "input.signature", "device.location", "device.contact", "device.calendar", "device.scan"]}
 ```
 
 - Send `requests` only after the FIRST call's result lists at least one of these methods under
   `server_requests`. A gateway that knows the methods knows the key; an older one refuses the unknown
   key with `4000` and the whole call, `confirm` levels included.
 - List only methods this device can show at all (a client that cannot upload files does not list
-  `input.file`). A single request it cannot show (no camera for a `capture: photo` and no picker either)
+  `input.file`; one without a camera that reads codes does not list `device.scan`; one that cannot write to a
+  calendar does not list `device.calendar`). A single request it cannot show (no camera for a `capture: photo` and no picker either)
   is answered with `4041` (§3).
 - The result's `requests` echoes the methods the gateway accepted (`[]` when none). Unknown names are
   ignored; the list holds at most 32 entries.
@@ -68,7 +75,7 @@ methods share these keys (`InteractiveRequestParams`), next to the transport's `
 | `summary` | string, 1–500 | The agent's words: what it asks and why. |
 | `detail` | string ≤2,000 or absent | Extra context, shown monospaced. |
 | `expires_at` | integer, Unix seconds | When the gateway stops waiting. |
-| `optional` | boolean | Whether Skip is offered. `input.*`: true unless the agent says otherwise; `review.*`: false. |
+| `optional` | boolean | Whether Skip is offered. `input.*` and `device.*`: true unless the agent says otherwise; `review.*`: false. |
 | `acting_user` | `{id, name}` or absent | The person the turn acts for, when the gateway can name them. Informative: the gateway decides who may answer. |
 
 Rendering rules (the same as `confirm`'s):
@@ -89,7 +96,8 @@ arrives later is not an answer (`request.answer` reports `expired`). The two clo
 
 Every result starts with a closed enum:
 
-- `input.*`: `status` ∈ `answered`, `skipped`. `skipped` only when the request is `optional`.
+- `input.*` and `device.*`: `status` ∈ `answered`, `skipped`; `device.calendar` ∈ `done`, `skipped`. `skipped` only
+  when the request is `optional`.
 - `review.*`: `decision` ∈ `approved`, `rejected`. There is no skip: the person rejects. (`review.diff` also
   decides every hunk, §7.)
 
@@ -104,13 +112,13 @@ shutting down) answers a JSON-RPC ERROR, never a made-up `skipped` or `rejected`
 {"jsonrpc": "2.0", "id": "<request id>", "error": {"code": 4041, "message": "cannot_show", "data": {"reason": "no_camera"}}}
 ```
 
-`data.reason` is a short machine string; the set is open. In use: `no_camera`,
-`not_supported_on_device`, `permission_denied`, `upload_failed`, `unsupported_version`,
-`shutting_down`, `declined`. The gateway reports the request as `unavailable` to the agent, which is
+`data.reason` is a short machine string; the set is open. In use: `no_camera`, `no_microphone`,
+`not_supported_on_device`, `permission_denied`, `location_unavailable`, `upload_failed`,
+`unsupported_version`, `shutting_down`, `declined`. The gateway reports the request as `unavailable` to the agent, which is
 not an answer.
 
 **Declined.** `declined` means the PERSON chose not to provide it; it is not a limitation of the device
-or the app. A client MUST let the person refuse a request that is not `optional` (an `input.*` request
+or the app. A client MUST let the person refuse a request that is not `optional` (an `input.*` or `device.*` request
 whose `optional` is false has no Skip): it offers a plain refusal ("Don't share") and answers
 `{"jsonrpc": "2.0", "id": "<request id>", "error": {"code": 4041, "message": "cannot_show", "data": {"reason": "declined"}}}`.
 It applies to every interactive method. For `review.draft` Reject (`decision: rejected`) is the normal
@@ -129,7 +137,7 @@ withdrawn (`request.cancel {reason: too_many_attempts}`) and the agent is told i
 | Reason | Methods | Meaning |
 | --- | --- | --- |
 | `bad_shape` | all | The result does not match the method's result in `schema.json`. |
-| `not_optional` | `input.*` | `skipped` for a request whose `optional` is false. |
+| `not_optional` | `input.*`, `device.*` | `skipped` for a request whose `optional` is false. |
 | `field:<id>:<problem>` | `input.form` | §4. |
 | `files:too_many` | `input.file` | More files than `upload.max_files`, or more than one without `multiple`. |
 | `files:too_large` | `input.file` | The files' `bytes` together exceed `upload.max_total_bytes`. |
@@ -140,9 +148,18 @@ withdrawn (`request.cancel {reason: too_many_attempts}`) and the agent is told i
 | `hunk:<id>:unknown` | `review.diff` | `hunks` has an id the request does not (§7). |
 | `hunk:<id>:missing` | `review.diff` | A hunk of the request has no entry in `hunks` (§7). |
 | `decision:inconsistent` | `review.diff` | `approved` with no hunk approved, or `rejected` with one approved (§7). |
+| `file:<n>:outside_dir`, `file:<n>:too_large`, `files:too_large` | `input.signature` | As for `input.file` (§5), over the two files. |
+| `files:not_png_and_svg` | `input.signature` | The two files are not one `image/png` and one `image/svg+xml` by their declared `mime` (§8). |
+| `statement:mismatch` | `input.signature` | `statement_sha256` is not the SHA-256 of the request's `statement` (§8). |
+| `precision:too_precise` | `device.location` | `precision: precise` for a request that asked `approximate` (§9). |
+| `contact:<key>:not_requested` | `device.contact` | The contact carries a key the request's `fields` did not list, whatever its value (§10). |
+| `contact:birthday:invalid` | `device.contact` | `birthday` is not a day that exists (§10). |
+| `contact:empty` | `device.contact` | Nothing usable is left in the contact once the gateway cleaned it (§10). |
+| `symbology:not_requested` | `device.scan` | `symbology` is not one of the request's `formats` (§12). |
+| `scan:empty` | `device.scan` | Nothing visible is left of `value` once the gateway cleaned it (§12). |
 
 The reason is the FIRST problem found, in this order: shape; `not_optional`; then per method as in §4,
-§5, §6 and §7.
+§5, §6, §7 and §8 to §12.
 
 ## 4. `input.form`
 
@@ -523,7 +540,131 @@ hunks from that copy, never from anything in the answer: the agent gets `approve
 new-side start back by the net change of the rejected one. The client's answer carries no text, so there is nothing
 of the client's to put in the patch.
 
-## 8. Versioning
+## 8. `input.signature`
+
+Params: the envelope plus
+
+| Key | Type |
+| --- | --- |
+| `statement` | string, 1–500: what the person signs, shown in FULL and verbatim above the pad |
+| `signer_name` | string 1–80, one line, optional, display only |
+| `upload` | as §5, with `max_files` at least 2 |
+
+The statement is shown under the rules of §6.1 to §6.3 (the gateway refuses a statement it cannot show as it
+is and never rewrites one), above the pad, with the signer's name (when the request names one) and the time.
+`optional` is true unless the agent says otherwise.
+
+The client uploads exactly two files, like §5's: a PNG and an SVG of the drawn signature, generated on the
+device, and answers
+
+```json
+{"status": "answered", "files": [{"path": "<upload.dir>/5c1d9e0a7b3f2468-signature.png", "name": "signature.png", "mime": "image/png", "bytes": 18211, "sha256": "<64 hex>"}, {"path": "<upload.dir>/9a2b4c6d8e0f1325-signature.svg", "name": "signature.svg", "mime": "image/svg+xml", "bytes": 6412, "sha256": "<64 hex>"}], "signed_at": 1791119310, "statement_sha256": "<64 lowercase hex>"}
+```
+
+- `files`: one `image/png` and one `image/svg+xml` by their declared `mime`, in either order
+  (`files:not_png_and_svg`).
+- `statement_sha256` is the SHA-256, lowercase hex, of the UTF-8 bytes of the request's `statement` exactly as the
+  frame carried it: no normalisation, no trimming, no line-ending change. The client hashes what it showed. A
+  different value is refused (`statement:mismatch`), so what the agent is told was signed is what the person saw.
+- `signed_at` is the client's clock in Unix seconds. The gateway passes it on as the client's claim and adds its
+  own time of receipt.
+
+Checks while the request is open: shape, `not_optional`, each file (`file:<n>:outside_dir`,
+`file:<n>:too_large`), the total (`files:too_large`), the two types, the hash. After it settled, the gateway
+checks the files on disk as for §5 and that the PNG begins with the PNG signature and the SVG is XML text
+starting with `<svg` that holds no script, event handler, `javascript:` URL, embedded document or image, or
+reference to anything outside the file; a file that is not what it says makes the request `unavailable
+(bad_upload)`.
+
+## 9. `device.location`
+
+Params: the envelope plus `precision`: `approximate` or `precise`.
+
+The sheet shows the precision asked for and lets the person lower it (`precise` to `approximate`) before
+sharing. The system permission prompt comes AFTER the person pressed Share on the sheet, never instead of it.
+One fix, never monitoring. `approximate` asks the OS for reduced accuracy (`kCLLocationAccuracyReduced`,
+`enableHighAccuracy: false`).
+
+Result: `{"status": "answered", "lat": 52.3731, "lon": 4.8922, "accuracy_m": 35.0, "at": 1791119300, "precision": "approximate"}`
+or `{"status": "skipped"}`. `lat` in [-90, 90], `lon` in [-180, 180], `accuracy_m` in [0, 10,000,000] metres,
+all JSON numbers (never text); `at` is the client's clock, Unix seconds; `precision` is what was shared.
+
+The gateway refuses `precise` for an `approximate` request (`precision:too_precise`: the person may share
+less, never more). What the agent receives is rounded by the gateway whatever the client sent: `approximate`
+rounds `lat` and `lon` to two decimals (about 1.1 km of latitude) and raises `accuracy_m` to at least 1,000;
+`precise` keeps six decimals. A client SHOULD send what the OS gave it and MUST NOT depend on the rounding.
+
+## 10. `device.contact`
+
+Params: the envelope plus `fields`: 1–6 of `name`, `phones`, `emails`, `postal`, `birthday`, `organization`,
+no repeats.
+
+The client lets the person pick ONE contact with the system picker (no Contacts permission is needed for the
+picker), lists the requested fields as boxes the person can untick, and answers with only what is ticked:
+
+```json
+{"status": "answered", "contact": {"name": "Bram de Vries", "phones": ["+31 6 12345678"]}}
+```
+
+| Key | Type |
+| --- | --- |
+| `name` | string 1–200 |
+| `phones` | up to 5 strings 1–40 |
+| `emails` | up to 5 strings 1–254 |
+| `postal` | up to 3 strings 1–300, an address per entry (line breaks allowed) |
+| `birthday` | `YYYY-MM-DD`, or `--MM-DD` without a year |
+| `organization` | string 1–200 |
+
+Every key is optional. A key the request did not list is refused (`contact:<key>:not_requested`) whatever its
+value, a `null` included; a key outside this table fails the model. The gateway refuses a `birthday` that is
+not a day that exists (`contact:birthday:invalid`; `--02-29` is one) and a contact with nothing usable in it
+(`contact:empty`: every value cleaned to nothing, or no key at all: the person skips instead). The agent
+receives the requested keys only, each string cleaned (control and invisible characters removed).
+
+## 11. `device.calendar`
+
+Params: the envelope plus
+
+| Key | Type |
+| --- | --- |
+| `kind` | `event` or `reminder` |
+| `item` | `{title, notes?, start?, end?, all_day?, location?, url?, alarm_minutes?}` |
+
+| `item` key | Type |
+| --- | --- |
+| `title` | string 1–120, one line |
+| `notes` | string 1–2,000, optional |
+| `start`, `end` | optional; dates `2026-10-12` when `all_day` (`end` inclusive), else instants with an offset `2026-10-12T09:30+02:00` (seconds optional, no `Z`, no fractions) |
+| `all_day` | boolean, default false |
+| `location` | string 1–200, one line, optional |
+| `url` | `http` or `https`, no whitespace, at most 300: SHOWN to the person, never opened by the sheet |
+| `alarm_minutes` | integer 0–40,320: an alert this long before `start`; needs `start` |
+
+`end` needs `start` and is not before it. A reminder has one time, `start` (when it is due), and no `end`. A
+date that does not exist, a date for a timed item or an instant for an all-day one makes the frame invalid.
+
+The client opens the system edit sheet prefilled (`EKEventEditViewController`; a reminder through
+`EKEventStore` with reminders access, which the sheet says before asking) and nothing is written until the
+person saves there. Calendar access is write-only where the OS offers it. Result: `{"status": "done"}` when
+the person saved, `{"status": "skipped"}` when they cancelled. No identifier travels back.
+
+## 12. `device.scan`
+
+Params: the envelope plus `formats`: 1–7 of `qr`, `ean13`, `ean8`, `code128`, `pdf417`, `datamatrix`,
+`aztec`, no repeats, or absent for every symbology the device reads.
+
+Result: `{"status": "answered", "value": "...", "symbology": "qr"}` or `{"status": "skipped"}`. `value` is the
+decoded text, 1–4,096: UNTRUSTED. The client shows it to the person BEFORE they send it, as plain text, never
+opens it (no URL is followed, no app is launched), and sends it only on an explicit press. `symbology` is what
+was read; with `formats` it is one of them (`symbology:not_requested`).
+
+The gateway cleans `value` before the agent receives it: control characters other than a line break (a tab
+becomes a space), format characters (bidi overrides, zero-width), surrogates, private-use, default-ignorable and
+invisible code points go, line and paragraph separators become line breaks, and spacing is kept. A value with
+nothing visible left is refused (`scan:empty`). The agent is told the text is scanned and untrusted, and
+whether the cleaning changed it.
+
+## 13. Versioning
 
 Additive changes (a new method, a new optional key, a new `cannot_show` reason) keep `v: 1`. A client
 never drops what it does not understand without saying so: it declines an unknown method with `-32601`

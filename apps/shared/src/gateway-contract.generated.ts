@@ -4603,7 +4603,7 @@ export interface PasskeyCredentialRef {
   name: string
   rp_id: string
 }
-/** ``tui_gateway/user_events.py::announce_mcp_changed``: ``granted`` from the MCP token exchange (``hermes_cli/dashboard_auth/mcp/routes.py``), ``revoked`` from ``POST /api/auth/mcp/grants/{id}/revoke`` (``mcp/api_routes.py``). Sent only to connections signed in as the person the grant belongs to. A revoke done by the operator's CLI (another process) sends none. */
+/** ``tui_gateway/user_events.py::announce_mcp_changed``: ``granted`` from the MCP token exchange (``hermes_cli/dashboard_auth/mcp/routes.py``); ``revoked`` from ``POST /api/auth/mcp/grants/{id}/revoke`` (``mcp/api_routes.py``), from the client's own RFC 7009 revoke (``POST /mcp/revoke``), and from the gateway itself when a spent code or a rotated refresh token was presented again (reuse revocation, ``mcp/routes.py``). Sent only to connections signed in as the person the grant belongs to, once per revocation. A revoke done by the operator's CLI (another process) sends none. */
 export interface McpChangedPayload {
   change: McpChange
   grant: McpGrantRef

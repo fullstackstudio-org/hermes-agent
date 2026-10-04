@@ -43,7 +43,10 @@ prompt of a ``secret``, ``sudo`` or ``vault.*`` request: those are a kind only.
 
 Threads. :meth:`TurnWatch._feed` runs on whatever thread emits (see ``transport.py``): it only records,
 under the watch's own lock, and never calls into the gateway. RPCs (reconcile, answers) run on the
-caller's thread. Process-wide: at most :data:`MAX_WATCHES` watches; a concluded one is evicted
+caller's thread. What decides whether the turn concluded without a frame saying so (a queued text a Stop
+dropped, a terminal frame held as a candidate, an ended turn told by its stored row) is also checked by the
+watch's own MONITOR thread every :data:`MONITOR_INTERVAL_S` while there is such a question, so a turn nobody
+waits on still concludes, frees its slot and detaches. Process-wide: at most :data:`MAX_WATCHES` watches; a concluded one is evicted
 :data:`RETAIN_AFTER_END_S` after it ended (or earlier, oldest first, to make room), and one that never
 concluded after :data:`STALE_AFTER_S`.
 """
@@ -76,6 +79,10 @@ TEXT_CAP_BYTES = 256 * 1024
 PROGRESS_TAIL_CHARS = 2000
 PROGRESS_INTERVAL_S = 1.0
 RECONCILE_INTERVAL_S = 2.0
+#: How often a watch whose conclusion needs the gateway's state checks it on its own thread, whether or not
+#: anybody waits: a queued text (dropped by a Stop?), a terminal frame held as a candidate, an ended turn not
+#: yet told to be ours or not.
+MONITOR_INTERVAL_S = 0.5
 _RECONCILE_MIN_GAP_S = 0.5
 _WAIT_SLICE_S = 0.25
 _RECONCILE_TIMEOUT_S = 10.0
@@ -288,6 +295,9 @@ class TurnWatch:
         #: The grant's running-turn slot this turn holds (``limits.Slot``), given back once it concludes or the
         #: watch is dropped (``Slot.release`` counts once).
         self._slot: Any = None
+        self._reconcile_lock = threading.Lock()
+        self._monitor: threading.Thread | None = None
+        self._monitor_stopped = False
         transport.set_event_sink(self._feed)
 
     # ── the emitting side (never blocks, never calls the gateway) ────────────────────────────
@@ -313,6 +323,7 @@ class TurnWatch:
                     self._early.append(item)
             else:
                 self._apply(item)
+            self._ensure_monitor()
             self._cond.notify_all()
 
     def _note_pre_arm(self, item: tuple) -> None:
@@ -617,7 +628,41 @@ class TurnWatch:
             early, self._early = self._early, []
             for item in early:
                 self._apply(item)
+            self._ensure_monitor()
             self._cond.notify_all()
+
+    # ── the monitor (a question only the gateway's state answers, asked whether or not anybody waits) ───────
+
+    def _needs_monitor(self) -> bool:
+        """Caller holds the lock."""
+        return (not self._monitor_stopped and not self._detached and self._status not in TERMINAL_STATUSES
+                and not self._transport.closed
+                and (self._queued_unstarted() or self._candidate is not None or bool(self._pending_end)))
+
+    def _ensure_monitor(self) -> None:
+        """Caller holds the lock. Start the monitor thread when there is a question and none runs."""
+        if self._monitor is not None or not self._needs_monitor():
+            return
+        thread = threading.Thread(target=self._monitor_loop, name=f"mcp-turn-watch-{self.turn_id[:8]}",
+                                  daemon=True)
+        self._monitor = thread
+        thread.start()
+
+    def _monitor_loop(self) -> None:
+        while True:
+            time.sleep(MONITOR_INTERVAL_S)
+            with self._cond:
+                if not self._needs_monitor():
+                    self._monitor = None
+                    return
+            # A waiter reconciling now answers the same question: skip this round rather than queue behind it.
+            if self._reconcile_lock.acquire(blocking=False):
+                try:
+                    self._reconcile_locked(check_requests=False)
+                except Exception:  # noqa: BLE001 - the next round asks again
+                    logger.debug("turn watch: monitor round failed", exc_info=True)
+                finally:
+                    self._reconcile_lock.release()
 
     # ── reading ───────────────────────────────────────────────────────────────────────────────
 
@@ -721,6 +766,12 @@ class TurnWatch:
 
     def _reconcile(self) -> None:
         """Bring the open requests (and a held candidate terminal frame) in line with the gateway, over RPC."""
+        with self._reconcile_lock:
+            self._reconcile_locked(check_requests=True)
+
+    def _reconcile_locked(self, *, check_requests: bool) -> None:
+        """Caller holds ``_reconcile_lock``. *check_requests*: also re-read the open requests (a waiter's
+        question; the monitor asks only what decides the turn's conclusion)."""
         with self._cond:
             if self._status in TERMINAL_STATUSES or self._transport.closed:
                 return
@@ -732,7 +783,7 @@ class TurnWatch:
         with self._cond:
             if self._status in TERMINAL_STATUSES:
                 return
-            check_requests = self._started
+            check_requests = check_requests and self._started
             candidate = self._candidate is not None and not self._started
         try:
             if check_requests:
@@ -946,6 +997,7 @@ def reset_for_tests() -> None:
         _registry.clear()
     for watch in watches:
         with watch._cond:
+            watch._monitor_stopped = True
             timer = watch._detach_timer
         if timer is not None:
             timer.cancel()

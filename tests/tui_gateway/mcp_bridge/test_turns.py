@@ -243,6 +243,32 @@ def test_a_queued_prompt_a_stop_dropped_ends_interrupted(gateway, monkeypatch):
     assert "marker reply" not in gateway.agent.texts
 
 
+def test_a_queued_prompt_a_stop_dropped_concludes_without_a_waiter(gateway, monkeypatch):
+    """Regression (review X1b): the drop was noticed only inside a waiter's reconcile, so with no bot_wait the
+    watch never concluded, held its slot and kept the agent's connection attached for hours."""
+    from tui_gateway.mcp_bridge import limits
+
+    monkeypatch.setattr(turns, "_DROPPED_CONFIRM_S", 0.2)
+    monkeypatch.setattr(turns, "MONITOR_INTERVAL_S", 0.1)
+    monkeypatch.setattr(turns, "DETACH_AFTER_END_S", 0.2)
+    limits.reset_for_tests()
+    assert gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker gated"})["result"]["status"] \
+        == "streaming"
+    transport = gateway.connect()
+    slot = limits.reserve_running(transport.grant, 3)
+    watch = turns.start_turn(transport, chat_id=KEY, session_id=SID, text="marker reply", params={"queued": True},
+                             slot=slot)
+    assert watch.status == "queued" and limits.running_turns(transport.grant) == 1
+    gateway.app.call("session.interrupt", {"session_id": SID})  # the person's Stop clears the queue
+    gateway.agent.gate.set()
+    # Nobody calls wait(): the watch concludes on its own, gives its slot back and detaches.
+    assert _until(lambda: watch.concluded, 5)
+    assert watch.snapshot()["error"] == turns.DROPPED_MESSAGE
+    assert limits.running_turns(transport.grant) == 0
+    assert _until(lambda: transport.closed and watch.detached, 5)
+    limits.reset_for_tests()
+
+
 def test_a_cancelled_wait_returns_without_stopping_the_turn(gateway):
     _transport, watch = _start(gateway, "marker gated")
     stop = threading.Event()
@@ -413,6 +439,16 @@ def test_a_held_terminal_frame_is_adopted_once_the_session_is_idle(monkeypatch):
     snap = watch.wait(_deadline(3))
     assert (snap["status"], snap["error"]) == ("error", "marker refused")
     assert "session.active_list" in calls
+
+
+def test_a_held_terminal_frame_concludes_without_a_waiter(monkeypatch):
+    monkeypatch.setattr(turns, "MONITOR_INTERVAL_S", 0.05)
+    monkeypatch.setattr(rpc, "call", lambda *a, **k: {"sessions": [{"id": SID, "status": "idle"}]})
+    watch = _watch()
+    watch._set_mode("streaming", None)
+    watch._feed(_event("error", "t-ours", {"message": "marker refused"}))
+    assert _until(lambda: watch.concluded, 3)
+    assert watch.snapshot()["error"] == "marker refused"
 
 
 def test_a_held_terminal_frame_is_dropped_when_the_turn_starts_after_all(monkeypatch):

@@ -656,7 +656,8 @@ def test_a_late_copy_four_seconds_after_its_rotation_is_raced_with_its_grant(sto
             store.load_refresh(issued.refresh_token, client_id="client-1")
         else:
             store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
-    assert (raced.value.reason, raced.value.grant_id) == ("raced", issued.grant.id)
+    assert (raced.value.reason, raced.value.grant_id, raced.value.user_id) == \
+        ("raced", issued.grant.id, issued.grant.user_id)
     assert store.grant(issued.grant.id).live
 
 

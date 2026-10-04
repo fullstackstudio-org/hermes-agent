@@ -573,6 +573,9 @@ def test_a_late_copy_four_seconds_after_its_rotation_is_raced_audited_and_the_gr
     assert (r.status_code, r.json()["error"]) == (400, "invalid_grant")
     [line] = _rejections()
     assert (line["reason"], line["grant_id"], line["client_id"]) == ("refresh_raced", grant["id"], flow.client_id)
+    # Whose grant it was, like the refreshed and revoked lines.
+    refreshed = next(x for x in audit_lines() if x["event"] == "mcp_token_refreshed")
+    assert line["user_id"] == refreshed["user_id"] != ""
     assert _revocations() == [] and mine.changes() == []
     assert [g["id"] for g in grants_of(gw)] == [grant["id"]]
 

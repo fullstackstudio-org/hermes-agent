@@ -130,6 +130,7 @@ class CallNotes:
     extra: dict = field(default_factory=dict)
     revoked_by_reuse: list = field(default_factory=list)  # store.Reused: grants a reused code/token revoked
     raced_grant: str = ""  # store.Raced: the grant of a refresh token refused inside the parallel-refresh window
+    raced_user: str = ""  # store.Raced: the person holding that grant
 
 
 _notes: ContextVar[Optional[CallNotes]] = ContextVar("dashboard_mcp_call_notes", default=None)
@@ -163,6 +164,7 @@ class RouteProvider(MCPProvider):
         notes = _note()
         if notes is not None:
             notes.raced_grant = exc.grant_id
+            notes.raced_user = exc.user_id
 
     async def get_client(self, client_id: str):
         info = await super().get_client(client_id)
@@ -466,8 +468,9 @@ async def token_endpoint(request: Request) -> Response:
     elif notes.raced_grant and grant_type == "refresh_token":
         # A parallel refresh, or a thief and the real client within the window (plan D3 amendment): the grant
         # stays, so the refusal is named apart from an ordinary invalid_grant.
-        audit_log(AuditEvent.MCP_TOKEN_REJECTED, grant_id=notes.raced_grant, client_id=client_id,
-                  grant_type=grant_type, ip=ip, reason="refresh_raced", status=response.status_code)
+        audit_log(AuditEvent.MCP_TOKEN_REJECTED, user_id=notes.raced_user, grant_id=notes.raced_grant,
+                  client_id=client_id, grant_type=grant_type, ip=ip, reason="refresh_raced",
+                  status=response.status_code)
     else:
         audit_log(AuditEvent.MCP_TOKEN_REJECTED, client_id=client_id, grant_type=grant_type, ip=ip,
                   reason=_clip(_body_json(response).get("error"), 40), status=response.status_code)

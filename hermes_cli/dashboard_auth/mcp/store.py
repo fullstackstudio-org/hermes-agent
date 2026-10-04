@@ -203,12 +203,14 @@ class TokenInvalid(StoreError):
 
 class Raced(TokenInvalid):
     """A rotated refresh token came back within :data:`REFRESH_RACE_GRACE` from the client it belongs to while
-    its successor is unused: a parallel refresh, refused and nothing revoked. ``grant_id``: its grant (for the
-    audit line, so a thief racing the real client inside the window is visible). ``reason`` is ``raced``."""
+    its successor is unused: a parallel refresh, refused and nothing revoked. ``grant_id`` and ``user_id``: its
+    grant and the person holding it, read in the same transaction (for the audit line, so a thief racing the real
+    client inside the window is visible, and whose grant it was). ``reason`` is ``raced``."""
 
-    def __init__(self, grant_id: str):
+    def __init__(self, grant_id: str, user_id: str = ""):
         super().__init__("raced")
         self.grant_id = grant_id
+        self.user_id = user_id
 
 
 class Reused(TokenInvalid):
@@ -536,17 +538,21 @@ class MCPStore:
         return access, access_exp, refresh, refresh_exp
 
     @staticmethod
-    def _raced(db: sqlite3.Connection, row: sqlite3.Row, client_id: str, now: int) -> bool:
-        """True when the rotated refresh token *row*, presented by *client_id*, is a parallel refresh rather
-        than a reuse: rotated less than REFRESH_RACE_GRACE seconds ago, of a grant of that client, and the
-        refresh token that replaced it has been neither rotated nor revoked since."""
+    def _raced(db: sqlite3.Connection, row: sqlite3.Row, client_id: str, now: int) -> Optional[Raced]:
+        """The :class:`Raced` to raise when the rotated refresh token *row*, presented by *client_id*, is a
+        parallel refresh rather than a reuse: rotated less than REFRESH_RACE_GRACE seconds ago, of a grant of
+        that client, and the refresh token that replaced it has been neither rotated nor revoked since. None
+        otherwise."""
         if row["rotated_at"] is None or now - int(row["rotated_at"]) >= REFRESH_RACE_GRACE:
-            return False
-        if db.execute("SELECT 1 FROM grants WHERE id = ? AND client_id = ? AND revoked_at IS NULL",
-                      (row["grant_id"], client_id)).fetchone() is None:
-            return False
-        return db.execute("SELECT 1 FROM tokens WHERE parent_hash = ? AND kind = 'refresh' AND rotated_at IS NULL "
-                          "AND revoked_at IS NULL", (bytes(row["token_hash"]),)).fetchone() is not None
+            return None
+        grant = db.execute("SELECT user_id FROM grants WHERE id = ? AND client_id = ? AND revoked_at IS NULL",
+                           (row["grant_id"], client_id)).fetchone()
+        if grant is None:
+            return None
+        if db.execute("SELECT 1 FROM tokens WHERE parent_hash = ? AND kind = 'refresh' AND rotated_at IS NULL "
+                      "AND revoked_at IS NULL", (bytes(row["token_hash"]),)).fetchone() is None:
+            return None
+        return Raced(str(row["grant_id"]), str(grant["user_id"]))
 
     # ── clients (RFC 7591) ───────────────────────────────────────────────────────────────────────
 
@@ -756,8 +762,8 @@ class MCPStore:
             if row is None:
                 return None
             if row["rotated_at"] is not None:
-                if self._raced(db, row, client_id, now):
-                    raise Raced(str(row["grant_id"]))  # nothing written: the transaction rolls back empty
+                if (raced := self._raced(db, row, client_id, now)) is not None:
+                    raise raced  # nothing written: the transaction rolls back empty
                 if self._revoke(db, row["grant_id"], BY_REFRESH_REUSE, now):
                     revoked = self._grant_row(db, row["grant_id"], now)
                 if revoked is None:
@@ -788,8 +794,8 @@ class MCPStore:
             if row is None:
                 raise TokenInvalid("unknown")
             if row["rotated_at"] is not None:
-                if self._raced(db, row, client_id, now):
-                    raise Raced(str(row["grant_id"]))
+                if (raced := self._raced(db, row, client_id, now)) is not None:
+                    raise raced
                 if self._revoke(db, row["grant_id"], BY_REFRESH_REUSE, now):
                     revoked = self._grant_row(db, row["grant_id"], now)
                 reused = True

@@ -563,6 +563,127 @@
           }
         },
         {
+          "name": "number_default_off_step",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "nights",
+                "kind": "number",
+                "label": "Nights",
+                "min": 1,
+                "step": 2,
+                "default": 4
+              }
+            ]
+          },
+          "note": "Values are min (1) plus a whole multiple of step (2): 4 is not one."
+        },
+        {
+          "name": "daterange_default_outside_min_max",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "stay",
+                "kind": "daterange",
+                "label": "Stay",
+                "min": "2026-10-05",
+                "max": "2026-12-31",
+                "default": {
+                  "start": "2026-10-01",
+                  "end": "2026-10-03"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "multiple_choice_default_below_min_selected",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "days",
+                "kind": "choice",
+                "label": "Which days?",
+                "multiple": true,
+                "min_selected": 2,
+                "default": [
+                  "mon"
+                ],
+                "options": [
+                  {
+                    "value": "mon",
+                    "label": "Monday"
+                  },
+                  {
+                    "value": "wed",
+                    "label": "Wednesday"
+                  },
+                  {
+                    "value": "fri",
+                    "label": "Friday"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "multiple_choice_default_above_max_selected",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "extras",
+                "kind": "choice",
+                "label": "Extras",
+                "multiple": true,
+                "max_selected": 1,
+                "default": [
+                  "a",
+                  "b"
+                ],
+                "options": [
+                  {
+                    "value": "a",
+                    "label": "A"
+                  },
+                  {
+                    "value": "b",
+                    "label": "B"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
           "name": "text_default_with_a_line_break",
           "layer": "cross_field",
           "params": {

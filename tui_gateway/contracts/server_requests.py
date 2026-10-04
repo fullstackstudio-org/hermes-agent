@@ -410,6 +410,10 @@ class ReviewDecision(WireEnum):
 
 # ── input.form ────────────────────────────────────────────────────────────────────────────────
 
+# The patterns below validate WHOLE values. Checked in Python, use ``re.fullmatch``, never ``re.match`` or
+# ``re.search``: Python's ``$`` also matches before a final "\n", so ``re.match(FORM_DATE, "2026-10-05\n")``
+# succeeds. (Pydantic's own ``pattern=`` checks and JSON Schema's ECMA regexes anchor at the very end.) The
+# answer checks of P1-F4 follow the same rule.
 FORM_FIELDS_MAX = 12
 FORM_FIELD_ID = r"^[a-z][a-z0-9_]{0,31}$"
 FORM_TEXT_MAX = 4_000
@@ -612,7 +616,7 @@ class FormDaterangeField(FormFieldBase):
         _ordered("daterange", self.min, self.max, None, _dt.date.fromisoformat)
         if self.default is not None:
             start, end = self.default.start, self.default.end
-            if not (re.match(FORM_DATE, start) and re.match(FORM_DATE, end)):
+            if not (re.fullmatch(FORM_DATE, start) and re.fullmatch(FORM_DATE, end)):
                 raise ValueError("daterange field: default start and end are YYYY-MM-DD")
             if _dt.date.fromisoformat(start) > _dt.date.fromisoformat(end):
                 raise ValueError("daterange field: default ends before it starts")

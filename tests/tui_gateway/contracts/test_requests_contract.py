@@ -169,7 +169,7 @@ def test_invalid_answers_fail_where_they_say(method):
     for case in EXAMPLES["methods"][method]["invalid_answers"]:
         name, reason = case["name"], case["reason"]
         assert case["request"] in frames, name
-        assert REASONS[method].match(reason), f"{name}: malformed reason {reason!r}"
+        assert REASONS[method].fullmatch(reason), f"{name}: malformed reason {reason!r}"
         if case["layer"] == "model":
             assert reason == "bad_shape", name
             assert not _parses(contract.result, case["result"]), f"{name}: the model accepts it"
@@ -221,7 +221,7 @@ def test_form_field_examples(entry):
         # A value of the wrong kind is still a JSON value the result model takes: only the validator,
         # which knows the field, can refuse it.
         InputFormResult.model_validate({"status": "answered", "values": {field.id: bad["value"]}})
-        assert REASONS["input.form"].match(bad["reason"]), bad
+        assert REASONS["input.form"].fullmatch(bad["reason"]), bad
         assert bad["reason"].split(":")[1] == field.id, bad
 
 
@@ -270,8 +270,21 @@ def test_error_examples():
             assert error["code"] == 4034 and case["direction"] == "gateway_to_client"
             assert case["request"]["method"] == "request.answer"
             RequestAnswerParams.model_validate(case["request"]["params"])
-            assert REASONS["input.form"].match(error["data"]["reason"])
+            assert REASONS["input.form"].fullmatch(error["data"]["reason"])
     assert seen == {CANNOT_SHOW, 4034}
+
+
+@pytest.mark.parametrize("field", [
+    {"id": "d", "kind": "date", "label": "D", "min": "2026-10-05\n"},
+    {"id": "t", "kind": "time", "label": "T", "max": "18:00\n"},
+    {"id": "a", "kind": "amount", "label": "A", "currency": "EUR", "min": "1\n"},
+    {"id": "dt", "kind": "datetime", "label": "DT", "min": "2026-10-05T00:00+02:00\n"},
+    {"id": "r", "kind": "daterange", "label": "R", "default": {"start": "2026-10-05\n", "end": "2026-10-06"}},
+    {"id": "f\n", "kind": "toggle", "label": "F"},
+])
+def test_a_trailing_newline_never_passes_a_whole_value_pattern(field):
+    """Every pattern check anchors at the very end: a value followed by "\n" is refused (``re.fullmatch``)."""
+    assert not _parses(SERVER_REQUESTS["input.form"].params, _single_field_params(field))
 
 
 def test_capabilities_requests_is_bounded():

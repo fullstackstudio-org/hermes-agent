@@ -16,9 +16,15 @@ allowlists the public ones.
   GET  /api/auth/me            current Session as JSON (auth-required)
   GET  /api/auth/picture?id=   a signed-in user's stored profile picture (auth-required)
   POST /api/auth/ws-ticket     single-use WS upgrade ticket (auth-required)
+
+Fork (passkey self-enrolment, ``passkeys/reauth.py``): ``/auth/login`` and ``/auth/native/authorize``
+take ``reauth=<grant id>``, checked before any redirect or cookie; the callback and the password login
+complete a web grant, ``/auth/native/token`` a native one (and then hands out no tokens). Without
+``reauth`` every route behaves exactly as before; the passkey package is imported only when it is present.
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 from typing import Any
@@ -38,9 +44,9 @@ from hermes_cli.dashboard_auth.base import (
     InvalidCodeError, InvalidCredentialsError, ProviderError, Session)
 from hermes_cli.dashboard_auth.rate_limit import SlidingWindowLimiter, Verdict
 from hermes_cli.dashboard_auth.cookies import (
-    clear_pkce_cookie, clear_session_cookies, clear_sso_attempt_cookie, detect_https,
-    parse_pkce_payload, read_pkce_cookie, read_session_cookies, set_pkce_cookie,
-    set_session_cookies)
+    clear_pkce_cookie, clear_reauth_cookie, clear_session_cookies, clear_sso_attempt_cookie,
+    detect_https, parse_pkce_payload, read_pkce_cookie, read_reauth_cookie, read_session_cookies,
+    set_pkce_cookie, set_session_cookies)
 from hermes_cli.dashboard_auth.login_page import (
     render_login_html, render_native_provider_choice_html)
 from hermes_cli.dashboard_auth.refresh_singleflight import (
@@ -179,12 +185,17 @@ async def _complete_login(request: Request, provider: str, session: Session, *, 
     return _validate_post_login_target(next_raw) or "/", False
 
 
-def _start_upstream_login(request: Request, p, *, audit_failure: bool, extra_pkce: dict[str, str]):
+def _start_upstream_login(request: Request, p, *, audit_failure: bool, extra_pkce: dict[str, str],
+                          fresh: bool = False):
     """Run ``start_login`` and 302 to the IDP with the PKCE cookie set. That cookie is the only
     server-controlled channel surviving the round trip (IDPs echo back only code+state), so it
-    carries the provider name plus ``extra_pkce``."""
+    carries the provider name plus ``extra_pkce``. ``fresh`` (a re-authentication, only for a
+    provider that ``supports_reauth``) is the only case that passes the keyword at all."""
     try:
-        ls = p.start_login(redirect_uri=_redirect_uri(request))
+        if fresh:
+            ls = p.start_login(redirect_uri=_redirect_uri(request), fresh=True)
+        else:
+            ls = p.start_login(redirect_uri=_redirect_uri(request))
     except ProviderError as e:
         if audit_failure:
             _login_failure(request, p.name, "provider_unreachable")
@@ -195,6 +206,88 @@ def _start_upstream_login(request: Request, p, *, audit_failure: bool, extra_pkc
     pkce.update(extra_pkce)
     _set_pkce(resp, request, pkce)
     return resp
+
+
+# --- Re-authentication grants (passkey self-enrolment) -----------------------
+# One helper per route; each imports the passkey package only when a ``reauth`` value is present.
+
+def _reauth_page(status_code: int, text: str) -> HTMLResponse:
+    """A person-facing refusal: never a redirect, no cookie (the route is public)."""
+    body = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<title>Passkey set-up</title></head><body><main><p>"
+            f"{html.escape(text)}</p></main></body></html>")
+    return HTMLResponse(body, status_code=status_code, headers=_NO_STORE)
+
+
+async def _reauth_start_refusal(request: Request, p, grant_id: str, *, client: str):
+    """``None`` when the sign-in may start for re-authentication grant ``grant_id``, else the answer
+    (429 past the refusal budget, 400 for a dead, foreign or unbound grant). A web grant needs this
+    browser's ``hermes_reauth`` cookie; a link to someone else's grant completes nothing."""
+    from hermes_cli.dashboard_auth.passkeys import reauth
+    ip = _client_ip(request)
+    if reauth.refusals_exhausted(ip):
+        return _reauth_page(429, "Too many attempts. Try again shortly.")
+    secret = (read_reauth_cookie(request, use_https=detect_https(request), prefix=_prefix(request))
+              if client == "web" else None)
+    grant = await run_in_threadpool(
+        reauth.grant_for_login, grant_id, provider=p, client=client, secret=secret, ip=ip)
+    return None if grant is not None else _reauth_page(400, reauth.EXPIRED_TEXT)
+
+
+class _ReauthRefused(Exception):
+    """Carries the refusal page out of :func:`_native_reauth_provider`."""
+
+    def __init__(self, response):
+        super().__init__("reauth refused")
+        self.response = response
+
+
+async def _native_reauth_provider(request: Request, provider: str, grant_id: str):
+    """The provider a native re-authentication runs with: the named one when the grant is its own,
+    or (no ``provider``) the one the grant names. Raises the refusal (429 / 400 / 404)."""
+    from hermes_cli.dashboard_auth.passkeys import reauth
+    if provider:
+        p = get_provider(provider)
+        if p is None:
+            raise _http(404, f"Unknown provider: {provider!r}")
+        refusal = await _reauth_start_refusal(request, p, grant_id, client="native")
+    else:
+        ip = _client_ip(request)
+        if reauth.refusals_exhausted(ip):
+            refusal = _reauth_page(429, "Too many attempts. Try again shortly.")
+        else:
+            p, _grant = await run_in_threadpool(
+                reauth.native_grant_for_login, grant_id, providers=list_session_providers(), ip=ip)
+            refusal = None if p is not None else _reauth_page(400, reauth.EXPIRED_TEXT)
+    if refusal is not None:
+        raise _ReauthRefused(refusal)
+    return p
+
+
+async def _finish_web_reauth(request: Request, resp, parts: dict[str, str], session: Session) -> bool:
+    """After a web sign-in (callback or password login) whose PKCE cookie carries ``reauth``: complete
+    that grant with this browser's cookie secret, and clear the cookie whatever the outcome. The
+    sign-in stands either way. ``False`` (nothing done) without ``reauth`` or on a native flow."""
+    grant_id = parts.get("reauth", "")
+    if not grant_id or parts.get("broker"):
+        return False
+    from hermes_cli.dashboard_auth.passkeys import reauth
+    https, prefix = detect_https(request), _prefix(request)
+    secret = read_reauth_cookie(request, use_https=https, prefix=prefix)
+    await run_in_threadpool(
+        reauth.complete, grant_id, session, client="web", secret=secret, ip=_client_ip(request))
+    clear_reauth_cookie(resp, use_https=https, prefix=prefix)
+    return True
+
+
+async def _native_reauth_answer(request: Request, grant_id: str, session: Session) -> JSONResponse:
+    """A native re-authentication code was redeemed: complete the grant (the PKCE verifier was the
+    binding) and answer ``{"reauth": {...}}`` with NO tokens; the app's own token set is untouched."""
+    from hermes_cli.dashboard_auth.passkeys import reauth
+    outcome = await run_in_threadpool(
+        reauth.complete, grant_id, session, client="native", secret=None, ip=_client_ip(request))
+    return JSONResponse({"reauth": outcome.body()}, headers=_NO_STORE)
 
 
 # --- Public: login page + provider list ------------------------------------
@@ -221,20 +314,29 @@ async def api_auth_providers() -> Any:
 # --- Public: OAuth round trip ----------------------------------------------
 
 @router.get("/auth/login", name="auth_login")
-async def auth_login(request: Request, provider: str, next: str = ""):
+async def auth_login(request: Request, provider: str, next: str = "", reauth: str = ""):
     p = get_provider(provider)
     if p is None:
         raise _http(404, f"Unknown provider: {provider!r}")
     if not getattr(p, "supports_session", True):
         raise _http(404, f"Provider does not support interactive login: {provider!r}")
+    if reauth:
+        refusal = await _reauth_start_refusal(request, p, reauth, client="web")
+        if refusal is not None:
+            return refusal
     safe_next = _validate_post_login_target(next)
     if getattr(p, "supports_password", False):
         login_url = f"{_prefix(request)}/login"
         if safe_next:
             login_url = f"{login_url}?next={quote(safe_next, safe='')}"
-        return RedirectResponse(url=login_url, status_code=302)
+        resp = RedirectResponse(url=login_url, status_code=302)
+        if reauth:  # the password login completes the grant named here
+            _set_pkce(resp, request, {"provider": p.name, "reauth": reauth})
+        return resp
+    extra = {"next": safe_next} if safe_next else {}
     resp = _start_upstream_login(
-        request, p, audit_failure=True, extra_pkce={"next": safe_next} if safe_next else {})
+        request, p, audit_failure=True, extra_pkce={**extra, **({"reauth": reauth} if reauth else {})},
+        fresh=bool(reauth))
     _audit(request, AuditEvent.LOGIN_START, provider=provider)
     return resp
 
@@ -268,7 +370,7 @@ def _select_native_provider(provider: str):
 @router.get("/auth/native/authorize", name="auth_native_authorize")
 async def auth_native_authorize(
     request: Request, provider: str = "", code_challenge: str = "",
-    code_challenge_method: str = "", redirect_uri: str = "", state: str = ""):
+    code_challenge_method: str = "", redirect_uri: str = "", state: str = "", reauth: str = ""):
     """Begin an RFC 8252 native-app login: stash a pending broker authorization keyed by an
     opaque ``broker_state`` riding in the gateway's own PKCE cookie (the desktop's
     challenge/state never touch it), then run the normal upstream round trip. Password providers
@@ -278,7 +380,13 @@ async def auth_native_authorize(
     if not code_challenge:
         raise _http(400, "code_challenge required")
     _validate_loopback_redirect_uri(redirect_uri)
-    p = _select_native_provider(provider)
+    if reauth:
+        try:
+            p = await _native_reauth_provider(request, provider, reauth)
+        except _ReauthRefused as refused:
+            return refused.response
+    else:
+        p = _select_native_provider(provider)
     if p is None and not provider:
         candidates = list_session_providers()
         if len(candidates) > 1:
@@ -299,7 +407,7 @@ async def auth_native_authorize(
     try:
         broker_state = native_flow.register_pending(
             code_challenge=code_challenge, redirect_uri=redirect_uri, client_state=state,
-            client_ip=_client_ip(request))
+            client_ip=_client_ip(request), reauth=reauth)
     except native_flow.NativeFlowError as e:
         raise _http(503, str(e))
     if getattr(p, "supports_password", False):
@@ -308,7 +416,7 @@ async def auth_native_authorize(
         _set_pkce(resp, request, {"provider": p.name, "broker": broker_state})
         return resp
     resp = _start_upstream_login(
-        request, p, audit_failure=False, extra_pkce={"broker": broker_state})
+        request, p, audit_failure=False, extra_pkce={"broker": broker_state}, fresh=bool(reauth))
     _audit(request, AuditEvent.NATIVE_AUTHORIZE_START, provider=p.name)
     return resp
 
@@ -351,6 +459,7 @@ async def auth_callback(
     resp = RedirectResponse(url=target, status_code=302)
     if not native:
         _set_session(resp, request, session)
+        await _finish_web_reauth(request, resp, parts, session)
     prefix = _prefix(request)
     clear_pkce_cookie(resp, use_https=detect_https(request), prefix=prefix)
     # Clear the one-shot auto-SSO loop-guard so it never suppresses a future silent attempt.
@@ -431,6 +540,8 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
         clear_pkce_cookie(resp, use_https=detect_https(request), prefix=_prefix(request))
     else:
         _set_session(resp, request, session)
+        if await _finish_web_reauth(request, resp, pkce_parts, session):
+            clear_pkce_cookie(resp, use_https=detect_https(request), prefix=_prefix(request))
     return resp
 
 
@@ -450,6 +561,7 @@ async def auth_logout(request: Request):
     resp = RedirectResponse(url=f"{prefix}/login", status_code=302)
     clear_session_cookies(resp, prefix=prefix)
     clear_pkce_cookie(resp, use_https=detect_https(request), prefix=prefix)
+    clear_reauth_cookie(resp, use_https=detect_https(request), prefix=prefix)
     return resp
 
 
@@ -526,14 +638,18 @@ class _NativeTokenBody(BaseModel):
 async def auth_native_token(request: Request, body: _NativeTokenBody):
     """Exchange a loopback gateway code + PKCE verifier for bearer tokens. The code is consumed
     on every path (no verifier oracle, no replay); any failure is a generic 400. Tokens go in
-    the JSON body; no cookie is set."""
+    the JSON body; no cookie is set. A re-authentication code (fork) answers
+    ``{"reauth": {"grant_id", "state", "reason"?, "expires_at"}}`` and no tokens."""
     try:
-        session = native_flow.redeem_code(code=body.code, code_verifier=body.code_verifier)
+        redeemed = native_flow.redeem(code=body.code, code_verifier=body.code_verifier)
     except native_flow.CodeInvalid:
         _audit(request, AuditEvent.NATIVE_TOKEN_FAILURE, reason="invalid_code_or_pkce")
         raise _http(400, "Invalid or expired authorization code.")
+    session = redeemed.session
     _audit(request, AuditEvent.NATIVE_TOKEN_SUCCESS, provider=session.provider,
-           user_id=session.user_id)
+           user_id=session.user_id, **({"reauth": True} if redeemed.reauth else {}))
+    if redeemed.reauth:
+        return await _native_reauth_answer(request, redeemed.reauth, session)
     return _bearer_payload(session)
 
 

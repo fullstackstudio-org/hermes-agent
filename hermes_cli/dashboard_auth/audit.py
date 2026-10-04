@@ -63,6 +63,13 @@ class AuditEvent(enum.Enum):
     PASSKEY_REVOKED = "passkey_revoked"
     PASSKEY_STEPUP_REFUSED = "passkey_stepup_refused"
     PASSKEY_BASE_URLS_CHANGED = "passkey_base_urls_changed"
+    # Self-enrolment (passkeys/reauth.py): a session opened a re-authentication grant, a sign-in completed it
+    # as fresh, or a grant was refused (at the sign-in start, at its completion, or when it was used). User,
+    # provider, client kind, the first 8 characters of the grant id, a reason, whether a missing auth_time was
+    # assumed, the times compared; never the grant secret, a code or a token.
+    PASSKEY_REAUTH_OPENED = "passkey_reauth_opened"
+    PASSKEY_REAUTH_FRESH = "passkey_reauth_fresh"
+    PASSKEY_REAUTH_REFUSED = "passkey_reauth_refused"
     CONFIRM_PASSKEY_VERIFIED = "confirm_passkey_verified"
     CONFIRM_PASSKEY_REFUSED = "confirm_passkey_refused"
     # An operator rule (confirm.passkey.require) forced a passkey confirmation (tools/passkey_policy.py): the

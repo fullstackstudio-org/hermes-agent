@@ -11,6 +11,11 @@ cookies set on such a 302, crbug 40508226), ``hermes_sso_attempt`` (auto-SSO loo
 draft-west-cookie-prefixes: bare name over HTTP; ``__Host-`` on gated HTTPS with Path=/;
 ``__Secure-`` behind a proxy prefix (``__Host-`` forbids Path != /). Setters and readers BOTH
 resolve the name via :func:`_resolved_name` — a mismatch silently breaks sessions.
+
+``hermes_reauth`` (fork, passkey self-enrolment) binds a web re-authentication grant to the browser that
+opened it: the grant's secret, 10 min, the PKCE cookie's attributes. Unlike the others it is read under
+the ONE name the request shape resolves to, never a weaker variant: on HTTPS a bare or ``__Secure-``
+copy tossed in by a sibling host must not stand in for ``__Host-hermes_reauth``.
 """
 from __future__ import annotations
 
@@ -29,6 +34,7 @@ SESSION_RT_COOKIE = "hermes_session_rt"
 SESSION_PROVIDER_COOKIE = "hermes_session_provider"
 PKCE_COOKIE = "hermes_session_pkce"
 SSO_ATTEMPT_COOKIE = "hermes_sso_attempt"
+REAUTH_COOKIE = "hermes_reauth"
 
 # Name variants a reader may have to try; most strict first.
 _NAME_VARIANTS = ("__Host-", "__Secure-", "")
@@ -37,6 +43,7 @@ _NAME_VARIANTS = ("__Host-", "__Secure-", "")
 # real authority (an expired RT -> RefreshExpiredError -> re-login).
 _RT_MAX_AGE = 30 * 24 * 60 * 60
 _PKCE_MAX_AGE = 10 * 60
+_REAUTH_MAX_AGE = 10 * 60  # a re-authentication grant's own lifetime (passkeys.store.GRANT_TTL)
 # Long enough for one portal round trip / back-button; short enough that a user returning later
 # gets a fresh silent attempt rather than a stuck /login.
 _SSO_ATTEMPT_MAX_AGE = 60
@@ -197,6 +204,26 @@ def parse_pkce_payload(raw: str) -> dict[str, str]:
             return {str(k): str(v) for k, v in decoded.items()}
     flat = raw if ";" in raw else unquote(raw)
     return dict(seg.split("=", 1) for seg in flat.split(";") if "=" in seg)
+
+
+def set_reauth_cookie(
+    response: Response, *, secret: str, use_https: bool, prefix: str = "") -> None:
+    """Bind a web re-authentication grant to this browser (``secret`` from the store's
+    ``new_reauth_secret``). The PKCE cookie's attributes: the IdP's cross-site return carries it."""
+    _set(response, REAUTH_COOKIE, secret, max_age=_REAUTH_MAX_AGE, use_https=use_https,
+         prefix=prefix, attrs=_pkce_attrs(use_https=use_https, prefix=prefix))
+
+
+def read_reauth_cookie(request: Request, *, use_https: bool, prefix: str = "") -> Optional[str]:
+    """The grant secret under the exact name this request shape resolves to (no fallback)."""
+    return request.cookies.get(_resolved_name(REAUTH_COOKIE, use_https=use_https, prefix=prefix)) or None
+
+
+def clear_reauth_cookie(response: Response, *, use_https: bool, prefix: str = "") -> None:
+    """Delete every reauth cookie variant (prefixed ones carry ``Secure; SameSite=None``)."""
+    _clear_cookie_variants(
+        response, REAUTH_COOKIE, prefix=prefix, https_samesite="none",
+        bare_attrs=_pkce_attrs(use_https=use_https, prefix=prefix))
 
 
 def set_sso_attempt_cookie(response: Response, *, use_https: bool, prefix: str = "") -> None:

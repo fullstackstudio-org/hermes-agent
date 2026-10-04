@@ -10,6 +10,11 @@ or password login mints a one-time code bound to cc_d (:func:`complete_pending`)
 -> desktop redeems it with cv_d at ``/auth/native/token`` (:func:`redeem_code`).
 PKCE binding, single use, short TTLs, 256-bit handles compared in constant time,
 no secret logging; in-memory, process-local, ``time.time`` patchable in tests.
+
+Fork (passkey self-enrolment): an authorization may carry a re-authentication grant id (``reauth``),
+kept server side from authorize to the issued code. Such a code is redeemed with :func:`redeem`, which
+says so; the token route then completes the grant and hands out NO tokens. :func:`redeem_code` refuses
+(and consumes) a reauth code, so no caller can turn one into a token set by accident.
 """
 
 from __future__ import annotations
@@ -43,6 +48,7 @@ class _Pending:
     client_state: str  # the desktop's own ``state`` (echoed back on redirect)
     client_ip: str  # requester IP at authorize time (per-IP pending cap)
     expires_at: int
+    reauth: str = ""  # a re-authentication grant id: the sign-in only completes that grant
 
 
 @dataclass
@@ -51,6 +57,14 @@ class _IssuedCode:
     code_challenge: str  # cc_d — verified against cv_d at redemption
     session: Session
     expires_at: int
+    reauth: str = ""  # copied from the pending authorization
+
+
+@dataclass(frozen=True)
+class Redeemed:
+    """A redeemed code: the session it was bound to and, for a re-authentication, the grant id."""
+    session: Session
+    reauth: str = ""
 
 
 _pending: Dict[str, _Pending] = {}  # broker_state -> _Pending
@@ -100,7 +114,7 @@ def _pop_pending_locked(broker_state: str, *, consume: bool) -> _Pending:
 
 def register_pending(
     *, code_challenge: str, redirect_uri: str, client_state: str, client_ip: str = "",
-    now: Optional[int] = None) -> str:
+    reauth: str = "", now: Optional[int] = None) -> str:
     """Stash a pending native authorization; return an opaque ``broker_state``. ``code_challenge``
     is the DESKTOP's cc_d. Raises ``NativeFlowError`` (fail closed) at store capacity or when
     ``client_ip`` holds ``_MAX_PENDING_PER_IP`` entries."""
@@ -115,7 +129,7 @@ def register_pending(
             raise NativeFlowError("too many pending native authorizations from this address")
         _pending[broker_state] = _Pending(
             code_challenge=code_challenge, redirect_uri=redirect_uri, client_state=client_state,
-            client_ip=client_ip, expires_at=now + _PENDING_TTL_SECONDS)
+            client_ip=client_ip, expires_at=now + _PENDING_TTL_SECONDS, reauth=reauth)
     return broker_state
 
 
@@ -138,12 +152,21 @@ def complete_pending(broker_state: str, *, session: Session, now: Optional[int] 
         gw_code = secrets.token_urlsafe(32)
         _issued[gw_code] = _IssuedCode(
             code_challenge=pending.code_challenge, session=session,
-            expires_at=now + _CODE_TTL_SECONDS)
+            expires_at=now + _CODE_TTL_SECONDS, reauth=pending.reauth)
     return gw_code
 
 
 def redeem_code(*, code: str, code_verifier: str, now: Optional[int] = None) -> Session:
-    """Verify PKCE + consume a gateway code; return the bound :class:`Session`. The entry is popped
+    """Verify PKCE + consume a gateway code; return the bound :class:`Session`. A re-authentication
+    code is consumed and refused (:class:`CodeInvalid`): only :func:`redeem` hands one out."""
+    redeemed = redeem(code=code, code_verifier=code_verifier, now=now)
+    if redeemed.reauth:
+        raise CodeInvalid("a re-authentication code carries no tokens")
+    return redeemed.session
+
+
+def redeem(*, code: str, code_verifier: str, now: Optional[int] = None) -> Redeemed:
+    """Verify PKCE + consume a gateway code; return the bound session and grant id. The entry is popped
     BEFORE the PKCE check so a wrong verifier cannot be retried (no oracle, no replay)."""
     now = _now(now)
     with _lock:
@@ -155,7 +178,7 @@ def redeem_code(*, code: str, code_verifier: str, now: Optional[int] = None) -> 
         raise CodeInvalid("code expired")
     if not hmac.compare_digest(issued.code_challenge, _s256(code_verifier)):
         raise CodeInvalid("PKCE verification failed")
-    return issued.session
+    return Redeemed(session=issued.session, reauth=issued.reauth)
 
 
 def _reset_for_tests() -> None:

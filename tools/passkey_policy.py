@@ -272,15 +272,15 @@ def _bounds() -> tuple[int, int]:
         return _SUMMARY_MAX, _DETAIL_MAX
 
 
-# Characters a ``confirm`` text drops or rewrites (``tui_gateway.confirm._clean``) or that read as something
+# Characters a ``confirm`` text drops or rewrites (``tui_gateway.request_text.clean_text``) or that read as something
 # else than what the shell gets: what the person sees would not be what runs.
 _INVISIBLE_LETTERS = frozenset({"ᅟ", "ᅠ", "ㅤ", "ﾠ", "⠀", "\U0001d159"})
 _MAX_COMBINING_MARKS = 4
-# The layout bounds of a verbatim detail (``tui_gateway.confirm.MAX_SPACE_RUN`` and the rest, which say
+# The layout bounds of a verbatim detail (``tui_gateway.request_text.MAX_SPACE_RUN`` and the rest, which say
 # why): spacing beyond them could park part of the detail outside what the person sees.
 _MAX_SPACE_RUN, _MAX_INDENT, _MAX_BLANK_LINES, _MAX_LINE_CHARS = 16, 32, 3, 2000
 # ``Default_Ignorable_Code_Point`` (Unicode ``DerivedCoreProperties.txt``, 14.0 through 16.0): code points
-# a renderer shows as nothing. The same table as ``tui_gateway.confirm.DEFAULT_IGNORABLE``, which says more.
+# a renderer shows as nothing. The same table as ``tui_gateway.request_text.DEFAULT_IGNORABLE``, which says more.
 _DEFAULT_IGNORABLE = (
     (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
     (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
@@ -328,7 +328,7 @@ def padded(text: str, *, json_strings: bool = False) -> bool:
     would show as ``git status``. The bounds limit padding; they do not keep everything in view (gaps
     just under them, repeated, still overflow), which is the clients' overflow marker's job.
 
-    *json_strings* (a tool call's detail, ``tui_gateway.confirm._layout_problem`` says more): a run right
+    *json_strings* (a tool call's detail, ``tui_gateway.request_text.layout_problem`` says more): a run right
     after the visible escape ``\\n`` inside a JSON string is a line's indentation, up to 32."""
     blank = 0
     for line in text.split("\n"):

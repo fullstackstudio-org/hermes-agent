@@ -39,19 +39,19 @@ in its own module before the frame goes out; :class:`Level` covers the context-f
 
 from __future__ import annotations
 
-import bisect
-import collections
 import logging
 import os
-import re
 import threading
 import time
-import unicodedata
 from dataclasses import dataclass
 
-from tui_gateway import request_hooks, server_requests
+from tui_gateway import request_hooks, request_limits, server_requests
 from tui_gateway.contracts.server_requests import (CONFIRM_DETAIL_MAX, CONFIRM_SUMMARY_MAX, CONFIRM_TITLE_MAX,
                                                    ConfirmDecision, ConfirmMethod)
+# The text rules live in ``request_text``; these names are re-exported because the policy and the tests read them here.
+from tui_gateway.request_text import (DEFAULT_IGNORABLE, MAX_BLANK_LINES, MAX_COMBINING_MARKS, MAX_INDENT,  # noqa: F401
+                                      MAX_LINE_CHARS, MAX_SPACE_RUN, clean_text, default_ignorable,  # noqa: F401
+                                      verbatim_problem)
 
 logger = logging.getLogger(__name__)
 audit = logging.getLogger("tui_gateway.confirm.audit")
@@ -151,163 +151,7 @@ class ConfirmParamsError(ValueError):
     """The agent's text cannot be shown as given (empty, or longer than the contract allows)."""
 
 
-# ── text ──────────────────────────────────────────────────────────────────────────────────────
-
-
-# Letters and symbols that render as nothing (Hangul fillers, the blank Braille pattern, the musical null
-# notehead): text built from them looks empty or hides where a line really ends.
-_INVISIBLE_LETTERS = frozenset({"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800", "\U0001d159"})
-_LINE_BREAKS = frozenset({"\n", "\u2028", "\u2029"})
-#: ``Default_Ignorable_Code_Point`` as Unicode publishes it (``DerivedCoreProperties.txt``; unchanged
-#: from 14.0, which added U+180F, through 16.0): code points a renderer shows as nothing. ``unicodedata``
-#: does not expose the property, so the ranges are copied here (``tools/passkey_policy.py`` holds the same
-#: table; a test keeps the two and the running Unicode database's ``Cf`` in step). Most are ``Cf`` and
-#: refused as such; the rest are variation selectors, the combining grapheme joiner, the Khmer inherent
-#: vowels (``Mn``), the Hangul fillers (``Lo``) and reserved ranges (``Cn``). Refused in a VERBATIM
-#: detail; :func:`_clean` keeps the ``Mn`` ones under :data:`MAX_COMBINING_MARKS` (an emoji's U+FE0F).
-DEFAULT_IGNORABLE = (
-    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
-    (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
-    (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
-    (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
-)
-_IGNORABLE_STARTS = [low for low, _ in DEFAULT_IGNORABLE]
-
-
-def default_ignorable(ch: str) -> bool:
-    """Whether *ch* is a ``Default_Ignorable_Code_Point`` (:data:`DEFAULT_IGNORABLE`)."""
-    code = ord(ch)
-    at = bisect.bisect_right(_IGNORABLE_STARTS, code) - 1
-    return at >= 0 and code <= DEFAULT_IGNORABLE[at][1]
-
-#: At most this many combining marks (Mn, Me) on one base character; more stack into unreadable glyphs.
-MAX_COMBINING_MARKS = 4
-
-# The layout of a VERBATIM detail (:func:`verbatim_problem`). Clients show it monospaced with every space
-# kept and scroll long lines sideways instead of wrapping them (web: ``white-space: pre``); a phone in
-# portrait shows about 40 columns and a dozen lines of it. Spacing beyond these bounds is padding that
-# can park a second command outside that view (``git status`` + 300 spaces + ``; curl … | sh``, or 80
-# blank lines before it); ordinary code stays well inside them. The text is refused, never rewritten:
-# the passkey challenge covers the exact characters.
-#: Spaces in a row after a line's first non-space character. Column-aligned comments and arguments
-#: rarely need more than a few; 16 still leaves the next word on a 40-column screen after a short command.
-MAX_SPACE_RUN = 16
-#: Spaces at the start of a line: 8 levels of 4-space Python, 16 levels of 2-space YAML or JSON (a
-#: Kubernetes manifest's secret reference sits at 18). Deeper is a jump to the right, not structure.
-MAX_INDENT = 32
-#: Empty lines in a row. PEP 8 puts two between top-level definitions; more than three only pushes what
-#: follows down the sheet.
-MAX_BLANK_LINES = 3
-#: Characters on one line, whatever the detail's own bound (``CONFIRM_DETAIL_MAX``) becomes.
-MAX_LINE_CHARS = 2_000
-# These bounds LIMIT padding; they cannot by themselves keep everything in view. Gaps just under them,
-# repeated, still run a line off the screen, as do many short lines, a long visible prefix or wide glyphs
-# (U+FDFD three hundred times). That is the clients' part: an overflow marker on the detail, and Confirm
-# disabled until it has been scrolled to its end (``website/docs/guides/confirm-sensitive-actions.md``).
-_SPACE_RUN = re.compile(" +")
-
-
-def _clean(text: object, *, multiline: bool) -> str:
-    """Plain text safe to show verbatim: line/paragraph separators become newlines, every other control
-    (Cc), format (Cf: bidi overrides and isolates, zero-width characters), surrogate (Cs) and private-use
-    (Co) code point is dropped, as are invisible letters, and combining marks beyond
-    :data:`MAX_COMBINING_MARKS` per base character. A single-line field collapses all whitespace to single
-    spaces."""
-    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-    out = []
-    marks = 0
-    for ch in raw:
-        category = unicodedata.category(ch)
-        if category in ("Mn", "Me"):
-            marks += 1
-            if marks <= MAX_COMBINING_MARKS:
-                out.append(ch)
-            continue
-        marks = 0
-        if ch in _LINE_BREAKS:
-            out.append("\n" if multiline else " ")
-        elif ch == "\t":
-            out.append(" ")
-        elif category in ("Cc", "Cf", "Cs", "Co") or ch in _INVISIBLE_LETTERS:
-            continue
-        else:
-            out.append(ch)
-    cleaned = "".join(out)
-    if not multiline:
-        return " ".join(cleaned.split())
-    lines = [" ".join(line.split()) for line in cleaned.split("\n")]
-    # At most one blank line in a row, none at either end.
-    kept: list[str] = []
-    for line in lines:
-        if line or (kept and kept[-1]):
-            kept.append(line)
-    while kept and not kept[-1]:
-        kept.pop()
-    return "\n".join(kept)
-
-
-def _layout_problem(text: str, *, json_strings: bool = False) -> str:
-    """Why the spacing of *text* could hide part of it from the person confirming it, or "" (see
-    :data:`MAX_SPACE_RUN`, :data:`MAX_INDENT`, :data:`MAX_BLANK_LINES`, :data:`MAX_LINE_CHARS`). Tabs and
-    every other kind of whitespace are refused before this runs, so only spaces and newlines count.
-
-    *json_strings* (a tool call's detail: its name, then its arguments as indented JSON): a string value
-    keeps its line breaks as the visible escape ``\\n``, so the indentation of each line of code in it
-    shows as a run of spaces right after that escape. Such a run is that line's indentation and may be up
-    to :data:`MAX_INDENT`; every other run keeps :data:`MAX_SPACE_RUN`."""
-    blank = 0
-    for number, line in enumerate(text.split("\n"), start=1):
-        if not line.strip(" "):
-            blank += 1
-            if blank > MAX_BLANK_LINES:
-                return f"line {number - blank + 1} starts more than {MAX_BLANK_LINES} blank lines in a row"
-            continue
-        blank = 0
-        if len(line) > MAX_LINE_CHARS:
-            return f"line {number} is {len(line)} characters (at most {MAX_LINE_CHARS})"
-        body = line.lstrip(" ")
-        if (indent := len(line) - len(body)) > MAX_INDENT:
-            return f"line {number} is indented {indent} spaces (at most {MAX_INDENT})"
-        for run in _SPACE_RUN.finditer(body):
-            size = run.end() - run.start()
-            if size <= MAX_SPACE_RUN:
-                continue
-            if json_strings and size <= MAX_INDENT and body[max(0, run.start() - 2):run.start()] == "\\n":
-                continue
-            return f"line {number} has {size} spaces in a row (at most {MAX_SPACE_RUN})"
-    return ""
-
-
-def verbatim_problem(text: str, *, json_strings: bool = False) -> str:
-    """Why *text* cannot be shown VERBATIM (no cleaning at all), or "": a character :func:`_clean` would
-    drop or rewrite (a control character other than newline, a tab, a format, surrogate or private-use
-    character, a line or paragraph separator, whitespace other than space, an invisible letter, more than
-    :data:`MAX_COMBINING_MARKS` combining marks on one character), an unassigned code point (``Cn``: the
-    running Unicode database does not know it, so neither does this check) or a default-ignorable one
-    (:data:`DEFAULT_IGNORABLE`, which renders as nothing), whitespace at the end of a line or of the text,
-    which no rendering shows, or spacing that could push part of it out of view (:func:`_layout_problem`,
-    with *json_strings* for a tool call's detail)."""
-    marks = 0
-    for ch in text:
-        category = unicodedata.category(ch)
-        if category == "Cn" or default_ignorable(ch):
-            return f"character U+{ord(ch):04X} cannot be shown as it is"
-        if category in ("Mn", "Me"):
-            marks += 1
-            if marks > MAX_COMBINING_MARKS:
-                return "too many combining marks on one character"
-            continue
-        marks = 0
-        if ch in ("\n", " "):
-            continue
-        if category in ("Cc", "Cf", "Cs", "Co", "Zl", "Zp", "Zs") or ch in _INVISIBLE_LETTERS or ch.isspace():
-            return f"character U+{ord(ch):04X} cannot be shown as it is"
-    if any(line != line.rstrip() for line in text.split("\n")) or text != text.rstrip():
-        return "whitespace at the end of a line or of the text cannot be seen"
-    if problem := _layout_problem(text, json_strings=json_strings):
-        return f"{problem}, which can put part of it out of view; present it without padding"
-    return ""
-
+# ── params ────────────────────────────────────────────────────────────────────────────────────
 
 DETAIL_LAYOUTS = ("text", "json")
 
@@ -329,7 +173,7 @@ def build_params(*, summary: object, detail: object = None, title: object = None
     level = str(level or "").strip()
     if level not in LEVELS:
         raise ConfirmParamsError(f"level must be one of: {', '.join(sorted(LEVELS))}")
-    summary_text = _clean(summary, multiline=True)
+    summary_text = clean_text(summary, multiline=True)
     if not summary_text:
         raise ConfirmParamsError("summary is required: one or two plain sentences saying exactly what will happen")
     if len(summary_text) > CONFIRM_SUMMARY_MAX:
@@ -340,10 +184,10 @@ def build_params(*, summary: object, detail: object = None, title: object = None
         if problem := verbatim_problem(detail_text, json_strings=detail_layout == "json"):
             raise ConfirmParamsError(f"detail cannot be shown verbatim: {problem}")
     else:
-        detail_text = _clean(detail, multiline=True) if detail is not None else ""
+        detail_text = clean_text(detail, multiline=True) if detail is not None else ""
     if len(detail_text) > CONFIRM_DETAIL_MAX:
         raise ConfirmParamsError(f"detail is {len(detail_text)} characters; the limit is {CONFIRM_DETAIL_MAX}.")
-    title_text = _clean(title, multiline=False) if title is not None else ""
+    title_text = clean_text(title, multiline=False) if title is not None else ""
     if len(title_text) > CONFIRM_TITLE_MAX:
         raise ConfirmParamsError(f"title is {len(title_text)} characters; the limit is {CONFIRM_TITLE_MAX}.")
     params: dict = {"title": title_text or DEFAULT_TITLE, "summary": summary_text, "level": level}
@@ -361,9 +205,11 @@ def result_problem(params: dict):
 
 # ── rate limit ────────────────────────────────────────────────────────────────────────────────
 
+_limiter = request_limits.Limiter(MAX_PENDING, MAX_PER_WINDOW, WINDOW_SECONDS)
+#: The limiter's send history (the same dict, not a copy; tests read and fill it).
+_sent = _limiter.sent
+#: Guards :data:`_passkey_failed` only; the limiter has a lock of its own and the two are never held together.
 _rate_lock = threading.Lock()
-_pending: dict[str, int] = {}
-_sent: dict[str, collections.deque] = {}
 # Conversation key → monotonic time the last ``passkey`` request there ended other than ``confirmed``.
 _passkey_failed: dict[str, float] = {}
 
@@ -377,31 +223,11 @@ def _rate_key(sid: str) -> str:
 
 def _reserve(key: str, now: float) -> str:
     """Take the one open slot for *key*; "" on success, else the reason it is refused."""
-    with _rate_lock:
-        history = _sent.get(key)
-        if history is not None:
-            while history and now - history[0] >= WINDOW_SECONDS:
-                history.popleft()
-            if not history:
-                _sent.pop(key, None)
-                history = None
-        if _pending.get(key, 0) >= MAX_PENDING:
-            return "already_pending"
-        if history is not None and len(history) >= MAX_PER_WINDOW:
-            return "rate_limited"
-        _pending[key] = _pending.get(key, 0) + 1
-        return ""
+    return _limiter.reserve(key, now)
 
 
 def _release(key: str, *, sent_at: float | None) -> None:
-    with _rate_lock:
-        left = _pending.get(key, 0) - 1
-        if left > 0:
-            _pending[key] = left
-        else:
-            _pending.pop(key, None)
-        if sent_at is not None:
-            _sent.setdefault(key, collections.deque()).append(sent_at)
+    _limiter.release(key, sent_at=sent_at)
 
 
 def _downgrade_refused(key: str, now: float) -> bool:
@@ -419,9 +245,8 @@ def _note_passkey_failed(key: str, now: float) -> None:
 
 
 def reset_for_tests() -> None:
+    _limiter.reset()
     with _rate_lock:
-        _pending.clear()
-        _sent.clear()
         _passkey_failed.clear()
 
 

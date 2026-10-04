@@ -284,19 +284,13 @@ async def _native_reauth_answer(request: Request, grant_id: str, session: Sessio
     """A native re-authentication code was redeemed: complete the grant (the PKCE verifier was the
     binding) and answer ``{"reauth": {...}}`` with NO tokens; the app's own token set is untouched. A fresh
     grant's answer carries its one-time ``use_secret``, which ``register/begin|finish`` require: only the
-    holder of the PKCE verifier ever sees it. The session the sign-in minted is not handed out, so its
-    refresh token is revoked at the provider (best effort)."""
+    holder of the PKCE verifier ever sees it. The session the sign-in minted is never handed out and is
+    deliberately NOT revoked at the provider: on an IdP such as Keycloak or Auth0 revoking that refresh token
+    can end the SSO session the app's own sign-in rides on, the token expires by itself, and a synchronous
+    IdP call does not belong in the token route."""
     from hermes_cli.dashboard_auth.passkeys import reauth
     outcome = await run_in_threadpool(
         reauth.complete, grant_id, session, client="native", secret=None, ip=_client_ip(request))
-    if session.refresh_token:
-        p = get_provider(session.provider)
-        if p is not None:
-            try:
-                await run_in_threadpool(p.revoke_session, refresh_token=session.refresh_token)
-            except Exception as e:  # noqa: BLE001 - best effort: the token was never handed out
-                _log.warning("dashboard-auth: revoking a re-authentication session on %r failed: %s",
-                             p.name, type(e).__name__)
     return JSONResponse({"reauth": outcome.body()}, headers=_NO_STORE)
 
 

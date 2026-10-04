@@ -513,8 +513,9 @@ def test_native_reauth_returns_the_grant_state_and_no_tokens(gw):
     with pytest.raises(Exception) as err:
         gw.store.fresh_grant(grant_id, user_id=ALICE, secret=None)
     assert getattr(err.value, "reason", "") == "unknown"
-    # The session the re-sign-in minted was never handed out: its refresh token is revoked at the IdP.
-    assert len(gw.idp.revoked) == 1
+    # The session the re-sign-in minted is never handed out, and not revoked at the IdP either (that could end
+    # the SSO session the app's own sign-in rides on).
+    assert gw.idp.revoked == []
     # Single use: the code is gone.
     again = gw.client.post("/auth/native/token", json={"code": code, "code_verifier": verifier})
     assert again.status_code == 400

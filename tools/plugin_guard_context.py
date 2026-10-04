@@ -300,11 +300,15 @@ def is_regex_alternation_token(finding: Finding, line: str) -> bool:
 #   - A sink built without any of the names above, and a value that reaches such a disguised
 #     call through a variable, cannot be seen. So "can run it" means "can run it by a route the
 #     inventory names".
-#   - A numeric key trusts ``Number``/``parseInt``/``parseFloat`` unless the plugin rebinds them by
-#     a route the checks name (a declaration or parameter, a function or method of that name,
-#     ``x.Number =``, a quoted name in an argument list, a computed member or an object key, a
-#     ``with`` statement). A global object reached through an alias and a built name
-#     (``g[k] = f``) is not seen, as ``g["Fun"+"ction"]`` is not.
+#   - A numeric key trusts ``Number``/``parseInt``/``parseFloat`` unless the plugin could rebind
+#     them by a route the checks name: a declaration or parameter, a function or method of that
+#     name, ``x.Number =``, a ``with`` statement, or the name as a string anywhere but a comparison
+#     or a list of string literals (a variable's or property's value ``const k = "Number"``, an
+#     argument, a key, a ``fromEntries`` pair); in a text-searched file, a ``\x`` escape or (HTML,
+#     SVG) a ``&#`` character reference is a doubt of its own. Not seen: a name built at run time
+#     (``"Num"+"ber"``, a template with substitutions) or read out of a list of string literals
+#     (``Reflect.set(g, names[2], f)``), as ``g["Fun"+"ction"]`` is not; and a reflective route
+#     spelled as a template (``O[`getOwnPropertyNames`](p)[n - 1]``).
 #   - This rule is not the only demotion: the per-line rule (5) already lowers a whole-literal
 #     ``"sudo"`` on a line that executes nothing to ``medium``, with no inventory at all.
 JS_DATA_PATTERN_IDS = {"sudo_usage", "exec_string"}
@@ -738,7 +742,11 @@ _JS_SINK_TEXT = re.compile(
     + r"|\b(?:from|import)\s*" + _REMOTE_SPECIFIER
     + r"|[\"'`](?:node:(?:vm|cluster|module|child_process|worker_threads|inspector|wasi)|vm|cluster|inspector|wasi"
     r"|worker_threads|zx(?:/[\w-]+)?|sudo-prompt|@vscode/sudo-prompt|cross-spawn)[\"'`]")
-_JS_ESCAPE = re.compile(r"\\u[0-9a-fA-F{]")
+_JS_ESCAPE = re.compile(r"\\u[0-9a-fA-F{]|\\x[0-9a-fA-F]")
+# An HTML/SVG file also decodes character references in event attributes, and SVG (XML) in its
+# ``<script>``: ``window.&#78;umber``. Searched as text, either spelling hides a name.
+_JS_ENTITY = re.compile(r"&#(?:[xX][0-9a-fA-F]|\d)")
+_JS_MARKUP_SUFFIXES = frozenset({".html", ".htm", ".svg"})
 
 # Lexed files are judged by token.
 _JS_SINK_IDS = frozenset({
@@ -1006,16 +1014,9 @@ def _computed_key_doubt(toks: list, k: int, closer_of: dict, numeric: Optional[_
     return receiver.kind == "id" and receiver.text == "prototype" and _is_p(after, *_JS_BINDING)
 
 
-def _name_string_inert(toks: list, k: int, closer_of: dict) -> bool:
-    """A string at *k* that may spell ``Number``/``parseInt``/``parseFloat`` sits where it cannot
-    name what is rebound: not an object key, and between it and its block no argument list, no
-    computed member and no computed object key (``defineProperty(g, "Number", …)``,
-    ``g["Number"] = f``, ``{["Number"]: f}``, ``Reflect.set(g, …["Number"], f)`` are not inert)."""
-    prev = toks[k - 1] if k else None
-    nxt = toks[k + 1] if k + 1 < len(toks) else None
-    if _is_p(prev, "{", ",") and _is_p(nxt, ":"):
-        return False
-    p = toks[k].parent
+def _block_reaches(toks: list, p: int, closer_of: dict) -> bool:
+    """From the bracket at *p* up to its block (or the top level) there is no argument list, no
+    computed member and no computed object key."""
     for _ in range(_MAX_RECEIVER_TOKENS):
         if p < 0:
             return True
@@ -1025,13 +1026,47 @@ def _name_string_inert(toks: list, k: int, closer_of: dict) -> bool:
                 return False
             if o.text == "[":
                 close = closer_of.get(p, -1)
-                if _computed_member(toks, p) or (close >= 0 and _is_p(toks[close + 1] if close + 1 < len(toks)
-                                                                       else None, ":")):
+                if _computed_member(toks, p) or close < 0 or _is_p(
+                        toks[close + 1] if close + 1 < len(toks) else None, ":"):
                     return False
             if o.text == "{" and o.block:
                 return True
         p = o.parent
-    return False    # nested deeper than this walk reads: not inert
+    return False    # nested deeper than this walk reads
+
+
+def _plain_literal(tok: _Tok) -> bool:
+    return tok.kind == "str" or (tok.kind == "tpl" and tok.text.startswith("`") and tok.text.endswith("`")
+                                 and len(tok.text) >= 2)
+
+
+def _name_string_inert(toks: list, k: int, closer_of: dict) -> bool:
+    """A string at *k* that may spell ``Number``/``parseInt``/``parseFloat`` is inert only where it
+    cannot be the name something is rebound by: compared (``x === "Number"``, ``case "Number":``),
+    or an element of an array literal that holds nothing but string literals (a highlighter's
+    keyword list) and is not spread, indexed, read on (``["Number"].join("")``) or a computed key,
+    with no argument list or computed member between it and its block. Anywhere else (a
+    variable's or property's value ``const k = "Number"``, an argument, a key, a pair
+    ``[["Number", f]]`` for ``fromEntries``) it is not inert."""
+    prev = toks[k - 1] if k else None
+    nxt = toks[k + 1] if k + 1 < len(toks) else None
+    if _is_p(prev, *_JS_EQUALITY) or _is_p(nxt, *_JS_EQUALITY) or (
+            prev is not None and prev.kind == "id" and prev.text == "case" and _is_p(nxt, ":")):
+        return True
+    p = toks[k].parent
+    if p < 0 or not _is_p(toks[p], "[") or _computed_member(toks, p):
+        return False
+    close = closer_of.get(p, -1)
+    if close < 0:
+        return False
+    for i in range(p + 1, close):
+        if not (_plain_literal(toks[i]) or _is_p(toks[i], ",")):
+            return False    # a pair, a nested array, a spread, a value: not a keyword list
+    before = toks[p - 1] if p else None
+    after = toks[close + 1] if close + 1 < len(toks) else None
+    if _is_p(before, "...") or _is_p(after, "[", ".", "?.", ":"):
+        return False
+    return _block_reaches(toks, toks[p].parent, closer_of)
 
 
 def _numeric_builtins_untouched(toks: list, closer_of: dict) -> bool:
@@ -1077,20 +1112,61 @@ def _numeric_builtins_untouched(toks: list, closer_of: dict) -> bool:
     return True
 
 
-# Raw-text files (TS, JSX, HTML): every ``Number``/``parseInt``/``parseFloat`` must be called or
-# read on (``Number(``, ``Number.isNaN``), never quoted, and no ``Number(…){`` method is defined.
+# Raw-text files (TS, JSX, HTML, SVG): every ``Number``/``parseInt``/``parseFloat`` must be called
+# or read on (``Number(``, ``Number.isNaN``) and never quoted, and a call must not be a function or
+# method being defined: after its balanced ``(…)`` (strings and comments skipped) and an optional
+# ``: type`` annotation, no ``{`` or ``=>`` follows.
 _JS_NUMERIC_NAME_TEXT = re.compile(r"(?<![\w$])(?:Number|parseInt|parseFloat)(?![\w$])")
 _JS_NUMERIC_NAME_USE = re.compile(r"\s*(?:\(|\??\.)")
-_JS_NUMERIC_NAME_DEFINED = re.compile(r"(?<![\w$])(?:Number|parseInt|parseFloat)\s*\([^()]*\)\s*(?:\{|=>)")
+_JS_TEXT_GAP = re.compile(r"(?:\s+|/\*.*?\*/|//[^\n]*)*", re.DOTALL)
+_JS_TEXT_TYPE = re.compile(r"[\w$.\s<>\[\]|&,?'\"]*")
+
+
+def _skip_gap(text: str, i: int) -> int:
+    return _JS_TEXT_GAP.match(text, i).end()
+
+
+def _close_paren(text: str, i: int) -> int:
+    """The index after the ``)`` that closes the ``(`` at *i*, strings, templates and comments
+    skipped; -1 when it does not close."""
+    depth, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in "\"'`":
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == "\\" else 1
+            i = j + 1
+            continue
+        if text.startswith("/*", i) or text.startswith("//", i):
+            j = _skip_gap(text, i)
+            i = j if j > i else i + 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
 
 
 def _numeric_builtins_untouched_text(text: str) -> bool:
-    if _JS_NUMERIC_NAME_DEFINED.search(text):
-        return False
     for m in _JS_NUMERIC_NAME_TEXT.finditer(text):
         before = text[m.start() - 1] if m.start() else ""
-        if (before and before in "\"'`") or not _JS_NUMERIC_NAME_USE.match(text, m.end()):
+        use = _JS_NUMERIC_NAME_USE.match(text, m.end())
+        if (before and before in "\"'`") or not use:
             return False
+        if use.group(0).endswith("("):
+            j = _close_paren(text, use.end() - 1)
+            if j < 0:
+                return False
+            j = _skip_gap(text, j)
+            if text.startswith(":", j):
+                j = _skip_gap(text, _JS_TEXT_TYPE.match(text, j + 1).end())
+            if text.startswith("{", j) or text.startswith("=>", j):
+                return False    # Number(s) {…}, Number(s: string): string {…}, Number(s) => …
     return True
 
 
@@ -1253,7 +1329,8 @@ class JsSinkInventory:
                 text = f.read_text(encoding="utf-8-sig")
             except (OSError, UnicodeDecodeError):
                 return True
-            if _JS_SINK_TEXT.search(text) or _JS_ESCAPE.search(text):
+            if _JS_SINK_TEXT.search(text) or _JS_ESCAPE.search(text) or (
+                    f.suffix.lower() in _JS_MARKUP_SUFFIXES and _JS_ENTITY.search(text)):
                 return True
         return False
 

@@ -994,6 +994,7 @@ class TestNumericComputedKeys:
         "const q=[1,2].map(Number),r=vt(n)[Number(e)],m=Number.isSafeInteger(r)&&Number.parseInt(\"1\");",
         "class Vd{with(e,n){this.p.set(e,n)}}const r=vt(n)[Number(e)];",    # a method named with
         'const gn=["Object","Function","Number","parseInt","parseFloat"],r=vt(n)[Number(e)];',
+        'switch(t){case"Number":go()}if(t==="parseInt")go();const r=vt(n)[Number(e)];',
     ])
     def test_numeric_keys_on_call_results_are_not_doubts(self, tmp_path, shape):
         sev, result = self._scan(tmp_path, [self.SUDO + shape])
@@ -1025,6 +1026,14 @@ class TestNumericComputedKeys:
         'Object.assign(globalThis,{Number(){return f}});vt(n)[Number(e)](c)();',
         "Object.assign(globalThis,{parseInt:f});vt(n)[parseInt(e)](c)();",
         "(function(Number){vt(n)[Number(e)](c)()})(f);",
+        # review: a name held in a variable, a property or a pair
+        'const k="Number";Object.assign(globalThis,{[k]:f});vt(n)[Number(e)](c)();',
+        'const k="Number";Reflect.set(globalThis,k,f);vt(n)[Number(e)](c)();',
+        'let k="Number";Object.defineProperty(globalThis,k,{value:f});vt(n)[Number(e)](c)();',
+        'const e2=[["Number",f]];Object.assign(globalThis,Object.fromEntries(e2));vt(n)[Number(e)](c)();',
+        'const g=globalThis,k="parseInt";g[k]=f;vt(n)[parseInt(e)](c)();',
+        'const o={k:"Number"};Reflect.set(globalThis,o.k,f);vt(n)[Number(e)](c)();',
+        'Reflect.set(globalThis,["Number"].join(""),f);vt(n)[Number(e)](c)();',
         "with(o)Number(e);vt(n)[Number(e)](c)();",
         # a reflective receiver: an index into a list of property names
         "Object.getOwnPropertyNames(p)[Number(e)];",
@@ -1049,12 +1058,30 @@ class TestNumericComputedKeys:
         ("dashboard/app/assets/num.js", 'const g=globalThis;g["Number"]=f;\n'),
         ("dashboard/src/num.ts", "window.Number = (s: string) => s\n"),
         ("dashboard/app/num.html", '<script>window.Number=f</script>\n'),
+        # review: method definitions the old text pattern missed, and hidden spellings
+        ("dashboard/app/num.html", '<script>Object.assign(window,{Number(s)/**/{return f}})</script>\n'),
+        ("dashboard/app/num.html", '<script>Object.assign(window,{Number(s=(0)){return f}})</script>\n'),
+        ("dashboard/src/num.ts", "Object.assign(window, {Number(s: string): string { return s }})\n"),
+        ("dashboard/src/num.ts", "Object.assign(window, {Number(s = \")\"): string { return s }})\n"),
+        ("dashboard/app/num.svg", '<svg xmlns="http://www.w3.org/2000/svg"><script>window.&#78;umber=f</script></svg>\n'),
+        ("dashboard/app/num.html", '<script>const g=window;g["\\x4eumber"]=f</script>\n'),
     ])
     def test_a_numeric_builtin_rebound_in_another_file_keeps_high(self, tmp_path, path, content):
         extra = {self.CHUNK: self._chunk(self.COPY_LINK), path: content}
         sev, result = self._scan(tmp_path, [self.SUDO], extra=extra)
         assert sev == {1: "high"}, path
         assert result.verdict != "safe"
+
+    @pytest.mark.parametrize("shape", [
+        "O[`getOwnPropertyNames`](p)[n-1];",                    # a template names the reflective route
+        'Reflect.set(globalThis,"Num"+"ber",f);vt(n)[Number(e)];',   # a name built at run time
+    ])
+    def test_known_misses_stay_pinned(self, tmp_path, shape):
+        """Accepted limits of the denylist (see rule 5b): a reflective name spelled as a template and
+        a builtin's name built at run time are not seen, as ``g["Fun"+"ction"]`` is not. Pinned so
+        a change to either is a decision, not an accident."""
+        sev, _ = self._scan(tmp_path, [self.SUDO + shape])
+        assert sev == {1: "low"}, shape
 
     def test_many_numeric_keys_are_judged_in_linear_time(self, tmp_path):
         """Each key is read by its top-level tokens and a ``const`` is found through an index: a

@@ -91,17 +91,25 @@ def _config() -> Any:
 
 
 def _gateway_homes() -> list:
-    """The homes whose rules apply besides the scoped profile's own: the gateway's own home when a turn in
-    the gateway runs scoped to a profile (``paths.gateway_home``), and the home of the host gateway that
-    serves this process's own profile when this is a separate process of a served profile
-    (``serving.serving_gateway_home``: ``hermes -p <name> chat``, a kanban worker). Each once, never the
-    scoped home itself."""
+    """The homes whose rules apply besides the scoped profile's own, each once, never the scoped home:
+
+    - the gateway's own home when a turn in the gateway runs scoped to a profile (``paths.gateway_home``);
+    - the default root whenever the scoped home is a named, non-standalone profile under it
+      (``serving.host_root``): structural, never from runtime records a turn could forge, so a separate
+      process of the profile (``hermes -p <name> chat``, a kanban worker) gets the root's rules too;
+    - the host gateway the runtime records name for this process (``serving.serving_gateway_home``), which
+      only ever adds rules."""
     from hermes_cli.dashboard_auth.passkeys.paths import gateway_home
-    from hermes_cli.dashboard_auth.passkeys.serving import serving_gateway_home
+    from hermes_cli.dashboard_auth.passkeys.serving import host_root, serving_gateway_home
     from hermes_constants import get_hermes_home, hermes_home_key
     seen = {hermes_home_key(get_hermes_home())}
     homes = []
-    for home in (gateway_home(), serving_gateway_home()):
+    for resolve in (gateway_home, host_root, serving_gateway_home):
+        try:
+            home = resolve()
+        except Exception:  # noqa: BLE001 - one undecidable source must not drop the others
+            logger.warning("passkey policy: a gateway home could not be resolved", exc_info=True)
+            continue
         if home is not None and hermes_home_key(home) not in seen:
             seen.add(hermes_home_key(home))
             homes.append(home)

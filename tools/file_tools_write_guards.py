@@ -168,6 +168,13 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     return _gateway_owned_path_error(filepath, candidates)
 
 
+#: Files at the top of every Hermes home the file tools never write: the config (``confirm.passkey`` rules,
+#: approvals), and the gateway's runtime records the serving-gateway detection reads.
+_HOME_GUARDED_FILES = ("config.yaml", "gateway_state.json", "gateway.pid", "gateway.lock")
+#: The dashboard's sign-in and passkey store directory (``hermes_cli/dashboard_auth/passkeys/paths.STORE_DIR``).
+_HOME_STORE_DIR = "dashboard_auth"
+
+
 def _same_dir(a: str, b: str) -> bool:
     if os.path.normcase(a) == os.path.normcase(b):
         return True
@@ -177,59 +184,109 @@ def _same_dir(a: str, b: str) -> bool:
         return False
 
 
+def _within(path: str, directory: str) -> bool:
+    path, directory = os.path.normcase(path), os.path.normcase(directory)
+    return path == directory or path.startswith(directory.rstrip(os.sep) + os.sep)
+
+
+def _guarded_homes() -> list[str]:
+    """Every Hermes home whose config, runtime records and store a turn must not write: this process's
+    gateway home (``passkeys.paths.gateway_home``), the gateway the runtime records name for it, the active
+    profile's home, the default root and every profile under it. Absolute, not resolved (the checks
+    resolve what is inside); empty only when none can be named."""
+    homes: list[str] = []
+
+    def add(home) -> None:
+        if home:
+            value = os.path.abspath(str(home))
+            if value not in homes:
+                homes.append(value)
+
+    sources = []
+    try:
+        from hermes_cli.dashboard_auth.passkeys.paths import gateway_home
+        from hermes_cli.dashboard_auth.passkeys.serving import serving_gateway_home
+        sources += [gateway_home, serving_gateway_home]
+    except Exception:
+        pass
+    try:
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+        sources += [get_hermes_home, get_default_hermes_root]
+    except Exception:
+        get_default_hermes_root = None
+    for source in sources:
+        try:
+            add(source())
+        except Exception:
+            continue
+    add(_get_real_hermes_home())
+    if get_default_hermes_root is not None:
+        try:
+            profiles = Path(str(get_default_hermes_root())) / "profiles"
+            if profiles.is_dir():
+                for entry in profiles.iterdir():
+                    if not entry.name.startswith(".") and entry.is_dir():
+                        add(entry)
+        except OSError:
+            pass
+    return homes
+
+
 def _gateway_owned_path_error(filepath: str, candidates: tuple[str, ...]) -> str | None:
-    """Refuse a write to the GATEWAY's config.yaml or into a ``dashboard_auth`` directory (passkey store,
-    MCP grants) of a Hermes home (the gateway's, the active profile's, the root or any profile under it),
-    from every turn. "The gateway" is this
-    process's own (``paths.gateway_home``) and, in a separate process of a served profile, the host gateway
-    that serves it (``serving.serving_gateway_home``).
+    """Refuse a write to a Hermes home's config.yaml or runtime records (``gateway_state.json``,
+    ``gateway.pid``, ``gateway.lock``) or into its ``dashboard_auth`` directory (passkey store, MCP
+    grants), for EVERY home (:func:`_guarded_homes`), from every turn.
 
     The config hard-block above covers the ACTIVE profile's config only. A turn in a profile the gateway
     multiplexes is scoped to that profile, so without this the gateway's own config.yaml (its
-    ``confirm.passkey`` operator rules and base URLs, which bind every profile it serves:
-    ``hermes_cli/dashboard_auth/passkeys/paths.gateway_home``) and its passkey store were writable from it.
-    Compared by realpath, the ``dashboard_auth`` component case-folded (APFS / NTFS ignore case)."""
-    try:
-        from hermes_cli.dashboard_auth.passkeys.paths import STORE_DIR, gateway_home
-        from hermes_cli.dashboard_auth.passkeys.serving import serving_gateway_home
-        gateways = [os.path.realpath(str(gateway_home()))]
-        served_by = serving_gateway_home()  # a separate process of a served profile (kanban worker, -p chat)
-        if served_by is not None and os.path.realpath(str(served_by)) not in gateways:
-            gateways.append(os.path.realpath(str(served_by)))
-    except Exception:
-        return None
-    homes = list(gateways)
-    active = _get_real_hermes_home()
-    if active and active not in homes:
-        homes.append(active)
-    try:
-        from hermes_constants import get_default_hermes_root
-        root = os.path.realpath(str(get_default_hermes_root()))
-    except Exception:
-        root = None
-    if root and root not in homes:
-        homes.append(root)
+    ``confirm.passkey`` operator rules and base URLs, which bind every profile it serves) and its passkey
+    store were writable from it, and so were the runtime records that say which gateway serves a profile.
+    Nothing here depends on those records. Compared by resolved path in both directions (a home's
+    ``config.yaml`` or ``dashboard_auth`` may itself be a link to elsewhere, e.g. a dotfiles checkout),
+    and by name with the file and directory name case-folded (APFS / NTFS ignore case). When no home can
+    be named at all, every file by one of those names and every ``dashboard_auth`` directory is refused."""
+    homes = _guarded_homes()
+    refusals = {
+        "config.yaml": ("the Hermes config file of another profile or of the gateway",
+                        "Agent cannot modify security-sensitive configuration (the gateway's confirm.passkey "
+                        "rules bind every profile it serves); the operator edits it on the gateway host."),
+        "runtime": ("the gateway's runtime records",
+                    "Agent cannot modify the records that say which gateway runs and what it serves."),
+        "store": ("the dashboard's sign-in and passkey store",
+                  "Agent cannot modify dashboard_auth (passkeys, MCP grants); the operator uses "
+                  "`hermes dashboard passkey` on the gateway host."),
+    }
 
-    def is_hermes_home(directory: str) -> bool:
-        # The gateway's, the active profile's, the root, or any profile under the root.
-        return any(_same_dir(directory, h) for h in homes) or bool(
-            root and os.path.basename(os.path.dirname(directory)) == "profiles"
-            and _same_dir(os.path.dirname(os.path.dirname(directory)), root))
+    def refuse(kind: str) -> str:
+        what, why = refusals[kind]
+        return f"Refusing to write to {what}: {filepath}\n{why}"
+
+    def kind_of(name: str) -> str:
+        return "config.yaml" if name == "config.yaml" else "runtime"
+
     for candidate in candidates:
         real = os.path.realpath(candidate)
-        if os.path.basename(real).casefold() == "config.yaml" and any(
-                _same_dir(os.path.dirname(real), g) for g in gateways):
-            return (
-                f"Refusing to write to the gateway's config file: {filepath}\n"
-                "Agent cannot modify the gateway's security-sensitive configuration (its confirm.passkey "
-                "rules bind every profile it serves); the operator edits it on the gateway host.")
         path = Path(real)
-        for ancestor in (path, *path.parents):
-            if ancestor.name.casefold() == STORE_DIR and is_hermes_home(str(ancestor.parent)):
-                return (
-                    f"Refusing to write to the dashboard's sign-in and passkey store: {filepath}\n"
-                    "Agent cannot modify dashboard_auth (passkeys, MCP grants); the operator uses "
-                    "`hermes dashboard passkey` on the gateway host.")
+        if not homes:  # fail closed on the names alone
+            if path.name.casefold() in _HOME_GUARDED_FILES:
+                return refuse(kind_of(path.name.casefold()))
+            if any(part.casefold() == _HOME_STORE_DIR for part in path.parts):
+                return refuse("store")
+            continue
+        for home in homes:
+            real_home = os.path.realpath(home)
+            for name in _HOME_GUARDED_FILES:
+                if os.path.normcase(real) == os.path.normcase(os.path.realpath(os.path.join(home, name))):
+                    return refuse(kind_of(name))
+            if path.name.casefold() in _HOME_GUARDED_FILES and (
+                    _same_dir(str(path.parent), home) or _same_dir(str(path.parent), real_home)):
+                return refuse(kind_of(path.name.casefold()))
+            if _within(real, os.path.realpath(os.path.join(home, _HOME_STORE_DIR))):
+                return refuse("store")
+            for ancestor in (path, *path.parents):
+                if ancestor.name.casefold() == _HOME_STORE_DIR and (
+                        _same_dir(str(ancestor.parent), home) or _same_dir(str(ancestor.parent), real_home)):
+                    return refuse("store")
     return None
 
 

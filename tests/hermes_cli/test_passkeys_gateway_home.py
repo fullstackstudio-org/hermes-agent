@@ -289,10 +289,86 @@ def test_a_running_dashboard_of_the_default_home_serves_the_profile(host, monkey
 
     def dashboards(*, exclude_pids=None, scope_home=None):
         seen.append(scope_home)
-        return [4242]
+        return [4242] if scope_home == str(root) else []
 
     monkeypatch.setattr("hermes_cli.main_dashboard._find_stale_dashboard_pids", dashboards)
-    assert cli.serving_gateway_home() == root and seen == [str(root)]
+    assert cli.serving_gateway_home() == root and seen == [str(profile), str(root)]
     # The per-call policy path never scans processes.
     serving.reset_for_tests()
     assert serving.serving_gateway_home() is None
+
+
+# ── forged runtime records and linked homes ───────────────────────────────────────────────────
+
+
+def _forge_records(monkeypatch, root, profile):
+    """What a turn could write if the records were writable: its profile's ``gateway_state.json`` saying a
+    gateway runs there, the root's saying it serves nothing. The detection is made to believe them."""
+    import json
+    (profile / "gateway_state.json").write_text(json.dumps({"pid": 4242, "gateway_state": "running"}))
+    (root / "gateway_state.json").write_text(json.dumps({"pid": 4343, "served_profiles": []}))
+    monkeypatch.setattr("gateway.status.live_gateway_pid_for_home",
+                        lambda home: 4242 if str(home) == str(profile) else None)
+    monkeypatch.setattr("hermes_cli.gateway_multiplex_mode.default_gateway_multiplexes", lambda root=None: False)
+    serving.reset_for_tests()
+    assert serving.serving_gateway_home() is None  # the records now say nobody serves the profile
+
+
+def test_forged_records_do_not_drop_the_roots_rules(host, monkeypatch):
+    from tools import passkey_policy
+    root, profile, _store = host
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    _forge_records(monkeypatch, root, profile)
+    rules = passkey_policy.require()
+    assert rules.commands == ("deploy-prod*",) and rules.tools == ("publish_site",)
+
+
+def test_forged_records_do_not_lift_the_write_block(host, monkeypatch):
+    root, profile, _store = host
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    _forge_records(monkeypatch, root, profile)
+    for target in (root / "config.yaml", root / "dashboard_auth" / "passkeys.db"):
+        assert _write_refused(target), target
+
+
+def test_runtime_records_of_every_home_are_refused(host):
+    root, profile, _store = host
+    other = root / "profiles" / "billing"
+    other.mkdir()
+    for home in (root, profile, other):
+        for name in ("gateway_state.json", "gateway.pid", "gateway.lock", "config.yaml", "Gateway_State.json"):
+            assert _in_home(profile, _write_refused, home / name), home / name
+        assert _in_home(profile, _write_refused, home / "dashboard_auth" / "mcp.db")
+
+
+def test_a_linked_config_and_store_are_refused_at_their_targets(host, tmp_path):
+    """Dotfiles setups: the root's config.yaml and dashboard_auth are links to files elsewhere."""
+    root, profile, _store = host
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    (root / "config.yaml").rename(dotfiles / "hermes.yaml")
+    (root / "config.yaml").symlink_to(dotfiles / "hermes.yaml")
+    (root / "dashboard_auth").rename(dotfiles / "auth")
+    (root / "dashboard_auth").symlink_to(dotfiles / "auth")
+    for target in (dotfiles / "hermes.yaml", dotfiles / "auth" / "passkeys.db", dotfiles / "auth" / "new.db",
+                   root / "config.yaml", root / "dashboard_auth" / "passkeys.db"):
+        assert _in_home(profile, _write_refused, target), target
+        assert _write_refused(target), target
+    assert _in_home(profile, _write_refused, dotfiles / "zshrc") is None
+
+
+def test_the_guard_fails_closed_when_no_home_can_be_named(host, tmp_path, monkeypatch):
+    from tools import file_tools_write_guards as guards
+    monkeypatch.setattr(guards, "_guarded_homes", lambda: [])
+    elsewhere = tmp_path / "x"
+    assert guards._gateway_owned_path_error("p", (str(elsewhere / "config.yaml"),))
+    assert guards._gateway_owned_path_error("p", (str(elsewhere / "Dashboard_Auth" / "a.db"),))
+    assert guards._gateway_owned_path_error("p", (str(elsewhere / "notes.md"),)) is None
+
+
+def test_the_cli_keeps_a_profile_that_runs_its_own_dashboard(host, monkeypatch):
+    root, profile, _store = host
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    monkeypatch.setattr("hermes_cli.main_dashboard._find_stale_dashboard_pids",
+                        lambda *, exclude_pids=None, scope_home=None: [7] if scope_home == str(profile) else [])
+    assert cli.serving_gateway_home() is None

@@ -78,7 +78,13 @@ The speak-stream WebSocket takes an optional `voice` on a text frame
 copy of the `tts` config and asks `resolve_streaming_provider` for a streamer on that copy,
 so a streamer needs no code of its own as long as it reads its voice from its config section
 (`tts_voice.VOICE_CONFIG_KEYS` lists the key per provider). A voice that cannot be used ends the
-session with `{"type": "error", "code": "invalid_voice" | "unknown_voice" | "voice_unsupported", "message": "..."}`.
+session with `{"type": "error", "code": "invalid_voice" | "unknown_voice" | "voice_unsupported", "message": "..."}`
+(`voice_failed` when the provider itself refuses a voice that had no list to be checked against).
+
+`voice-config` advertises the voices of `tts.provider` and `POST /api/audio/speak` speaks with it, so a
+`voice` is only honoured by a streamer of that same provider. When `tts.streaming.provider` pins another
+provider (or is `auto` and resolves to one), the socket answers `{"type": "fallback"}` to a frame that
+names a voice and the client uses `POST /api/audio/speak`.
 
 ## Adding a new streaming provider
 

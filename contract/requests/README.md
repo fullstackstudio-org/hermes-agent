@@ -127,6 +127,12 @@ passes the reason on to the agent and the audit record as `cannot_show:declined`
 tells the agent to respect the choice and not to ask again at once; it is never taken for an answer,
 a skip or a rejection. For an `optional` request Skip (`status: skipped`) stays the normal refusal.
 
+**Who is asked.** A request goes only to connections signed in as the person the turn acts for, when the gateway
+can name them. In a shared conversation whose turn names nobody, `review.*`, `input.signature` and every
+`device.*` request are never put to anyone: nothing is sent and the agent is told `unavailable (no_acting_user)`.
+(`input.form` and `input.file` still go to every capable connection then.) A client never sees such a frame it
+could not answer for the right person.
+
 **Refused answers.** The gateway checks every answer: first against the result model (`schema.json`),
 then against the request's params. A refused answer is `request.answer` error `4034` (or the same
 refusal on a bare response) with `data.reason`, and the request STAYS OPEN: the client shows the reason
@@ -144,13 +150,14 @@ withdrawn (`request.cancel {reason: too_many_attempts}`) and the agent is told i
 | `file:<n>:outside_dir` | `input.file` | File `n` (0-based) is not directly in `upload.dir` (§5). |
 | `file:<n>:too_large` | `input.file` | File `n` declares more `bytes` than `upload.max_bytes`. |
 | `file:<n>:not_audio` | `input.file` | `accept` is `audio` and file `n`'s `mime` is not `audio/` and a subtype, without parameters (§5.1). |
-| `text:not_audio` | `input.file` | `text` for a request whose `accept` is `image` or `document` (§5.1). |
+| `text:not_audio` | `input.file` | `text` for a request that has no recording to transcribe: `accept` is `image` or `document`, or `any` with no `audio/*` file in the answer (§5.1). |
 | `text:not_verbatim` | `review.draft` | The approved text contains something that cannot be shown as it is (§6). |
 | `text:edited` | `review.draft` | The text differs from the draft while `editable` is false. |
 | `hunk:<id>:unknown` | `review.diff` | `hunks` has an id the request does not (§7). |
 | `hunk:<id>:missing` | `review.diff` | A hunk of the request has no entry in `hunks` (§7). |
 | `decision:inconsistent` | `review.diff` | `approved` with no hunk approved, or `rejected` with one approved (§7). |
 | `file:<n>:outside_dir`, `file:<n>:too_large`, `files:too_large` | `input.signature` | As for `input.file` (§5), over the two files. |
+| `file:<n>:extension` | `input.signature` | File `n`'s name does not end `.png` (for the PNG) or `.svg` (for the SVG) (§8). |
 | `files:not_png_and_svg` | `input.signature` | The two files are not one `image/png` and one `image/svg+xml` by their declared `mime` (§8). |
 | `statement:mismatch` | `input.signature` | `statement_sha256` is not the SHA-256 of the request's `statement` (§8). |
 | `precision:too_precise` | `device.location` | `precision: precise` for a request that asked `approximate` (§9). |
@@ -275,7 +282,7 @@ gateway's existing HTTP upload route, with the credentials it already uses for a
 - `strip_metadata`: remove EXIF and GPS data from camera and library images before uploading.
   Documents are uploaded untouched.
 - `text` (≤4,000) is an audio answer's transcript, when the client has one (§5.1); it is refused for an `image` or
-  a `document` request (`text:not_audio`).
+  a `document` request, and for an `any` request unless an `audio/*` file came with it (`text:not_audio`).
 - A failed or cancelled upload is `4041 upload_failed`, never an answer naming a file that is not
   there.
 
@@ -301,13 +308,17 @@ same answer shape.
   press Send. The system's microphone prompt comes after they pressed Record on the sheet, never instead of it. A
   device without a microphone, or a denied permission, answers `4041` `no_microphone` or `permission_denied`
   unless the person can pick an existing audio file instead (`capture` is a preference).
-- `strip_metadata` is false: there is no EXIF or GPS in a recording.
+- `strip_metadata` is false: it is about images. A recording the app makes carries no location, but a container can
+  (an MP4 audio file may hold a `©xyz` location atom, and creation times), so a recording the person PICKS is
+  uploaded as it is and may carry such tags; the gateway does not strip them and the agent is not told they are
+  absent.
 - Every file's `mime` starts with `audio/` and carries no parameters (`audio/mp4`, not
   `audio/mp4;codecs=mp4a.40.2`); anything else is refused (`file:<n>:not_audio`).
 - `text` is a transcript, optional. It is made ON the device (on-device recognition, nothing sent to a speech
   service) and only when the client can; a client that cannot, such as a browser, leaves it out. The agent receives
   it cleaned and is told it is a machine transcript that may be wrong and that the recording is the source. It is
-  refused for an `image` or a `document` request (`text:not_audio`), which have no recording to transcribe.
+  refused when there is no recording to transcribe: an `image` or a `document` request, or an `any` request whose
+  answer has no `audio/*` file (`text:not_audio`).
 
 ## 6. `review.draft`
 
@@ -586,21 +597,39 @@ device, and answers
 ```
 
 - `files`: one `image/png` and one `image/svg+xml` by their declared `mime`, in either order
-  (`files:not_png_and_svg`).
+  (`files:not_png_and_svg`), each saved under a name ending `.png` or `.svg` to match (`file:<n>:extension`).
 - `statement_sha256` is the SHA-256, lowercase hex, of the UTF-8 bytes of the request's `statement` exactly as the
   frame carried it: no normalisation, no trimming, no line-ending change. The client hashes what it showed. A
   different value is refused (`statement:mismatch`), so what the agent is told was signed is what the person saw.
-- `signed_at` is the client's clock in Unix seconds. The gateway passes it on as the client's claim and adds its
-  own time of receipt.
+- `signed_at` is the client's clock in Unix seconds, at most 2^53 (the same bound as §9's `at`). The gateway passes
+  it on as the client's claim and adds its own time of receipt.
 
 Checks while the request is open: shape, `not_optional`, each file (`file:<n>:outside_dir`,
-`file:<n>:too_large`), the total (`files:too_large`), the two types, the hash. After it settled, the gateway
-checks the files on disk as for §5 and that the PNG begins with the PNG signature and the SVG is XML text
-whose first element is `<svg` (after an XML declaration or comments; no doctype) that holds no script, event
-handler, `javascript:` URL, embedded document, image or `<use>`, stylesheet import or entity; a file that is not
-what it says makes the request `unavailable (bad_upload)`. A client draws plain paths: nothing it needs is refused.
+`file:<n>:too_large`), the total (`files:too_large`), the two types, the names' extensions, the hash. After it
+settled, the gateway checks the files on disk as for §5 (the whole file is read) and that each is what it says
+(`file:<n>:type`, `unavailable (bad_upload)`). The PNG begins with the PNG signature. The SVG is judged by an
+ALLOWLIST, not by what is known to be dangerous, so draw only this:
+
+- UTF-8 text, strictly (a byte order mark is fine); an XML declaration naming another encoding is refused;
+- no `&` anywhere (no entity, no character reference), no `url(` anywhere, no doctype, no CDATA section, no
+  processing instruction, no external reference;
+- elements, written WITHOUT a namespace prefix: `svg` (the root, with `xmlns="http://www.w3.org/2000/svg"`, which
+  only the root may carry), `g`, `path`, `polyline`, `polygon`, `line`, `circle`, `ellipse`, `rect`, `title`,
+  `desc`; text only inside `title` and `desc`; at most 32 levels deep;
+- attributes: `xmlns`, `version`, `viewBox`, `width`, `height`, `preserveAspectRatio`, `transform`, `d`, `points`,
+  `x`, `y`, `x1`, `y1`, `x2`, `y2`, `cx`, `cy`, `r`, `rx`, `ry`, `fill`, `fill-opacity`, `fill-rule`, `opacity`,
+  `stroke`, `stroke-width`, `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`, `stroke-opacity`,
+  `stroke-dasharray` and `stroke-dashoffset`. Nothing else: no `href`, no `style`, no `class`, no script, no event
+  handler, no other namespace.
+
+A plain pad drawing (paths with a stroke) needs nothing more.
+
+In a shared conversation whose turn names nobody, this request is never put to anyone (`unavailable
+(no_acting_user)`, §3).
 
 ## 9. `device.location`
+
+In a shared conversation whose turn names nobody this request is never put to anyone (`unavailable (no_acting_user)`, §3).
 
 Params: the envelope plus `precision`: `approximate` or `precise`.
 
@@ -611,7 +640,7 @@ One fix, never monitoring. `approximate` asks the OS for reduced accuracy (`kCLL
 
 Result: `{"status": "answered", "lat": 52.3731, "lon": 4.8922, "accuracy_m": 35.0, "at": 1791119300, "precision": "approximate"}`
 or `{"status": "skipped"}`. `lat` in [-90, 90], `lon` in [-180, 180], `accuracy_m` in [0, 10,000,000] metres,
-all JSON numbers (never text); `at` is the client's clock, Unix seconds; `precision` is what was shared.
+all JSON numbers (never text); `at` is the client's clock, Unix seconds, at most 2^53; `precision` is what was shared.
 
 The gateway refuses `precise` for an `approximate` request (`precision:too_precise`: the person may share
 less, never more). What the agent receives is rounded by the gateway whatever the client sent: `approximate`
@@ -619,6 +648,8 @@ rounds `lat` and `lon` to two decimals (about 1.1 km of latitude) and raises `ac
 `precise` keeps six decimals. A client SHOULD send what the OS gave it and MUST NOT depend on the rounding.
 
 ## 10. `device.contact`
+
+In a shared conversation whose turn names nobody this request is never put to anyone (`unavailable (no_acting_user)`, §3).
 
 Params: the envelope plus `fields`: 1–6 of `name`, `phones`, `emails`, `postal`, `birthday`, `organization`,
 no repeats.
@@ -647,6 +678,8 @@ receives the requested keys only, each string cleaned (control and invisible cha
 
 ## 11. `device.calendar`
 
+In a shared conversation whose turn names nobody this request is never put to anyone (`unavailable (no_acting_user)`, §3).
+
 Params: the envelope plus
 
 | Key | Type |
@@ -661,7 +694,7 @@ Params: the envelope plus
 | `start`, `end` | optional; dates `2026-10-12` when `all_day` (`end` inclusive), else instants with an offset `2026-10-12T09:30+02:00` (seconds optional, no `Z`, no fractions) |
 | `all_day` | boolean, default false |
 | `location` | string 1–200, one line, optional |
-| `url` | `http` or `https`, no whitespace, at most 300: SHOWN to the person, never opened by the sheet |
+| `url` | `http` or `https`, no whitespace or control character, at most 300, no user information (`https://user@host/` is refused: the text before the first `/`, `?` or `#` has no `@`) and no hidden character (the gateway refuses format characters such as a bidi override or a zero-width one, private-use, unassigned and invisible code points, as it does for §6 text): SHOWN to the person, never opened by the sheet |
 | `alarm_minutes` | integer 0–40,320: an alert this long before `start`; needs `start` |
 
 `end` needs `start` and is not before it. A reminder has one time, `start` (when it is due), and no `end`. A
@@ -673,6 +706,8 @@ person saves there. Calendar access is write-only where the OS offers it. Result
 the person saved, `{"status": "skipped"}` when they cancelled. No identifier travels back.
 
 ## 12. `device.scan`
+
+In a shared conversation whose turn names nobody this request is never put to anyone (`unavailable (no_acting_user)`, §3).
 
 Params: the envelope plus `formats`: 1–7 of `qr`, `ean13`, `ean8`, `code128`, `pdf417`, `datamatrix`,
 `aztec`, no repeats, or absent for every symbology the device reads.

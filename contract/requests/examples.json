@@ -1198,6 +1198,32 @@
               "strip_metadata": false
             }
           }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_file_any",
+          "method": "input.file",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Any file",
+            "summary": "Send whatever you have about the claim.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "accept": "any",
+            "multiple": false,
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 26214400,
+              "max_total_bytes": 26214400,
+              "max_files": 1,
+              "strip_metadata": false
+            }
+          }
         }
       ],
       "invalid_frames": [
@@ -1479,6 +1505,22 @@
               }
             ],
             "text": "Let's start with the budget."
+          }
+        },
+        {
+          "name": "any_with_a_document",
+          "request": "req_file_any",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/c29a07f1e8d4b536-claim.pdf",
+                "name": "claim.pdf",
+                "mime": "application/pdf",
+                "bytes": 120344,
+                "sha256": "91ed46a40ff2cbf4cb9b141f2f8f43ffe6b4976c15119d1b5e30b48129b73765"
+              }
+            ]
           }
         }
       ],
@@ -1851,6 +1893,26 @@
             "status": "skipped"
           },
           "reason": "not_optional"
+        },
+        {
+          "name": "transcript_without_a_recording",
+          "request": "req_file_any",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/c29a07f1e8d4b536-claim.pdf",
+                "name": "claim.pdf",
+                "mime": "application/pdf",
+                "bytes": 120344,
+                "sha256": "91ed46a40ff2cbf4cb9b141f2f8f43ffe6b4976c15119d1b5e30b48129b73765"
+              }
+            ],
+            "text": "This is a claim."
+          },
+          "reason": "text:not_audio",
+          "note": "For an any request a transcript needs an audio/* file in the same answer."
         }
       ]
     },
@@ -3933,6 +3995,88 @@
             "statement_sha256": "bc7ed3f83354e7a0c6ff3d3e79b881bc19ff430fca7c14351365b019c269b07b"
           },
           "reason": "statement:mismatch"
+        },
+        {
+          "name": "png_saved_as_svg",
+          "request": "req_sig_lease",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.svg",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              }
+            ],
+            "signed_at": 1791119310,
+            "statement_sha256": "5635bd861dd1470f255d6d00877b22a5bca2bf8a844af5b6f3622289a4fbfd9b"
+          },
+          "reason": "file:0:extension",
+          "note": "The name ends .png for the PNG and .svg for the SVG."
+        },
+        {
+          "name": "svg_saved_as_png",
+          "request": "req_sig_lease",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.png",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              }
+            ],
+            "signed_at": 1791119310,
+            "statement_sha256": "5635bd861dd1470f255d6d00877b22a5bca2bf8a844af5b6f3622289a4fbfd9b"
+          },
+          "reason": "file:1:extension"
+        },
+        {
+          "name": "signed_at_beyond_2_53",
+          "request": "req_sig_lease",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5c1d9e0a7b3f2468-signature.png",
+                "name": "signature.png",
+                "mime": "image/png",
+                "bytes": 18211,
+                "sha256": "8ce048484c02a1aa4decebd6b50d0dfbf2de808d3bd906e670ca2c8f7628498f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/9a2b4c6d8e0f1325-signature.svg",
+                "name": "signature.svg",
+                "mime": "image/svg+xml",
+                "bytes": 6412,
+                "sha256": "3445aba75ed588a7f35608b818fb7898ec223e8181d6ee94f45b378ccb4c38fa"
+              }
+            ],
+            "signed_at": 9007199254740993,
+            "statement_sha256": "5635bd861dd1470f255d6d00877b22a5bca2bf8a844af5b6f3622289a4fbfd9b"
+          },
+          "reason": "bad_shape"
         }
       ]
     },
@@ -4208,6 +4352,20 @@
             "status": "skipped"
           },
           "reason": "not_optional"
+        },
+        {
+          "name": "timestamp_beyond_2_53",
+          "request": "req_loc_approx",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "lat": 52.3731,
+            "lon": 4.8922,
+            "accuracy_m": 35.0,
+            "at": 9007199254740993,
+            "precision": "approximate"
+          },
+          "reason": "bad_shape"
         }
       ]
     },
@@ -5171,6 +5329,138 @@
               "end": "2026-10-12T10:00+02:00",
               "location": "Tandarts Jansen, Prinsengracht 4",
               "url": "https://example.com/appointments/4711",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "url_with_user_information",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://bank.nl@evil.example/login",
+              "alarm_minutes": 30
+            }
+          },
+          "note": "The text before the first / ? or # has no @."
+        },
+        {
+          "name": "url_with_a_bidi_override",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/\u202etxt.exe",
+              "alarm_minutes": 30
+            }
+          },
+          "note": "Hidden characters are refused by the gateway; a pattern cannot say so."
+        },
+        {
+          "name": "url_with_a_zero_width_character",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://exa\u200bmple.com/",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "url_with_a_bidi_isolate",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://\u2066example.com/",
+              "alarm_minutes": 30
+            }
+          }
+        },
+        {
+          "name": "url_with_a_private_use_character",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Add to your calendar",
+            "summary": "Put the dentist appointment in your calendar.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "event",
+            "item": {
+              "title": "Dentist",
+              "notes": "Bring the insurance card.",
+              "start": "2026-10-12T09:30+02:00",
+              "end": "2026-10-12T10:00+02:00",
+              "location": "Tandarts Jansen, Prinsengracht 4",
+              "url": "https://example.com/\ue000",
               "alarm_minutes": 30
             }
           }

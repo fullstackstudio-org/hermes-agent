@@ -1332,11 +1332,11 @@ def test_an_uploaded_file_round_trip_gives_path_and_the_same_ref_text_as_file_at
     assert root.is_dir()
     one, two = _put(root, "0123456789abcdef-my receipt.pdf", b"%PDF-marker"), _put(
         root, "fedcba9876543210-notes.txt", b"hello")
-    answer = {"status": "answered", "text": "Voice‮ note\n\n\n\nhere", "files": [
+    answer = {"status": "answered", "files": [
         _entry(one, b"%PDF-marker", name="my‮ receipt.pdf", mime="application/pdf"),
         _entry(two, b"hello", mime="not a mime")]}
     rid, outcome = _ask(server, build, "input.file", params, peer=phone, answer=answer)
-    assert outcome.status == "answered" and outcome.payload["text"] == "Voice note\n\nhere"
+    assert outcome.status == "answered" and "text" not in outcome.payload
     first, second = outcome.payload["files"]
     assert first["path"] == str(one.resolve()) and first["name"] == "my receipt.pdf"
     assert first["mime"] == "application/pdf" and first["bytes"] == 11

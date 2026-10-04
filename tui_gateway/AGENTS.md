@@ -178,9 +178,11 @@ hand-off, so they cannot disagree). `input.signature`: the statement is shown VE
 whitespace removed, anything that cannot be shown as it is refused, at most 500 characters), the answer is a PNG and an
 SVG uploaded like `input.file`'s plus `statement_sha256`, which must be the SHA-256 of the exact UTF-8 bytes of the
 frame's `statement` (`statement:mismatch`); after the request settled, `verify_files(sniff=...)` also checks that the
-PNG begins with the PNG signature and the SVG is XML text whose first element is `<svg` (no doctype) with no script, event handler,
-`javascript:` URL, embedded document, image or `<use>`, stylesheet import or entity (`bad_upload`; linear in the file, no
-backtracking pattern). The agent gets
+PNG begins with the PNG signature and the SVG passes `interactive_device._svg_problem` (`bad_upload`): strict UTF-8, no
+`&`, no `url(`, expat with handlers that refuse a doctype, entity, CDATA and processing instruction, and an ALLOWLIST
+of unprefixed elements and attributes (a denylist is bypassed by a prefix, a character reference or another encoding).
+The files' names must end `.png` and `.svg` (`file:<n>:extension`), and the whole file is read (up to 1 MiB, however the
+reads were split). The agent gets
 `signed`, `statement_sha256`, `signed_at` (the client's clock), `received_at` (the gateway's), `signer_name?` and the
 two files. `device.location`: the answer is JSON numbers in range, refused as `precision:too_precise` for a
 `precise` answer to an `approximate` request; the agent receives coordinates ROUNDED by the gateway whatever the
@@ -189,7 +191,7 @@ when the person shared less than asked. `device.contact`: `fields` names what ma
 refused (`contact:<key>:not_requested`, a null included), as is a contact with nothing usable left once cleaned
 (`contact:empty`), and the hand-off cuts the contact to the requested keys again and cleans every string.
 `device.calendar`: the agent's item is cleaned, bounded and held to the contract model (dates when `all_day`, instants
-with an offset otherwise, `end` after `start`, a reminder has no `end`); the client opens the system sheet and only the
+with an offset otherwise, `end` after `start`, a reminder has no `end`; a `url` with user information (`user@host`) or any hidden character is refused); the client opens the system sheet and only the
 person's Save is `done`; the agent receives `{saved: true, kind}` and nothing identifying. `device.scan`: the value is
 untrusted text, bounded at 4,096, shown to the person before it is sent; the agent receives it cleaned (control,
 format, private-use and invisible characters removed, spacing kept) with `cleaned` saying whether that changed it.

@@ -422,9 +422,21 @@ def _diff_problem(params: dict, result: dict) -> str | None:
 # ── input.signature and the device requests ────────────────────────────────────────────────────
 
 
+def _transcript_problem(params: dict, body: dict) -> str | None:
+    """A transcript belongs to a recording: an ``audio`` request has one to give, an ``any`` request only when an
+    ``audio/*`` file was sent, an image or a document request never."""
+    if body.get("text") is None:
+        return None
+    if params.get("accept") == "audio":
+        return None
+    if params.get("accept") == "any" and any(str(f.get("mime")).startswith("audio/") for f in body["files"]):
+        return None
+    return "text:not_audio"
+
+
 def _signature_problem(params: dict, body: dict) -> str | None:
     """The two files (each directly in ``upload.dir`` and within the sizes, as for ``input.file``), then that they are
-    one PNG and one SVG by their declared type, then that ``statement_sha256`` is the SHA-256 of the statement the
+    one PNG and one SVG by their declared type and the extension of their names (``file:<n>:extension``), then that ``statement_sha256`` is the SHA-256 of the statement the
     request carried (``statement:mismatch``)."""
     upload = params.get("upload") or {}
     files = body["files"]
@@ -437,6 +449,11 @@ def _signature_problem(params: dict, body: dict) -> str | None:
         return "files:too_large"
     if sorted(str(file.get("mime")) for file in files) != sorted(SIGNATURE_MIMES):
         return "files:not_png_and_svg"
+    for number, file in enumerate(files):
+        # The name the file is saved under says what it is: ``.png`` for the PNG, ``.svg`` for the SVG.
+        suffix = ".png" if file.get("mime") == "image/png" else ".svg"
+        if not str(file.get("path")).lower().endswith(suffix):
+            return f"file:{number}:extension"
     if body["statement_sha256"] != interactive_device.statement_sha256(str(params.get("statement"))):
         return "statement:mismatch"
     return None
@@ -491,10 +508,7 @@ def validate_answer(method: str, params: dict, result: Any) -> str | None:
             if method == "input.form":
                 return _form_problem(params, body["values"])
             if method == "input.file":
-                # A transcript belongs to a recording: an image or a document request has none to give.
-                return _file_problem(params, body["files"]) or (
-                    "text:not_audio" if body.get("text") is not None and params.get("accept") in ("image", "document")
-                    else None)
+                return _file_problem(params, body["files"]) or _transcript_problem(params, body)
             if method == "input.signature":
                 return _signature_problem(params, body)
             if method == "device.location":

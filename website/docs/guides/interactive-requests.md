@@ -207,7 +207,7 @@ background) gets a fresh two-minute window from that moment, never past the 300-
   requests sent per 10 minutes (separately from `confirm_action`). Requests that reached no app do not count.
 - A signature statement is at most 500 characters and is shown exactly as written: a tab, a hidden character or
   padding is refused for the agent to fix. Its two files are at most 1 MiB each, and the gateway checks after the
-  request that one is a PNG and the other a plain SVG (no script, no embedded content).
+  request that one is a PNG and the other a plain SVG drawing (only paths and shapes: no script, link, style, entity or embedded content).
 - A diff is one file's unified diff (`git diff -- <file>` or `diff -u`), at most 64 KiB, 200 hunks, 400 lines per
   hunk and 500 characters per line. The gateway reads it itself and refuses what cannot be shown as written, naming
   the hunk and the line: a carriage return (a CRLF file), whitespace at the end of a line, a hidden or

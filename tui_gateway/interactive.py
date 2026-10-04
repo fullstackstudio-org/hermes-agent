@@ -306,7 +306,7 @@ def build_file_params(sid: str, *, summary: object, accept: object, capture: obj
     params["multiple"] = multiple
     params["upload"] = {"dir": _upload_dir(sid), "max_bytes": max_bytes, "max_total_bytes": max_total_bytes,
                         "max_files": UPLOAD_MAX_FILES if multiple else 1,
-                        # Nothing to strip from a recording (EXIF and GPS are an image's).
+                        # ``strip_metadata`` is about images: nothing for the client to strip from a recording it makes.
                         "strip_metadata": strip_metadata and accept != "audio"}
     return params
 
@@ -523,8 +523,8 @@ def verify_files(params: dict, files: list[dict], *,
     ``size``, ``hash``; ``dir:unsafe`` when the directory itself is not a real path, is reached through a link or
     changed under the check. Nothing is read beyond the declared size, and nothing is deleted.
 
-    *sniff*, when given, is called for each file that passed with ``(entry, first_bytes)`` (the first chunk read for the
-    hash: the whole file when it is at most one MiB) and may return a problem word, which becomes
+    *sniff*, when given, is called for each file that passed with ``(entry, first_bytes)`` (the first MiB of the file,
+    however the reads were split: the whole file when it is at most one MiB) and may return a problem word, which becomes
     ``file:<n>:<word>`` (a signature's files must be what their ``mime`` says, ``interactive_device``)."""
     upload = params["upload"]
     directory = str(upload["dir"])
@@ -559,10 +559,10 @@ def verify_files(params: dict, files: list[dict], *,
                 total += info.st_size
                 if total > int(upload["max_total_bytes"]):
                     return "files:too_large", []
-                digest, read, first = hashlib.sha256(), 0, b""
+                digest, read, first = hashlib.sha256(), 0, bytearray()
                 while chunk := os.read(fd, min(_HASH_CHUNK, declared + 1 - read)):
-                    if not read:
-                        first = chunk
+                    if len(first) < _HASH_CHUNK:  # a short read is not the end: keep up to a MiB for *sniff*
+                        first += chunk[:_HASH_CHUNK - len(first)]
                     read += len(chunk)
                     digest.update(chunk)
                     if read > declared:
@@ -571,7 +571,7 @@ def verify_files(params: dict, files: list[dict], *,
                     return f"file:{number}:size", []
                 if not hmac.compare_digest(digest.hexdigest(), str(entry["sha256"])):
                     return f"file:{number}:hash", []
-                if sniff is not None and (word := sniff(entry, first)):
+                if sniff is not None and (word := sniff(entry, bytes(first))):
                     return f"file:{number}:{word}", []
             finally:
                 os.close(fd)
@@ -722,6 +722,10 @@ def _present_values(params: dict, values: dict) -> dict:
 
 
 def _signature_sniff(entry: dict, head: bytes) -> str | None:
+    """A signature file is judged WHOLE: one longer than what was kept (never, with the signature's own size bound)
+    cannot be, so it is refused."""
+    if int(entry["bytes"]) != len(head):
+        return "type"
     return interactive_device.png_or_svg_problem(str(entry.get("mime")), head)
 
 

@@ -92,7 +92,11 @@ def device_calendar_tool(summary: str, kind: str, item, title: str | None = None
 
 def device_scan_tool(summary: str, formats=None, title: str | None = None) -> str:
     if isinstance(formats, str):
-        formats = [formats]
+        # JSON text for a list, or one format named as a bare word (as for ``fields``).
+        try:
+            formats = _json_value(formats, "formats") if formats.lstrip().startswith("[") else [formats]
+        except ValueError as exc:
+            return tool_error(str(exc))
     return _run("device.scan", summary=summary, formats=formats, title=title or None)
 
 

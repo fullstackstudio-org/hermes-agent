@@ -59,7 +59,7 @@ REASONS: dict[str, re.Pattern[str]] = {
                              r"file:(0|[1-9][0-9]*):(outside_dir|too_large|not_audio))$"),
     "review.draft": re.compile(r"^(bad_shape|text:(not_verbatim|edited))$"),
     "review.diff": re.compile(r"^(bad_shape|hunk:h[1-9][0-9]{0,2}:(unknown|missing)|decision:inconsistent)$"),
-    "input.signature": re.compile(r"^(bad_shape|not_optional|file:(0|1):(outside_dir|too_large)|files:too_large|"
+    "input.signature": re.compile(r"^(bad_shape|not_optional|file:(0|1):(outside_dir|too_large|extension)|files:too_large|"
                                   r"files:not_png_and_svg|statement:mismatch)$"),
     "device.location": re.compile(r"^(bad_shape|not_optional|precision:too_precise)$"),
     "device.contact": re.compile(r"^(bad_shape|not_optional|contact:(name|phones|emails|postal|birthday|organization)"
@@ -209,6 +209,10 @@ def test_validator_cases_are_consistent_with_their_frames():
                 assert field_id in result["values"], reason
             if problem == "missing":
                 assert result["values"].get(field_id) in (None, "", []), reason
+        elif reason.endswith(":extension"):
+            number = int(reason.split(":")[1])
+            suffix = ".png" if result["files"][number]["mime"] == "image/png" else ".svg"
+            assert not result["files"][number]["path"].endswith(suffix), reason
         elif reason.startswith("file:"):
             assert int(reason.split(":")[1]) < len(result["files"]), reason
         elif reason == "files:too_many":
@@ -218,7 +222,8 @@ def test_validator_cases_are_consistent_with_their_frames():
             assert all(f["bytes"] <= params["upload"]["max_bytes"] for f in result["files"]), reason
             assert sum(f["bytes"] for f in result["files"]) > params["upload"]["max_total_bytes"], reason
         elif reason == "text:not_audio":
-            assert params["accept"] in ("image", "document") and result.get("text"), reason
+            assert result.get("text") and (params["accept"] in ("image", "document") or (
+                params["accept"] == "any" and not any(f["mime"].startswith("audio/") for f in result["files"]))), reason
         elif reason.endswith(":not_audio"):
             assert params["accept"] == "audio", reason
         elif reason == "files:not_png_and_svg":
@@ -612,11 +617,19 @@ def test_a_calendar_item_is_bounded_and_consistent():
                                                        "alarm_minutes": 40320}))
     assert _parses(params, _env(kind="event", item={"title": "T", "all_day": True, "start": "2026-10-12",
                                                     "end": "2026-10-12"}))
+    for url in ("https://example.com", "http://example.com/a@b", "https://example.com?mail=a@b.nl",
+                "https://example.com#@x", "https://\u00e9xample.nl/caf\u00e9"):
+        assert _parses(params, _env(kind="event", item={"title": "T", "url": url})), url
     assert _parses(params, _env(kind="event", item={"title": "T" * 120, "notes": "n" * 2000, "location": "l" * 200,
                                                     "url": "https://example.com/" + "a" * 270}))
     for bad in ({"title": "T" * 121}, {"title": "T", "notes": "n" * 2001}, {"title": "T", "location": "l" * 201},
                 {"title": "T", "url": "https://example.com/" + "a" * 290}, {"title": "T", "url": "ftp://x"},
                 {"title": "T", "url": "https://x y"}, {"title": "T", "url": "https://x\ny"},
+                {"title": "T", "url": "https://bank.nl@evil.example/"}, {"title": "T", "url": "https://user:pw@host/"},
+                {"title": "T", "url": "https://@host/"}, {"title": "T", "url": "https://a.nl\u202e/x"},
+                {"title": "T", "url": "https://a\u200b.nl/"}, {"title": "T", "url": "https://\u2066a.nl/"},
+                {"title": "T", "url": "https://a.nl/\ue000"}, {"title": "T", "url": "https://a.nl/\u00ad"},
+                {"title": "T", "url": "https://a.nl/\ufeff"}, {"title": "T", "url": "https:///path"},
                 {"title": "T", "alarm_minutes": 5}, {"title": "T", "alarm_minutes": True, **timed},
                 {**timed, "alarm_minutes": 40321}, {**timed, "alarm_minutes": 1.5},
                 {**timed, "end": "2026-10-12T09:00+02:00"}, {"title": "T", "end": timed["end"]},
@@ -647,3 +660,13 @@ def test_the_calendar_result_has_its_own_status():
     assert _parses(result, {"status": "done"}) and _parses(result, {"status": "skipped"})
     for bad in ({"status": "answered"}, {"status": "done", "id": "x"}, {}, {"status": "Done"}):
         assert not _parses(result, bad), bad
+
+
+def test_a_clients_clock_is_bounded_to_what_a_json_number_holds():
+    big = 2**53
+    loc = SERVER_REQUESTS["device.location"].result
+    good = {"status": "answered", "lat": 0, "lon": 0, "accuracy_m": 0, "at": big, "precision": "precise"}
+    assert _parses(loc, good) and not _parses(loc, {**good, "at": big + 1})
+    sig = SERVER_REQUESTS["input.signature"].result
+    ok = {"status": "answered", "files": [PNG, SVG], "signed_at": big, "statement_sha256": "a" * 64}
+    assert _parses(sig, ok) and not _parses(sig, {**ok, "signed_at": big + 1})

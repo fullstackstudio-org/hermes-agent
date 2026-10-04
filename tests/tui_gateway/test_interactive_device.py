@@ -211,27 +211,89 @@ def test_the_statement_hash_is_sha256_of_the_exact_utf8_bytes():
     assert dev.statement_sha256("é") != dev.statement_sha256("é")
 
 
+NS = b'xmlns="http://www.w3.org/2000/svg"'
+
+
+PLAIN = b"<svg " + b'xmlns="http://www.w3.org/2000/svg"' + b"><path d='M0 0'/></svg>"
+
+
+def _svg(inner=b"", attrs=b""):
+    return b"<svg " + NS + (b" " + attrs if attrs else b"") + b">" + inner + b"</svg>"
+
+
 @pytest.mark.parametrize("mime, head, ok", [
     ("image/png", b"\x89PNG\r\n\x1a\nrest", True), ("image/png", b"\x89PNG\r\n", False), ("image/png", b"GIF89a", False),
-    ("image/png", b"", False),
-    ("image/svg+xml", SVG_BYTES, True), ("image/svg+xml", b"<svg xmlns='http://www.w3.org/2000/svg'/>", True),
-    ("image/svg+xml", b"\xef\xbb\xbf<?xml version='1.0'?><!-- c --><!-- d -->\n<svg>", True),
-    ("image/svg+xml", b"<?xml version='1.0'?><!DOCTYPE svg PUBLIC 'x' 'y'><svg>", False),
-    ("image/svg+xml", b"<!DOCTYPE svg [<!ENTITY a 'b'>]><svg>&a;</svg>", False),
-    ("image/svg+xml", b"<?xml-stylesheet href='x.css'?><svg/>", False),
-    ("image/svg+xml", b"<svg/><?xml version='1.0'?>", True), ("image/svg+xml", b" <?xml version='1.0'?><svg/>", False),
-    ("image/svg+xml", b"<!-- never closed <svg>", False), ("image/svg+xml", b"<svgx/>", False),
-    ("image/svg+xml", b"<html><svg></svg></html>", False), ("image/svg+xml", b"\x89PNG\r\n\x1a\n", False),
-    ("image/svg+xml", b"", False), ("image/jpeg", b"\xff\xd8\xff", False),
-    ("image/svg+xml", b"<svg><script>alert(1)</script></svg>", False),
-    ("image/svg+xml", b"<svg><SCRIPT src=x></SCRIPT></svg>", False),
-    ("image/svg+xml", b"<svg onload=alert(1)>", False), ("image/svg+xml", b"<svg><path onclick = 'x'/></svg>", False),
-    ("image/svg+xml", b"<svg><a href='javascript:x'/></svg>", False),
-    ("image/svg+xml", b"<svg><foreignObject/></svg>", False), ("image/svg+xml", b"<svg><image href='x'/></svg>", False),
-    ("image/svg+xml", b"<svg><style>@import url(x)</style></svg>", False),
-    ("image/svg+xml", b"<svg><use href='#a'/></svg>", False),
-    ("image/svg+xml", b"<svg><USE xlink:href=\"#a\"/></svg>", False),
-    ("image/svg+xml", b"<svg><use href='http://x/y.svg#a'/></svg>", False),
+    ("image/png", b"", False), ("image/jpeg", b"\xff\xd8\xff", False),
+    # what a pad draws
+    ("image/svg+xml", SVG_BYTES, True), ("image/svg+xml", b"<svg " + NS + b"/>", True),
+    ("image/svg+xml", b"\xef\xbb\xbf" + SVG_BYTES, True),
+    ("image/svg+xml", b"<!-- c -->" + _svg(b'<title>Sign</title><desc>a &amp; b</desc>').replace(b"&amp;", b"and"), True),
+    ("image/svg+xml", _svg(b'<g transform="scale(2)"><path d="M0 0L1 1" fill="none" stroke="#000" stroke-width="2" '
+                           b'stroke-linecap="round"/><polyline points="0,0 1,1"/><polygon points="0,0 1,1 2,0"/>'
+                           b'<line x1="0" y1="0" x2="1" y2="1"/><circle cx="1" cy="1" r="1"/>'
+                           b'<ellipse cx="1" cy="1" rx="2" ry="1"/><rect x="0" y="0" width="1" height="1"/></g>',
+                           b'viewBox="0 0 10 10" width="10" height="10" version="1.1"'), True),
+    ("image/svg+xml", b'<?xml version="1.0" encoding="UTF-8"?>' + PLAIN, True),
+    ("image/svg+xml", b'<?xml version="1.0" encoding="utf-8" standalone="no"?>\n' + PLAIN, True),
+    # not an SVG, not XML, not UTF-8
+    ("image/svg+xml", b"", False), ("image/svg+xml", b"\x89PNG\r\n\x1a\n", False),
+    ("image/svg+xml", b"<html><svg></svg></html>", False), ("image/svg+xml", b"<svgx/>", False),
+    ("image/svg+xml", b"<svg " + NS + b"><path</svg>", False), ("image/svg+xml", b"<!-- never closed <svg>", False),
+    ("image/svg+xml", _svg(b"\xff\xfe"), False), ("image/svg+xml", SVG_BYTES.decode().encode("utf-16"), False),
+    ("image/svg+xml", b'<?xml version="1.0" encoding="ISO-2022-JP"?><svg ' + NS + b"><scr\x1b(Bipt>alert(1)</scr\x1b(Bipt>"
+                      b"</svg>", False),
+    ("image/svg+xml", b'<?xml version="1.0" encoding="ISO-8859-1"?>' + PLAIN, False),
+    ("image/svg+xml", b'<?xml version="1.0" encoding="UTF-16"?>' + PLAIN, False),
+    ("image/svg+xml", b"<svg " + NS + b"/><script>x</script>", False), ("image/svg+xml", SVG_BYTES + SVG_BYTES, False),
+    ("image/svg+xml", SVG_BYTES + b"<!-- after -->", True),
+    # the prologue: nothing but a declaration at the very start and comments
+    ("image/svg+xml", b"<?xml-stylesheet href='x.css'?>" + PLAIN, False),
+    ("image/svg+xml", b" <?xml version='1.0'?>" + PLAIN, False),
+    ("image/svg+xml", b"<?xml version='1.0'?><!DOCTYPE svg PUBLIC 'x' 'y'>" + PLAIN, False),
+    ("image/svg+xml", b"<!DOCTYPE svg [<!ENTITY a 'b'>]>" + _svg(b"&a;"), False),
+    ("image/svg+xml", b"<!DOCTYPE svg>" + PLAIN, False),
+    ("image/svg+xml", SVG_BYTES + b"<?php x ?>", False),
+    # a namespace the root must carry, and only the root
+    ("image/svg+xml", b"<svg><path d='M0 0'/></svg>", False),
+    ("image/svg+xml", b'<svg xmlns="http://www.w3.org/1999/xhtml"><path d="M0 0"/></svg>', False),
+    ("image/svg+xml", _svg(b'<g xmlns="http://www.w3.org/2000/svg"/>'), False),
+    ("image/svg+xml", _svg(b'<path xmlns="http://www.w3.org/1999/xhtml"/>'), False),
+    # script, handlers, prefixes (the reviewer's vectors)
+    ("image/svg+xml", _svg(b"<script>alert(1)</script>"), False), ("image/svg+xml", _svg(b"<SCRIPT src=x></SCRIPT>"), False),
+    ("image/svg+xml", b"<svg " + NS + b' xmlns:s="http://www.w3.org/2000/svg"><s:script>alert(1)</s:script></svg>', False),
+    ("image/svg+xml", b"<svg " + NS + b' xmlns:h="http://www.w3.org/1999/xhtml"><h:script>alert(1)</h:script></svg>', False),
+    ("image/svg+xml", b"<svg " + NS + b' xmlns:s="http://www.w3.org/2000/svg"><s:foreignObject/></svg>', False),
+    ("image/svg+xml", b"<svg " + NS + b' xmlns:s="http://www.w3.org/2000/svg"><s:path d="M0 0"/></svg>', False),
+    ("image/svg+xml", _svg(b"<path/>", b"onload=alert(1)"), False), ("image/svg+xml", _svg(b"<path onclick = 'x'/>"), False),
+    ("image/svg+xml", b"<svg " + NS + b"\tonload='x'></svg>", False),
+    ("image/svg+xml", _svg(b"<foreignObject/>"), False), ("image/svg+xml", _svg(b"<image href='x'/>"), False),
+    ("image/svg+xml", _svg(b"<a href='javascript:x'><path/></a>"), False),
+    ("image/svg+xml", b"<svg " + NS + b' xmlns:x="http://www.w3.org/1999/xlink"><a x:href="&#106;avascript:alert(1)">'
+                      b"<path d='M0 0'/></a></svg>", False),
+    ("image/svg+xml", _svg(b"<a><set attributeName='href' to='&#x6a;avascript:alert(1)'/><path d='M0 0'/></a>"), False),
+    ("image/svg+xml", _svg(b'<a href="data:text/html;base64,AAAA"><path/></a>'), False),
+    ("image/svg+xml", _svg(b'<filter id="f"><feImage href="https://example.invalid/x.png"/></filter>'), False),
+    ("image/svg+xml", _svg(b"<use href='#a'/>"), False), ("image/svg+xml", _svg(b'<USE xlink:href="#a"/>'), False),
+    ("image/svg+xml", _svg(b"<use href='http://x/y.svg#a'/>"), False),
+    ("image/svg+xml", _svg(b"<iframe/>"), False), ("image/svg+xml", _svg(b"<embed/>"), False),
+    ("image/svg+xml", _svg(b"<animate attributeName='x' to='1'/>"), False),
+    # CSS and references
+    ("image/svg+xml", _svg(b"<style>path{fill:url(https://example.invalid/a.svg#g)}</style>"), False),
+    ("image/svg+xml", _svg(b"<style>@import 'x.css';</style>"), False),
+    ("image/svg+xml", _svg(b'<path style="fill:url(https://example.invalid/a#b)"/>'), False),
+    ("image/svg+xml", _svg(b'<path style="fill:red"/>'), False), ("image/svg+xml", _svg(b'<path class="a"/>'), False),
+    ("image/svg+xml", _svg(b'<path fill="url(#g)"/>'), False), ("image/svg+xml", _svg(b'<path fill="URL(#g)"/>'), False),
+    ("image/svg+xml", _svg(b'<path d="M0 0" xlink:href="#a"/>'), False),
+    ("image/svg+xml", _svg(b'<path d="M0 0" xml:space="preserve"/>'), False),
+    # no entities or references anywhere
+    ("image/svg+xml", _svg(b"<title>a &amp; b</title>"), False), ("image/svg+xml", _svg(b"<title>&#65;</title>"), False),
+    ("image/svg+xml", _svg(b'<path d="M0 0" fill="&#x23;000"/>'), False),
+    ("image/svg+xml", _svg(b"<![CDATA[x]]>"), False), ("image/svg+xml", _svg(b"<title><![CDATA[x]]></title>"), False),
+    # text outside a title or a description
+    ("image/svg+xml", _svg(b"hello"), False), ("image/svg+xml", _svg(b"<g>hello</g>"), False),
+    ("image/svg+xml", _svg(b"<title>fine</title>\n  <desc>fine</desc>\n"), True),
+    # depth
+    ("image/svg+xml", _svg(b"<g>" * 30 + b"</g>" * 30), True), ("image/svg+xml", _svg(b"<g>" * 40 + b"</g>" * 40), False),
 ])
 def test_a_signature_file_is_what_its_declared_type_says(mime, head, ok):
     assert (dev.png_or_svg_problem(mime, head) is None) is ok
@@ -1057,3 +1119,85 @@ def test_checking_a_signature_file_is_linear_in_its_size(blob):
     started = time.monotonic()
     dev.png_or_svg_problem("image/svg+xml", blob)
     assert time.monotonic() - started < 2.0
+
+
+# ── review round 1: url, names, transcripts, short reads, formats ───────────────────────────────
+
+
+@pytest.mark.parametrize("url, ok", [
+    ("https://example.com/a", True), ("http://example.com/a@b", True), ("https://example.com?mail=a@b.nl", True),
+    ("https://bank.nl@evil.example/login", False), ("https://user:pw@host/", False), ("https://@host/", False),
+    ("https://example.com/\u202etxt.exe", False), ("https://exa\u200bmple.com/", False),
+    ("https://\u2066example.com/", False), ("https://example.com/\ue000", False), ("https://example.com/\u00ad", False),
+    ("https://example.com/\ufeff", False), ("https://example.com/\u3164", False), ("https://example.com/\U000e0041", False),
+    ("https://example.com/\u0378", False),      # unassigned
+    ("https://example.com/a b", False), ("javascript:alert(1)", False), ("ftp://example.com/", False)])
+def test_a_calendar_url_has_no_user_information_and_no_hidden_character(url, ok):
+    if ok:
+        assert dev.build_calendar_item({"title": "x", "url": url}, _Refused)["url"] == url
+    else:
+        with pytest.raises(_Refused, match="item: url") as raised:
+            dev.build_calendar_item({"title": "x", "url": url}, _Refused)
+        assert "bank" not in str(raised.value) and MARKER not in str(raised.value)
+
+
+def test_a_url_the_agent_hides_text_in_is_refused_with_a_sentence_it_can_act_on(build):
+    with pytest.raises(build.InteractiveParamsError, match="url cannot be shown as it is"):
+        _calendar(build, item={**ITEM, "url": "https://example.com/\u202etxt.exe"})
+    with pytest.raises(build.InteractiveParamsError, match="item: url"):
+        _calendar(build, item={**ITEM, "url": "https://bank.nl@evil.example/"})
+
+
+def test_the_signature_files_names_must_say_what_they_are():
+    files = _sig_answer()["files"]
+    assert v.validate_answer("input.signature", _sig_params(), _sig_answer()) is None
+    upper = [{**files[0], "path": files[0]["path"].replace(".png", ".PNG")},
+             {**files[1], "path": files[1]["path"].replace(".svg", ".Svg")}]
+    assert v.validate_answer("input.signature", _sig_params(), _sig_answer(files=upper)) is None, "case does not matter"
+    png_as_svg = {**files[0], "path": files[0]["path"].replace(".png", ".svg")}
+    assert v.validate_answer("input.signature", _sig_params(), _sig_answer(files=[png_as_svg, files[1]])) == \
+        "file:0:extension"
+    svg_as_png = {**files[1], "path": files[1]["path"].replace(".svg", ".png")}
+    assert v.validate_answer("input.signature", _sig_params(), _sig_answer(files=[files[0], svg_as_png])) == \
+        "file:1:extension"
+    for name in ("noextension", "x.png.exe", "x.svgz", "x.png "):
+        odd = {**files[0], "path": f"{_DIR}/aaaaaaaaaaaaaaaa-{name}"}
+        assert v.validate_answer("input.signature", _sig_params(), _sig_answer(files=[odd, files[1]])) == \
+            "file:0:extension", name
+
+
+@pytest.mark.parametrize("accept, mime, ok", [
+    ("any", "audio/mp4", True), ("any", "application/pdf", False), ("any", "image/jpeg", False),
+    ("audio", "audio/mp4", True), ("image", "image/jpeg", False), ("document", "application/pdf", False)])
+def test_a_transcript_needs_a_recording_in_the_same_answer(accept, mime, ok):
+    params = {**_ENV, "accept": accept, "multiple": False,
+              "upload": {"dir": _DIR, "max_bytes": 100, "max_total_bytes": 100, "max_files": 1, "strip_metadata": True}}
+    if accept == "audio":
+        params["capture"] = "audio"
+    answer = {"status": "answered", "text": "Tuesday.", "files": [{
+        "path": f"{_DIR}/a07e5d21c4b98f13-x", "name": "x", "mime": mime, "bytes": 10, "sha256": "0" * 64}]}
+    assert v.validate_answer("input.file", params, answer) == (None if ok else "text:not_audio")
+
+
+def test_a_short_read_does_not_shorten_what_a_signature_file_is_judged_on(build, tmp_path, monkeypatch):
+    """``os.read`` may return less than asked: the whole file is still collected (up to a MiB) before it is sniffed."""
+    params = _sig(build)
+    png, svg, files = _signature_files(params, svg=_svg_bytes(b"<path d='M0 0'/>" * 2000))
+    real = build.os.read
+    monkeypatch.setattr(build.os, "read", lambda fd, n: real(fd, min(n, 7)))
+    assert build.verify_files(params, files, sniff=build._signature_sniff)[0] == ""
+    # a script placed after the first 7 bytes (and the first short read) is still seen
+    png, svg, files = _signature_files(params, svg=_svg_bytes(b"<path d='M0 0'/>" * 2000 + b"<script/>"))
+    assert build.verify_files(params, files, sniff=build._signature_sniff)[0] == "file:1:type"
+
+
+def _svg_bytes(inner: bytes) -> bytes:
+    return b'<svg xmlns="http://www.w3.org/2000/svg">' + inner + b"</svg>"
+
+
+def test_a_signature_file_that_was_not_read_whole_is_refused_not_judged_on_its_start():
+    from tui_gateway import interactive
+    head = _svg_bytes(b"<path d='M0 0'/>")
+    assert interactive._signature_sniff({"mime": "image/svg+xml", "bytes": len(head)}, head) is None
+    assert interactive._signature_sniff({"mime": "image/svg+xml", "bytes": len(head) + 1}, head) == "type"
+    assert interactive._signature_sniff({"mime": "image/png", "bytes": len(PNG_BYTES)}, PNG_BYTES) is None

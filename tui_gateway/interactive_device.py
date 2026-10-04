@@ -17,8 +17,9 @@ settled) use, so the two can never disagree about what an answer means.
   went out. The client hashes what it showed; the answer must carry this very value.
 - :func:`build_calendar_item`: the agent's calendar item as the contract's ``CalendarItem``: every string the person
   will see cleaned, anything over a bound refused (never truncated), the rest left to the contract's own model.
-- :func:`png_or_svg_problem`: a signature's two files are what they say (the PNG signature, an SVG that is XML text
-  with no script and no event handler), read after the request settled.
+- :func:`png_or_svg_problem`: a signature's two files are what they say (the PNG signature; an SVG that parses as
+  UTF-8 XML with no doctype or entity and uses only a short allowlist of plain drawing elements and attributes), read
+  after the request settled.
 
 Nothing here does I/O, logs or keeps state.
 """
@@ -46,13 +47,19 @@ CONTACT_KEYS = tuple(field.value for field in ContactField)
 _LISTS = {"phones": CONTACT_PHONES_MAX, "emails": CONTACT_EMAILS_MAX, "postal": CONTACT_POSTALS_MAX}
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-_SVG_WHITESPACE = b" \t\r\n"
-_SVG_ROOT = re.compile(rb"<svg[\s>/]")
-# What a signature drawn on a pad never needs and an SVG viewer would act on: script, event handlers, ``javascript:``,
-# embedded documents, images and references (``<use>`` too), a stylesheet import. Every alternative is a literal or a
-# word and a short run, so a scan of a MiB is linear.
-_SVG_ACTIVE = re.compile(rb"<script|\son[a-z]+\s*=|javascript:|<foreignObject|<iframe|<embed|<object|<image|<use\b"
-                         rb"|@import|<!ENTITY", re.IGNORECASE)
+SVG_NAMESPACE = "http://www.w3.org/2000/svg"
+#: The only elements a drawn signature needs, written WITHOUT a prefix (a prefixed name is refused whatever namespace
+#: it maps to): the root, a group, the shapes, and a title and description.
+SVG_ELEMENTS = frozenset({"svg", "g", "path", "polyline", "polygon", "line", "circle", "ellipse", "rect", "title",
+                          "desc"})
+#: The only attributes on them. No ``href`` or ``xlink:href``, no ``style``, no ``class``, no event handler, no
+#: ``xml:*`` and no other namespace declaration: ``xmlns`` itself is allowed only on the root with the SVG namespace.
+SVG_ATTRIBUTES = frozenset({
+    "xmlns", "version", "viewBox", "width", "height", "preserveAspectRatio", "transform", "d", "points", "x", "y", "x1",
+    "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry", "fill", "fill-opacity", "fill-rule", "opacity", "stroke",
+    "stroke-width", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stroke-opacity", "stroke-dasharray",
+    "stroke-dashoffset"})
+SVG_MAX_DEPTH = 32
 
 
 # ── location ───────────────────────────────────────────────────────────────────────────────────
@@ -178,38 +185,90 @@ def statement_sha256(statement: str) -> str:
     return hashlib.sha256(statement.encode("utf-8")).hexdigest()
 
 
-def _svg_root_follows_prologue(head: bytes) -> bool:
-    """Whether *head* is XML text whose first element is ``<svg``: after an optional byte order mark, whitespace, an
-    optional XML declaration and comments, nothing else (no doctype, no processing instruction). A linear walk with
-    ``bytes.find``, never a regular expression over the prologue: a file of a million comments costs a million steps."""
-    data = head[3:] if head.startswith(b"\xef\xbb\xbf") else head
-    pos, size = 0, len(data)
-    while True:
-        while pos < size and data[pos] in _SVG_WHITESPACE:
-            pos += 1
-        if pos == 0 and data[:5] == b"<?xml" and data[5:6] in (b" ", b"\t", b"\r", b"\n", b"?"):
-            end = data.find(b"?>")
-            if end < 0:
-                return False
-            pos = end + 2
-        elif data.startswith(b"<!--", pos):
-            end = data.find(b"-->", pos + 4)
-            if end < 0:
-                return False
-            pos = end + 3
-        else:
-            return _SVG_ROOT.match(data, pos) is not None
+class _SvgRefused(Exception):
+    """The SVG uses something outside the allowlist; the word says what (never put in a reply)."""
+
+
+def _svg_problem(head: bytes) -> str | None:
+    """Why *head* is not a plain drawn SVG, or None. A strict UTF-8 decode (anything else, a byte order mark apart, is
+    refused, and so is any XML declaration of another encoding), no ``&`` anywhere (no entity, no character
+    reference, so nothing is spelt out of pieces), no ``url(``, then ``xml.parsers.expat`` (linear; a doctype, an
+    entity declaration, a processing instruction and an external reference are refused by its handlers) and an
+    ALLOWLIST: unprefixed elements of :data:`SVG_ELEMENTS`, attributes of :data:`SVG_ATTRIBUTES` only, ``xmlns`` on the
+    root and equal to :data:`SVG_NAMESPACE`, text only inside ``title`` and ``desc``, at most :data:`SVG_MAX_DEPTH` deep.
+    A denylist of what is dangerous is never enough: a prefix, a character reference or another encoding spells the
+    same thing differently."""
+    from xml.parsers import expat
+    try:
+        text = head.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return "encoding"
+    if "&" in text or "url(" in text.lower():
+        return "reference"
+    depth = 0
+    stack: list[str] = []
+
+    def refuse(word: str):
+        raise _SvgRefused(word)
+
+    def xml_decl(version, encoding, standalone):
+        if encoding is not None and encoding.lower() not in ("utf-8", "utf8"):
+            refuse("encoding")
+
+    def start(name, attrs):
+        nonlocal depth
+        depth += 1
+        if depth > SVG_MAX_DEPTH or name not in SVG_ELEMENTS or (depth == 1) != (name == "svg"):
+            refuse("element")
+        for key, value in attrs.items():
+            if key not in SVG_ATTRIBUTES or "url(" in value.lower():
+                refuse("attribute")
+            if key == "xmlns" and (depth != 1 or value != SVG_NAMESPACE):
+                refuse("namespace")
+        if depth == 1 and attrs.get("xmlns") != SVG_NAMESPACE:
+            refuse("namespace")
+        stack.append(name)
+
+    def end(name):
+        nonlocal depth
+        depth -= 1
+        stack.pop()
+
+    def chars(data):
+        if data.strip() and (not stack or stack[-1] not in ("title", "desc")):
+            refuse("text")
+
+    parser = expat.ParserCreate()
+    parser.buffer_text = True
+    parser.XmlDeclHandler = xml_decl
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.CharacterDataHandler = chars
+    parser.StartDoctypeDeclHandler = lambda *args: refuse("doctype")
+    parser.EntityDeclHandler = lambda *args: refuse("entity")
+    parser.ProcessingInstructionHandler = lambda *args: refuse("instruction")
+    parser.StartCdataSectionHandler = lambda: refuse("cdata")
+    parser.ExternalEntityRefHandler = lambda *args: refuse("external")
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    try:
+        parser.Parse(text, True)
+    except _SvgRefused as exc:
+        return str(exc)
+    except expat.ExpatError:
+        return "xml"
+    except Exception:  # noqa: BLE001 - an input that cannot be judged is refused
+        return "xml"
+    return None if depth == 0 else "xml"
 
 
 def png_or_svg_problem(mime: str, head: bytes) -> str | None:
-    """``type`` when the start of a signature file (*head*: at most its first MiB, all of it for a file within the
-    signature's own size bound) is not what its declared *mime* says: a PNG begins with the PNG signature; an SVG is
-    XML text that begins with ``<svg`` (after an XML declaration or comments; a doctype is refused) and holds no
-    ``<script``, event-handler attribute, ``javascript:`` URL, embedded object, image or ``<use>``, or stylesheet import."""
+    """``type`` when a signature file (*head*: ALL of it; the caller refuses a file it could not read whole) is not what
+    its declared *mime* says: a PNG begins with the PNG signature; an SVG passes :func:`_svg_problem` (UTF-8 XML,
+    no doctype or entity, only the allowlisted drawing elements and attributes)."""
     if mime == "image/png":
         return None if head.startswith(_PNG_SIGNATURE) else "type"
     if mime == "image/svg+xml":
-        return None if _svg_root_follows_prologue(head) and not _SVG_ACTIVE.search(head) else "type"
+        return "type" if _svg_problem(head) else None
     return "type"
 
 

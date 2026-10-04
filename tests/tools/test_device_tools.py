@@ -376,6 +376,20 @@ def test_device_scan_round_trip_gives_cleaned_untrusted_text(server, phone):
     assert data["cleaned"] is False and "formats" not in phone.requests("device.scan")[1]["params"]
 
 
+def test_device_scan_takes_formats_as_json_text_or_one_bare_word(server, phone):
+    for formats, want in ((json.dumps(["qr", "ean13"]), ["qr", "ean13"]), ("aztec", ["aztec"])):
+        data = _ask(server, phone, "device.scan", tool.device_scan_tool,
+                    {"status": "answered", "value": "x", "symbology": want[0]}, summary="Scan it.", formats=formats)
+        assert data["outcome"] == "answered"
+        assert phone.requests("device.scan")[-1]["params"]["formats"] == want
+    release = _bind_ui_session("s1")
+    try:
+        assert "formats must be JSON" in json.loads(tool.device_scan_tool(summary="x", formats="[qr"))["error"]
+        assert "error" in json.loads(tool.device_scan_tool(summary="x", formats="upc"))
+    finally:
+        release()
+
+
 def test_device_scan_refuses_formats_it_does_not_know_with_nothing_sent(server, phone):
     release = _bind_ui_session("s1")
     try:

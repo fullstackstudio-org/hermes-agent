@@ -169,7 +169,7 @@
           "anyOf": [
             {
               "maxLength": 300,
-              "pattern": "^https?://[^\\s\\x00-\\x1f\\x7f\\u0085\\u2028\\u2029]+$",
+              "pattern": "^https?://[^\\s@/?#\\x00-\\x1f\\x7f\\u0085\\u2028\\u2029]+([/?#][^\\s\\x00-\\x1f\\x7f\\u0085\\u2028\\u2029]*)?$",
               "type": "string"
             },
             {
@@ -613,6 +613,7 @@
           "type": "number"
         },
         "at": {
+          "maximum": 9007199254740992,
           "minimum": 0,
           "title": "At",
           "type": "integer"
@@ -2292,6 +2293,7 @@
           "type": "array"
         },
         "signed_at": {
+          "maximum": 9007199254740992,
           "minimum": 0,
           "title": "Signed At",
           "type": "integer"

@@ -14,6 +14,8 @@ from typing import Annotated, Any, Callable, Literal
 
 from pydantic import Field, RootModel, StrictBool, StrictFloat, StrictInt, StrictStr, model_validator
 
+from tui_gateway.request_text import verbatim_problem
+
 from .base import JsonValue, Params, Payload, Result, WireEnum
 from .registry import event, server_request
 
@@ -1024,6 +1026,10 @@ server_request("review.diff", params=ReviewDiffRequestParams, result=ReviewDiffR
 
 # ── input.signature ───────────────────────────────────────────────────────────────────────────
 
+#: A client's clock in Unix seconds (``signed_at``, ``at``): at most 2**53, the largest whole number a JSON reader that
+#: uses floats holds exactly. The gateway adds its own time of receipt to a signature.
+TIMESTAMP_MAX = 2**53
+
 SIGNATURE_STATEMENT_MAX = 500
 SIGNATURE_SIGNER_MAX = 80
 #: ``statement_sha256``, and every other SHA-256 of this contract: 64 lowercase hex digits.
@@ -1057,7 +1063,7 @@ class InputSignatureAnswered(Result):
 
     status: Literal[InputStatus.answered]
     files: list[UploadedFile] = Field(min_length=2, max_length=2)
-    signed_at: StrictInt = Field(ge=0)
+    signed_at: StrictInt = Field(ge=0, le=TIMESTAMP_MAX)
     statement_sha256: str = Field(pattern=SHA256_HEX)
 
 
@@ -1107,7 +1113,7 @@ class DeviceLocationAnswered(Result):
     lat: float = Field(strict=True, ge=-90, le=90, allow_inf_nan=False)
     lon: float = Field(strict=True, ge=-180, le=180, allow_inf_nan=False)
     accuracy_m: float = Field(strict=True, ge=0, le=LOCATION_ACCURACY_MAX, allow_inf_nan=False)
-    at: StrictInt = Field(ge=0)
+    at: StrictInt = Field(ge=0, le=TIMESTAMP_MAX)
     precision: LocationPrecision
 
 
@@ -1206,8 +1212,12 @@ CALENDAR_URL_MAX = 300
 CALENDAR_ALARM_MAX_MINUTES = 40_320
 #: A date (an all-day item) or an instant as :data:`FORM_DATETIME` (a timed one); which one follows ``all_day``.
 CALENDAR_WHEN = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T" + _CLOCK + _OFFSET + ")?$"
-#: ``http`` or ``https`` and no whitespace: shown to the person, never opened by the sheet.
-CALENDAR_URL = r"^https?://[^\s\x00-\x1f\x7f\u0085\u2028\u2029]+$"
+#: ``http`` or ``https``, no whitespace or control character, and NO user information (``user@host``: the part before
+#: the first ``/``, ``?`` or ``#`` holds no ``@``): shown to the person, never opened by the sheet. The gateway also
+#: refuses hidden characters (format, private-use, unassigned, default-ignorable and invisible code points: a bidi
+#: override can reorder what the person reads), which no portable pattern can say (``CalendarItem``).
+CALENDAR_URL = (r"^https?://[^\s@/?#\x00-\x1f\x7f\u0085\u2028\u2029]+"
+                r"([/?#][^\s\x00-\x1f\x7f\u0085\u2028\u2029]*)?$")
 
 
 class CalendarKind(WireEnum):
@@ -1236,6 +1246,8 @@ class CalendarItem(Params):
             # ``fromisoformat`` is the calendar: a day that does not exist (2026-02-30) raises ValueError.
             return _dt.date.fromisoformat(text) if "T" not in text else _dt.datetime.fromisoformat(text)
 
+        if self.url is not None and (problem := verbatim_problem(self.url)):
+            raise ValueError(f"calendar item: url cannot be shown as it is ({problem})")
         for name in ("start", "end"):
             value = getattr(self, name)
             if value is not None and ("T" not in value) != self.all_day:

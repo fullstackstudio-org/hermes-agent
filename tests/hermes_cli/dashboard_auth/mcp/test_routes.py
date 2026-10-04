@@ -239,6 +239,18 @@ def test_a_secret_client_authenticates_against_the_stored_hash(gw):
     assert gw.store.grants(include_inactive=True)[0].revoked_by == "client"
 
 
+def test_a_parallel_refresh_is_refused_without_ending_the_grant(gw):
+    flow = gw.connect()
+    first, late = gw.refresh(flow), gw.refresh(flow)  # the same refresh token twice, as two parallel requests
+    assert first.status_code == 200, first.text
+    assert (late.status_code, late.json()["error"]) == (400, "invalid_grant")
+    [grant] = gw.store.grants()
+    assert grant.revoked_at is None
+    assert gw.call(first.json()["access_token"]).status_code == 503  # bridge_not_ready: admitted
+    assert gw.refresh(flow, first.json()["refresh_token"]).status_code == 200
+    assert not [line for line in audit_lines() if line["event"] == "mcp_grant_revoked"]
+
+
 def test_a_token_request_for_another_resource_is_invalid_target(gw):
     flow = gw.consent(gw.register())
     r = gw.token(flow, resource="https://other.example.invalid/mcp")

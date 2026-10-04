@@ -399,17 +399,22 @@ def test_refresh_rotation_and_reuse_revokes_the_grant(provider, store, clock):
     second = run(provider.exchange_refresh_token(client, rt, rt.scopes))
     assert second.refresh_token != first.refresh_token and second.access_token != first.access_token
     assert run(provider.load_access_token(second.access_token)) is not None
+    clock.t += store_mod.REFRESH_RACE_GRACE  # past the parallel-refresh grace
     assert run(provider.load_refresh_token(client, first.refresh_token)) is None  # reuse
     assert store.grant(rt.grant_id).revoked_by == BY_REFRESH_REUSE
     assert run(provider.load_access_token(second.access_token)) is None
     assert run(provider.load_refresh_token(client, second.refresh_token)) is None
 
 
-def test_refresh_exchange_with_a_stale_object_is_reuse(provider, store):
+def test_refresh_exchange_with_a_stale_object_is_reuse(provider, store, clock):
     client = run(registered(provider))
     first = run(tokens(provider, client))
     rt = run(provider.load_refresh_token(client, first.refresh_token))
     run(provider.exchange_refresh_token(client, rt, rt.scopes))
+    with pytest.raises(TokenError) as raced:  # a parallel refresh: refused, the grant stays
+        run(provider.exchange_refresh_token(client, rt, rt.scopes))
+    assert raced.value.error == "invalid_grant" and store.grant(rt.grant_id).live
+    clock.t += store_mod.REFRESH_RACE_GRACE
     with pytest.raises(TokenError) as refused:
         run(provider.exchange_refresh_token(client, rt, rt.scopes))
     assert refused.value.error == "invalid_grant" and store.grant(rt.grant_id).revoked_by == BY_REFRESH_REUSE
@@ -556,7 +561,7 @@ def _app(provider: MCPProvider) -> Starlette:
 
 
 @pytest.mark.parametrize("method", ["none", "client_secret_post"])
-def test_flow_through_the_sdk_handlers(provider, store, method):
+def test_flow_through_the_sdk_handlers(provider, store, clock, method):
     http = TestClient(_app(provider))
     reg = http.post("/mcp/register", json={"redirect_uris": [REDIRECT], "client_name": "Example Agent",
                                            "token_endpoint_auth_method": method,
@@ -610,6 +615,11 @@ def test_flow_through_the_sdk_handlers(provider, store, method):
                                               **creds})
     assert refreshed.status_code == 200, refreshed.text
     new = refreshed.json()
+    raced = http.post("/mcp/token", data={"grant_type": "refresh_token", "refresh_token": body["refresh_token"],
+                                          **creds})
+    assert raced.status_code == 400 and raced.json()["error"] == "invalid_grant"
+    assert run(MCPTokenVerifier(provider).verify_token(new["access_token"])) is not None  # a parallel refresh
+    clock.t += store_mod.REFRESH_RACE_GRACE
     reuse = http.post("/mcp/token", data={"grant_type": "refresh_token", "refresh_token": body["refresh_token"],
                                           **creds})
     assert reuse.status_code == 400 and reuse.json()["error"] == "invalid_grant"

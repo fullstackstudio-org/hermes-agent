@@ -15,6 +15,7 @@ from hermes_cli.dashboard_auth.mcp import store as store_mod
 from hermes_cli.dashboard_auth.mcp.store import (
     BY_CLIENT, BY_CODE_REUSE, BY_REFRESH_REUSE, CHAT_IDLE_KEEP, CLIENT_UNUSED_TTL, CODE_TTL, CONSENT_TTL,
     CONSENTS_PER_ADDRESS, GRANT_KEEP_AFTER_END, LAST_USED_EVERY, METADATA_MAX_BYTES, OPERATOR,
+    REFRESH_RACE_GRACE,
     TOKEN_KEEP_AFTER_EXPIRY, CodeInvalid, ConsentInvalid, LimitReached, MCPStore, StoreError, TokenInvalid,
     hash_secret)
 
@@ -500,10 +501,11 @@ def test_refresh_never_outlives_the_grant(store, clock):
     assert store.load_refresh(rotated.refresh_token, client_id="client-1") is None
 
 
-def test_reuse_of_a_rotated_refresh_token_revokes_the_grant(store):
+def test_reuse_of_a_rotated_refresh_token_revokes_the_grant(store, clock):
     _client(store)
     issued = _grant(store)
     rotated = store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    clock.t += REFRESH_RACE_GRACE  # past the parallel-refresh grace
     with pytest.raises(TokenInvalid) as reused:
         store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
     assert reused.value.reason == "reused"
@@ -513,16 +515,21 @@ def test_reuse_of_a_rotated_refresh_token_revokes_the_grant(store):
     assert store.load_refresh(rotated.refresh_token, client_id="client-1") is None
 
 
-def test_loading_a_rotated_refresh_token_revokes_the_grant(store):
+def test_loading_a_rotated_refresh_token_revokes_the_grant(store, clock):
     _client(store)
     issued = _grant(store)
     rotated = store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    clock.t += REFRESH_RACE_GRACE
     assert store.load_refresh(issued.refresh_token, client_id="client-1") is None
     assert store.grant(issued.grant.id).revoked_by == BY_REFRESH_REUSE
     assert store.verify_access(rotated.access_token) is None
 
 
-def test_two_concurrent_rotations_one_wins_and_the_other_counts_as_reuse(tmp_path, clock):
+@pytest.mark.parametrize("with_load", [False, True])
+def test_two_parallel_refreshes_one_wins_and_the_grant_stays(tmp_path, clock, with_load):
+    # A client whose two requests both found their access token expired refreshes twice with one refresh
+    # token. That is not a theft: one rotation wins, the others are refused ("raced") and nothing is revoked.
+    # with_load: as the SDK's token handler runs it (load, then rotate), so the late ones may fail at either.
     path = tmp_path / "dashboard_auth" / "mcp.db"
     first = MCPStore(path, clock=clock)
     _client(first)
@@ -530,22 +537,81 @@ def test_two_concurrent_rotations_one_wins_and_the_other_counts_as_reuse(tmp_pat
     stores = [MCPStore(path, clock=clock) for _ in range(4)]
     outcomes, barrier = [], threading.Barrier(len(stores))
 
-    def rotate(s: MCPStore) -> None:
+    def refresh(s: MCPStore) -> None:
         barrier.wait()
         try:
+            if with_load and s.load_refresh(issued.refresh_token, client_id="client-1") is None:
+                outcomes.append("not loaded")
+                return
             outcomes.append(s.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL))
         except TokenInvalid as exc:
             outcomes.append(exc.reason)
 
-    threads = [threading.Thread(target=rotate, args=(s,)) for s in stores]
+    threads = [threading.Thread(target=refresh, args=(s,)) for s in stores]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    assert sum(1 for o in outcomes if not isinstance(o, str)) == 1
-    assert sorted(o for o in outcomes if isinstance(o, str)) == ["reused"] * 3
-    revoked = first.grant(issued.grant.id)
-    assert revoked is not None and revoked.revoked_by == BY_REFRESH_REUSE
+    [winner] = [o for o in outcomes if not isinstance(o, str)]
+    assert set(o for o in outcomes if isinstance(o, str)) <= {"raced", "not loaded"} and len(outcomes) == 4
+    grant = first.grant(issued.grant.id)
+    assert grant.revoked_at is None and grant.live
+    assert first.verify_access(winner.access_token) is not None
+    assert first.rotate_refresh(winner.refresh_token, client_id="client-1", scopes=None, **TTL).grant.live
+
+
+def test_a_late_copy_is_refused_without_revoking_only_while_the_successor_is_unused(store, clock):
+    _client(store)
+    issued = _grant(store)
+    rotated = store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    clock.t += REFRESH_RACE_GRACE - 1
+    assert store.load_refresh(issued.refresh_token, client_id="client-1") is None
+    with pytest.raises(TokenInvalid) as raced:
+        store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    assert raced.value.reason == "raced" and store.grant(issued.grant.id).live
+    # Once the successor has been used, the old token is a reuse even inside the window.
+    store.rotate_refresh(rotated.refresh_token, client_id="client-1", scopes=None, **TTL)
+    with pytest.raises(TokenInvalid) as reused:
+        store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    assert reused.value.reason == "reused" and store.grant(issued.grant.id).revoked_by == BY_REFRESH_REUSE
+
+
+@pytest.mark.parametrize("how", ["after_the_window", "another_client", "successor_revoked"])
+def test_a_rotated_token_outside_the_grace_still_revokes(store, clock, how):
+    _client(store)
+    _client(store, "client-2")
+    issued = _grant(store)
+    rotated = store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    presenter = "client-1"
+    if how == "after_the_window":
+        clock.t += REFRESH_RACE_GRACE
+    elif how == "another_client":
+        presenter = "client-2"
+    else:
+        db = sqlite3.connect(store.path)
+        db.execute("UPDATE tokens SET revoked_at = ? WHERE token_hash = ?",
+                   (int(clock.t), hash_secret(rotated.refresh_token)))
+        db.commit()
+        db.close()
+    assert store.load_refresh(issued.refresh_token, client_id=presenter) is None
+    assert store.grant(issued.grant.id).revoked_by == BY_REFRESH_REUSE
+
+
+def test_a_file_without_the_successor_link_gains_it(tmp_path, clock):
+    path = tmp_path / "dashboard_auth" / "mcp.db"
+    MCPStore(path, clock=clock).counts()
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE tokens DROP COLUMN parent_hash")
+    db.commit()
+    db.close()
+    store = MCPStore(path, clock=clock)
+    _client(store)
+    issued = _grant(store)
+    store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    db = sqlite3.connect(path)
+    assert db.execute("SELECT COUNT(*) FROM tokens WHERE parent_hash = ?",
+                      (hash_secret(issued.refresh_token),)).fetchone()[0] == 1
+    assert db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "1"
 
 
 def test_refresh_scope_may_narrow_never_widen(store):

@@ -23,7 +23,8 @@ Rules (plan ``gateway-mcp.md`` D2-D4, Security 3-4):
   ``max_grants_per_user`` live grants;
 - tokens are opaque (256 bits), stored as SHA-256; access ``access_token_ttl``; refresh rotated on every
   use with ``refresh_token_ttl`` (sliding) and never past the grant's ``grant_max_age`` (absolute);
-  presenting a rotated refresh token revokes the grant; revoking either kind revokes the grant;
+  presenting a rotated refresh token revokes the grant (except a parallel refresh of the same client within
+  :data:`~.store.REFRESH_RACE_GRACE`, refused without revoking); revoking either kind revokes the grant;
 - every token is bound to the resource it was issued for, and the verifier refuses a token of another
   resource.
 

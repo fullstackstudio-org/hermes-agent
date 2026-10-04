@@ -540,8 +540,10 @@ class _TurnRun:
     prompt_text: str = ""
     marker_key: str = ""
     receipt_attempted: bool = False
-    # The outbox settings when this session's files are shared with the person (tui_gateway/outbox_share.py).
+    # The outbox settings when this session's files are shared with the person (tui_gateway/outbox_share.py),
+    # and the filter that keeps MEDIA: directives out of the stream.
     outbox: Any = None
+    media_filter: Any = None
 
 
 def _adopt_out_of_band_turns(session: dict) -> None:
@@ -684,7 +686,7 @@ def _invoke_agent(
     media_filter = None
     if st.outbox is not None:
         from tui_gateway.outbox_share import MediaDeltaFilter
-        media_filter = MediaDeltaFilter()
+        media_filter = st.media_filter = MediaDeltaFilter()
 
     def _stream(delta):
         if getattr(agent, "_mute_notification_reply", False):
@@ -995,6 +997,21 @@ def _outbox_settings_if_shared(session: dict, agent: Any):
         return None
 
 
+def _flush_media_filter(sid: str, session: dict, st: _TurnRun) -> None:
+    """The stream's last held words (a line that may have held a directive), cleaned, before message.complete."""
+    if st.media_filter is None or getattr(st.agent, "_mute_notification_reply", False):
+        return
+    try:
+        rest = st.media_filter.flush()
+    except Exception:
+        logger.debug("outbox: media filter flush failed", exc_info=True)
+        return
+    if rest:
+        with session["history_lock"]:
+            _append_inflight_delta(session, rest)
+        _emit("message.delta", sid, {"text": rest})
+
+
 def _outbox_logins(session: dict) -> set[str]:
     """Every signed-in login this conversation belongs to right now: the one it was created under, its stored
     owner, everyone who attached, and the person this turn works for (``outbox.may_fetch``)."""
@@ -1029,21 +1046,39 @@ def _share_turn_outbox(session: dict, st: _TurnRun, raw: str, final_row_id: int 
     if not shared.named:
         return shared.text
     payload["attachments"] = shared.attachments
+    meta_update = {outbox.METADATA_KEY: shared.attachments}
+    if shared.refused:
+        meta_update[outbox_share.REFUSED_KEY] = len(shared.refused)
     with session["history_lock"]:
         for message in reversed(session.get("history") or []):
             if isinstance(message, dict) and message.get("role") == "assistant" and message.get("content") == raw:
-                meta = dict(message.get("display_metadata") or {})
-                meta[outbox.METADATA_KEY] = shared.attachments
-                message["display_metadata"] = meta
+                message["display_metadata"] = {**(message.get("display_metadata") or {}), **meta_update}
                 break
-    db = getattr(agent, "_session_db", None)
-    if db is not None and final_row_id is not None:
-        try:
-            if not db.set_message_attachments(session_id, final_row_id, shared.attachments):
-                logger.warning("outbox: row %s of session %s not found for its attachments", final_row_id, session_id)
-        except Exception:
-            logger.exception("outbox: could not record the attachments of row %s", final_row_id)
+    _persist_turn_attachments(agent, session_id, st, raw, final_row_id, meta_update)
     return shared.text
+
+
+def _persist_turn_attachments(agent: Any, session_id: str, st: _TurnRun, raw: str, final_row_id: int | None,
+                              meta_update: dict) -> None:
+    """Record the attachments on the reply's stored row, so a reload shows them and not the path. The row is the
+    receipt's final row; without a receipt (compaction, a redirected turn) the committed id of the result's last
+    message when that is the reply; failing that, the newest active assistant row of the session whose content
+    is exactly the reply."""
+    db = getattr(agent, "_session_db", None)
+    if db is None:
+        return
+    if final_row_id is None:
+        messages = (st.result or {}).get("messages") if isinstance(st.result, dict) else None
+        if isinstance(messages, list) and messages and isinstance(messages[-1], dict):
+            final_row_id = _final_assistant_row_id(messages[-1], raw, "complete")
+    try:
+        done = db.set_message_attachments(session_id, final_row_id, meta_update, content=raw)
+    except Exception:
+        logger.exception("outbox: could not record the attachments of session %s", session_id)
+        return
+    if not done:
+        logger.warning("outbox: no stored row of session %s holds the reply; its attachments live only in memory",
+                       session_id)
 
 
 def _recover_turn_exception(sid: str, session: dict, st: _TurnRun, e: BaseException) -> None:
@@ -1275,6 +1310,7 @@ def _run_prompt_submit(
                 display_metadata, turn_author, text, origin=origin, contributors=contributors)
             status_note = _absorb_turn_result(
                 sid, session, st, text, display_kind, display_metadata)
+            _flush_media_filter(sid, session, st)
             payload, raw, status = _complete_turn_payload(session, st, status_note, cols)
             _emit("message.complete", sid, payload)
             goal_followup = _goal_followup_after_turn(sid, session, st.result, status, raw)

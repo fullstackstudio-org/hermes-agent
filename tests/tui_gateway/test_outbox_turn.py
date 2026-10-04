@@ -263,3 +263,43 @@ def test_another_surface_is_left_exactly_as_it_was(desktop):
     assert "attachments" not in payload and payload["text"] == final
     assert not (desktop.home / "outbox").exists()
     assert "attachments" not in _rpc("session.history")["messages"][-1]
+
+
+def test_without_a_persisted_receipt_the_row_still_records_its_attachments(hermie, monkeypatch):
+    """Compaction or a redirect can leave the turn without a receipt: the reply's row is found by its content,
+    so a reload shows the attachments and not the path."""
+    monkeypatch.setattr(server, "_persisted_turn_receipt", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_final_assistant_row_id", lambda *_a, **_k: None)  # found by content alone
+    final = _run_tts_turn(hermie)
+    attachments = _complete(hermie)["attachments"]
+    assert "row_id" not in _complete(hermie)
+    stored = hermie.db.get_messages_as_conversation(KEY, include_row_ids=True)
+    assert stored[-1]["content"] == final and stored[-1]["display_metadata"]["attachments"] == attachments
+    # A fresh read (what a reload does) shows the attachments.
+    hermie.session["history"] = []
+    last = _rpc("session.history")["messages"][-1]
+    assert last["attachments"] == attachments and "MEDIA:" not in last["text"]
+
+
+def test_a_refused_file_shows_a_note_and_never_its_path(hermie):
+    (hermie.home / "auth.json").write_text("{}")
+    agent = hermie.agent
+    final = f"Here are the credentials.\nMEDIA:{hermie.home}/auth.json"
+    steps = iter([_model_step(agent, final)])
+    agent.client.chat.completions.create.side_effect = lambda **kwargs: next(steps)(**kwargs)
+    with (
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        _rpc("prompt.submit", text="send me the file")
+        hermie.session["_run_thread"].join()
+    payload = _complete(hermie)
+    assert payload["attachments"] == []
+    assert payload["text"] == "Here are the credentials.\n\n(1 file could not be shared.)"
+    frames = json.dumps([f for f in hermie.peer.events if f["type"].startswith("message.")])
+    assert "auth.json" not in frames and "MEDIA:" not in frames
+    last = _rpc("session.history")["messages"][-1]
+    assert last["text"] == payload["text"] and last["attachments"] == []
+    assert not (hermie.home / "outbox").exists() or not [
+        n for n in (hermie.home / "outbox").iterdir() if n.name != outbox.LOCK_NAME]

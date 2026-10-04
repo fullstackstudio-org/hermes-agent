@@ -69,6 +69,11 @@ DEFAULT_MAX_FILE_MB = 200
 DEFAULT_MAX_TOTAL_MB = 2048
 DEFAULT_RETENTION_DAYS = 30
 DEFAULT_SOURCES = ("hermie",)
+DEFAULT_MAX_TURN_FILES = 20
+DEFAULT_MAX_TURN_MB = 500
+DEFAULT_TURN_TIMEOUT_S = 120
+#: The cross-process lock file inside ``outbox/`` (``flock``); never a share, never pruned.
+LOCK_NAME = ".lock"
 #: A hard ceiling on the number of shared files per profile, whatever their size: pruning reads every entry.
 MAX_ENTRIES = 10_000
 _NAME_MAX_CHARS = 180
@@ -88,7 +93,11 @@ class ShareRefused(Exception):
         self.reason = reason
 
 
-REFUSAL_REASONS = ("unsupported", "invalid_path", "denied", "not_found", "not_regular", "too_large", "io_error")
+#: ``linked``: the file has another hard link; ``turn_limit``: the turn shared its maximum number of files;
+#: ``no_room``: the outbox is full of other conversations' recent files; ``busy``: the outbox stayed locked;
+#: ``timeout``: the copy did not finish within the turn's time.
+REFUSAL_REASONS = ("unsupported", "invalid_path", "denied", "not_found", "not_regular", "linked", "too_large",
+                   "turn_limit", "no_room", "busy", "timeout", "io_error")
 
 
 # ── what a file is ───────────────────────────────────────────────────────────────────────────────────────────
@@ -210,6 +219,9 @@ class OutboxSettings:
     max_total_bytes: int = DEFAULT_MAX_TOTAL_MB * 1024 * 1024
     retention_seconds: float = DEFAULT_RETENTION_DAYS * 86400.0
     sources: frozenset[str] = frozenset(DEFAULT_SOURCES)
+    max_turn_files: int = DEFAULT_MAX_TURN_FILES
+    max_turn_bytes: int = DEFAULT_MAX_TURN_MB * 1024 * 1024
+    turn_timeout_seconds: float = float(DEFAULT_TURN_TIMEOUT_S)
 
 
 def _positive(value: Any, default: float) -> float:
@@ -234,6 +246,9 @@ def settings_from(cfg: Mapping[str, Any] | None) -> OutboxSettings:
         max_total_bytes=int(_positive(files.get("outbox_max_total_mb"), DEFAULT_MAX_TOTAL_MB) * 1024 * 1024),
         retention_seconds=_positive(files.get("outbox_retention_days"), DEFAULT_RETENTION_DAYS) * 86400.0,
         sources=sources,
+        max_turn_files=int(_positive(files.get("outbox_max_turn_files"), DEFAULT_MAX_TURN_FILES)),
+        max_turn_bytes=int(_positive(files.get("outbox_max_turn_mb"), DEFAULT_MAX_TURN_MB) * 1024 * 1024),
+        turn_timeout_seconds=_positive(files.get("outbox_turn_timeout_s"), DEFAULT_TURN_TIMEOUT_S),
     )
 
 
@@ -336,9 +351,38 @@ def _denied_basename(path: Path) -> bool:
     return any(part.lower() in _DENIED_PARTS for part in path.parent.parts)
 
 
-def check_source(path: str, *, session_key: str = "") -> Path:
+def hermes_homes(*extra: Path | str) -> list[Path]:
+    """Every Hermes home on this host, resolved: the active one, the root, every ``<root>/profiles/*`` and
+    *extra*. Read at call time, so a profile made after start counts."""
+    homes: list[Path | str] = [*extra]
+    with contextlib.suppress(Exception):
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+        root = Path(get_default_hermes_root())
+        homes += [get_hermes_home(), root]
+        with contextlib.suppress(OSError):
+            homes += [p for p in (root / "profiles").iterdir() if p.is_dir()]
+    out: dict[str, Path] = {}
+    for home in homes:
+        with contextlib.suppress(OSError, RuntimeError, ValueError):
+            resolved = Path(home).expanduser().resolve()
+            out.setdefault(str(resolved), resolved)
+    return list(out.values())
+
+
+def _is_shared_store(resolved: Path, homes: Iterable[Path]) -> bool:
+    """Whether *resolved* is inside a home's ``outbox/`` (another conversation's copy: re-sharing it would hand
+    it to whoever is in THIS conversation) or a person's upload folder (``.../uploads/hermie/...``)."""
+    for home in homes:
+        if resolved == home / OUTBOX_DIR or (home / OUTBOX_DIR) in resolved.parents:
+            return True
+    parts = resolved.parts
+    return any((parts[i], parts[i + 1]) == upload_dirs.UPLOAD_SEGMENTS for i in range(len(parts) - 1))
+
+
+def check_source(path: str, *, session_key: str = "", home: Path | str | None = None) -> Path:
     """The resolved path of a file that may be shared, else :class:`ShareRefused`. Symbolic links are resolved
-    first, so every check below judges the file that would actually be read."""
+    first, so every check below judges the file that would actually be read (and :func:`_open_source` reads
+    that path without following a link)."""
     from tools.path_security import has_unsafe_path_chars
     if not isinstance(path, str) or not path.strip() or has_unsafe_path_chars(path):
         raise ShareRefused("invalid_path")
@@ -354,21 +398,63 @@ def check_source(path: str, *, session_key: str = "") -> Path:
         blocked = "unreadable"
     if blocked or _denied_basename(resolved):
         raise ShareRefused("denied")
+    if _is_shared_store(resolved, hermes_homes(*(() if home is None else (home,)))):
+        raise ShareRefused("denied")
     return resolved
 
 
-def _open_source(resolved: Path) -> int:
-    """Open the checked file for reading: the last component not through a link, a FIFO never blocking."""
+_SOURCE_FLAGS = os.O_RDONLY | _NOFOLLOW | _CLOEXEC | _NONBLOCK
+
+
+def _open_walked(resolved: Path) -> int:
+    """Open *resolved* one component at a time from ``/``, never following a link (``upload_dirs.walk``): the
+    file read is the one the checks judged, whatever is swapped in after them. ``PermissionError`` when an
+    ancestor may be searched but not opened (``/home`` at 0711)."""
+    parts = upload_dirs.components(str(resolved))
+    if not parts:
+        raise ShareRefused("not_regular")
+    dir_fd = upload_dirs.walk(parts[:-1], start="/")
     try:
-        fd = os.open(str(resolved), os.O_RDONLY | _NOFOLLOW | _CLOEXEC | _NONBLOCK)
+        return os.open(parts[-1], _SOURCE_FLAGS, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _open_checked(resolved: Path) -> int:
+    """The fallback when an ancestor cannot be opened: the path itself without following its last component,
+    then proof it is still the judged file (the path resolves to itself and names the opened inode)."""
+    fd = os.open(str(resolved), _SOURCE_FLAGS)
+    try:
+        info, now = os.fstat(fd), os.stat(resolved, follow_symlinks=False)
+        if os.path.realpath(resolved) != str(resolved) or (info.st_dev, info.st_ino) != (now.st_dev, now.st_ino):
+            raise ShareRefused("denied")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _open_source(resolved: Path) -> int:
+    """Open the checked file for reading (see :func:`_open_walked`), a FIFO never blocking; only a regular file
+    with ONE link: a hard link to a secret elsewhere would pass every path check under an innocent name."""
+    try:
+        try:
+            fd = _open_walked(resolved)
+        except PermissionError:
+            fd = _open_checked(resolved)
     except FileNotFoundError:
         raise ShareRefused("not_found")
+    except upload_dirs.UnsafePath:
+        raise ShareRefused("denied")
     except OSError as exc:
         raise ShareRefused("not_regular" if exc.errno in (errno.ELOOP, errno.ENXIO) else "io_error")
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode):
         os.close(fd)
         raise ShareRefused("not_regular")
+    if info.st_nlink != 1:
+        os.close(fd)
+        raise ShareRefused("linked")
     return fd
 
 
@@ -392,60 +478,116 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[written:]
 
 
+@contextlib.contextmanager
+def _locked_outbox(root: Path, *, create: bool, timeout: float | None = None):
+    """Hold *root*'s outbox exclusively, in this process (a lock per home) and across processes (``flock`` on
+    ``outbox/.lock``), and yield the outbox folder's descriptor, or None when there is no outbox and *create*
+    is false. ``ShareRefused("busy")`` when either lock is not had within *timeout* seconds (None: wait)."""
+    deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+    lock = _home_lock(root)
+    if not lock.acquire(timeout=-1 if deadline is None else max(0.0, deadline - time.monotonic())):
+        raise ShareRefused("busy")
+    try:
+        try:
+            outbox_fd = upload_dirs.walk([OUTBOX_DIR], create_from=0 if create else None, start=str(root))
+        except FileNotFoundError:
+            if create:
+                raise ShareRefused("io_error")
+            yield None
+            return
+        except OSError as exc:
+            logger.warning("outbox: cannot open %s/%s: %s", root, OUTBOX_DIR, type(exc).__name__)
+            raise ShareRefused("io_error")
+        try:
+            lock_fd = _flock(outbox_fd, deadline)
+            try:
+                yield outbox_fd
+            finally:
+                os.close(lock_fd)  # releases the flock
+        finally:
+            os.close(outbox_fd)
+    finally:
+        lock.release()
+
+
+def _flock(outbox_fd: int, deadline: float | None) -> int:
+    try:
+        import fcntl
+    except ImportError:  # no flock (Windows): sharing is unsupported there anyway
+        return os.dup(outbox_fd)
+    try:
+        lock_fd = os.open(LOCK_NAME, os.O_RDWR | os.O_CREAT | _NOFOLLOW | _CLOEXEC, 0o600, dir_fd=outbox_fd)
+    except OSError:
+        raise ShareRefused("io_error")
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lock_fd
+        except BlockingIOError:
+            if deadline is not None and time.monotonic() >= deadline:
+                os.close(lock_fd)
+                raise ShareRefused("busy")
+            time.sleep(0.05)
+        except OSError:
+            os.close(lock_fd)
+            raise ShareRefused("io_error")
+
+
 def share_file(source: str, *, home: Path | str, session_id: str, logins: Iterable[str] = (),
-               settings: OutboxSettings | None = None, session_key: str = "", now: float | None = None) -> dict:
+               settings: OutboxSettings | None = None, session_key: str = "", now: float | None = None,
+               max_bytes: int | None = None, protect: Iterable[str] = (), cancel: threading.Event | None = None,
+               lock_timeout: float | None = None) -> dict:
     """Copy the file *source* names into *home*'s outbox and return its record (:data:`RECORD_KEYS`).
-    :class:`ShareRefused` when it may not or cannot be shared; nothing is left behind then."""
+    :class:`ShareRefused` when it may not or cannot be shared; nothing is left behind then.
+
+    *max_bytes* is what is left of the turn's byte budget; *protect* the tokens this turn already shared (never
+    evicted to make room); *cancel* stops a copy in progress (``timeout``); *lock_timeout* bounds the wait for the
+    outbox (``busy``)."""
     if not upload_dirs.supported():
         raise ShareRefused("unsupported")
     settings = settings or OutboxSettings()
-    resolved = check_source(source, session_key=session_key)
+    root = _resolved_home(home)
+    resolved = check_source(source, session_key=session_key, home=root)
     src_fd = _open_source(resolved)
     try:
         size = os.fstat(src_fd).st_size
-        if size > settings.max_file_bytes or size > settings.max_total_bytes:
+        limit = min(settings.max_file_bytes, settings.max_total_bytes,
+                    settings.max_turn_bytes if max_bytes is None else max_bytes)
+        if size > limit:
             raise ShareRefused("too_large")
-        root = _resolved_home(home)
         name = display_name(resolved.name)
-        with _home_lock(root):
-            _prune_locked(root, settings, now=now, room_for=size)
-            return _copy_in(root, src_fd, name, size, session_id=session_id, logins=logins, settings=settings,
-                            source=str(resolved), now=now)
+        with _locked_outbox(root, create=True, timeout=lock_timeout) as outbox_fd:
+            _prune_locked(outbox_fd, root, settings, now=now, room_for=size, session_id=str(session_id or ""),
+                          protect=frozenset(protect))
+            return _copy_in(outbox_fd, src_fd, name, size, session_id=session_id, logins=logins,
+                            limit=limit, source=str(resolved), now=now, cancel=cancel)
     finally:
         os.close(src_fd)
 
 
-def _copy_in(root: Path, src_fd: int, name: str, size: int, *, session_id: str, logins: Iterable[str],
-             settings: OutboxSettings, source: str, now: float | None) -> dict:
-    try:
-        outbox_fd = upload_dirs.walk([OUTBOX_DIR], create_from=0, start=str(root))
-    except OSError as exc:
-        logger.warning("outbox: cannot open %s/%s: %s", root, OUTBOX_DIR, type(exc).__name__)
-        raise ShareRefused("io_error")
+def _copy_in(outbox_fd: int, src_fd: int, name: str, size: int, *, session_id: str, logins: Iterable[str],
+             limit: int, source: str, now: float | None, cancel: threading.Event | None) -> dict:
     token = ""
-    try:
-        for _ in range(8):
-            token = secrets.token_urlsafe(24)
-            try:
-                os.mkdir(token, upload_dirs.DIR_MODE, dir_fd=outbox_fd)
-                break
-            except FileExistsError:
-                token = ""
-        if not token:
-            raise ShareRefused("io_error")
+    for _ in range(8):
+        token = secrets.token_urlsafe(24)
         try:
-            record = _fill_entry(outbox_fd, token, src_fd, name, size, session_id=session_id, logins=logins,
-                                 settings=settings, source=source, now=now)
-        except BaseException:
-            _remove_entry(outbox_fd, token)
-            raise
-        return record
-    finally:
-        os.close(outbox_fd)
+            os.mkdir(token, upload_dirs.DIR_MODE, dir_fd=outbox_fd)
+            break
+        except FileExistsError:
+            token = ""
+    if not token:
+        raise ShareRefused("io_error")
+    try:
+        return _fill_entry(outbox_fd, token, src_fd, name, size, session_id=session_id, logins=logins,
+                           limit=limit, source=source, now=now, cancel=cancel)
+    except BaseException:
+        _remove_entry(outbox_fd, token)
+        raise
 
 
 def _fill_entry(outbox_fd: int, token: str, src_fd: int, name: str, size: int, *, session_id: str,
-                logins: Iterable[str], settings: OutboxSettings, source: str, now: float | None) -> dict:
+                logins: Iterable[str], limit: int, source: str, now: float | None,
+                cancel: threading.Event | None) -> dict:
     entry_fd = upload_dirs.open_dir(token, dir_fd=outbox_fd)
     try:
         create = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC
@@ -454,11 +596,13 @@ def _fill_entry(outbox_fd: int, token: str, src_fd: int, name: str, size: int, *
         try:
             os.lseek(src_fd, 0, os.SEEK_SET)
             while True:
+                if cancel is not None and cancel.is_set():
+                    raise ShareRefused("timeout")
                 chunk = os.read(src_fd, _COPY_CHUNK)
                 if not chunk:
                     break
                 copied += len(chunk)
-                if copied > settings.max_file_bytes:  # it grew while being copied
+                if copied > limit:  # it grew while being copied
                     raise ShareRefused("too_large")
                 if len(head) < _SNIFF_BYTES:
                     head += chunk[: _SNIFF_BYTES - len(head)]
@@ -606,67 +750,83 @@ def may_fetch(record: Mapping[str, Any], login: str | None, live_logins: Iterabl
 # ── retention ────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-def _entries(outbox_fd: int) -> list[tuple[float, int, str]]:
-    """``(mtime, size, token)`` of every entry; a planted non-token name is ``(0, 0, name)`` (removed first)."""
-    out: list[tuple[float, int, str]] = []
+@dataclass(order=True)
+class _Entry:
+    mtime: float
+    size: int
+    token: str
+    session_id: str = ""
+
+
+def _entries(outbox_fd: int) -> list[_Entry]:
+    """Every entry (oldest first by its blob's mtime); a planted non-token name is aged 0 (removed first). The
+    lock file is not an entry."""
+    out: list[_Entry] = []
     for entry in os.listdir(outbox_fd):
+        if entry == LOCK_NAME:
+            continue
         if not TOKEN_RE.match(entry):
-            out.append((0.0, 0, entry))
+            out.append(_Entry(0.0, 0, entry))
             continue
         try:
             info = os.stat(entry, dir_fd=outbox_fd, follow_symlinks=False)
             if not stat.S_ISDIR(info.st_mode):
-                out.append((0.0, 0, entry))
+                out.append(_Entry(0.0, 0, entry))
                 continue
             entry_fd = upload_dirs.open_dir(entry, dir_fd=outbox_fd)
             try:
-                blob = os.stat(BLOB_NAME, dir_fd=entry_fd, follow_symlinks=False)
-                out.append((blob.st_mtime, blob.st_size, entry))
-            except FileNotFoundError:
-                out.append((info.st_mtime, 0, entry))  # an interrupted share: aged like the folder
+                record = _read_record(entry_fd) or {}
+                session_id = str(record.get("session_id") or "")
+                try:
+                    blob = os.stat(BLOB_NAME, dir_fd=entry_fd, follow_symlinks=False)
+                    out.append(_Entry(blob.st_mtime, blob.st_size, entry, session_id))
+                except FileNotFoundError:
+                    out.append(_Entry(info.st_mtime, 0, entry, session_id))  # interrupted: aged like the folder
             finally:
                 os.close(entry_fd)
         except OSError:
             continue
-    return out
+    return sorted(out)
 
 
-def _prune_locked(root: Path, settings: OutboxSettings, *, now: float | None = None,
-                  room_for: int | None = None) -> int:
-    """Prune under the home's lock; *room_for* (bytes) also makes room for one more file of that size."""
-    try:
-        outbox_fd = upload_dirs.walk([OUTBOX_DIR], start=str(root))
-    except FileNotFoundError:
-        return 0
-    except OSError as exc:
-        logger.warning("outbox: cannot prune %s/%s: %s", root, OUTBOX_DIR, type(exc).__name__)
+def _prune_locked(outbox_fd: int | None, root: Path, settings: OutboxSettings, *, now: float | None = None,
+                  room_for: int | None = None, session_id: str = "", protect: frozenset[str] = frozenset()) -> int:
+    """Prune the locked outbox. Always: every entry past the retention. Then:
+
+    - making room for a share (*room_for* bytes, one more entry): only the SAME conversation's oldest
+      (*session_id*), never a token in *protect* (this turn's own); still over the cap means
+      ``ShareRefused("no_room")``: one conversation cannot push out another's recent files;
+    - the periodic pass (*room_for* None): the oldest of any conversation until within the cap (it only bites
+      when the cap was lowered).
+    """
+    if outbox_fd is None:
         return 0
     removed = 0
-    try:
-        now = time.time() if now is None else float(now)
-        cutoff = now - settings.retention_seconds
-        entries = sorted(_entries(outbox_fd))
-        keep: list[tuple[float, int, str]] = []
-        for mtime, size, token in entries:
-            if mtime < cutoff:
-                _remove_entry(outbox_fd, token)
-                removed += 1
-            else:
-                keep.append((mtime, size, token))
-        total = sum(size for _, size, _ in keep)
-        budget = settings.max_total_bytes - (room_for or 0)
-        max_entries = MAX_ENTRIES - (0 if room_for is None else 1)
-        for mtime, size, token in list(keep):
-            if total <= budget and len(keep) <= max_entries:
-                break
-            _remove_entry(outbox_fd, token)
-            keep.pop(0)
-            total -= size
+    now = time.time() if now is None else float(now)
+    cutoff = now - settings.retention_seconds
+    keep: list[_Entry] = []
+    for entry in _entries(outbox_fd):
+        if entry.mtime < cutoff and entry.token not in protect:
+            _remove_entry(outbox_fd, entry.token)
             removed += 1
-    finally:
-        os.close(outbox_fd)
+        else:
+            keep.append(entry)
+    total = sum(entry.size for entry in keep)
+    budget = settings.max_total_bytes - (room_for or 0)
+    max_entries = MAX_ENTRIES - (0 if room_for is None else 1)
+    for entry in list(keep):
+        if total <= budget and len(keep) <= max_entries:
+            break
+        if room_for is not None and (entry.token in protect or not session_id or entry.session_id != session_id):
+            continue
+        _remove_entry(outbox_fd, entry.token)
+        keep.remove(entry)
+        total -= entry.size
+        removed += 1
     if removed:
         logger.info("outbox: removed %d shared file(s) from %s", removed, root)
+    if room_for is not None and (total > budget or len(keep) > max_entries):
+        raise ShareRefused("no_room")
     return removed
 
 
@@ -680,8 +840,44 @@ def prune_outbox(home: Path | str, settings: OutboxSettings | None = None, *, no
     except (OSError, RuntimeError):
         return 0
     settings = settings or settings_for_home(root)
-    with _home_lock(root):
-        return _prune_locked(root, settings, now=now)
+    with _locked_outbox(root, create=False) as outbox_fd:
+        return _prune_locked(outbox_fd, root, settings, now=now)
+
+
+def remove_shared(home: Path | str, token: str) -> None:
+    """Remove one shared copy (a share the turn gave up on). Never raises."""
+    if not TOKEN_RE.match(token or "") or not upload_dirs.supported():
+        return
+    try:
+        with _locked_outbox(_resolved_home(home), create=False, timeout=30.0) as outbox_fd:
+            if outbox_fd is not None:
+                _remove_entry(outbox_fd, token)
+    except Exception:
+        logger.warning("outbox: could not remove an abandoned share in %s", home, exc_info=True)
+
+
+def remove_session_files(home: Path | str, session_ids: Iterable[str]) -> int:
+    """Remove every copy *home*'s outbox holds for the conversations *session_ids* (they were deleted).
+    Returns how many were removed. Never raises."""
+    ids = {str(sid) for sid in session_ids if sid}
+    if not ids or not upload_dirs.supported():
+        return 0
+    try:
+        root = _resolved_home(home)
+        if not (root / OUTBOX_DIR).is_dir():
+            return 0
+        removed = 0
+        with _locked_outbox(root, create=False, timeout=30.0) as outbox_fd:
+            if outbox_fd is None:
+                return 0
+            for entry in _entries(outbox_fd):
+                if entry.session_id in ids:
+                    _remove_entry(outbox_fd, entry.token)
+                    removed += 1
+        return removed
+    except Exception:
+        logger.warning("outbox: could not remove the shared files of deleted sessions in %s", home, exc_info=True)
+        return 0
 
 
 def outbox_homes() -> list[Path]:

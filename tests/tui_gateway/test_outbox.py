@@ -44,7 +44,7 @@ def _share(home: Path, path: Path | str, **kwargs):
 
 def _entries(home: Path) -> list[str]:
     root = home / "outbox"
-    return sorted(os.listdir(root)) if root.exists() else []
+    return sorted(n for n in os.listdir(root) if n != outbox.LOCK_NAME) if root.exists() else []
 
 
 def test_a_shared_file_is_a_private_copy_under_a_random_token(home):
@@ -331,7 +331,8 @@ def test_a_refused_file_leaves_no_path_and_no_attachment(home):
     shared = outbox_share.share_turn_files(f"Look: MEDIA:{home}/auth.json", [], home=home, session_id="s1",
                                            logins=[], settings=outbox.OutboxSettings())
     assert shared.named and shared.attachments == [] and shared.refused == ["denied"]
-    assert shared.text == "Look:"
+    assert shared.text == "Look:\n\n(1 file could not be shared.)"
+    assert str(home) not in shared.text
 
 
 def test_the_stream_never_shows_a_directive():
@@ -357,3 +358,225 @@ def test_history_shows_attachments_instead_of_directives():
     assert outbox_share.project_row("assistant", "MEDIA:/x.png", {"turn_id": "t"}) == (
         "MEDIA:/x.png", None, {"turn_id": "t"})
     assert outbox_share.project_row("user", "MEDIA:/x.png", {"attachments": []})[1] is None
+
+
+# ── review round: re-sharing, per-turn caps, eviction, deletion, previews ────────────────────────────────────
+
+
+def test_a_shared_copy_or_an_upload_is_never_shared_again(home, tmp_path):
+    """Login B in a chat of the same profile must not get A's copy by asking the bot to send its blob."""
+    source = home / "work" / "a.txt"
+    source.write_text("for A only")
+    record = _share(home, source)
+    blob = home / "outbox" / record["id"] / "blob"
+    for path in (blob, home / "outbox" / record["id"] / "record.json"):
+        with pytest.raises(outbox.ShareRefused) as refused:
+            outbox.share_file(str(path), home=home, session_id="s2", logins=["oidc:b"])
+        assert refused.value.reason == "denied"
+    # Another profile's outbox too, and a link into one.
+    other = home / "profiles" / "lloyd" / "outbox" / ("Q" * 32)
+    other.mkdir(parents=True)
+    (other / "blob").write_text("lloyd's")
+    link = home / "work" / "innocent.txt"
+    link.symlink_to(other / "blob")
+    for path in (other / "blob", link):
+        with pytest.raises(outbox.ShareRefused):
+            _share(home, path)
+    upload = tmp_path / "work" / "uploads" / "hermie" / "2026-10-04" / "0123456789abcdef-scan.pdf"
+    upload.parent.mkdir(parents=True)
+    upload.write_bytes(b"%PDF-1.7\n")
+    with pytest.raises(outbox.ShareRefused):
+        _share(home, upload)
+    assert _entries(home) == [record["id"]]
+
+
+def test_the_read_guard_and_native_delivery_refuse_the_outbox(home):
+    from agent.file_safety import get_read_block_error
+    from gateway.platforms.base import validate_media_delivery_path
+    source = home / "work" / "a.txt"
+    source.write_text("x")
+    blob = home / "outbox" / _share(home, source)["id"] / "blob"
+    assert get_read_block_error(str(blob)) is not None
+    assert validate_media_delivery_path(str(blob)) is None
+
+
+def test_a_hard_linked_source_is_refused(home):
+    (home / "auth.json").write_text("{}")
+    alias = home / "work" / "notes.txt"
+    os.link(home / "auth.json", alias)
+    with pytest.raises(outbox.ShareRefused) as refused:
+        _share(home, alias)
+    assert refused.value.reason == "linked"
+
+
+def test_a_source_swapped_for_a_link_after_the_check_is_not_read(home, tmp_path, monkeypatch):
+    """The checks judge the resolved path; the open walks it without following a link."""
+    secret = home / ".env"
+    secret.write_text("SECRET=1")
+    folder = home / "work" / "out"
+    folder.mkdir()
+    (folder / "a.txt").write_text("fine")
+    real_check = outbox.check_source
+
+    def check_then_swap(path, **kwargs):
+        resolved = real_check(path, **kwargs)
+        moved = home / "work" / "moved"
+        folder.rename(moved)
+        folder.symlink_to(home)  # .../out now points at the home
+        (moved / "a.txt").unlink()
+        (home / "a.txt").symlink_to(secret)
+        return resolved
+
+    monkeypatch.setattr(outbox, "check_source", check_then_swap)
+    with pytest.raises(outbox.ShareRefused):
+        _share(home, folder / "a.txt")
+    assert _entries(home) == []
+
+
+def _big(home, name, size):
+    path = home / "work" / name
+    with open(path, "wb") as handle:
+        handle.truncate(size)
+    return path
+
+
+def test_one_conversation_cannot_evict_anothers_recent_files(home):
+    """The reviewer's scenario, scaled down (x200 MB -> x200 B): A shares one file; then a reply in B names
+    eleven files that do not all fit. A's file stays; B's turn gets what fits and the rest is refused."""
+    settings = outbox.OutboxSettings(max_total_bytes=2000, max_file_bytes=200, max_turn_bytes=100_000)
+    a = outbox.share_file(str(_big(home, "a.bin", 200)), home=home, session_id="A", logins=["oidc:a"],
+                          settings=settings)
+    text = "\n".join(f"MEDIA:{_big(home, f'b{i}.bin', 200)}" for i in range(11))
+    shared = outbox_share.share_turn_files(text, [], home=home, session_id="B", logins=["oidc:b"],
+                                           settings=settings)
+    assert a["id"] in _entries(home)
+    assert len(shared.attachments) == 9 and shared.refused == ["no_room", "no_room"]
+    assert all(att["id"] in _entries(home) for att in shared.attachments)
+    # A later turn of B may push out B's own oldest, still never A's.
+    later = outbox.share_file(str(_big(home, "b-late.bin", 200)), home=home, session_id="B", settings=settings,
+                              now=time.time() + 60)
+    assert a["id"] in _entries(home) and later["id"] in _entries(home)
+    assert shared.attachments[0]["id"] not in _entries(home)
+
+
+def test_room_is_made_from_the_same_conversations_oldest_but_never_this_turns(home):
+    settings = outbox.OutboxSettings(max_total_bytes=450, max_file_bytes=200)
+    old = outbox.share_file(str(_big(home, "o.bin", 200)), home=home, session_id="A", settings=settings)
+    first = outbox.share_file(str(_big(home, "f.bin", 200)), home=home, session_id="A", settings=settings,
+                              now=time.time() + 1)
+    # The same conversation's oldest goes to make room ...
+    second = outbox.share_file(str(_big(home, "s.bin", 200)), home=home, session_id="A", settings=settings,
+                               now=time.time() + 2)
+    assert _entries(home) == sorted([first["id"], second["id"]])
+    # ... but never a file of the turn being shared.
+    with pytest.raises(outbox.ShareRefused) as refused:
+        outbox.share_file(str(_big(home, "t.bin", 200)), home=home, session_id="A", settings=settings,
+                          protect={first["id"], second["id"]})
+    assert refused.value.reason == "no_room"
+    assert old["id"] not in _entries(home)
+
+
+def test_per_turn_caps_on_count_and_bytes(home):
+    paths = [_big(home, f"f{i}.bin", 100) for i in range(5)]
+    text = "\n".join(f"MEDIA:{p}" for p in paths)
+    settings = outbox.OutboxSettings(max_turn_files=3)
+    shared = outbox_share.share_turn_files(text, [], home=home, session_id="s", logins=[], settings=settings)
+    assert len(shared.attachments) == 3 and shared.refused == ["turn_limit", "turn_limit"]
+    assert shared.text == "(2 files could not be shared.)"
+    settings = outbox.OutboxSettings(max_turn_bytes=250)
+    shared = outbox_share.share_turn_files(text, [], home=home, session_id="t", logins=[], settings=settings)
+    assert len(shared.attachments) == 2 and set(shared.refused) == {"too_large"}
+
+
+def test_a_slow_copy_is_abandoned_and_removed(home, monkeypatch):
+    """The turn waits a bounded time; a copy still running then is cancelled and leaves nothing behind."""
+    import threading
+    path = _big(home, "slow.bin", 100)
+    release = threading.Event()
+    real_fill = outbox._fill_entry
+
+    def slow_fill(*args, **kwargs):
+        release.wait(5)
+        return real_fill(*args, **kwargs)
+
+    monkeypatch.setattr(outbox, "_fill_entry", slow_fill)
+    settings = outbox.OutboxSettings(turn_timeout_seconds=0.3)
+    started = time.monotonic()
+    shared = outbox_share.share_turn_files(f"MEDIA:{path}", [], home=home, session_id="s", logins=[],
+                                           settings=settings)
+    assert time.monotonic() - started < 3
+    assert shared.attachments == [] and shared.refused == ["timeout"]
+    release.set()
+    deadline = time.monotonic() + 5
+    while _entries(home) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert _entries(home) == []
+
+
+def test_deleting_a_session_removes_its_copies(home, tmp_path):
+    from hermes_state import SessionDB
+    home = tmp_path / "store"  # the outbox lives beside the store (a profile home)
+    home.mkdir()
+    (home / "work").mkdir()
+    db = SessionDB(db_path=home / "state.db")
+    try:
+        for sid in ("keep", "gone"):
+            db.create_session(session_id=sid, source="hermie", model="m")
+        kept = outbox.share_file(str(_big(home, "k.bin", 10)), home=home, session_id="keep")
+        outbox.share_file(str(_big(home, "g.bin", 10)), home=home, session_id="gone")
+        assert db.delete_session("gone")
+        assert _entries(home) == [kept["id"]]
+        outbox.share_file(str(_big(home, "g2.bin", 10)), home=home, session_id="bulk")
+        db.create_session(session_id="bulk", source="hermie", model="m")
+        assert db.delete_sessions(["bulk"]) == 1
+        assert _entries(home) == [kept["id"]]
+    finally:
+        db.close()
+
+
+def test_previews_never_show_a_media_path():
+    from hermes_state_common import _shape_preview, strip_media_for_preview
+    assert strip_media_for_preview("Here you go MEDIA:/root/.hermes/cache/audio/tts_1.mp3 enjoy") == \
+        "Here you go enjoy"
+    assert strip_media_for_preview('**MEDIA:"/a b/c.png"** [[audio_as_voice]]') == ""
+    assert strip_media_for_preview(">>>MEDIA:/root/.hermes/ca...") == ">>>"
+    assert _shape_preview("look MEDIA:/x/y.pdf") == "look"
+
+
+def test_the_stream_keeps_examples_in_code_and_flushes_at_the_end():
+    stream = outbox_share.MediaDeltaFilter()
+    shown = "".join(stream.feed(d) for d in ["```\nMEDIA:/ex.png\n```\n", "done MEDIA:/a.p", "ng"])
+    shown += stream.flush()
+    assert shown == "```\nMEDIA:/ex.png\n```\ndone "
+    long = outbox_share.MediaDeltaFilter()
+    shown = long.feed("x MEDIA:/" + "a" * 9000) + long.feed("b.png rest") + long.flush()
+    assert "MEDIA:" not in shown and shown.endswith("rest")
+
+
+def test_project_row_adds_the_note_for_refused_files():
+    text, attachments, meta = outbox_share.project_row(
+        "assistant", "Here.\nMEDIA:/etc/passwd", {"attachments": [], "attachments_refused": 1})
+    assert text == "Here.\n\n(1 file could not be shared.)" and attachments == [] and meta is None
+
+
+def test_every_preview_surface_strips_media_paths(tmp_path):
+    """Session list previews, the roster preview, the live session item, timeline entries and search snippets."""
+    from hermes_state import SessionDB
+    from hermes_state_timeline import get_session_timeline
+    from tui_gateway.methods_profiles import _latest_message_preview
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session(session_id="s", source="hermie", model="m")
+        db.append_message("s", role="user", content="send MEDIA:/root/.hermes/secret/plan.pdf please")
+        db.append_message("s", role="assistant", content="Done.\nMEDIA:/root/.hermes/cache/audio/tts_1.mp3")
+        assert "MEDIA:" not in _latest_message_preview(db, "s")
+        rows = db.list_sessions_rich(limit=5)
+        assert rows and all("MEDIA:" not in (row.get("preview") or "") for row in rows)
+        entries = get_session_timeline(db, "s")["entries"]
+        assert entries and all("MEDIA:" not in e["preview"] for e in entries)
+    finally:
+        db.close()
+    import tui_gateway.server as server
+    item = server._session_live_item("x", {"history": [{"role": "assistant", "content": "Here MEDIA:/a/b.png"}],
+                                           "session_key": "x"})
+    assert item["preview"] == "Here"

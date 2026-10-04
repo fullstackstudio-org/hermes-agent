@@ -115,7 +115,8 @@ def _latest_message_preview(db, session_id):
                 (session_id,)).fetchone()
     except Exception:
         return ""
-    text = " ".join(str(row[0] or "").split()).strip() if row else ""
+    from hermes_state_common import strip_media_for_preview
+    text = " ".join(strip_media_for_preview(str(row[0] or "")).split()).strip() if row else ""
     return text[:80] + "..." if len(text) > 80 else text
 
 

@@ -32,7 +32,8 @@ def _prompt_preview(db, content, display_kind, summary):
             for part in content if isinstance(part, (str, dict)))
     if not isinstance(content, str):
         return ""
-    text = " ".join(content.split())
+    from hermes_state_common import strip_media_for_preview
+    text = " ".join(strip_media_for_preview(content).split())
     if not text or _SYNTHETIC_PROMPT.match(text):
         return ""
     return text if len(text) <= 120 else text[:119].rstrip() + "…"

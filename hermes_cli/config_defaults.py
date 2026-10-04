@@ -1283,6 +1283,9 @@ DEFAULT_CONFIG = {
         "outbox_max_file_mb": 200,  # a larger file is not shared
         "outbox_max_total_mb": 2048,  # per profile; the oldest shared files go first
         "outbox_retention_days": 30,  # shared files older than this are removed
+        "outbox_max_turn_files": 20,  # files one reply may share; the rest are refused
+        "outbox_max_turn_mb": 500,  # bytes one reply may share
+        "outbox_turn_timeout_s": 120,  # copying a reply's files may delay its completion this long at most
     },
     # "Hey Hermes" hands-free wake word: always-on, on-device hotword detection that starts a fresh
     # voice session. Off by default; toggle with /wake.

@@ -337,6 +337,11 @@ _READ_DENIED_DIRS = (
     ("vault",
      "is the Hermes credential vault directory and cannot be read directly (secrets are filled server-side by browser_vault_fill).",
      "is inside the Hermes credential vault (encrypted secrets + local key) and cannot be read directly (browser_vault_fill resolves them server-side)."),
+    # Fork: the files bots shared with people (tui_gateway/outbox.py). Each belongs to the conversation that shared
+    # it; read back here, any conversation of the profile could hand it to whoever is in it.
+    ("outbox",
+     "is the Hermes outbox (files shared in other conversations) and cannot be read directly.",
+     "is a file shared in another conversation (Hermes outbox) and cannot be read directly."),
 )
 
 

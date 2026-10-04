@@ -340,6 +340,8 @@ async def search_sessions(
             # One keyspace for id-hits and content-hits, keyed by lineage root;
             # first hit wins, and ID matches run first.
             seen: dict = {}
+            # A bot's file is an attachment, never a server path (tui_gateway/outbox_share.py).
+            from hermes_state_common import strip_media_for_preview
 
             def add_lineage_result(raw_sid: str, payload: dict) -> None:
                 if not raw_sid:
@@ -385,7 +387,7 @@ async def search_sessions(
                 # hits have no row recency and leave it null so the desktop can
                 # fall back to session_started instead of inventing one.
                 return {
-                    "snippet": snippet, "role": role, "source": row.get("source"),
+                    "snippet": strip_media_for_preview(snippet), "role": role, "source": row.get("source"),
                     "model": row.get("model"), "session_started": session_started,
                     "last_active": row.get("last_active")}
 

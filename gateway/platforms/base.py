@@ -789,7 +789,9 @@ _ROOT_CREDENTIAL_PATHS = (
     # Whole conversation history (every secret ever pasted into a chat) and the copied browser
     # cookie/login store; sessions/ is the legacy transcript dir. SQLite sidecars are listed
     # too: WAL mode touches state.db-wal on every write, so recency trust alone would leak them.
-    "sessions", "browser-profile", *_sqlite_files("state.db"), *_sqlite_files("kanban.db"))
+    "sessions", "browser-profile", *_sqlite_files("state.db"), *_sqlite_files("kanban.db"),
+    # Fork: copies shared in one conversation (tui_gateway/outbox.py) are never delivered from another.
+    "outbox")
 
 
 def _profile_cache_roots() -> List[Path]:

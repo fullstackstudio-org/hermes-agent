@@ -6,6 +6,7 @@ import errno
 import json
 import logging
 import os
+import re
 import sys
 import time
 from typing import Any
@@ -129,9 +130,24 @@ _PREVIEW_RAW_SELECT = (
     f" ELSE SUBSTR({_PREVIEW_CONTENT_SQL}, 1, {_PREVIEW_HEAD_CHARS}) END")
 
 
+# A ``MEDIA:<path>`` directive (any quoting) and the voice/document markers. Previews and search snippets are
+# cut-outs of stored text, so a path may be truncated: this is deliberately looser than the delivery regex.
+_PREVIEW_MEDIA_RE = re.compile(
+    r"""[`"'*_]{0,3}MEDIA:[ \t]*(?:"[^"\n]*"?|'[^'\n]*'?|`[^`\n]*`?|\S+)[`"'*_]{0,3}"""
+    r"""|\[\[(?:audio_as_voice|as_document)\]\]""")
+
+
+def strip_media_for_preview(text: Any) -> Any:
+    """*text* without ``MEDIA:`` directives, for previews, timeline entries and search snippets: what a bot
+    attached is shown as an attachment (``tui_gateway/outbox_share.py``), never as a server path."""
+    if not isinstance(text, str) or ("MEDIA:" not in text and "[[" not in text):
+        return text
+    return re.sub(r"[ \t]{2,}", " ", _PREVIEW_MEDIA_RE.sub("", text)).strip()
+
+
 def _shape_preview(raw: Any) -> str:
     """Turn a ``_preview_raw`` column into the short preview callers show."""
-    text = str(raw or "").strip()
+    text = strip_media_for_preview(str(raw or "")).strip()
     if not text:
         return ""
     text = text.replace("\n", " ").replace("\r", " ")

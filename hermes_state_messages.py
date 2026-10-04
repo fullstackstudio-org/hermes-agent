@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.context_compressor import (
@@ -442,23 +443,46 @@ class SessionMessagesMixin:
             return reactions
         return self._execute_write(_do)
 
-    def set_message_attachments(self, session_id: str, message_row_id: int,
-                                attachments: List[Dict[str, Any]]) -> bool:
-        """Record on one assistant row the files a bot shared in it (``tui_gateway/outbox.py``), under
-        ``ATTACHMENTS_METADATA_KEY`` in its ``display_metadata``: what clients see, never what the model is
-        sent. ``False`` for a row outside the session's visible lineage (see ``_reaction_row_query``)."""
-        if not session_id or message_row_id is None:
+    def set_message_attachments(self, session_id: str, message_row_id: Optional[int],
+                                metadata: Dict[str, Any], *, content: Optional[str] = None) -> bool:
+        """Merge *metadata* (the files a bot shared in this reply: ``tui_gateway/outbox_share.py``) into one
+        assistant row's ``display_metadata``: what clients see, never what the model is sent. The row is
+        *message_row_id* when it is in the session's visible lineage (see ``_reaction_row_query``); otherwise, with
+        *content*, the newest active assistant row of *session_id* whose content is exactly that. ``False`` when
+        no row qualifies."""
+        if not session_id or (message_row_id is None and not content):
             return False
-        sql, params = self._reaction_row_query(session_id, message_row_id)
+        by_id = self._reaction_row_query(session_id, message_row_id) if message_row_id is not None else None
         def _do(conn):
-            row = conn.execute(sql, params).fetchone()
+            row, row_id = None, message_row_id
+            if by_id is not None:
+                row = conn.execute(*by_id).fetchone()
+            if row is None and content:
+                found = conn.execute(
+                    "SELECT id, display_metadata FROM messages WHERE session_id = ? AND role = 'assistant' "
+                    "AND content = ? AND active = 1 ORDER BY id DESC LIMIT 1",
+                    (session_id, self._encode_content(content, "assistant"))).fetchone()
+                if found is not None:
+                    row_id, row = found[0], (found[1],)
             if row is None:
                 return False
             meta = self._decode_display_metadata(row[0]) or {}
-            meta[self.ATTACHMENTS_METADATA_KEY] = list(attachments)
-            conn.execute(_SET_DISPLAY_META_SQL, (self._encode_display_metadata(meta), message_row_id))
+            meta.update(metadata)
+            conn.execute(_SET_DISPLAY_META_SQL, (self._encode_display_metadata(meta), row_id))
             return True
         return bool(self._execute_write(_do))
+
+    def _remove_session_outbox(self, session_ids: List[str]) -> None:
+        """Fork: a deleted conversation's shared files go with it (``tui_gateway/outbox.py``); the outbox lives
+        beside this store, in the same profile home. Never raises."""
+        try:
+            home = Path(self.db_path).parent
+            if not session_ids or not (home / "outbox").is_dir():
+                return
+            from tui_gateway.outbox import remove_session_files
+            remove_session_files(home, session_ids)
+        except Exception:
+            logger.debug("outbox cleanup after a session delete failed", exc_info=True)
 
     def get_message_reactions(self, session_id: str, message_row_id: int) -> List[Dict[str, Any]]:
         """Reaction list persisted on one message row (never ``None``)."""

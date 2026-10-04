@@ -300,6 +300,7 @@ class SessionMaintenanceMixin:
         count = self._execute_write(_do)
         for sid in removed_ids:
             self._remove_session_files(sessions_dir, sid)
+        self._remove_session_outbox(removed_ids)
         return count
 
     def _page_pragmas(self, names: Tuple[str, ...], fail_msg: str) -> Optional[list]:

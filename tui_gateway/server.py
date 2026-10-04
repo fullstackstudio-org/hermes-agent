@@ -3050,12 +3050,15 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
     status = _session_live_status(sid, session)
     inflight = _inflight_snapshot(session)
     queued = _queued_prompt_snapshot(session)
+    from hermes_state_common import strip_media_for_preview
     preview = next((" ".join(text.split())[:160] for msg in reversed(history)
-                    if (text := _content_display_text(msg.get("content", msg.get("text", ""))).strip())), "")
+                    if (text := strip_media_for_preview(
+                        _content_display_text(msg.get("content", msg.get("text", "")))).strip())), "")
     if queued:
-        preview = " ".join(str(queued.get("user") or preview).split())[:160]
+        preview = " ".join(strip_media_for_preview(str(queued.get("user") or preview)).split())[:160]
     elif inflight:
-        preview = " ".join(str(inflight.get("assistant") or inflight.get("user") or preview).split())[:160]
+        preview = " ".join(strip_media_for_preview(
+            str(inflight.get("assistant") or inflight.get("user") or preview)).split())[:160]
     now = time.time()
     return {
         "current": sid == current_sid, "id": sid,

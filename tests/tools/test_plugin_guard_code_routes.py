@@ -94,16 +94,30 @@ def test_a_loader_aimed_at_python_source_is_not_flagged(tmp_path, call):
     assert not _ids(plugin) & LOADER_IDS, call
 
 
-def test_a_loader_path_the_scan_cannot_work_out_is_reported_but_does_not_block(tmp_path):
+def test_a_loader_path_in_the_plugin_the_scan_cannot_name_is_reported_but_does_not_block(tmp_path):
     plugin = _plugin(tmp_path, {"__init__.py": (
-        "import importlib.util\n"
-        "def load(name, path):\n"
-        "    return importlib.util.spec_from_file_location(name, path)\n")})
+        "import importlib.util, os\n"
+        "HERE = os.path.dirname(__file__)\n"
+        "def load(name):\n"
+        "    return importlib.util.spec_from_file_location(name, os.path.join(HERE, name))\n")})
     _commit_all(plugin)
     result = scan_plugin(plugin)
     found = [f for f in result.findings if f.pattern_id == "dynamic_source_loader"]
-    assert found and found[0].severity == "medium" and found[0].line == 3
+    assert found and found[0].severity == "medium" and found[0].line == 4
     assert result.verdict == "safe"
+
+
+@pytest.mark.parametrize("path", ["path", "'/tmp/m.py'", "'m.py'", "os.path.join(HERE, '..', 'm.py')",
+                                  "os.path.join(HERE, '/tmp/m.py')", "os.path.join(tempfile.mkdtemp(), 'm.py')",
+                                  "os.path.join(os.path.dirname(HERE), 'm.py')"])
+def test_a_loader_path_outside_the_plugin_is_flagged(tmp_path, path):
+    """Only a path built from ``__file__`` that stays in the plugin is the plugin's own code."""
+    plugin = _plugin(tmp_path, {"__init__.py": (
+        "import importlib.util, os, tempfile\n"
+        "HERE = os.path.dirname(__file__)\n"
+        f"def load(name, path):\n    return importlib.util.spec_from_file_location(name, {path})\n")})
+    _commit_all(plugin)
+    assert "foreign_source_loader" in _ids(plugin, at_least="high"), path
 
 
 def test_load_compiled_is_a_bytecode_loader_whatever_its_path(tmp_path):

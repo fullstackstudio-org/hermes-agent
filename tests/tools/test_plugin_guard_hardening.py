@@ -224,3 +224,117 @@ def test_test_or_script_code_nothing_imports_steps_down(tmp_path, path):
     result = scan_plugin(plugin)
     assert [f.severity for f in result.findings if f.pattern_id == "exec_dynamic_code"] == ["medium"]
     assert result.verdict == "safe"
+
+
+# ── 5/6. runtime code by any spelling the scan can follow (a denylist, with its limits) ─────
+
+_RUNTIME_CODE_CASES = {
+    "alias": ("src = M\ne = exec\ne(src)\n", "exec_dynamic_code"),
+    "map": ("src = M\nlist(map(exec, [src]))\n", "exec_dynamic_code"),
+    "partial": ("import functools\nsrc = M\nfunctools.partial(exec)(src)\n", "exec_dynamic_code"),
+    "builtins dict": ("src = M\n__builtins__['exec'](src) if isinstance(__builtins__, dict) "
+                      "else __builtins__.__dict__['exec'](src)\n", "exec_dynamic_code"),
+    "vars(builtins)": ("import builtins\nsrc = M\nvars(builtins)['ex'+'ec'](src)\n", "exec_dynamic_code"),
+    "import_module + getattr": ("import importlib\nsrc = M\n"
+                                "getattr(importlib.import_module('built'+'ins'), 'ex'+'ec')(src)\n",
+                                "exec_dynamic_code"),
+    "getattr with a name": ("import builtins\nNAME = input()\ngetattr(builtins, NAME)('x')\n", "exec_dynamic_code"),
+    "timeit": ("import timeit\nsrc = M\ntimeit.timeit(src, number=1)\n", "code_runner"),
+    "code module": ("import code\nsrc = M\ncode.InteractiveInterpreter().runsource(src, symbol='exec')\n",
+                    "code_runner"),
+    "cProfile": ("import cProfile\nsrc = M\ncProfile.run(src)\n", "code_runner"),
+    "pdb": ("import pdb as p\nsrc = M\np.run(src)\n", "code_runner"),
+    "pickle": ("import pickle, base64\nBLOB = 'gASV'\npickle.loads(base64.b64decode(BLOB))\n", "unpickle_code"),
+    "dill": ("from dill import loads\nloads(b'')\n", "unpickle_code"),
+    "ctypes": ("import ctypes\nsrc = M\nctypes.pythonapi.PyRun_SimpleString(src.encode())\n", "code_runner"),
+    "ctypes by name": ("import ctypes\nf = getattr(ctypes.pythonapi, 'PyRun_' + 'SimpleString')\n", "code_runner"),
+    "source loader class": ("import importlib.abc\nclass L(importlib.abc.SourceLoader):\n"
+                            "    def get_filename(self, f): return 'x.py'\n    def get_data(self, p): return b''\n",
+                            "custom_loader"),
+    "SourceFileLoader subclass": ("from importlib.machinery import SourceFileLoader\nclass L(SourceFileLoader):\n"
+                                  "    pass\nL('m', 'data.bin').load_module()\n", "custom_loader"),
+    "loader by methods": ("class L:\n    def exec_module(self, m):\n        pass\n", "custom_loader"),
+    "source_to_code": ("import importlib.util\nc = importlib.util.source_to_code(b'x = 1')\n",
+                       "compile_dynamic_code"),
+    "FunctionType + __code__.replace": ("import types\nf = lambda: 0\n"
+                                        "g = types.FunctionType(f.__code__.replace(co_consts=(None,)), {})\n",
+                                        "code_object"),
+    "__code__ assigned": ("def f(): pass\ndef g(): pass\nf.__code__ = g.__code__\n", "code_object"),
+    "python -c": ("import subprocess, sys\nsrc = M\nsubprocess.run([sys.executable, '-c', src])\n",
+                  "interpreter_code"),
+    "imp.load_module": ("import imp\nimp.load_module('m', open('data.bin'), 'data.bin', ('.bin', 'r', 1))\n",
+                        "non_source_loader"),
+    "zipimport by string": ("import importlib, os\nmod = importlib.import_module('zipimport')\n"
+                            "z = getattr(mod, 'zip' + 'importer')('a.bin')\n", "zipimport_use"),
+    "SourcelessFileLoader by string": ("import importlib.machinery as m\nL = getattr(m, 'SourcelessFileLoader')\n",
+                                       "bytecode_or_native_loader"),
+    "archive name in a variable": ("import sys\nW = 'vendor.whl'\nsys.path.insert(0, W)\n", "archive_on_sys_path"),
+}
+
+
+@pytest.mark.parametrize("case", list(_RUNTIME_CODE_CASES))
+def test_runtime_code_by_any_followable_spelling_is_flagged(tmp_path, case):
+    source, pattern = _RUNTIME_CODE_CASES[case]
+    plugin = _plugin(tmp_path, {"__init__.py": source.replace("M", MARKER, 1) if "src = M" in source else source})
+    _commit_all(plugin)
+    assert (pattern, "__init__.py") in _found(plugin), (case, scan_plugin(plugin).findings)
+
+
+@pytest.mark.parametrize("line", [
+    "timeit.timeit('x = 1', number=1)",
+    "timeit.timeit(lambda: None, number=1)",
+    "data = pickle.dumps({'a': 1})",
+    "ns = types.SimpleNamespace(a=1)",
+    "opener = getattr(builtins, 'open')",
+    "mod = importlib.import_module('.helpers', __package__)",
+    "mod = importlib.import_module('json')",
+    "pattern = re.compile(r'\\d+')",
+    "value = ast.literal_eval('[1]')",
+    "subprocess.run([sys.executable, '-c', 'print(1)'])",
+    "subprocess.run([sys.executable, '-m', 'pip', '--version'])",
+])
+def test_ordinary_code_is_not_flagged_as_runtime_code(tmp_path, line):
+    plugin = _plugin(tmp_path, {"__init__.py": (
+        "import ast, builtins, importlib, pickle, re, subprocess, sys, timeit, types\n"
+        f"def f():\n    {line}\n")})
+    _commit_all(plugin)
+    from tools.plugin_guard_code import ROUTE_PATTERN_IDS
+
+    assert not {pid for pid, _f in _found(plugin, at_least="medium")} & ROUTE_PATTERN_IDS, line
+
+
+# ── 7. a loader or sys.path entry must stay in the plugin ──────────────────────────────────
+
+
+@pytest.mark.parametrize("source, pattern", [
+    ("import importlib.machinery\nimportlib.machinery.SourceFileLoader('m', '/tmp/m.py').load_module()\n",
+     "foreign_source_loader"),
+    ("import sys, tempfile, os, importlib\nd = tempfile.mkdtemp()\nsys.path.insert(0, d)\n"
+     "importlib.import_module('m')\n", "foreign_sys_path"),
+    ("import sys\nsys.path.append('/opt/elsewhere')\n", "foreign_sys_path"),
+    ("import sys\nsys.path.append('vendor')\n", "foreign_sys_path"),          # relative to the working dir
+    ("import os, sys\nsys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n", "foreign_sys_path"),
+    ("import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'x'))\n", "foreign_sys_path"),
+    ("import site\nsite.addsitedir('/usr/local/share/x')\n", "foreign_sys_path"),
+])
+def test_a_path_outside_the_plugin_is_flagged(tmp_path, source, pattern):
+    plugin = _plugin(tmp_path, {"__init__.py": source})
+    _commit_all(plugin)
+    assert (pattern, "__init__.py") in _found(plugin), source
+
+
+@pytest.mark.parametrize("rel, source", [
+    ("__init__.py", "import os, sys\nsys.path.insert(0, os.path.dirname(__file__))\n"),
+    ("__init__.py", "import sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).parent / 'vendor'))\n"),
+    ("pkg/mod.py", "import sys\nfrom pathlib import Path\nsys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n"),
+    ("pkg/mod.py", "import os, sys\nsys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))\n"),
+    ("__init__.py", ("import importlib.util\nfrom pathlib import Path\n"
+                     "def a(path):\n    return path\n"
+                     "def b():\n    path = Path(__file__).with_name('helper.py')\n"
+                     "    return importlib.util.spec_from_file_location('h', path)\n")),
+])
+def test_a_path_anchored_in_the_plugin_is_not_flagged(tmp_path, rel, source):
+    plugin = _plugin(tmp_path, {"__init__.py": "", rel: source, "helper.py": "VALUE = 1\n"})
+    _commit_all(plugin)
+    assert not {pid for pid, _f in _found(plugin, at_least="medium")} & {
+        "foreign_sys_path", "foreign_source_loader", "archive_on_sys_path", "non_source_loader"}, source

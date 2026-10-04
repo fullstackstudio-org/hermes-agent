@@ -298,10 +298,12 @@ def test_an_ordinary_loader_and_sys_path_insert_are_not_flagged(tmp_path):
     plugin = _plugin(tmp_path, {"__init__.py": (
         "import importlib.util, os, sys\n"
         "sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'vendor'))\n"
-        "spec = importlib.util.spec_from_file_location('helper', 'helper.py')\n")})
+        "spec = importlib.util.spec_from_file_location('helper', os.path.join(os.path.dirname(__file__), "
+        "'helper.py'))\n")})
     _commit_all(plugin)
     result = scan_plugin(plugin)
-    assert not {f.pattern_id for f in result.findings} & {"non_source_loader", "archive_on_sys_path"}
+    assert not {f.pattern_id for f in result.findings} & {
+        "non_source_loader", "archive_on_sys_path", "foreign_source_loader", "foreign_sys_path"}
 
 
 @pytest.mark.parametrize("name", [f"helper{sfx}" for sfx in (".so", ".abi3.so", ".cpython-311-x86_64-linux-gnu.so",

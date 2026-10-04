@@ -1,18 +1,33 @@
 """Python a plugin can run that no text scan reads (``tools.plugin_guard``; HERM-196b, HERM-197).
 
-Two kinds: code imported from somewhere the scan does not read (an archive, bytecode, a file that
-is not ``.py``), and code the plugin builds at run time and executes (``exec``/``eval`` of anything
-but a literal, ``compile`` in exec mode, ``marshal``, a finder put into ``sys.meta_path`` or
-``sys.path_hooks``). A literal ``exec("...")`` is visible text and is left to the pattern scan.
+Two kinds of route:
+
+* code imported from somewhere the scan does not read: an archive or any other file put on
+  ``sys.path``, a directory outside the plugin, bytecode, a file that is not ``.py``, a custom
+  loader or finder, a change to the import machinery;
+* code the plugin builds at run time and executes: ``exec``/``eval``/``compile`` of anything but a
+  literal, and the other ways to run a string or a code object (``marshal``/``pickle`` and kin,
+  ``timeit``, the ``code`` module, ``pdb``/``profile`` runners, ``ctypes.pythonapi``, code objects
+  built or swapped by hand, ``python -c`` with a computed argument).
+
+The second list is a DENYLIST and has the limits every denylist has: Python can reach an
+interpreter in more ways than any list names, and a determined author can hide a name from static
+analysis altogether. The checks follow the spellings a scan can see (aliases, ``import ... as``,
+``getattr`` and subscripts with a constant or concatenated name, ``vars(builtins)``,
+``importlib.import_module('builtins')``); what they cannot follow is not reported. They exist to
+make a plain bypass visible, not to prove a plugin harmless.
 
 Read from the AST, not line by line, so a docstring that names a route is prose, a loader is
 judged by the path it is given rather than by every dotted string on its line, a call that spans
-several lines is one call, and only a CHANGE to ``sys.path`` counts. Source the scanner's own
-Python cannot parse (newer syntax than the scanner, or a broken file) is read line by line instead,
-with docstrings skipped there too.
+several lines is one call, and only a CHANGE to ``sys.path`` counts. A loader path or a ``sys.path``
+entry is accepted only when it is anchored to the plugin itself (built from ``__file__``, without
+leaving the plugin's directory); an absolute path, a path relative to the working directory, or one
+computed from anything else is high. Source the scanner's own Python cannot parse (newer syntax
+than the scanner, or a broken file) is read line by line instead, with docstrings skipped there too.
 
-Every finding is ``high`` (confirm before installing) except a loader whose path the scan cannot
-work out: that file is scanned like any other wherever it is, so it is reported at ``medium``.
+Every finding is ``high`` (confirm before installing) except a loader anchored to the plugin whose
+file name the scan cannot work out: the file is somewhere in the plugin, which is scanned, so it
+is reported at ``medium``.
 """
 
 from __future__ import annotations
@@ -34,61 +49,111 @@ _FILE_LOADERS: Dict[str, Tuple[int, str]] = {
     "SourceFileLoader": (1, "path"),
     "spec_from_file_location": (1, "location"),
     "load_source": (1, "pathname"),
+    "load_module": (2, "pathname"),          # imp.load_module(name, file, pathname, description)
     "run_path": (0, "path_name"),
 }
 # Names that load bytecode or a native module directly, whatever they are given.
 _RAW_LOADERS = {"SourcelessFileLoader", "ExtensionFileLoader", "load_compiled", "load_dynamic"}
-# Builtins that run code given to them; ``compile`` only in a mode that makes a code object to run.
+_ZIP_NAMES = {"zipimport", "zipimporter"}
+# Builtins that run code given to them.
 _CODE_RUNNERS = {"exec", "eval", "compile"}
-_BUILTINS_MODULES = {"builtins", "__builtins__"}
+_BUILTIN_NAMES = _CODE_RUNNERS | {"getattr", "vars", "__import__", "globals", "locals", "setattr"}
 # The import machinery: a finder or hook put here decides where every later import comes from.
-_IMPORT_HOOKS = {"meta_path", "path_hooks", "path_importer_cache"}
+_IMPORT_HOOKS = {"sys.meta_path", "sys.path_hooks", "sys.path_importer_cache"}
 _MUTATORS = {"insert", "append", "extend", "__setitem__", "__iadd__", "update", "setdefault"}
 # Calls that build a path whose last literal piece is the file name.
 _PATH_BUILDERS = {"join", "Path", "PurePath", "PosixPath", "WindowsPath", "PurePosixPath", "PureWindowsPath",
                   "joinpath", "str", "fspath", "abspath", "realpath", "normpath", "expanduser", "resolve",
-                  "absolute", "expandvars", "fsdecode"}
+                  "absolute", "expandvars", "fsdecode", "glob", "rglob"}
+# Loading any of these runs code that is in the data (a pickle's __reduce__, a marshalled code object).
+_DESERIALIZERS = {
+    "marshal.loads": "marshal_code", "marshal.load": "marshal_code",
+    **{f"{module}.{name}": "unpickle_code"
+       for module in ("pickle", "_pickle", "cPickle", "dill", "cloudpickle")
+       for name in ("load", "loads", "Unpickler")},
+    "shelve.open": "unpickle_code", "shelve.Shelf": "unpickle_code", "shelve.DbfilenameShelf": "unpickle_code",
+    "jsonpickle.decode": "unpickle_code", "joblib.load": "unpickle_code", "pandas.read_pickle": "unpickle_code",
+}
+# Run a string of Python: flagged unless that string is a literal (or, for timeit, a lambda).
+_STRING_RUNNERS = {"timeit.timeit", "timeit.repeat", "timeit.Timer", "pdb.run", "pdb.runeval", "pdb.runctx",
+                   "cProfile.run", "cProfile.runctx", "profile.run", "profile.runctx"}
+_STRING_RUNNER_METHODS = {"runctx", "runeval", "runsource", "runcode"}
+# Interpreters and code objects: any use at all.
+_CODE_MACHINERY = {
+    "code.InteractiveInterpreter": "code_runner", "code.InteractiveConsole": "code_runner",
+    "code.interact": "code_runner", "code.compile_command": "code_runner", "codeop.compile_command": "code_runner",
+    "codeop.Compile": "code_runner", "codeop.CommandCompiler": "code_runner", "ctypes.pythonapi": "code_runner",
+    "types.CodeType": "code_object", "types.FunctionType": "code_object", "types.LambdaType": "code_object",
+    "zipimport": "zipimport_use", "zipimport.zipimporter": "zipimport_use",
+}
+# Names distinctive enough to flag on any object, and constant strings naming them.
+_DISTINCT_NAMES = {**{name: "bytecode_or_native_loader" for name in _RAW_LOADERS},
+                   **{name: "zipimport_use" for name in _ZIP_NAMES},
+                   "pythonapi": "code_runner", "source_to_code": "compile_dynamic_code", "CodeType": "code_object",
+                   "__builtins__": "exec_dynamic_code"}
+_C_API_RUNNERS = ("PyRun_", "Py_CompileString", "PyEval_EvalCode", "PyImport_ExecCode", "Py_Main")
+# A class that is (or acts as) an import loader or finder: it decides what code an import runs.
+_LOADER_BASE_SUFFIXES = ("Loader", "Finder", "Importer")
+_LOADER_METHODS = {"exec_module", "get_code", "source_to_code", "find_spec", "find_module", "create_module"}
+# Ways a path expression climbs one directory.
+_UP_CALLS = {"dirname"}
+_SAME_DIR_CALLS = {"Path", "PurePath", "PosixPath", "WindowsPath", "PurePosixPath", "PureWindowsPath", "str",
+                   "fspath", "abspath", "realpath", "normpath", "resolve", "absolute", "expanduser", "fsdecode",
+                   "joinpath", "glob", "rglob", "iterdir", "with_suffix", "with_name", "files"}
 
 _DESCRIPTIONS = {
     "archive_on_sys_path": "puts a file (an archive, whatever its name) on sys.path: imports code no scan reads",
+    "foreign_sys_path": "puts a directory outside the plugin (absolute, working-directory relative or computed) "
+                        "on sys.path: imports code no scan reads",
     "zipimport_use": "uses zipimport (imports code from an archive no scan reads)",
     "bytecode_or_native_loader": "loads bytecode or a native module directly",
     "non_source_loader": "loads a file that is not .py source as a module",
-    "dynamic_source_loader": "loads a module from a path the scan cannot work out (the file is scanned wherever it is)",
-    "exec_dynamic_code": "runs code built at run time with exec()/eval() (no scan reads what runs)",
-    "compile_dynamic_code": "compiles code built at run time in exec mode (no scan reads what runs)",
+    "foreign_source_loader": "loads a module from a path outside the plugin (absolute, working-directory "
+                             "relative or computed): no scan reads it",
+    "dynamic_source_loader": "loads a module from a file in the plugin the scan cannot name (the plugin is scanned)",
+    "exec_dynamic_code": "runs code built at run time with exec()/eval(), or reaches them indirectly "
+                         "(no scan reads what runs)",
+    "compile_dynamic_code": "compiles code built at run time (no scan reads what runs)",
     "marshal_code": "loads marshalled code objects (bytecode no scan reads)",
-    "import_hook_change": "changes the import machinery (sys.meta_path / sys.path_hooks): later imports can come from anywhere",
+    "unpickle_code": "unpickles data (pickle and kin run code named in the data)",
+    "code_runner": "runs a string of Python through an interpreter API (timeit, code, pdb/profile, ctypes "
+                   "pythonapi)",
+    "code_object": "builds or swaps a code object by hand (bytecode no scan reads)",
+    "custom_loader": "defines an import loader or finder: it decides what code an import runs",
+    "interpreter_code": "runs a Python interpreter on code built at run time (python -c)",
+    "import_hook_change": "changes the import machinery (sys.meta_path / sys.path_hooks): later imports can "
+                          "come from anywhere",
 }
 _SEVERITY = {"dynamic_source_loader": "medium"}
 # Every finding this module makes: a route by which code runs that no text scan reads. Under a test
 # tree these step down only when nothing the plugin runs imports the file (``plugin_guard``).
 ROUTE_PATTERN_IDS = frozenset(_DESCRIPTIONS)
 
+_MAX_DEPTH = 12
+
 
 def python_code_findings(text: str, rel: str, *, line_fallback: bool = True) -> List[Finding]:
-    """Findings for Python *text* (the file at *rel*). With *line_fallback*, text that does not parse
-    is read line by line instead; without it, such text yields nothing."""
+    """Findings for Python *text* (the file at *rel* in the plugin). With *line_fallback*, text that
+    does not parse is read line by line instead; without it, such text yields nothing."""
     try:
         tree = ast.parse(text)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return _line_findings(text, rel) if line_fallback else []
-    return _CodeReader(text, rel).read(tree)
+    return _CodeReader(text, rel, tree).read()
 
 
 class _CodeReader:
-    def __init__(self, text: str, rel: str) -> None:
+    def __init__(self, text: str, rel: str, tree: ast.AST) -> None:
         self.lines = text.split("\n")
         self.rel = rel
+        self.tree = tree
+        # How many directories the file sits below the plugin root (an archive member: none of its own).
+        self.depth = -1 if "!/" in rel else rel.count("/")
         self.found: Dict[Tuple[str, int], Finding] = {}
-        self.sys_names: Set[str] = {"sys"}
-        self.site_names: Set[str] = {"site"}
-        self.from_sys: Dict[str, str] = {}       # local name -> sys attribute it is
-        self.site_funcs: Set[str] = set()
-        self.marshal_names: Set[str] = {"marshal"}
-        self.marshal_funcs: Set[str] = set()
-        self.builtins_names: Set[str] = set(_BUILTINS_MODULES)
-        self.runners: Dict[str, str] = {name: name for name in _CODE_RUNNERS}   # local name -> builtin
+        self.nodes = list(ast.walk(tree))      # iterative: a deeply nested file cannot recurse the scan
+        self.parents: Dict[ast.AST, ast.AST] = {}
+        self.bindings: Dict[Tuple[ast.AST, str], _Binding] = {}   # (scope, name) -> how it is bound there
+        self.prose: Set[ast.AST] = set()          # string statements: docstrings and bare prose
 
     # ── output ──────────────────────────────────────────────────────────────────────────────
 
@@ -101,89 +166,263 @@ class _CodeReader:
             pattern_id, _SEVERITY.get(pattern_id, "high"), "execution", self.rel, line,
             text if len(text) <= 120 else text[:117] + "...", _DESCRIPTIONS[pattern_id])
 
-    def read(self, tree: ast.AST) -> List[Finding]:
-        nodes = list(ast.walk(tree))      # iterative: a deeply nested file cannot recurse the scan
-        for node in nodes:
-            self.note_import(node)
-        for node in nodes:
+    def read(self) -> List[Finding]:
+        for node in self.nodes:
+            for child in ast.iter_child_nodes(node):
+                self.parents[child] = node
+        for node in self.nodes:
+            self.note_binding(node)
+        for node in self.nodes:
             self.check(node)
         return sorted(self.found.values(), key=lambda f: (f.line, f.pattern_id))
 
     # ── names ───────────────────────────────────────────────────────────────────────────────
 
-    def note_import(self, node: ast.AST) -> None:
+    def scope(self, node: ast.AST) -> ast.AST:
+        """The function, lambda, class or module whose namespace *node* is evaluated in."""
+        up = self.parents.get(node)
+        while up is not None and not isinstance(up, _SCOPES):
+            up = self.parents.get(up)
+        return up if up is not None else self.tree
+
+    def binding(self, node: ast.AST, name: str) -> "_Binding":
+        """The record for *name* in the scope *node* binds it in."""
+        key = (self.scope(node), name)
+        if key not in self.bindings:
+            self.bindings[key] = _Binding()
+        return self.bindings[key]
+
+    def lookup(self, node: ast.Name) -> Optional["_Binding"]:
+        """How the name *node* reads is bound: its own scope, then enclosing functions (a class body
+        is not visible from its methods), then the module; None for a builtin or unknown name."""
+        scope, first = self.scope(node), True
+        while True:
+            if first or not isinstance(scope, ast.ClassDef):
+                found = self.bindings.get((scope, node.id))
+                if found is not None:
+                    return found
+            if scope is self.tree:
+                return None
+            scope, first = self.scope(scope), False
+
+    def note_binding(self, node: ast.AST) -> None:
         if isinstance(node, ast.Import):
             for alias in node.names:
-                local = alias.asname or alias.name.split(".")[0]
-                if alias.name == "sys":
-                    self.sys_names.add(local)
-                elif alias.name == "site":
-                    self.site_names.add(local)
-                elif alias.name == "marshal":
-                    self.marshal_names.add(local)
-                elif alias.name == "builtins":
-                    self.builtins_names.add(local)
-                elif alias.name == "zipimport":
+                if alias.asname:
+                    self.binding(node, alias.asname).imported.append(alias.name)
+                else:
+                    top = alias.name.split(".")[0]
+                    self.binding(node, top).imported.append(top)
+                if alias.name.split(".")[0] in _ZIP_NAMES:
                     self.add("zipimport_use", node)
         elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
             for alias in node.names:
                 local = alias.asname or alias.name
-                if module == "sys":
-                    self.from_sys[local] = alias.name
-                elif module == "site" and alias.name == "addsitedir":
-                    self.site_funcs.add(local)
-                elif module == "marshal" and alias.name in {"loads", "load"}:
-                    self.marshal_funcs.add(local)
-                elif module == "builtins" and alias.name in _CODE_RUNNERS:
-                    self.runners[local] = alias.name
-                if module == "zipimport":
+                if node.level == 0 and node.module:
+                    self.binding(node, local).imported.append(f"{node.module}.{alias.name}")
+                else:
+                    self.binding(node, local).other = True
+                if (node.module or "").split(".")[0] in _ZIP_NAMES or alias.name in _ZIP_NAMES:
                     self.add("zipimport_use", node)
                 if alias.name in _RAW_LOADERS:
                     self.add("bytecode_or_native_loader", node)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and node.value is not None:
+                    # x += ... rebinds to something new: ambiguous on purpose.
+                    self.binding(node, target.id).values.append(
+                        node.value if not isinstance(node, ast.AugAssign) else node)
+                else:
+                    for name in _stored_names(target):
+                        self.binding(node, name).other = True
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            if isinstance(node.target, ast.Name):
+                self.binding(node, node.target.id).iters.append(node.iter)
+            else:
+                for name in _stored_names(node.target):
+                    self.binding(node, name).other = True
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            self.binding(node, node.name).other = True
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                self.prose.add(body[0].value)
+        elif isinstance(node, ast.arg):
+            self.binding(node, node.arg).other = True
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            self.binding(node, node.name).other = True
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            for name in _stored_names(node.optional_vars):
+                self.binding(node, name).other = True
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            self.prose.add(node.value)
 
-    def sys_attr(self, node: ast.AST) -> Optional[str]:
-        """``"path"`` for ``sys.path`` (under any alias, or imported from sys); else None."""
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in self.sys_names:
-            return node.attr
-        if isinstance(node, ast.Name):
-            return self.from_sys.get(node.id)
+    def single_value(self, node: ast.Name) -> Optional[ast.AST]:
+        found = self.lookup(node)
+        if found is not None and len(found.values) == 1 and not (found.other or found.imported or found.iters):
+            return found.values[0]
         return None
 
-    def runner(self, func: ast.AST) -> Optional[str]:
-        """``"exec"``/``"eval"``/``"compile"`` when *func* is that builtin, by any spelling the scan
-        can follow: the bare name, an alias imported from builtins, ``builtins.exec``,
-        ``__import__('builtins').exec`` or ``getattr(builtins, 'exec')``."""
-        if isinstance(func, ast.Name):
-            return self.runners.get(func.id)
-        if isinstance(func, ast.Attribute) and func.attr in _CODE_RUNNERS and self.is_builtins(func.value):
-            return func.attr
-        if isinstance(func, ast.Call) and isinstance(func.func, ast.Name) and func.func.id == "getattr" \
-                and len(func.args) >= 2 and self.is_builtins(func.args[0]) \
-                and isinstance(func.args[1], ast.Constant) and func.args[1].value in _CODE_RUNNERS:
-            return func.args[1].value
+    def qual(self, node: ast.AST, depth: int = 0) -> Optional[str]:
+        """The dotted name *node* stands for ("builtins.exec", "marshal.loads", "sys.path"), through
+        imports, single assignments, ``getattr``/subscripts with a constant name, ``vars(x)``,
+        ``__builtins__`` and ``import_module``/``__import__`` of a constant; None when unknown."""
+        if depth > _MAX_DEPTH:
+            return None
+        if isinstance(node, ast.Name):
+            if node.id == "__builtins__":
+                return "builtins"
+            found = self.lookup(node)
+            if found is None:
+                return f"builtins.{node.id}" if node.id in _BUILTIN_NAMES else None
+            if len(found.imported) == 1 and not (found.values or found.iters or found.other):
+                return found.imported[0]
+            value = self.single_value(node)
+            return self.qual(value, depth + 1) if value is not None else None
+        if isinstance(node, ast.Attribute):
+            base = self.qual(node.value, depth + 1)
+            return f"{base}.{node.attr}" if base else None
+        if isinstance(node, ast.Call):
+            func = self.qual(node.func, depth + 1)
+            if func in {"builtins.__import__", "importlib.import_module"} and node.args:
+                name = self.fold(node.args[0])
+                return name if name and not name.startswith(".") else None
+            if func == "builtins.getattr" and len(node.args) >= 2:
+                base, name = self.qual(node.args[0], depth + 1), self.fold(node.args[1])
+                return f"{base}.{name}" if base and name else None
+            if func == "builtins.vars" and node.args:
+                base = self.qual(node.args[0], depth + 1)
+                return f"{base}.__dict__" if base else None
+            return None
+        if isinstance(node, ast.Subscript):
+            key = self.fold(node.slice)
+            if key == "__builtins__":
+                return "builtins"
+            base = self.qual(node.value, depth + 1)
+            if key is None or base is None:
+                return None
+            return f"{base[:-len('.__dict__')] if base.endswith('.__dict__') else base}.{key}"
         return None
 
-    def is_builtins(self, node: ast.AST) -> bool:
+    def fold(self, node: ast.AST, depth: int = 0) -> Optional[str]:
+        """The constant string *node* evaluates to (literals, ``+``, f-strings of constants,
+        ``''.join([...])``, a name assigned once), or None."""
+        if depth > _MAX_DEPTH:
+            return None
+        if isinstance(node, ast.Constant):
+            return node.value if isinstance(node.value, str) else None
+        if isinstance(node, ast.JoinedStr):
+            parts = [self.fold(v.value if isinstance(v, ast.FormattedValue) else v, depth + 1) for v in node.values]
+            return None if None in parts else "".join(parts)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = self.fold(node.left, depth + 1), self.fold(node.right, depth + 1)
+            return None if left is None or right is None else left + right
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "join" \
+                and isinstance(node.func.value, ast.Constant) and isinstance(node.func.value.value, str) \
+                and len(node.args) == 1 and isinstance(node.args[0], (ast.List, ast.Tuple)):
+            parts = [self.fold(e, depth + 1) for e in node.args[0].elts]
+            return None if None in parts else node.func.value.value.join(parts)
         if isinstance(node, ast.Name):
-            return node.id in self.builtins_names
-        if isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant) \
-                and node.args[0].value == "builtins":
+            value = self.single_value(node)
+            return self.fold(value, depth + 1) if value is not None else None
+        return None
+
+    # ── paths ───────────────────────────────────────────────────────────────────────────────
+
+    def tail(self, node: ast.AST, depth: int = 0) -> Optional[str]:
+        """The last literal piece of a path expression (what decides its file name), through names
+        assigned once and loops over a glob; None when it does not end in one."""
+        if depth > _MAX_DEPTH:
+            return None
+        if isinstance(node, ast.Name):
+            value = self.single_value(node)
+            if value is not None:
+                return self.tail(value, depth + 1)
+            found = self.lookup(node)
+            if found is not None and len(found.iters) == 1 and not (found.values or found.other or found.imported):
+                return self.tail(found.iters[0], depth + 1)
+            return None
+        return _literal_tail(node, lambda sub: self.tail(sub, depth + 1))
+
+    def ups(self, node: ast.AST, depth: int = 0) -> Optional[int]:
+        """How many directories above the file's own directory a path expression is rooted, when it
+        is built from ``__file__`` (``dirname(__file__)`` is 0, each further ``dirname``/``.parent``
+        or ``..`` one more); None when it is not built from this file's location, or a literal piece
+        is absolute (``os.path.join(HERE, '/tmp/x')`` discards HERE)."""
+        if depth > _MAX_DEPTH:
+            return None
+        if isinstance(node, ast.Name):
+            if node.id == "__file__":
+                return -1
+            if node.id == "__path__":
+                return 0
+            found = self.lookup(node)
+            if found is None or found.other or found.imported:
+                return None
+            values = found.values + found.iters
+            if not values:
+                return None
+            found = [self.ups(v, depth + 1) for v in values]
+            return None if None in found else max(found)
+        if isinstance(node, ast.Attribute):
+            if node.attr == "parent":
+                base = self.ups(node.value, depth + 1)
+                return None if base is None else base + 1
+            if node.attr == "origin" and isinstance(node.value, ast.Name) and node.value.id == "__spec__":
+                return -1
+            return None
+        if isinstance(node, ast.Subscript):
+            if isinstance(node.value, ast.Attribute) and node.value.attr == "parents":
+                base = self.ups(node.value.value, depth + 1)
+                index = node.slice.value if isinstance(node.slice, ast.Constant) else None
+                return None if base is None or not isinstance(index, int) else base + index + 1
+            if isinstance(node.value, ast.Name) and node.value.id == "__path__":
+                return 0
+            return None
+        if isinstance(node, ast.JoinedStr):
+            if not node.values or not isinstance(node.values[0], ast.FormattedValue):
+                return None
+            base = self.ups(node.values[0].value, depth + 1)
+            return self.climb(base, [v for v in node.values[1:] if isinstance(v, ast.Constant)])
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.Add)):
+            base = self.ups(node.left, depth + 1)
+            return self.climb(base, [node.right])
+        if isinstance(node, ast.Call):
             func = node.func
-            name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
-            return name in {"__import__", "import_module"}
-        return False
+            name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+            if name in _UP_CALLS and node.args:
+                base = self.ups(node.args[0], depth + 1)
+                return None if base is None else base + 1
+            if name == "join" and node.args:
+                return self.climb(self.ups(node.args[0], depth + 1), node.args[1:])
+            if name == "files":           # importlib.resources.files(__package__)
+                return 0 if any(isinstance(n, ast.Name) and n.id in {"__package__", "__name__"}
+                                for n in ast.walk(node)) else None
+            if name in _SAME_DIR_CALLS:
+                if isinstance(func, ast.Attribute) and name not in {"Path", "PurePath", "str", "fspath", "abspath",
+                                                                     "realpath", "normpath", "files"}:
+                    return self.climb(self.ups(func.value, depth + 1), node.args)
+                if node.args:
+                    return self.climb(self.ups(node.args[0], depth + 1), node.args[1:])
+            return None
+        return None
 
-    def added_paths(self, value: ast.AST) -> List[ast.AST]:
-        """The path expressions *value* adds to ``sys.path``: the elements of a list or tuple, both
-        sides of a ``+`` (``sys.path`` itself excepted), else *value* itself."""
-        if isinstance(value, (ast.List, ast.Tuple)):
-            return list(value.elts)
-        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
-            return self.added_paths(value.left) + self.added_paths(value.right)
-        if self.sys_attr(value) == "path":
-            return []
-        return [value]
+    def climb(self, base: Optional[int], pieces: List[ast.AST]) -> Optional[int]:
+        """*base* moved by the literal path pieces after it: ``..`` climbs, an absolute piece escapes."""
+        if base is None:
+            return None
+        for piece in pieces:
+            text = self.fold(piece)
+            if text is None:
+                continue          # a computed piece below the anchor: the file name is unknown, not the root
+            if text.startswith(("/", "\\", "~")) or re.match(r"^[A-Za-z]:[\\/]", text):
+                return None
+            base += sum(1 for part in re.split(r"[\\/]+", text) if part == "..")
+        return base
+
+    def inside_plugin(self, node: ast.AST) -> bool:
+        up = self.ups(node)
+        return up is not None and up <= self.depth
 
     # ── checks ──────────────────────────────────────────────────────────────────────────────
 
@@ -194,62 +433,181 @@ class _CodeReader:
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
                 self.check_store(target, node)
-        elif isinstance(node, ast.Name) and node.id in _RAW_LOADERS | {"zipimporter"}:
-            self.add("zipimport_use" if node.id == "zipimporter" else "bytecode_or_native_loader", node)
-        elif isinstance(node, ast.Attribute) and node.attr in _RAW_LOADERS | {"zipimporter"}:
-            self.add("zipimport_use" if node.attr == "zipimporter" else "bytecode_or_native_loader", node)
+        elif isinstance(node, ast.ClassDef):
+            self.check_class(node)
+        elif isinstance(node, (ast.List, ast.Tuple)):
+            self.check_interpreter_argv(node)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node not in self.prose:
+            self.check_string(node.value.strip(), node)
+        elif isinstance(node, (ast.BinOp, ast.JoinedStr)) and not isinstance(self.parents.get(node), ast.BinOp):
+            folded = self.fold(node)
+            if folded is not None:
+                self.check_string(folded.strip(), node)
+        if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)):
+            self.check_reference(node)
+        if isinstance(node, ast.Attribute):
+            if node.attr in _DISTINCT_NAMES and node.attr != "__builtins__":
+                self.add(_DISTINCT_NAMES[node.attr], node)
+            elif node.attr.startswith(_C_API_RUNNERS):
+                self.add("code_runner", node)
+            elif node.attr == "__code__" and isinstance(node.ctx, ast.Store):
+                self.add("code_object", node)
+            elif node.attr == "replace" and isinstance(node.value, ast.Attribute) and node.value.attr == "__code__":
+                self.add("code_object", node)
+        elif isinstance(node, ast.Name) and node.id in _DISTINCT_NAMES and node.id != "__builtins__" \
+                and not (self.lookup(node) is not None and self.lookup(node).other):
+            self.add(_DISTINCT_NAMES[node.id], node)
+
+    def check_string(self, value: str, node: ast.AST) -> None:
+        """A constant (or concatenated) string that names a route: ``getattr(m, 'zip' + 'importer')``."""
+        if value in _DISTINCT_NAMES:
+            self.add(_DISTINCT_NAMES[value], node)
+        elif value.startswith(_C_API_RUNNERS):
+            self.add("code_runner", node)
+
+    def check_reference(self, node: ast.AST) -> None:
+        """Every reference to a code runner by any spelling the scan can follow. A direct call with a
+        literal source is left to the pattern scan; anything else (an alias, ``map(exec, ...)``,
+        ``partial(exec)``) is a finding."""
+        if isinstance(getattr(node, "ctx", None), ast.Store) or isinstance(getattr(node, "ctx", None), ast.Del):
+            return
+        name = self.qual(node)
+        if name is None:
+            return
+        parent = self.parents.get(node)
+        called = isinstance(parent, ast.Call) and parent.func is node
+        if name in {"builtins.exec", "builtins.eval", "builtins.compile"}:
+            runner = name.split(".")[1]
+            if not called:
+                self.add("compile_dynamic_code" if runner == "compile" else "exec_dynamic_code", node)
+            elif runner == "compile":
+                source, mode = _argument(parent, 0, "source"), _argument(parent, 2, "mode")
+                if not (source is not None and _is_literal(source)) \
+                        and not (isinstance(mode, ast.Constant) and mode.value == "eval"):
+                    self.add("compile_dynamic_code", parent)
+            else:
+                source = _argument(parent, 0, "source")
+                if source is None or not _is_literal(source):
+                    self.add("exec_dynamic_code", parent)     # exec(*parts) is dynamic too
+        elif name == "builtins":
+            # The builtins module itself, other than for one of its names spelled out.
+            if isinstance(parent, ast.Attribute) and parent.value is node and parent.attr != "__dict__":
+                return
+            if isinstance(parent, (ast.Subscript, ast.Call)) and self.qual(parent) is not None \
+                    and self.qual(parent).split(".")[-1] not in {"__dict__"}:
+                return            # builtins['open'] / getattr(builtins, 'open'): judged by that name
+            self.add("exec_dynamic_code", node)
+        elif name == "builtins.__dict__":
+            self.add("exec_dynamic_code", node)
+        elif name in _DESERIALIZERS:
+            self.add(_DESERIALIZERS[name], node)
+        elif name in _CODE_MACHINERY:
+            self.add(_CODE_MACHINERY[name], node)
+        elif name in _STRING_RUNNERS:
+            if not called:
+                self.add("code_runner", node)
+                return
+            statements = [a for a in (_argument(parent, 0, "stmt"), _argument(parent, 1, "setup")) if a is not None] \
+                if name.startswith("timeit.") else [a for a in (_argument(parent, 0, "cmd"),) if a is not None]
+            if any(not _is_literal(a) and not isinstance(a, ast.Lambda) for a in statements):
+                self.add("code_runner", parent)
+        elif name in _IMPORT_HOOKS and isinstance(parent, ast.Attribute) and parent.attr in _MUTATORS:
+            self.add("import_hook_change", parent)
 
     def check_store(self, target: ast.AST, statement: ast.AST) -> None:
-        """An assignment to ``sys.path`` (or a slice of it) that holds an archive, or to the import
-        machinery at all."""
+        """An assignment to ``sys.path`` (or a slice of it), or to the import machinery at all."""
         base = target.value if isinstance(target, ast.Subscript) else target
-        attr = self.sys_attr(base)
-        if attr in _IMPORT_HOOKS:
+        name = self.qual(base)
+        if name in _IMPORT_HOOKS:
             self.add("import_hook_change", statement)
-        elif attr == "path" and statement.value is not None and _adds_a_file(self.added_paths(statement.value)):
-            self.add("archive_on_sys_path", statement)
+        elif name == "sys.path" and statement.value is not None:
+            self.check_sys_path(self.added_paths(statement.value), statement)
+
+    def added_paths(self, value: ast.AST) -> List[ast.AST]:
+        """The path expressions *value* adds to ``sys.path``: the elements of a list or tuple, both
+        sides of a ``+`` (``sys.path`` itself excepted), else *value* itself."""
+        if isinstance(value, (ast.List, ast.Tuple)):
+            return list(value.elts)
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+            return self.added_paths(value.left) + self.added_paths(value.right)
+        if self.qual(value) == "sys.path":
+            return []
+        if isinstance(value, (ast.ListComp, ast.GeneratorExp)) and any(
+                self.qual(gen.iter) == "sys.path" for gen in value.generators):
+            return []          # sys.path filtered: nothing added
+        return [value]
+
+    def check_sys_path(self, paths: List[ast.AST], where: ast.AST) -> None:
+        for path in paths:
+            tail = self.tail(path)
+            if _mentions_archive(path) or (tail is not None and _suffix(tail)):
+                self.add("archive_on_sys_path", where)
+            elif not self.inside_plugin(path):
+                self.add("foreign_sys_path", where)
+
+    def check_class(self, node: ast.ClassDef) -> None:
+        bases = []
+        for base in node.bases:
+            name = self.qual(base) or (base.attr if isinstance(base, ast.Attribute) else
+                                       base.id if isinstance(base, ast.Name) else "")
+            bases.append(name.split(".")[-1])
+        methods = {item.name for item in node.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        if any(b.endswith(_LOADER_BASE_SUFFIXES) for b in bases) or methods & _LOADER_METHODS \
+                or {"get_data", "get_filename"} <= methods:
+            self.add("custom_loader", node)
+
+    def check_interpreter_argv(self, node: ast.AST) -> None:
+        """``[sys.executable, '-c', src]`` with a computed *src*."""
+        elts = node.elts
+        for i, elt in enumerate(elts[:-2]):
+            exe = self.qual(elt) == "sys.executable" or re.search(r"(?:^|[\\/])python[\d.]*(?:\.exe)?$",
+                                                                     self.fold(elt) or "") is not None
+            if exe and self.fold(elts[i + 1]) == "-c" and not _is_literal(elts[i + 2]):
+                self.add("interpreter_code", node)
 
     def check_call(self, node: ast.Call) -> None:
         func = node.func
         name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
-        runner = self.runner(func)
-        if runner in {"exec", "eval"}:
-            source = _argument(node, 0, "source")
-            if (source is None and (node.args or node.keywords)) or (source is not None and not _is_literal(source)):
-                self.add("exec_dynamic_code", node)     # exec(*parts) is dynamic too
-        elif runner == "compile":
-            source, mode = _argument(node, 0, "source"), _argument(node, 2, "mode")
-            if source is not None and not _is_literal(source) \
-                    and not (isinstance(mode, ast.Constant) and mode.value == "eval"):
-                self.add("compile_dynamic_code", node)
-        if (isinstance(func, ast.Attribute) and func.attr in {"loads", "load"} and isinstance(func.value, ast.Name)
-                and func.value.id in self.marshal_names) or (isinstance(func, ast.Name) and func.id in self.marshal_funcs):
-            self.add("marshal_code", node)
-        if isinstance(func, ast.Attribute) and func.attr in _MUTATORS and self.sys_attr(func.value) in _IMPORT_HOOKS:
-            self.add("import_hook_change", node)
-        if isinstance(func, ast.Name) and func.id == "setattr" and len(node.args) >= 2 \
-                and isinstance(node.args[0], ast.Name) and node.args[0].id in self.sys_names \
-                and isinstance(node.args[1], ast.Constant) and node.args[1].value in _IMPORT_HOOKS:
-            self.add("import_hook_change", node)
+        qualified = self.qual(func) or ""
         if isinstance(func, ast.Attribute) and func.attr in {"insert", "append", "extend", "__iadd__"} \
-                and self.sys_attr(func.value) == "path":
+                and self.qual(func.value) == "sys.path":
             added = _argument(node, 1 if func.attr == "insert" else 0, "object")
-            if added is not None and _adds_a_file(self.added_paths(added)):
-                self.add("archive_on_sys_path", node)
-        is_addsitedir = (isinstance(func, ast.Attribute) and func.attr == "addsitedir"
-                         and isinstance(func.value, ast.Name) and func.value.id in self.site_names) \
-            or (isinstance(func, ast.Name) and func.id in self.site_funcs)
-        if is_addsitedir and node.args and _adds_a_file([node.args[0]]):
-            self.add("archive_on_sys_path", node)
+            if added is not None:
+                self.check_sys_path(self.added_paths(added) if func.attr == "extend" else [added], node)
+        if (qualified == "site.addsitedir" or name == "addsitedir") and node.args:
+            self.check_sys_path([node.args[0]], node)
+        if qualified == "builtins.setattr" and len(node.args) >= 2 and self.qual(node.args[0]) == "sys" \
+                and f"sys.{self.fold(node.args[1])}" in _IMPORT_HOOKS:
+            self.add("import_hook_change", node)
+        if name in _STRING_RUNNER_METHODS and isinstance(func, ast.Attribute) and node.args \
+                and not _is_literal(node.args[0]):
+            self.add("code_runner", node)
+        if name in {"load_compiled", "load_dynamic"}:
+            self.add("bytecode_or_native_loader", node)
         if name in _FILE_LOADERS:
             position, keyword = _FILE_LOADERS[name]
             path = _argument(node, position, keyword)
             if path is not None:
-                tail = _literal_tail(path)
-                if tail is None:
-                    self.add("dynamic_source_loader", node)
-                elif _suffix(tail) not in PYTHON_SOURCE_EXTENSIONS:
+                tail = self.tail(path)
+                if tail is not None and _suffix(tail) not in PYTHON_SOURCE_EXTENSIONS:
                     self.add("non_source_loader", node)
+                elif not self.inside_plugin(path):
+                    self.add("foreign_source_loader", node)
+                elif tail is None:
+                    self.add("dynamic_source_loader", node)
+
+
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.Module)
+
+
+@dataclass
+class _Binding:
+    """How a name is bound in one scope: assigned *values*, loop *iters*, *imported* names, or
+    *other* (an argument, a def, a tuple target ...: nothing the scan can follow)."""
+    values: List[ast.AST] = field(default_factory=list)
+    iters: List[ast.AST] = field(default_factory=list)
+    imported: List[str] = field(default_factory=list)
+    other: bool = False
 
 
 @dataclass
@@ -300,6 +658,11 @@ def module_refs(text: str) -> Optional[ModuleRefs]:
     return refs
 
 
+def _stored_names(target: ast.AST) -> List[str]:
+    """The names an assignment target binds (``a, b = ...``), not those it only reads (``x[i] = ...``)."""
+    return [n.id for n in ast.walk(target) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)]
+
+
 def _argument(call: ast.Call, position: int, keyword: str) -> Optional[ast.AST]:
     for kw in call.keywords:
         if kw.arg == keyword:
@@ -314,9 +677,10 @@ def _is_literal(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))
 
 
-def _literal_tail(node: ast.AST) -> Optional[str]:
+def _literal_tail(node: ast.AST, inner=None) -> Optional[str]:
     """The last literal piece of a path expression (what decides its file name), or None when the
-    expression does not end in one the scan can see."""
+    expression does not end in one the scan can see. *inner* resolves sub-expressions (names)."""
+    inner = inner or (lambda sub: _literal_tail(sub))
     if isinstance(node, ast.Constant):
         if isinstance(node.value, str):
             return node.value
@@ -324,33 +688,38 @@ def _literal_tail(node: ast.AST) -> Optional[str]:
             return node.value.decode("utf-8", "replace")
         return None
     if isinstance(node, ast.JoinedStr):
-        return _literal_tail(node.values[-1]) if node.values else None
+        return inner(node.values[-1]) if node.values else None
+    if isinstance(node, ast.FormattedValue):
+        return inner(node.value)
     if isinstance(node, ast.BinOp):
         if isinstance(node.op, (ast.Add, ast.Div)):
-            return _literal_tail(node.right)
+            return inner(node.right)
         if isinstance(node.op, ast.Mod):        # '%s/helpers.py' % HERE
-            return _literal_tail(node.left)
+            return inner(node.left)
         return None
     if isinstance(node, ast.Call):
         func = node.func
         name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
         if name == "with_suffix" and node.args:
-            tail = _literal_tail(node.args[0])
+            tail = inner(node.args[0])
             return None if tail is None else "x" + tail
         if name == "format" and isinstance(func, ast.Attribute):
-            return _literal_tail(func.value)
+            return inner(func.value)
         if name in _PATH_BUILDERS:
             if node.args:
-                return _literal_tail(node.args[-1])
+                return inner(node.args[-1])
             if isinstance(func, ast.Attribute):    # (HERE / 'mod.py').resolve()
-                return _literal_tail(func.value)
+                return inner(func.value)
         return None
     return None
 
 
 def _suffix(tail: str) -> str:
-    name = tail.replace("\\", "/").rsplit("/", 1)[-1]
-    return os.path.splitext("x" + name)[1].lower()
+    name = tail.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    if name in ("", ".", ".."):
+        return ""
+    suffix = os.path.splitext("x" + name)[1].lower()
+    return "" if suffix == "." else suffix
 
 
 def _strings(node: ast.AST) -> Iterator[str]:
@@ -363,16 +732,6 @@ def _mentions_archive(node: ast.AST) -> bool:
     return any(_ARCHIVE_MENTION.search(s) for s in _strings(node))
 
 
-def _adds_a_file(paths: List[ast.AST]) -> bool:
-    """Whether a ``sys.path`` entry is a FILE: it names an archive, or its last literal piece has an
-    extension (a zip is importable whatever it is called: ``logo.png`` works as well as ``deps.zip``)."""
-    for path in paths:
-        tail = _literal_tail(path)
-        if _mentions_archive(path) or (tail is not None and _suffix(tail)):
-            return True
-    return False
-
-
 # ── fallback: Python the scanner cannot parse ───────────────────────────────────────────────
 
 _IMPORT_PATH_CALL = re.compile(
@@ -381,6 +740,8 @@ _IMPORT_PATH_CALL = re.compile(
 _ZIPIMPORT = re.compile(r"\bzipimport\b|\bzipimporter\s*\(")
 _RAW_LOADER_NAMES = re.compile(r"\b(?:SourcelessFileLoader|ExtensionFileLoader|load_compiled|load_dynamic)\b")
 _FILE_LOADER_CALL = re.compile(r"\b(?:SourceFileLoader|spec_from_file_location|load_source|run_path)\s*\(")
+_RUNTIME_CODE = re.compile(r"\b(?:exec|eval|compile)\s*\((?!\s*[rbuf]*[\"'])|\bmarshal\.loads?\b|\bpickle\.loads?\b"
+                           r"|\bsys\.(?:meta_path|path_hooks)\b|__builtins__")
 _QUOTED = re.compile(r"""["']([^"'\n]*)["']""")
 
 
@@ -406,6 +767,8 @@ def _line_findings(text: str, rel: str) -> List[Finding]:
             quoted = _QUOTED.findall(line)
             if quoted and _suffix(quoted[-1]) not in PYTHON_SOURCE_EXTENSIONS:
                 hits.append("non_source_loader")
+        if _RUNTIME_CODE.search(line):
+            hits.append("exec_dynamic_code")
         for pattern_id in hits:
             out.append(Finding(pattern_id, _SEVERITY.get(pattern_id, "high"), "execution", rel, number,
                                stripped if len(stripped) <= 120 else stripped[:117] + "...",

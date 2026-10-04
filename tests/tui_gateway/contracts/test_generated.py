@@ -1,5 +1,6 @@
-"""The committed TypeScript + OpenRPC contract files are exactly what ``tui_gateway/contracts``
-renders, and the contract catalog covers the whole wire.
+"""The committed TypeScript + OpenRPC contract files (and ``contract/requests/schema.json`` with its
+``SHA256SUMS``) are exactly what ``tui_gateway/contracts`` renders, and the contract catalog covers the
+whole wire.
 
 Regenerate with ``.venv/bin/python scripts/gen_gateway_contracts.py`` when a model changes. The
 two files are listed in ``scripts/ci/classify_changes.py::_PY_RELEVANT_CONTRACT_FILES`` so a
@@ -27,7 +28,7 @@ def gen():
 
 
 def test_generated_files_are_current(gen):
-    """Both committed artefacts equal an in-memory regeneration (byte-for-byte)."""
+    """Every committed artefact equals an in-memory regeneration (byte-for-byte)."""
     stale = [path.relative_to(REPO) for path, text in gen.render_all().items()
              if (path.read_text(encoding="utf-8") if path.exists() else None) != text]
     assert not stale, f"stale generated contract files {stale}: run scripts/gen_gateway_contracts.py"
@@ -80,6 +81,11 @@ def sent_server_requests() -> set[str]:
     names: set[str] = set()
     for src in (REPO / "tui_gateway").glob("*.py"):
         names.update(_LITERAL_REQUEST.findall(_read(src)))
+    # The interactive request methods are sent by name from one generic path (``method`` is a variable
+    # there), so no literal call names them; the contract's own list is their inventory.
+    from tui_gateway.contracts.server_requests import INTERACTIVE_METHODS
+
+    names.update(INTERACTIVE_METHODS)
     return names
 
 

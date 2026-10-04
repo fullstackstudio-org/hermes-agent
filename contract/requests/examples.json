@@ -1,0 +1,1497 @@
+{
+  "version": 1,
+  "about": "Normative examples for contract/requests (README.md). Every frame and every valid answer parses against schema.json; every invalid answer is refused with exactly its reason: layer 'model' fails schema.json (reason bad_shape), layer 'validator' passes schema.json and is refused by the gateway's checks against the request's params.",
+  "methods": {
+    "input.form": {
+      "frames": [
+        {
+          "jsonrpc": "2.0",
+          "id": "req_form_booking",
+          "method": "input.form",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Hotel booking details",
+            "summary": "I found three hotels in Utrecht. Fill this in and I will book the best match.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "fields": [
+              {
+                "id": "name",
+                "kind": "text",
+                "label": "Name on the booking",
+                "required": true,
+                "max_length": 20
+              },
+              {
+                "id": "guests",
+                "kind": "number",
+                "label": "Guests",
+                "required": true,
+                "min": 1,
+                "max": 12,
+                "integer": true,
+                "default": 2
+              },
+              {
+                "id": "stay",
+                "kind": "daterange",
+                "label": "Stay",
+                "required": true,
+                "min": "2026-10-05",
+                "max": "2026-12-31"
+              },
+              {
+                "id": "budget",
+                "kind": "amount",
+                "label": "Budget per night",
+                "currency": "EUR",
+                "min": "0",
+                "max": "5000"
+              },
+              {
+                "id": "arrival",
+                "kind": "date",
+                "label": "Arrival",
+                "min": "2026-10-05",
+                "max": "2026-12-31",
+                "tz": "Europe/Amsterdam"
+              },
+              {
+                "id": "check_in",
+                "kind": "time",
+                "label": "Check-in time",
+                "min": "08:00",
+                "max": "18:00"
+              },
+              {
+                "id": "call_at",
+                "kind": "datetime",
+                "label": "When may we call?",
+                "tz": "Europe/Amsterdam",
+                "min": "2026-10-05T00:00:00+02:00"
+              },
+              {
+                "id": "room",
+                "kind": "choice",
+                "label": "Room",
+                "options": [
+                  {
+                    "value": "single",
+                    "label": "Single"
+                  },
+                  {
+                    "value": "double",
+                    "label": "Double"
+                  }
+                ]
+              },
+              {
+                "id": "extras",
+                "kind": "choice",
+                "label": "Extras",
+                "multiple": true,
+                "max_selected": 2,
+                "options": [
+                  {
+                    "value": "breakfast",
+                    "label": "Breakfast"
+                  },
+                  {
+                    "value": "parking",
+                    "label": "Parking"
+                  },
+                  {
+                    "value": "late_checkout",
+                    "label": "Late check-out"
+                  }
+                ]
+              },
+              {
+                "id": "newsletter",
+                "kind": "toggle",
+                "label": "Send me offers",
+                "default": false
+              },
+              {
+                "id": "notes",
+                "kind": "text",
+                "label": "Anything we should know?",
+                "multiline": true,
+                "hint": "Allergies, accessibility, arrival time."
+              }
+            ]
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_form_invoice",
+          "method": "input.form",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Invoice number",
+            "summary": "Which invoice number should the reminder mention?",
+            "detail": "Open invoices: 2026-041, 2026-044",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "fields": [
+              {
+                "id": "invoice",
+                "kind": "text",
+                "label": "Invoice number",
+                "required": true,
+                "max_length": 20
+              }
+            ]
+          }
+        }
+      ],
+      "answers": [
+        {
+          "name": "answered_everything",
+          "request": "req_form_booking",
+          "result": {
+            "status": "answered",
+            "values": {
+              "name": "Ada Lovelace",
+              "guests": 2,
+              "stay": {
+                "start": "2026-11-14",
+                "end": "2026-11-16"
+              },
+              "budget": "180.00",
+              "arrival": "2026-11-14",
+              "check_in": "15:00",
+              "call_at": "2026-11-10T10:00:00+01:00[Europe/Amsterdam]",
+              "room": "double",
+              "extras": [
+                "breakfast"
+              ],
+              "newsletter": false,
+              "notes": "Arriving by train."
+            }
+          }
+        },
+        {
+          "name": "answered_required_only",
+          "request": "req_form_booking",
+          "result": {
+            "status": "answered",
+            "values": {
+              "name": "Ada",
+              "guests": 1,
+              "stay": {
+                "start": "2026-12-01",
+                "end": "2026-12-02"
+              }
+            }
+          }
+        },
+        {
+          "name": "skipped",
+          "request": "req_form_booking",
+          "result": {
+            "status": "skipped"
+          }
+        },
+        {
+          "name": "answered_invoice",
+          "request": "req_form_invoice",
+          "result": {
+            "status": "answered",
+            "values": {
+              "invoice": "2026-044"
+            }
+          }
+        }
+      ],
+      "invalid_answers": [
+        {
+          "name": "answered_without_values",
+          "request": "req_form_booking",
+          "layer": "model",
+          "result": {
+            "status": "answered"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "unknown_status",
+          "request": "req_form_booking",
+          "layer": "model",
+          "result": {
+            "status": "later"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "skipped_with_values",
+          "request": "req_form_booking",
+          "layer": "model",
+          "result": {
+            "status": "skipped",
+            "values": {}
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "null_value",
+          "request": "req_form_booking",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "values": {
+              "name": null
+            }
+          },
+          "reason": "bad_shape",
+          "note": "Leave a field without a value out; null is not a value."
+        },
+        {
+          "name": "skip_not_offered",
+          "request": "req_form_invoice",
+          "layer": "validator",
+          "result": {
+            "status": "skipped"
+          },
+          "reason": "not_optional"
+        },
+        {
+          "name": "unknown_field",
+          "request": "req_form_booking",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "values": {
+              "name": "Ada Lovelace",
+              "guests": 2,
+              "stay": {
+                "start": "2026-11-14",
+                "end": "2026-11-16"
+              },
+              "budget": "180.00",
+              "arrival": "2026-11-14",
+              "check_in": "15:00",
+              "call_at": "2026-11-10T10:00:00+01:00[Europe/Amsterdam]",
+              "room": "double",
+              "extras": [
+                "breakfast"
+              ],
+              "newsletter": false,
+              "notes": "Arriving by train.",
+              "colour": "blue"
+            }
+          },
+          "reason": "field:colour:unknown"
+        },
+        {
+          "name": "required_missing",
+          "request": "req_form_booking",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "values": {
+              "name": "Ada",
+              "stay": {
+                "start": "2026-12-01",
+                "end": "2026-12-02"
+              }
+            }
+          },
+          "reason": "field:guests:missing"
+        },
+        {
+          "name": "required_empty_text",
+          "request": "req_form_invoice",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "values": {
+              "invoice": ""
+            }
+          },
+          "reason": "field:invoice:missing"
+        },
+        {
+          "name": "out_of_range",
+          "request": "req_form_booking",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "values": {
+              "name": "Ada Lovelace",
+              "guests": 40,
+              "stay": {
+                "start": "2026-11-14",
+                "end": "2026-11-16"
+              },
+              "budget": "180.00",
+              "arrival": "2026-11-14",
+              "check_in": "15:00",
+              "call_at": "2026-11-10T10:00:00+01:00[Europe/Amsterdam]",
+              "room": "double",
+              "extras": [
+                "breakfast"
+              ],
+              "newsletter": false,
+              "notes": "Arriving by train."
+            }
+          },
+          "reason": "field:guests:above_max"
+        },
+        {
+          "name": "first_problem_in_field_order",
+          "request": "req_form_booking",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "values": {
+              "name": "Ada Lovelace",
+              "guests": 0,
+              "stay": {
+                "start": "2026-11-14",
+                "end": "2026-11-16"
+              },
+              "budget": "180.00",
+              "arrival": "2026-11-14",
+              "check_in": "15:00",
+              "call_at": "2026-11-10T10:00:00+01:00[Europe/Amsterdam]",
+              "room": "double",
+              "extras": [
+                "breakfast"
+              ],
+              "newsletter": "no",
+              "notes": "Arriving by train."
+            }
+          },
+          "reason": "field:guests:below_min",
+          "note": "Fields are checked in params.fields order (guests comes before newsletter); the first problem is the reason."
+        }
+      ]
+    },
+    "input.file": {
+      "frames": [
+        {
+          "jsonrpc": "2.0",
+          "id": "req_file_receipt",
+          "method": "input.file",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Receipt",
+            "summary": "Take a photo of the parking receipt so I can add it to the expense report.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "accept": "image",
+            "capture": "photo",
+            "multiple": false,
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 10485760,
+              "max_files": 1,
+              "strip_metadata": true
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_file_voice",
+          "method": "input.file",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Voice reply",
+            "summary": "Record your answer to the landlord; I will transcribe and send it.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "accept": "audio",
+            "capture": "audio",
+            "multiple": false,
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 26214400,
+              "max_files": 1,
+              "strip_metadata": false
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_file_contracts",
+          "method": "input.file",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Signed contracts",
+            "summary": "Upload the two signed rental contracts.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "accept": "document",
+            "multiple": true,
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 20971520,
+              "max_files": 3,
+              "strip_metadata": false
+            }
+          }
+        }
+      ],
+      "answers": [
+        {
+          "name": "photo",
+          "request": "req_file_receipt",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/3f9c2a7b1d4e8f60-receipt.jpg",
+                "name": "receipt.jpg",
+                "mime": "image/jpeg",
+                "bytes": 482113,
+                "sha256": "fd16e784e91ab960e4fb349d8cc179c9e5891ef6d767c7620e2560a59ba0bc2f"
+              }
+            ]
+          }
+        },
+        {
+          "name": "audio_with_transcript",
+          "request": "req_file_voice",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/a07e5d21c4b98f13-reply.m4a",
+                "name": "reply.m4a",
+                "mime": "audio/mp4",
+                "bytes": 191820,
+                "sha256": "d35a9389705da075460c8eb0a50ee192ef89dc97f5f8fdb8ac058056de07bee5"
+              }
+            ],
+            "text": "Tuesday at ten works for me."
+          }
+        },
+        {
+          "name": "two_documents",
+          "request": "req_file_contracts",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/0b1c2d3e4f506172-contract-a.pdf",
+                "name": "contract-a.pdf",
+                "mime": "application/pdf",
+                "bytes": 1203345,
+                "sha256": "91ed46a40ff2cbf4cb9b141f2f8f43ffe6b4976c15119d1b5e30b48129b73765"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/8192a3b4c5d6e7f8-contract-b.pdf",
+                "name": "contract-b.pdf",
+                "mime": "application/pdf",
+                "bytes": 998012,
+                "sha256": "cd6643332204e9d3dc5146e03bbc725e1935850ba2665df041dbb58d20aa354c"
+              }
+            ]
+          }
+        },
+        {
+          "name": "skipped",
+          "request": "req_file_receipt",
+          "result": {
+            "status": "skipped"
+          }
+        }
+      ],
+      "invalid_answers": [
+        {
+          "name": "no_files",
+          "request": "req_file_receipt",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "files": []
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "uppercase_sha256",
+          "request": "req_file_receipt",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/3f9c2a7b1d4e8f60-receipt.jpg",
+                "name": "receipt.jpg",
+                "mime": "image/jpeg",
+                "bytes": 482113,
+                "sha256": "FD16E784E91AB960E4FB349D8CC179C9E5891EF6D767C7620E2560A59BA0BC2F"
+              }
+            ]
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "relative_path",
+          "request": "req_file_receipt",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "3f9c2a7b1d4e8f60-receipt.jpg",
+                "name": "receipt.jpg",
+                "mime": "image/jpeg",
+                "bytes": 482113,
+                "sha256": "fd16e784e91ab960e4fb349d8cc179c9e5891ef6d767c7620e2560a59ba0bc2f"
+              }
+            ]
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "inline_bytes",
+          "request": "req_file_receipt",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/3f9c2a7b1d4e8f60-receipt.jpg",
+                "name": "receipt.jpg",
+                "mime": "image/jpeg",
+                "bytes": 482113,
+                "sha256": "fd16e784e91ab960e4fb349d8cc179c9e5891ef6d767c7620e2560a59ba0bc2f",
+                "data": "/9j/4AAQSkZJRg"
+              }
+            ]
+          },
+          "reason": "bad_shape",
+          "note": "Files are uploaded, never inlined."
+        },
+        {
+          "name": "skip_not_offered",
+          "request": "req_file_contracts",
+          "layer": "validator",
+          "result": {
+            "status": "skipped"
+          },
+          "reason": "not_optional"
+        },
+        {
+          "name": "path_escapes_dir",
+          "request": "req_file_receipt",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/../../../.ssh/id_ed25519",
+                "name": "receipt.jpg",
+                "mime": "image/jpeg",
+                "bytes": 482113,
+                "sha256": "fd16e784e91ab960e4fb349d8cc179c9e5891ef6d767c7620e2560a59ba0bc2f"
+              }
+            ]
+          },
+          "reason": "file:0:outside_dir"
+        },
+        {
+          "name": "path_in_sibling_dir",
+          "request": "req_file_receipt",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04-old/3f9c2a7b1d4e8f60-receipt.jpg",
+                "name": "receipt.jpg",
+                "mime": "image/jpeg",
+                "bytes": 482113,
+                "sha256": "fd16e784e91ab960e4fb349d8cc179c9e5891ef6d767c7620e2560a59ba0bc2f"
+              }
+            ]
+          },
+          "reason": "file:0:outside_dir",
+          "note": "A shared string prefix is not \"under\"."
+        },
+        {
+          "name": "two_files_not_multiple",
+          "request": "req_file_receipt",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/3f9c2a7b1d4e8f60-receipt.jpg",
+                "name": "receipt.jpg",
+                "mime": "image/jpeg",
+                "bytes": 482113,
+                "sha256": "fd16e784e91ab960e4fb349d8cc179c9e5891ef6d767c7620e2560a59ba0bc2f"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/77aa88bb99cc00dd-receipt-2.jpg",
+                "name": "receipt.jpg",
+                "mime": "image/jpeg",
+                "bytes": 482113,
+                "sha256": "fd16e784e91ab960e4fb349d8cc179c9e5891ef6d767c7620e2560a59ba0bc2f"
+              }
+            ]
+          },
+          "reason": "files:too_many"
+        },
+        {
+          "name": "over_max_files",
+          "request": "req_file_contracts",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/0b1c2d3e4f506172-contract-a.pdf",
+                "name": "contract-a.pdf",
+                "mime": "application/pdf",
+                "bytes": 1203345,
+                "sha256": "91ed46a40ff2cbf4cb9b141f2f8f43ffe6b4976c15119d1b5e30b48129b73765"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/8192a3b4c5d6e7f8-contract-b.pdf",
+                "name": "contract-b.pdf",
+                "mime": "application/pdf",
+                "bytes": 998012,
+                "sha256": "cd6643332204e9d3dc5146e03bbc725e1935850ba2665df041dbb58d20aa354c"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/1111222233334444-c.pdf",
+                "name": "contract-a.pdf",
+                "mime": "application/pdf",
+                "bytes": 1203345,
+                "sha256": "91ed46a40ff2cbf4cb9b141f2f8f43ffe6b4976c15119d1b5e30b48129b73765"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/5555666677778888-d.pdf",
+                "name": "contract-b.pdf",
+                "mime": "application/pdf",
+                "bytes": 998012,
+                "sha256": "cd6643332204e9d3dc5146e03bbc725e1935850ba2665df041dbb58d20aa354c"
+              }
+            ]
+          },
+          "reason": "files:too_many"
+        },
+        {
+          "name": "declared_too_large",
+          "request": "req_file_receipt",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/3f9c2a7b1d4e8f60-receipt.jpg",
+                "name": "receipt.jpg",
+                "mime": "image/jpeg",
+                "bytes": 10485761,
+                "sha256": "fd16e784e91ab960e4fb349d8cc179c9e5891ef6d767c7620e2560a59ba0bc2f"
+              }
+            ]
+          },
+          "reason": "file:0:too_large"
+        }
+      ]
+    },
+    "review.draft": {
+      "frames": [
+        {
+          "jsonrpc": "2.0",
+          "id": "req_draft_mail",
+          "method": "review.draft",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Reply to Bram",
+            "summary": "Here is the reply I would send. Approve, edit or reject it.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "mail",
+            "text": "Hi Bram,\n\nThe flat is free from 1 November. The rent is EUR 1,150 a month, deposit two months.\nCould you confirm by Friday?\n\nKind regards,\nAda",
+            "subject": "Re: Flat on the Oudegracht",
+            "recipients": [
+              "Bram de Vries <bram@example.com>"
+            ],
+            "editable": true
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_draft_post",
+          "method": "review.draft",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Shop announcement",
+            "summary": "I will post this on the shop's page exactly as written.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "post",
+            "text": "We are open again from Monday 9:00. Thanks for your patience!",
+            "editable": false
+          }
+        }
+      ],
+      "answers": [
+        {
+          "name": "approved_unchanged",
+          "request": "req_draft_mail",
+          "result": {
+            "decision": "approved",
+            "text": "Hi Bram,\n\nThe flat is free from 1 November. The rent is EUR 1,150 a month, deposit two months.\nCould you confirm by Friday?\n\nKind regards,\nAda"
+          }
+        },
+        {
+          "name": "approved_edited",
+          "request": "req_draft_mail",
+          "result": {
+            "decision": "approved",
+            "text": "Hi Bram,\n\nThe flat is free from 1 November. The rent is EUR 1,150 a month, deposit two months.\nCould you confirm by Thursday?\n\nKind regards,\nAda"
+          }
+        },
+        {
+          "name": "approved_trailing_space_removed",
+          "request": "req_draft_mail",
+          "result": {
+            "decision": "approved",
+            "text": "Hi Bram,  \n\nThe flat is free from 1 November. The rent is EUR 1,150 a month, deposit two months.\nCould you confirm by Friday?\n\nKind regards,\nAda"
+          },
+          "note": "Trailing whitespace per line is removed before the checks; the gateway keeps the text without it."
+        },
+        {
+          "name": "approved_locked",
+          "request": "req_draft_post",
+          "result": {
+            "decision": "approved",
+            "text": "We are open again from Monday 9:00. Thanks for your patience!"
+          }
+        },
+        {
+          "name": "rejected_with_comment",
+          "request": "req_draft_mail",
+          "result": {
+            "decision": "rejected",
+            "comment": "Ask for the deposit in two parts."
+          }
+        },
+        {
+          "name": "rejected",
+          "request": "req_draft_post",
+          "result": {
+            "decision": "rejected"
+          }
+        }
+      ],
+      "invalid_answers": [
+        {
+          "name": "approved_without_text",
+          "request": "req_draft_mail",
+          "layer": "model",
+          "result": {
+            "decision": "approved"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "approved_empty_text",
+          "request": "req_draft_mail",
+          "layer": "model",
+          "result": {
+            "decision": "approved",
+            "text": ""
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "status_instead_of_decision",
+          "request": "req_draft_mail",
+          "layer": "model",
+          "result": {
+            "status": "skipped"
+          },
+          "reason": "bad_shape",
+          "note": "review.* results have no skip."
+        },
+        {
+          "name": "rejected_with_text",
+          "request": "req_draft_mail",
+          "layer": "model",
+          "result": {
+            "decision": "rejected",
+            "text": "Hi Bram,\n\nThe flat is free from 1 November. The rent is EUR 1,150 a month, deposit two months.\nCould you confirm by Friday?\n\nKind regards,\nAda"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "edited_when_locked",
+          "request": "req_draft_post",
+          "layer": "validator",
+          "result": {
+            "decision": "approved",
+            "text": "We are open again from Monday 10:00. Thanks for your patience!"
+          },
+          "reason": "text:edited"
+        },
+        {
+          "name": "bidi_override",
+          "request": "req_draft_mail",
+          "layer": "validator",
+          "result": {
+            "decision": "approved",
+            "text": "Hi Bram,\n\nThe flat is free from 1 November. The rent is EUR \u202e051,1 a month, deposit two months.\nCould you confirm by Friday?\n\nKind regards,\nAda"
+          },
+          "reason": "text:not_verbatim"
+        },
+        {
+          "name": "tab",
+          "request": "req_draft_mail",
+          "layer": "validator",
+          "result": {
+            "decision": "approved",
+            "text": "Hi Bram,\n\nThe flat is free from 1 November. The rent is EUR 1,150 a month, deposit two months.\nCould you confirm by Friday?\n\nKind\tregards,\nAda"
+          },
+          "reason": "text:not_verbatim"
+        }
+      ]
+    }
+  },
+  "form_fields": [
+    {
+      "name": "text",
+      "field": {
+        "id": "name",
+        "kind": "text",
+        "label": "Name on the booking",
+        "required": true,
+        "max_length": 20
+      },
+      "valid": [
+        "Ada Lovelace"
+      ],
+      "invalid": [
+        {
+          "value": "Augusta Ada King-Noel",
+          "reason": "field:name:too_long",
+          "note": "21 code points; max_length is 20."
+        },
+        {
+          "value": "Ada\nLovelace",
+          "reason": "field:name:format",
+          "note": "A newline in a field that is not multiline."
+        },
+        {
+          "value": "",
+          "reason": "field:name:missing",
+          "note": "\"\" counts as no value; the field is required."
+        },
+        {
+          "value": 42,
+          "reason": "field:name:type"
+        }
+      ]
+    },
+    {
+      "name": "text_multiline",
+      "field": {
+        "id": "notes",
+        "kind": "text",
+        "label": "Anything we should know?",
+        "multiline": true,
+        "hint": "Allergies, accessibility, arrival time."
+      },
+      "valid": [
+        "Arriving late.\nNo nuts, please."
+      ],
+      "invalid": [
+        {
+          "value": [
+            "Arriving late."
+          ],
+          "reason": "field:notes:type"
+        }
+      ]
+    },
+    {
+      "name": "number",
+      "field": {
+        "id": "guests",
+        "kind": "number",
+        "label": "Guests",
+        "required": true,
+        "min": 1,
+        "max": 12,
+        "integer": true,
+        "default": 2
+      },
+      "valid": [
+        4,
+        12
+      ],
+      "invalid": [
+        {
+          "value": 2.5,
+          "reason": "field:guests:not_integer"
+        },
+        {
+          "value": 0,
+          "reason": "field:guests:below_min"
+        },
+        {
+          "value": 13,
+          "reason": "field:guests:above_max"
+        },
+        {
+          "value": "4",
+          "reason": "field:guests:type",
+          "note": "A number field takes a JSON number."
+        },
+        {
+          "value": true,
+          "reason": "field:guests:type",
+          "note": "A boolean is not a number."
+        }
+      ]
+    },
+    {
+      "name": "number_step",
+      "field": {
+        "id": "nights",
+        "kind": "number",
+        "label": "Nights",
+        "min": 1,
+        "step": 2
+      },
+      "valid": [
+        1,
+        3,
+        7
+      ],
+      "invalid": [
+        {
+          "value": 4,
+          "reason": "field:nights:step",
+          "note": "Values are min (1) plus a whole multiple of step (2)."
+        }
+      ]
+    },
+    {
+      "name": "amount",
+      "field": {
+        "id": "budget",
+        "kind": "amount",
+        "label": "Budget per night",
+        "currency": "EUR",
+        "min": "0",
+        "max": "5000"
+      },
+      "valid": [
+        "1250.50",
+        "0",
+        "80"
+      ],
+      "invalid": [
+        {
+          "value": 1250.5,
+          "reason": "field:budget:type",
+          "note": "Amounts are decimal strings, never JSON numbers."
+        },
+        {
+          "value": "1250.505",
+          "reason": "field:budget:format",
+          "note": "At most two decimals."
+        },
+        {
+          "value": "1,250.50",
+          "reason": "field:budget:format"
+        },
+        {
+          "value": "-5",
+          "reason": "field:budget:below_min"
+        },
+        {
+          "value": "5000.01",
+          "reason": "field:budget:above_max"
+        }
+      ]
+    },
+    {
+      "name": "date",
+      "field": {
+        "id": "arrival",
+        "kind": "date",
+        "label": "Arrival",
+        "min": "2026-10-05",
+        "max": "2026-12-31",
+        "tz": "Europe/Amsterdam"
+      },
+      "valid": [
+        "2026-11-14"
+      ],
+      "invalid": [
+        {
+          "value": "2026-02-30",
+          "reason": "field:arrival:format",
+          "note": "Not a calendar date."
+        },
+        {
+          "value": "14-11-2026",
+          "reason": "field:arrival:format"
+        },
+        {
+          "value": "2026-10-04",
+          "reason": "field:arrival:below_min"
+        },
+        {
+          "value": "2027-01-01",
+          "reason": "field:arrival:above_max"
+        }
+      ]
+    },
+    {
+      "name": "time",
+      "field": {
+        "id": "check_in",
+        "kind": "time",
+        "label": "Check-in time",
+        "min": "08:00",
+        "max": "18:00"
+      },
+      "valid": [
+        "14:30",
+        "08:00"
+      ],
+      "invalid": [
+        {
+          "value": "19:15",
+          "reason": "field:check_in:above_max"
+        },
+        {
+          "value": "2:30 PM",
+          "reason": "field:check_in:format"
+        },
+        {
+          "value": "14:30:00",
+          "reason": "field:check_in:format",
+          "note": "Hours and minutes only."
+        }
+      ]
+    },
+    {
+      "name": "datetime",
+      "field": {
+        "id": "call_at",
+        "kind": "datetime",
+        "label": "When may we call?",
+        "tz": "Europe/Amsterdam",
+        "min": "2026-10-05T00:00:00+02:00"
+      },
+      "valid": [
+        "2026-10-07T14:30:00+02:00[Europe/Amsterdam]",
+        "2026-11-07T09:00:00+01:00[Europe/Amsterdam]"
+      ],
+      "invalid": [
+        {
+          "value": "2026-10-07T14:30:00+02:00",
+          "reason": "field:call_at:format",
+          "note": "The answer carries the offset AND the zone."
+        },
+        {
+          "value": "2026-11-07T09:00:00+02:00[Europe/Amsterdam]",
+          "reason": "field:call_at:offset",
+          "note": "Amsterdam is at +01:00 on 7 November 2026."
+        },
+        {
+          "value": "2026-10-07T13:30:00+01:00[Europe/London]",
+          "reason": "field:call_at:zone",
+          "note": "The field names a tz; the answer is in that zone."
+        },
+        {
+          "value": "2026-10-04T23:59:00+02:00[Europe/Amsterdam]",
+          "reason": "field:call_at:below_min"
+        }
+      ]
+    },
+    {
+      "name": "datetime_device_zone",
+      "field": {
+        "id": "remind_at",
+        "kind": "datetime",
+        "label": "Remind me at"
+      },
+      "valid": [
+        "2026-10-07T08:30:00-04:00[America/New_York]"
+      ],
+      "invalid": [
+        {
+          "value": "2026-10-07T08:30:00-04:00[Mars/Olympus_Mons]",
+          "reason": "field:remind_at:zone",
+          "note": "Not an IANA zone the gateway knows."
+        }
+      ]
+    },
+    {
+      "name": "daterange",
+      "field": {
+        "id": "stay",
+        "kind": "daterange",
+        "label": "Stay",
+        "required": true,
+        "min": "2026-10-05",
+        "max": "2026-12-31"
+      },
+      "valid": [
+        {
+          "start": "2026-11-14",
+          "end": "2026-11-16"
+        },
+        {
+          "start": "2026-11-14",
+          "end": "2026-11-14"
+        }
+      ],
+      "invalid": [
+        {
+          "value": {
+            "start": "2026-11-16",
+            "end": "2026-11-14"
+          },
+          "reason": "field:stay:order"
+        },
+        {
+          "value": {
+            "start": "2026-10-01",
+            "end": "2026-10-08"
+          },
+          "reason": "field:stay:below_min"
+        },
+        {
+          "value": {
+            "start": "2026-12-30",
+            "end": "2027-01-02"
+          },
+          "reason": "field:stay:above_max"
+        },
+        {
+          "value": {
+            "start": "2026-11-14",
+            "end": "soon"
+          },
+          "reason": "field:stay:format"
+        },
+        {
+          "value": "2026-11-14/2026-11-16",
+          "reason": "field:stay:type"
+        }
+      ]
+    },
+    {
+      "name": "choice",
+      "field": {
+        "id": "room",
+        "kind": "choice",
+        "label": "Room",
+        "options": [
+          {
+            "value": "single",
+            "label": "Single"
+          },
+          {
+            "value": "double",
+            "label": "Double"
+          }
+        ]
+      },
+      "valid": [
+        "double"
+      ],
+      "invalid": [
+        {
+          "value": "suite",
+          "reason": "field:room:not_an_option"
+        },
+        {
+          "value": "Double",
+          "reason": "field:room:not_an_option",
+          "note": "Values match exactly; labels are not values."
+        },
+        {
+          "value": [
+            "double"
+          ],
+          "reason": "field:room:type",
+          "note": "A single choice is a string."
+        }
+      ]
+    },
+    {
+      "name": "choice_multiple",
+      "field": {
+        "id": "extras",
+        "kind": "choice",
+        "label": "Extras",
+        "multiple": true,
+        "max_selected": 2,
+        "options": [
+          {
+            "value": "breakfast",
+            "label": "Breakfast"
+          },
+          {
+            "value": "parking",
+            "label": "Parking"
+          },
+          {
+            "value": "late_checkout",
+            "label": "Late check-out"
+          }
+        ]
+      },
+      "valid": [
+        [
+          "breakfast",
+          "parking"
+        ],
+        [
+          "late_checkout"
+        ]
+      ],
+      "invalid": [
+        {
+          "value": [
+            "breakfast",
+            "parking",
+            "late_checkout"
+          ],
+          "reason": "field:extras:too_many"
+        },
+        {
+          "value": [
+            "breakfast",
+            "breakfast"
+          ],
+          "reason": "field:extras:duplicate"
+        },
+        {
+          "value": [
+            "spa"
+          ],
+          "reason": "field:extras:not_an_option"
+        },
+        {
+          "value": "breakfast",
+          "reason": "field:extras:type",
+          "note": "A multiple choice is a list."
+        }
+      ]
+    },
+    {
+      "name": "choice_min_selected",
+      "field": {
+        "id": "days",
+        "kind": "choice",
+        "label": "Which days?",
+        "multiple": true,
+        "min_selected": 2,
+        "options": [
+          {
+            "value": "mon",
+            "label": "Monday"
+          },
+          {
+            "value": "wed",
+            "label": "Wednesday"
+          },
+          {
+            "value": "fri",
+            "label": "Friday"
+          }
+        ]
+      },
+      "valid": [
+        [
+          "mon",
+          "fri"
+        ]
+      ],
+      "invalid": [
+        {
+          "value": [
+            "wed"
+          ],
+          "reason": "field:days:too_few"
+        }
+      ]
+    },
+    {
+      "name": "toggle",
+      "field": {
+        "id": "newsletter",
+        "kind": "toggle",
+        "label": "Send me offers",
+        "default": false
+      },
+      "valid": [
+        true,
+        false
+      ],
+      "invalid": [
+        {
+          "value": "yes",
+          "reason": "field:newsletter:type"
+        },
+        {
+          "value": 1,
+          "reason": "field:newsletter:type"
+        }
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "name": "cannot_show_no_camera",
+      "direction": "client_to_gateway",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "req_file_receipt",
+        "error": {
+          "code": 4041,
+          "message": "cannot_show",
+          "data": {
+            "reason": "no_camera"
+          }
+        }
+      }
+    },
+    {
+      "name": "cannot_show_upload_failed",
+      "direction": "client_to_gateway",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "req_file_contracts",
+        "error": {
+          "code": 4041,
+          "message": "cannot_show",
+          "data": {
+            "reason": "upload_failed"
+          }
+        }
+      }
+    },
+    {
+      "name": "cannot_show_unknown_kind",
+      "direction": "client_to_gateway",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "req_form_booking",
+        "error": {
+          "code": 4041,
+          "message": "cannot_show",
+          "data": {
+            "reason": "not_supported_on_device"
+          }
+        }
+      }
+    },
+    {
+      "name": "answer_refused",
+      "direction": "gateway_to_client",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 17,
+        "method": "request.answer",
+        "params": {
+          "id": "req_form_booking",
+          "result": {
+            "status": "answered",
+            "values": {
+              "name": "Ada Lovelace",
+              "guests": 0,
+              "stay": {
+                "start": "2026-11-14",
+                "end": "2026-11-16"
+              },
+              "budget": "180.00",
+              "arrival": "2026-11-14",
+              "check_in": "15:00",
+              "call_at": "2026-11-10T10:00:00+01:00[Europe/Amsterdam]",
+              "room": "double",
+              "extras": [
+                "breakfast"
+              ],
+              "newsletter": false,
+              "notes": "Arriving by train."
+            }
+          }
+        }
+      },
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 17,
+        "error": {
+          "code": 4034,
+          "message": "answer refused",
+          "data": {
+            "reason": "field:guests:below_min"
+          }
+        }
+      }
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "second_call",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "client.capabilities",
+        "params": {
+          "server_requests": true,
+          "confirm": [
+            "plain"
+          ],
+          "requests": [
+            "input.form",
+            "input.file",
+            "review.draft"
+          ]
+        }
+      },
+      "note": "Sent only after the first result's server_requests listed one of the methods."
+    }
+  ]
+}

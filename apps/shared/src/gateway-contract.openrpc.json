@@ -7633,6 +7633,21 @@
               }
             ],
             "default": null
+          },
+          "requests": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Requests"
           }
         },
         "title": "ClientCapabilitiesParams",
@@ -7665,6 +7680,13 @@
               }
             ],
             "default": null
+          },
+          "requests": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Requests",
+            "type": "array"
           }
         },
         "required": [
@@ -13420,6 +13442,16 @@
         "title": "DisplayThumbnailResult",
         "type": "object"
       },
+      "DraftKind": {
+        "enum": [
+          "mail",
+          "post",
+          "message",
+          "document"
+        ],
+        "title": "DraftKind",
+        "type": "string"
+      },
       "EmptyRequestParams": {
         "additionalProperties": false,
         "properties": {
@@ -13509,6 +13541,16 @@
         ],
         "title": "ErrorSurface",
         "type": "object"
+      },
+      "FileAccept": {
+        "enum": [
+          "image",
+          "document",
+          "audio",
+          "any"
+        ],
+        "title": "FileAccept",
+        "type": "string"
       },
       "FileAttachParams": {
         "additionalProperties": false,
@@ -13612,6 +13654,16 @@
         "title": "FileAttachResult",
         "type": "object"
       },
+      "FileCapture": {
+        "description": "A preference for how to obtain the file; the person may always pick an existing one.",
+        "enum": [
+          "photo",
+          "scan",
+          "audio"
+        ],
+        "title": "FileCapture",
+        "type": "string"
+      },
       "ForeignSessionRow": {
         "additionalProperties": false,
         "description": "``hermes_cli/foreign_sessions_browser.py::list_foreign_sessions`` \u2014 ``id`` is an opaque\nhandle, never a path.",
@@ -13693,6 +13745,948 @@
           "content"
         ],
         "title": "ForeignTurn",
+        "type": "object"
+      },
+      "FormAmountField": {
+        "additionalProperties": false,
+        "description": "Value: a decimal STRING (``\"12.50\"``: never a JSON number) in ``[min, max]``, in ``currency``\n(ISO 4217).",
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Hint"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "amount",
+            "title": "Kind",
+            "type": "string"
+          },
+          "currency": {
+            "pattern": "^[A-Z]{3}$",
+            "title": "Currency",
+            "type": "string"
+          },
+          "min": {
+            "anyOf": [
+              {
+                "pattern": "^-?(0|[1-9][0-9]{0,14})(\\.[0-9]{1,2})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Min"
+          },
+          "max": {
+            "anyOf": [
+              {
+                "pattern": "^-?(0|[1-9][0-9]{0,14})(\\.[0-9]{1,2})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "pattern": "^-?(0|[1-9][0-9]{0,14})(\\.[0-9]{1,2})?$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Default"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "kind",
+          "currency"
+        ],
+        "title": "FormAmountField",
+        "type": "object"
+      },
+      "FormChoiceField": {
+        "additionalProperties": false,
+        "description": "Value: one option ``value`` (a string), or with ``multiple`` a list of distinct option values whose\nlength is in ``[min_selected, max_selected]``; ``[]`` counts as no value.",
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Hint"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "choice",
+            "title": "Kind",
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/FormChoiceOption"
+            },
+            "maxItems": 12,
+            "minItems": 1,
+            "title": "Options",
+            "type": "array"
+          },
+          "multiple": {
+            "default": false,
+            "title": "Multiple",
+            "type": "boolean"
+          },
+          "min_selected": {
+            "anyOf": [
+              {
+                "maximum": 12,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Min Selected"
+          },
+          "max_selected": {
+            "anyOf": [
+              {
+                "maximum": 12,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Selected"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Default"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "kind",
+          "options"
+        ],
+        "title": "FormChoiceField",
+        "type": "object"
+      },
+      "FormChoiceOption": {
+        "additionalProperties": false,
+        "properties": {
+          "value": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "title": "FormChoiceOption",
+        "type": "object"
+      },
+      "FormDateField": {
+        "additionalProperties": false,
+        "description": "Value: a calendar date ``\"2026-10-03\"`` in ``[min, max]``. ``tz`` names the zone \"today\" is in.",
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Hint"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "date",
+            "title": "Kind",
+            "type": "string"
+          },
+          "min": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Min"
+          },
+          "max": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max"
+          },
+          "tz": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tz"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Default"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "kind"
+        ],
+        "title": "FormDateField",
+        "type": "object"
+      },
+      "FormDateRange": {
+        "additionalProperties": false,
+        "description": "A ``daterange`` value: two calendar dates, ``start`` \u2264 ``end``, both inclusive.",
+        "properties": {
+          "start": {
+            "title": "Start",
+            "type": "string"
+          },
+          "end": {
+            "title": "End",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "title": "FormDateRange",
+        "type": "object"
+      },
+      "FormDaterangeField": {
+        "additionalProperties": false,
+        "description": "Value: ``{start, end}`` (``FormDateRange``) with ``min`` \u2264 ``start`` \u2264 ``end`` \u2264 ``max``.",
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Hint"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "daterange",
+            "title": "Kind",
+            "type": "string"
+          },
+          "min": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Min"
+          },
+          "max": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max"
+          },
+          "tz": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tz"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FormDateRange"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "kind"
+        ],
+        "title": "FormDaterangeField",
+        "type": "object"
+      },
+      "FormDatetimeField": {
+        "additionalProperties": false,
+        "description": "Value: RFC 3339 with the offset AND the IANA zone as an RFC 9557 suffix,\n``\"2026-10-03T14:30:00+02:00[Europe/Amsterdam]\"``: the zone is ``tz`` when the field has one, else the\ndevice's; the offset is that zone's at that instant. ``min`` / ``max`` (offset, no zone) are instants.",
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Hint"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "datetime",
+            "title": "Kind",
+            "type": "string"
+          },
+          "min": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?(Z|[+-][0-9]{2}:[0-9]{2})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Min"
+          },
+          "max": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?(Z|[+-][0-9]{2}:[0-9]{2})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max"
+          },
+          "tz": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tz"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?(Z|[+-][0-9]{2}:[0-9]{2})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Default"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "kind"
+        ],
+        "title": "FormDatetimeField",
+        "type": "object"
+      },
+      "FormField": {
+        "description": "One form field, discriminated by ``kind``. A client that does not know a kind answers ``4041``\n(``not_supported_on_device``) rather than leave the field out.",
+        "discriminator": {
+          "mapping": {
+            "amount": "#/components/schemas/FormAmountField",
+            "choice": "#/components/schemas/FormChoiceField",
+            "date": "#/components/schemas/FormDateField",
+            "daterange": "#/components/schemas/FormDaterangeField",
+            "datetime": "#/components/schemas/FormDatetimeField",
+            "number": "#/components/schemas/FormNumberField",
+            "text": "#/components/schemas/FormTextField",
+            "time": "#/components/schemas/FormTimeField",
+            "toggle": "#/components/schemas/FormToggleField"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/FormTextField"
+          },
+          {
+            "$ref": "#/components/schemas/FormNumberField"
+          },
+          {
+            "$ref": "#/components/schemas/FormAmountField"
+          },
+          {
+            "$ref": "#/components/schemas/FormDateField"
+          },
+          {
+            "$ref": "#/components/schemas/FormTimeField"
+          },
+          {
+            "$ref": "#/components/schemas/FormDatetimeField"
+          },
+          {
+            "$ref": "#/components/schemas/FormDaterangeField"
+          },
+          {
+            "$ref": "#/components/schemas/FormChoiceField"
+          },
+          {
+            "$ref": "#/components/schemas/FormToggleField"
+          }
+        ],
+        "title": "FormField"
+      },
+      "FormNumberField": {
+        "additionalProperties": false,
+        "description": "Value: a JSON number in ``[min, max]``, a whole number when ``integer``, and ``min`` (else 0) plus\na whole multiple of ``step`` when ``step`` is set.",
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Hint"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "number",
+            "title": "Kind",
+            "type": "string"
+          },
+          "min": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Min"
+          },
+          "max": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max"
+          },
+          "step": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Step"
+          },
+          "integer": {
+            "default": false,
+            "title": "Integer",
+            "type": "boolean"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Default"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "kind"
+        ],
+        "title": "FormNumberField",
+        "type": "object"
+      },
+      "FormTextField": {
+        "additionalProperties": false,
+        "description": "Value: a string of at most ``max_length`` (else 4000) code points; one line unless ``multiline``.\n``\"\"`` counts as no value.",
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Hint"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "text",
+            "title": "Kind",
+            "type": "string"
+          },
+          "multiline": {
+            "default": false,
+            "title": "Multiline",
+            "type": "boolean"
+          },
+          "max_length": {
+            "anyOf": [
+              {
+                "maximum": 4000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Length"
+          },
+          "input": {
+            "$ref": "#/components/schemas/FormTextInput",
+            "default": "plain"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Default"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "kind"
+        ],
+        "title": "FormTextField",
+        "type": "object"
+      },
+      "FormTextInput": {
+        "description": "A keyboard hint, never a check: the gateway does not validate an address, number or URL.",
+        "enum": [
+          "plain",
+          "email",
+          "phone",
+          "url"
+        ],
+        "title": "FormTextInput",
+        "type": "string"
+      },
+      "FormTimeField": {
+        "additionalProperties": false,
+        "description": "Value: a 24-hour wall-clock time ``\"14:30\"`` in ``[min, max]``.",
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Hint"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "time",
+            "title": "Kind",
+            "type": "string"
+          },
+          "min": {
+            "anyOf": [
+              {
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Min"
+          },
+          "max": {
+            "anyOf": [
+              {
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max"
+          },
+          "tz": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tz"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Default"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "kind"
+        ],
+        "title": "FormTimeField",
+        "type": "object"
+      },
+      "FormToggleField": {
+        "additionalProperties": false,
+        "description": "Value: a JSON boolean.",
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Hint"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "toggle",
+            "title": "Kind",
+            "type": "string"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Default"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "kind"
+        ],
+        "title": "FormToggleField",
         "type": "object"
       },
       "FreeTierAckNoticeResult": {
@@ -16162,6 +17156,334 @@
           "matched"
         ],
         "title": "InputDetectDropResult",
+        "type": "object"
+      },
+      "InputFileAnswered": {
+        "additionalProperties": false,
+        "description": "``files`` (at most ``upload.max_files``, one unless ``multiple``) and an optional ``text`` (an audio\nanswer's transcript).",
+        "properties": {
+          "status": {
+            "const": "answered",
+            "title": "Status",
+            "type": "string"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/UploadedFile"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Files",
+            "type": "array"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Text"
+          }
+        },
+        "required": [
+          "status",
+          "files"
+        ],
+        "title": "InputFileAnswered",
+        "type": "object"
+      },
+      "InputFileRequestParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "v": {
+            "const": 1,
+            "title": "V",
+            "type": "integer"
+          },
+          "title": {
+            "maxLength": 80,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]+$",
+            "title": "Title",
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Detail"
+          },
+          "expires_at": {
+            "minimum": 0,
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "optional": {
+            "title": "Optional",
+            "type": "boolean"
+          },
+          "acting_user": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RequestActingUser"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "accept": {
+            "$ref": "#/components/schemas/FileAccept"
+          },
+          "capture": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FileCapture"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "multiple": {
+            "title": "Multiple",
+            "type": "boolean"
+          },
+          "upload": {
+            "$ref": "#/components/schemas/UploadTarget"
+          }
+        },
+        "required": [
+          "session_id",
+          "v",
+          "title",
+          "summary",
+          "expires_at",
+          "optional",
+          "accept",
+          "multiple",
+          "upload"
+        ],
+        "title": "InputFileRequestParams",
+        "type": "object"
+      },
+      "InputFileResult": {
+        "description": "``{status: answered, files, text?}`` or ``{status: skipped}`` (only when ``optional``).",
+        "discriminator": {
+          "mapping": {
+            "answered": "#/components/schemas/InputFileAnswered",
+            "skipped": "#/components/schemas/InputFileSkipped"
+          },
+          "propertyName": "status"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/InputFileAnswered"
+          },
+          {
+            "$ref": "#/components/schemas/InputFileSkipped"
+          }
+        ],
+        "title": "InputFileResult"
+      },
+      "InputFileSkipped": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "const": "skipped",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "InputFileSkipped",
+        "type": "object"
+      },
+      "InputFormAnswered": {
+        "additionalProperties": false,
+        "description": "``values`` maps field ids to values; a field without a value is left out. The gateway re-validates\nevery value against its field (required present, typed, in range, no unknown id) and refuses the\nfirst problem as ``field:<id>:<problem>``.",
+        "properties": {
+          "status": {
+            "const": "answered",
+            "title": "Status",
+            "type": "string"
+          },
+          "values": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "$ref": "#/components/schemas/FormDateRange"
+                }
+              ]
+            },
+            "maxProperties": 12,
+            "title": "Values",
+            "type": "object"
+          }
+        },
+        "required": [
+          "status",
+          "values"
+        ],
+        "title": "InputFormAnswered",
+        "type": "object"
+      },
+      "InputFormRequestParams": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "v": {
+            "const": 1,
+            "title": "V",
+            "type": "integer"
+          },
+          "title": {
+            "maxLength": 80,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]+$",
+            "title": "Title",
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Detail"
+          },
+          "expires_at": {
+            "minimum": 0,
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "optional": {
+            "title": "Optional",
+            "type": "boolean"
+          },
+          "acting_user": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RequestActingUser"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/FormField"
+            },
+            "maxItems": 12,
+            "minItems": 1,
+            "title": "Fields",
+            "type": "array"
+          }
+        },
+        "required": [
+          "session_id",
+          "v",
+          "title",
+          "summary",
+          "expires_at",
+          "optional",
+          "fields"
+        ],
+        "title": "InputFormRequestParams",
+        "type": "object"
+      },
+      "InputFormResult": {
+        "description": "``{status: answered, values}`` or ``{status: skipped}`` (only when ``optional``).",
+        "discriminator": {
+          "mapping": {
+            "answered": "#/components/schemas/InputFormAnswered",
+            "skipped": "#/components/schemas/InputFormSkipped"
+          },
+          "propertyName": "status"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/InputFormAnswered"
+          },
+          {
+            "$ref": "#/components/schemas/InputFormSkipped"
+          }
+        ],
+        "title": "InputFormResult"
+      },
+      "InputFormSkipped": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "const": "skipped",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "InputFormSkipped",
         "type": "object"
       },
       "InsightsGetParams": {
@@ -26653,6 +27975,26 @@
         "title": "RepoDiscoveryPolicyParams",
         "type": "object"
       },
+      "RequestActingUser": {
+        "additionalProperties": false,
+        "description": "The person the request is for, ``<provider>:<user id>`` and a display name. Informative: the gateway\nenforces who may answer.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "RequestActingUser",
+        "type": "object"
+      },
       "RequestAnswerParams": {
         "additionalProperties": false,
         "properties": {
@@ -26730,6 +28072,193 @@
         ],
         "title": "ResumePhaseStatus",
         "type": "string"
+      },
+      "ReviewDraftApproved": {
+        "additionalProperties": false,
+        "description": "The text as approved: unchanged unless ``editable``. The gateway removes trailing whitespace per line\nand refuses text it could not show verbatim (``text:not_verbatim``) or, when not ``editable``, any\nchange (``text:edited``).",
+        "properties": {
+          "decision": {
+            "const": "approved",
+            "title": "Decision",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision",
+          "text"
+        ],
+        "title": "ReviewDraftApproved",
+        "type": "object"
+      },
+      "ReviewDraftRejected": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "const": "rejected",
+            "title": "Decision",
+            "type": "string"
+          },
+          "comment": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Comment"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "ReviewDraftRejected",
+        "type": "object"
+      },
+      "ReviewDraftRequestParams": {
+        "additionalProperties": false,
+        "description": "``text`` is shown verbatim (the gateway refuses to build a draft it cannot show as it is);\n``subject`` and ``recipients`` are display only, shown apart from the body. With ``editable`` the\nperson may change the text before approving.",
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "v": {
+            "const": 1,
+            "title": "V",
+            "type": "integer"
+          },
+          "title": {
+            "maxLength": 80,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]+$",
+            "title": "Title",
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Detail"
+          },
+          "expires_at": {
+            "minimum": 0,
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "optional": {
+            "title": "Optional",
+            "type": "boolean"
+          },
+          "acting_user": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RequestActingUser"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DraftKind"
+          },
+          "text": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Subject"
+          },
+          "recipients": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 120,
+                  "type": "string"
+                },
+                "maxItems": 10,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Recipients"
+          },
+          "editable": {
+            "default": true,
+            "title": "Editable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session_id",
+          "v",
+          "title",
+          "summary",
+          "expires_at",
+          "optional",
+          "kind",
+          "text"
+        ],
+        "title": "ReviewDraftRequestParams",
+        "type": "object"
+      },
+      "ReviewDraftResult": {
+        "description": "``{decision: approved, text}`` or ``{decision: rejected, comment?}``.",
+        "discriminator": {
+          "mapping": {
+            "approved": "#/components/schemas/ReviewDraftApproved",
+            "rejected": "#/components/schemas/ReviewDraftRejected"
+          },
+          "propertyName": "decision"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ReviewDraftApproved"
+          },
+          {
+            "$ref": "#/components/schemas/ReviewDraftRejected"
+          }
+        ],
+        "title": "ReviewDraftResult"
       },
       "ReviewSummaryPayload": {
         "additionalProperties": false,
@@ -35800,6 +37329,85 @@
         "title": "UiMetaConflict",
         "type": "object"
       },
+      "UploadTarget": {
+        "additionalProperties": false,
+        "description": "Where the answer's files go. ``dir`` is an absolute path under the session's working directory; the\nclient uploads each file through the HTTP upload route (the credentials it uses for attachments) to\n``<dir>/<16 hex>-<safe name>`` and answers with references, never bytes. ``strip_metadata``: remove\nEXIF / GPS from camera and library images before uploading.",
+        "properties": {
+          "dir": {
+            "minLength": 2,
+            "pattern": "^/",
+            "title": "Dir",
+            "type": "string"
+          },
+          "max_bytes": {
+            "maximum": 104857600,
+            "minimum": 1,
+            "title": "Max Bytes",
+            "type": "integer"
+          },
+          "max_files": {
+            "maximum": 10,
+            "minimum": 1,
+            "title": "Max Files",
+            "type": "integer"
+          },
+          "strip_metadata": {
+            "title": "Strip Metadata",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dir",
+          "max_bytes",
+          "max_files",
+          "strip_metadata"
+        ],
+        "title": "UploadTarget",
+        "type": "object"
+      },
+      "UploadedFile": {
+        "additionalProperties": false,
+        "description": "One uploaded file: its absolute ``path`` (under ``upload.dir``), the name the person sees, the MIME\ntype, the size and the lowercase hex SHA-256 of the bytes as uploaded. The gateway checks size and hash\nafter the request settles.",
+        "properties": {
+          "path": {
+            "minLength": 2,
+            "pattern": "^/",
+            "title": "Path",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "mime": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Mime",
+            "type": "string"
+          },
+          "bytes": {
+            "minimum": 0,
+            "title": "Bytes",
+            "type": "integer"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "name",
+          "mime",
+          "bytes",
+          "sha256"
+        ],
+        "title": "UploadedFile",
+        "type": "object"
+      },
       "Usage": {
         "additionalProperties": true,
         "description": "``tui_gateway/server.py::_get_usage`` + ``agent/context_breakdown.py::context_usage_fields``.",
@@ -38224,6 +39832,42 @@
       }
     },
     {
+      "name": "input.file",
+      "summary": "The agent asks the person for one or more files (photo, scan, document, audio), uploaded to upload.dir and answered by reference. 300 s.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/InputFileRequestParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/InputFileResult"
+        }
+      }
+    },
+    {
+      "name": "input.form",
+      "summary": "The agent asks the person to fill in a form of typed fields (1-12). 300 s.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/InputFormRequestParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/InputFormResult"
+        }
+      }
+    },
+    {
       "name": "preview.act",
       "summary": "Click / type / scroll / annotate inside the in-app browser preview.",
       "params": [
@@ -38256,6 +39900,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/ValueResult"
+        }
+      }
+    },
+    {
+      "name": "review.draft",
+      "summary": "The agent shows the person a draft (mail, post, message, document) to approve, edit or reject before it acts on it. 300 s.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/ReviewDraftRequestParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/ReviewDraftResult"
         }
       }
     },

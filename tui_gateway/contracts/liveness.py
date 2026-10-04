@@ -65,6 +65,13 @@ class ClientCapabilitiesParams(Params):
     #: Required for ``passkey`` to be accepted (contract §8). Send it only after a result carried
     #: ``confirm_passkey`` with ``enabled: true``.
     confirm_passkey: ConfirmPasskeyAdvertisement | None = None
+    #: The interactive request methods (``input.form``, ``input.file``, ``review.draft``, …) this connection
+    #: can SHOW on this device; it lists nothing it cannot do. Optional and additive: absent means none, and
+    #: the gateway never sends such a method to this connection. Only read together with
+    #: ``server_requests: true``; methods this backend does not know are ignored. Send it in a SECOND call,
+    #: only after the first result's ``server_requests`` lists one of them: a backend older than the key
+    #: rejects it (4000) and the whole call, ``confirm`` levels included.
+    requests: list[str] | None = None
 
 
 class ConfirmPasskeyRps(Result):
@@ -93,6 +100,9 @@ class ClientCapabilitiesResult(Result):
     confirm: list[ConfirmLevel] = Field(default_factory=list)
     #: The level ``passkey`` as this connection sees it (a build that knows the level always sends it).
     confirm_passkey: ConfirmPasskeyCapability | None = None
+    #: The interactive request methods this backend accepted from this connection's ``requests`` (``[]``
+    #: when none, or from a backend older than the key).
+    requests: list[str] = Field(default_factory=list)
 
 
 method("client.capabilities", params=ClientCapabilitiesParams, result=ClientCapabilitiesResult,

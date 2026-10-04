@@ -1675,6 +1675,7 @@ export interface ClientCapabilitiesParams {
   server_requests?: boolean
   confirm?: string[] | null
   confirm_passkey?: ConfirmPasskeyAdvertisement | null
+  requests?: string[] | null
 }
 /** Second ``client.capabilities`` call, with ``passkey`` in ``confirm``: how this client runs the ceremony, ``{v: 1, kind, rp_id}``. ``kind``: ``native`` (an app under a native RP) or ``web`` (a browser; ``rp_id`` is its host). Deliberately permissive here (any value, extra keys allowed) and checked in code (``confirm_passkey.accept_advertisement``): a shape this gateway does not accept, including a later client's extra field, only drops ``passkey`` and never fails the call (and ``plain`` with it). */
 export interface ConfirmPasskeyAdvertisement {
@@ -1687,6 +1688,7 @@ export interface ClientCapabilitiesResult {
   server_requests: string[]
   confirm?: ConfirmLevel[]
   confirm_passkey?: ConfirmPasskeyCapability | null
+  requests?: string[]
 }
 /** What a confirmation proves. ``plain``: someone tapped Confirm in a connected client; nothing more, and the gateway cannot check even that. ``passkey``: the gateway verified a WebAuthn assertion with user verification, made by a passkey enrolled for the person the turn acts for, over a challenge that commits to this gateway, session, request and text (``contract/confirm-passkey/README.md``). Sent only to connections signed in as that person that advertised the level with an accepted RP. The set is open: a later level is one more value here. */
 export type ConfirmLevel = 'plain' | 'passkey'
@@ -4322,6 +4324,223 @@ export interface ConfirmPasskeyAssertion {
   signature: string
   user_handle?: string | null
 }
+export interface InputFormRequestParams {
+  session_id: string
+  v: 1
+  title: string
+  summary: string
+  detail?: string | null
+  expires_at: number
+  optional: boolean
+  acting_user?: RequestActingUser | null
+  fields: FormField[]
+}
+/** The person the request is for, ``<provider>:<user id>`` and a display name. Informative: the gateway enforces who may answer. */
+export interface RequestActingUser {
+  id: string
+  name: string
+}
+/** One form field, discriminated by ``kind``. A client that does not know a kind answers ``4041`` (``not_supported_on_device``) rather than leave the field out. */
+export type FormField = FormTextField | FormNumberField | FormAmountField | FormDateField | FormTimeField | FormDatetimeField | FormDaterangeField | FormChoiceField | FormToggleField
+/** Value: a string of at most ``max_length`` (else 4000) code points; one line unless ``multiline``. ``""`` counts as no value. */
+export interface FormTextField {
+  id: string
+  label: string
+  hint?: string | null
+  required?: boolean
+  kind: 'text'
+  multiline?: boolean
+  max_length?: number | null
+  input?: FormTextInput
+  default?: string | null
+}
+/** A keyboard hint, never a check: the gateway does not validate an address, number or URL. */
+export type FormTextInput = 'plain' | 'email' | 'phone' | 'url'
+/** Value: a JSON number in ``[min, max]``, a whole number when ``integer``, and ``min`` (else 0) plus a whole multiple of ``step`` when ``step`` is set. */
+export interface FormNumberField {
+  id: string
+  label: string
+  hint?: string | null
+  required?: boolean
+  kind: 'number'
+  min?: number | null
+  max?: number | null
+  step?: number | null
+  integer?: boolean
+  default?: number | null
+}
+/** Value: a decimal STRING (``"12.50"``: never a JSON number) in ``[min, max]``, in ``currency`` (ISO 4217). */
+export interface FormAmountField {
+  id: string
+  label: string
+  hint?: string | null
+  required?: boolean
+  kind: 'amount'
+  currency: string
+  min?: string | null
+  max?: string | null
+  default?: string | null
+}
+/** Value: a calendar date ``"2026-10-03"`` in ``[min, max]``. ``tz`` names the zone "today" is in. */
+export interface FormDateField {
+  id: string
+  label: string
+  hint?: string | null
+  required?: boolean
+  kind: 'date'
+  min?: string | null
+  max?: string | null
+  tz?: string | null
+  default?: string | null
+}
+/** Value: a 24-hour wall-clock time ``"14:30"`` in ``[min, max]``. */
+export interface FormTimeField {
+  id: string
+  label: string
+  hint?: string | null
+  required?: boolean
+  kind: 'time'
+  min?: string | null
+  max?: string | null
+  tz?: string | null
+  default?: string | null
+}
+/** Value: RFC 3339 with the offset AND the IANA zone as an RFC 9557 suffix, ``"2026-10-03T14:30:00+02:00[Europe/Amsterdam]"``: the zone is ``tz`` when the field has one, else the device's; the offset is that zone's at that instant. ``min`` / ``max`` (offset, no zone) are instants. */
+export interface FormDatetimeField {
+  id: string
+  label: string
+  hint?: string | null
+  required?: boolean
+  kind: 'datetime'
+  min?: string | null
+  max?: string | null
+  tz?: string | null
+  default?: string | null
+}
+/** Value: ``{start, end}`` (``FormDateRange``) with ``min`` ≤ ``start`` ≤ ``end`` ≤ ``max``. */
+export interface FormDaterangeField {
+  id: string
+  label: string
+  hint?: string | null
+  required?: boolean
+  kind: 'daterange'
+  min?: string | null
+  max?: string | null
+  tz?: string | null
+  default?: FormDateRange | null
+}
+/** A ``daterange`` value: two calendar dates, ``start`` ≤ ``end``, both inclusive. */
+export interface FormDateRange {
+  start: string
+  end: string
+}
+/** Value: one option ``value`` (a string), or with ``multiple`` a list of distinct option values whose length is in ``[min_selected, max_selected]``; ``[]`` counts as no value. */
+export interface FormChoiceField {
+  id: string
+  label: string
+  hint?: string | null
+  required?: boolean
+  kind: 'choice'
+  options: FormChoiceOption[]
+  multiple?: boolean
+  min_selected?: number | null
+  max_selected?: number | null
+  default?: string | string[] | null
+}
+export interface FormChoiceOption {
+  value: string
+  label: string
+}
+/** Value: a JSON boolean. */
+export interface FormToggleField {
+  id: string
+  label: string
+  hint?: string | null
+  required?: boolean
+  kind: 'toggle'
+  default?: boolean | null
+}
+/** ``{status: answered, values}`` or ``{status: skipped}`` (only when ``optional``). */
+export type InputFormResult = InputFormAnswered | InputFormSkipped
+/** ``values`` maps field ids to values; a field without a value is left out. The gateway re-validates every value against its field (required present, typed, in range, no unknown id) and refuses the first problem as ``field:<id>:<problem>``. */
+export interface InputFormAnswered {
+  status: 'answered'
+  values: Record<string, boolean | number | string | string[] | FormDateRange>
+}
+export interface InputFormSkipped {
+  status: 'skipped'
+}
+export interface InputFileRequestParams {
+  session_id: string
+  v: 1
+  title: string
+  summary: string
+  detail?: string | null
+  expires_at: number
+  optional: boolean
+  acting_user?: RequestActingUser | null
+  accept: FileAccept
+  capture?: FileCapture | null
+  multiple: boolean
+  upload: UploadTarget
+}
+export type FileAccept = 'image' | 'document' | 'audio' | 'any'
+/** A preference for how to obtain the file; the person may always pick an existing one. */
+export type FileCapture = 'photo' | 'scan' | 'audio'
+/** Where the answer's files go. ``dir`` is an absolute path under the session's working directory; the client uploads each file through the HTTP upload route (the credentials it uses for attachments) to ``<dir>/<16 hex>-<safe name>`` and answers with references, never bytes. ``strip_metadata``: remove EXIF / GPS from camera and library images before uploading. */
+export interface UploadTarget {
+  dir: string
+  max_bytes: number
+  max_files: number
+  strip_metadata: boolean
+}
+/** ``{status: answered, files, text?}`` or ``{status: skipped}`` (only when ``optional``). */
+export type InputFileResult = InputFileAnswered | InputFileSkipped
+/** ``files`` (at most ``upload.max_files``, one unless ``multiple``) and an optional ``text`` (an audio answer's transcript). */
+export interface InputFileAnswered {
+  status: 'answered'
+  files: UploadedFile[]
+  text?: string | null
+}
+/** One uploaded file: its absolute ``path`` (under ``upload.dir``), the name the person sees, the MIME type, the size and the lowercase hex SHA-256 of the bytes as uploaded. The gateway checks size and hash after the request settles. */
+export interface UploadedFile {
+  path: string
+  name: string
+  mime: string
+  bytes: number
+  sha256: string
+}
+export interface InputFileSkipped {
+  status: 'skipped'
+}
+/** ``text`` is shown verbatim (the gateway refuses to build a draft it cannot show as it is); ``subject`` and ``recipients`` are display only, shown apart from the body. With ``editable`` the person may change the text before approving. */
+export interface ReviewDraftRequestParams {
+  session_id: string
+  v: 1
+  title: string
+  summary: string
+  detail?: string | null
+  expires_at: number
+  optional: boolean
+  acting_user?: RequestActingUser | null
+  kind: DraftKind
+  text: string
+  subject?: string | null
+  recipients?: string[] | null
+  editable?: boolean
+}
+export type DraftKind = 'mail' | 'post' | 'message' | 'document'
+/** ``{decision: approved, text}`` or ``{decision: rejected, comment?}``. */
+export type ReviewDraftResult = ReviewDraftApproved | ReviewDraftRejected
+/** The text as approved: unchanged unless ``editable``. The gateway removes trailing whitespace per line and refuses text it could not show verbatim (``text:not_verbatim``) or, when not ``editable``, any change (``text:edited``). */
+export interface ReviewDraftApproved {
+  decision: 'approved'
+  text: string
+}
+export interface ReviewDraftRejected {
+  decision: 'rejected'
+  comment?: string | null
+}
 export interface DisplayInstallSudoParams {
   session_id: string
   profile_key: string
@@ -5516,10 +5735,16 @@ export interface ServerRequestMap {
   confirm: { params: ConfirmRequestParams; result: ConfirmResult }
   /** Masked sudo password for the Bot Screen package install; app-level (empty session). */
   'display.install.sudo': { params: DisplayInstallSudoParams; result: ValueResult }
+  /** The agent asks the person for one or more files (photo, scan, document, audio), uploaded to upload.dir and answered by reference. 300 s. */
+  'input.file': { params: InputFileRequestParams; result: InputFileResult }
+  /** The agent asks the person to fill in a form of typed fields (1-12). 300 s. */
+  'input.form': { params: InputFormRequestParams; result: InputFormResult }
   /** Click / type / scroll / annotate inside the in-app browser preview. */
   'preview.act': { params: PreviewActRequestParams; result: ValueResult }
   /** Read the in-app browser preview's text (JSON text answer). */
   'preview.read': { params: ReadRangeRequestParams; result: ValueResult }
+  /** The agent shows the person a draft (mail, post, message, document) to approve, edit or reject before it acts on it. 300 s. */
+  'review.draft': { params: ReviewDraftRequestParams; result: ReviewDraftResult }
   /** Masked value for a named env var (skills / setup flows). */
   secret: { params: SecretRequestParams; result: ValueResult }
   /** Masked sudo password for the terminal tool. */
@@ -5543,8 +5768,11 @@ export const SERVER_REQUEST_METHODS = [
   'clarify',
   'confirm',
   'display.install.sudo',
+  'input.file',
+  'input.form',
   'preview.act',
   'preview.read',
+  'review.draft',
   'secret',
   'sudo',
   'terminal.read',

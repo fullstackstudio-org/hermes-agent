@@ -833,6 +833,42 @@ class TestPreviewDeadline:
             tts_voice.fetch_preview(f"{slow_server}/trickle", timeout=1)
         assert 0.8 < time.monotonic() - started < 6
 
+    def test_chunked_trailers_cannot_outlast_the_limit(self, slow_server):
+        # A chunked body whose last chunk is followed by trailer lines, one every 250 ms: http.client
+        # reads them all inside a single read1(), each with a fresh socket timeout.
+        import socket
+        import threading
+        import time
+
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+
+        def serve():
+            conn, _ = listener.accept()
+            try:
+                conn.recv(4096)
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nTransfer-Encoding: chunked\r\n\r\n"
+                    b"4\r\nMARK\r\n0\r\n"
+                )
+                for n in range(40):
+                    time.sleep(0.25)
+                    conn.sendall(b"X-Marker-%d: harmless\r\n" % n)
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+        threading.Thread(target=serve, daemon=True).start()
+        started = time.monotonic()
+        try:
+            with pytest.raises(tts_voice.PreviewError, match="too long"):
+                tts_voice.fetch_preview(f"http://127.0.0.1:{listener.getsockname()[1]}/x", timeout=1)
+        finally:
+            listener.close()
+        assert time.monotonic() - started < 4
+
     def test_a_stalled_server_is_cut_off_at_the_limit(self, slow_server):
         import time
         started = time.monotonic()

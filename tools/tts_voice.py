@@ -186,8 +186,15 @@ def edge_voice_list(wait: Optional[float] = None) -> tuple:
         if failed_at > 0.0 and now - failed_at < _LIST_FAILURE_TTL_SECONDS:
             return (voices, "ready") if voices is not None else (None, "unavailable")
         if _edge_inflight is None:
-            _edge_inflight = done = threading.Event()
-            threading.Thread(target=_refresh_edge_voices, args=(done,), daemon=True, name="edge-voice-list").start()
+            done = threading.Event()
+            try:
+                threading.Thread(
+                    target=_refresh_edge_voices, args=(done,), daemon=True, name="edge-voice-list"
+                ).start()
+            except RuntimeError:  # no thread to be had: answer as a failed fetch, try again later
+                _edge_cache["failed_at"] = now
+                return (voices, "ready") if voices is not None else (None, "unavailable")
+            _edge_inflight = done
         done = _edge_inflight
         if voices is not None:
             return voices, "ready"  # stale, served while the refresh runs
@@ -337,9 +344,11 @@ def fetch_preview(url: str, timeout: float = PREVIEW_TIMEOUT_SECONDS) -> tuple:
     https and the host allowlist are checked first, redirects are not followed, the body is read
     in chunks and refused past :data:`PREVIEW_MAX_BYTES`, and the body has to arrive within *timeout*
     seconds (default :data:`PREVIEW_TIMEOUT_SECONDS`) of the start, counted as a whole: each read
-    returns what has arrived (``read1``) and the socket's timeout is cut to the time that is left
-    before it, so a server that dribbles bytes or stalls cannot outlast the limit. (Connecting and
-    the response headers are bounded by *timeout* per operation, not as a whole.) A non-audio content
+    returns what has arrived (``read1``), the socket's timeout is cut to the time that is left
+    before it, and a watchdog shuts the socket at the deadline (a chunked body's size lines and
+    trailers are read inside one ``read1``), so a server that dribbles bytes or stalls cannot
+    outlast the limit. (Connecting and the response headers are bounded by *timeout* per
+    operation, not as a whole.) A non-audio content
     type is sent on as ``audio/mpeg``.
     """
     check_preview_url(url)
@@ -350,22 +359,14 @@ def fetch_preview(url: str, timeout: float = PREVIEW_TIMEOUT_SECONDS) -> tuple:
         with opener.open(request, timeout=timeout) as response:
             content_type = response.headers.get_content_type() if response.headers else ""
             sock = _response_socket(response)
-            body = bytearray()
-            while not getattr(response, "isclosed", lambda: False)():  # closed = the body was complete
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise PreviewError("preview download took too long")
-                if sock is not None:
-                    sock.settimeout(remaining)
-                try:
-                    chunk = response.read1(64 * 1024)
-                except (TimeoutError, socket.timeout):  # the socket ran out of the time that was left
-                    raise PreviewError("preview download took too long") from None
-                if not chunk:
-                    break
-                body.extend(chunk)
-                if len(body) > PREVIEW_MAX_BYTES:
-                    raise PreviewError("preview is larger than the limit")
+            expired = threading.Event()
+            watchdog = threading.Timer(max(0.0, deadline - time.monotonic()), _cut_off, args=(sock, expired))
+            watchdog.daemon = True
+            watchdog.start()
+            try:
+                body = _read_preview_body(response, sock, deadline, expired)
+            finally:
+                watchdog.cancel()
     except PreviewError:
         raise
     except Exception as exc:  # HTTPError (incl. a refused redirect), timeouts, DNS, TLS
@@ -373,6 +374,47 @@ def fetch_preview(url: str, timeout: float = PREVIEW_TIMEOUT_SECONDS) -> tuple:
     if not body:
         raise PreviewError("preview is empty")
     return bytes(body), content_type if content_type.startswith("audio/") else "audio/mpeg"
+
+
+def _cut_off(sock: Any, expired: threading.Event) -> None:
+    """The watchdog: at the deadline, shut the socket so any read in progress returns at once (a
+    chunked body's size lines and trailers are read by ``http.client`` inside one ``read1``, each
+    with a fresh socket timeout, so the per-read timeout alone does not bound the whole)."""
+    expired.set()
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
+def _read_preview_body(response: Any, sock: Any, deadline: float, expired: threading.Event) -> bytearray:
+    body = bytearray()
+    try:
+        while not getattr(response, "isclosed", lambda: False)():  # closed = the body was complete
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PreviewError("preview download took too long")
+            if sock is not None:
+                sock.settimeout(remaining)
+            try:
+                chunk = response.read1(64 * 1024)
+            except (TimeoutError, socket.timeout):  # the socket ran out of the time that was left
+                raise PreviewError("preview download took too long") from None
+            if not chunk:
+                break
+            body.extend(chunk)
+            if len(body) > PREVIEW_MAX_BYTES:
+                raise PreviewError("preview is larger than the limit")
+    except PreviewError:
+        raise
+    except Exception:
+        if expired.is_set():
+            raise PreviewError("preview download took too long") from None
+        raise
+    if expired.is_set():
+        raise PreviewError("preview download took too long")
+    return body
 
 
 _preview_lock = threading.Lock()

@@ -598,7 +598,11 @@ async def get_attached_image(name: str, profile: Optional[str] = None):
 _OUTBOX_CSP = "default-src 'none'; sandbox"
 _OUTBOX_INLINE_KINDS = frozenset({"image", "video", "audio", "pdf"})
 _OUTBOX_CHUNK = 256 * 1024
-_OUTBOX_RANGE_RE = re.compile(r"(\d*)-(\d*)")
+# At most 18 digits a side (an exabyte): a longer number is malformed, never a 500 on int().
+_OUTBOX_RANGE_RE = re.compile(r"(\d{0,18})-(\d{0,18})")
+# Browser navigations: Chromium's PDF viewer does not run under a sandboxing CSP, so a PDF opened as a page
+# is a download there; an app fetching it (no Sec-Fetch-Dest, or "empty") still gets it inline.
+_OUTBOX_DOCUMENT_DESTS = frozenset({"document", "iframe", "frame", "embed", "object"})
 _OUTBOX_NOT_FOUND = "File not found"
 
 
@@ -658,18 +662,21 @@ def _outbox_disposition(inline: bool, name: str) -> str:
     return f"{'inline' if inline else 'attachment'}; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
 
 
-def _outbox_body(fd: int, start: int, length: int) -> Iterator[bytes]:
+def _outbox_body(handle, start: int, length: int) -> Iterator[bytes]:
+    """The bytes ``start .. start+length`` of the open *handle*. The handle is a file object, so it is closed
+    even when the client goes before the body is iterated (the response, and with it this generator, is
+    collected)."""
     try:
         offset, remaining = start, length
         while remaining > 0:
-            chunk = os.pread(fd, min(_OUTBOX_CHUNK, remaining), offset)
+            chunk = os.pread(handle.fileno(), min(_OUTBOX_CHUNK, remaining), offset)
             if not chunk:
                 break
             offset += len(chunk)
             remaining -= len(chunk)
             yield chunk
     finally:
-        os.close(fd)
+        handle.close()
 
 
 @router.get("/api/files/outbox/{token}/{name}")
@@ -699,6 +706,8 @@ async def get_outbox_file(request: Request, token: str, name: str, profile: Opti
         mime = str(record.get("mime") or "application/octet-stream")
         served = outbox.served_type(mime)
         inline = bool(record.get("inline")) and record.get("kind") in _OUTBOX_INLINE_KINDS and served == mime
+        if record.get("kind") == "pdf" and request.headers.get("sec-fetch-dest", "").lower() in _OUTBOX_DOCUMENT_DESTS:
+            inline = False
         etag = f'"{str(record.get("sha256") or "")[:40]}"'
         headers = {
             "Accept-Ranges": "bytes",
@@ -728,8 +737,9 @@ async def get_outbox_file(request: Request, token: str, name: str, profile: Opti
             headers["Content-Range"] = f"bytes {start}-{end}/{size}"
         if request.method == "HEAD":
             return Response(status_code=status, headers=headers, media_type=served)
-        fd, shared.fd = shared.fd, -1  # the body owns the descriptor from here
-        return StreamingResponse(_outbox_body(fd, start, length), status_code=status, headers=headers,
+        handle = os.fdopen(shared.fd, "rb", buffering=0)
+        shared.fd = -1  # the body owns the descriptor from here
+        return StreamingResponse(_outbox_body(handle, start, length), status_code=status, headers=headers,
                                  media_type=served)
     finally:
         if shared.fd >= 0:

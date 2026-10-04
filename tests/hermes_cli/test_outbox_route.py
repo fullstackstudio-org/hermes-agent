@@ -229,3 +229,39 @@ def test_a_replaced_blob_is_not_served(world):
     blob.unlink()
     os.link(secret, blob)
     assert world.client.get(_url(record)).status_code == 404
+
+
+@pytest.mark.parametrize("header", ["bytes=0-9999999999999999999999", "bytes=99999999999999999999-",
+                                    "bytes=-99999999999999999999"])
+def test_a_huge_range_number_is_416_not_500(world, header):
+    response = world.client.get(_url(world.share("clip.mp3", _MP3)), headers={"Range": header})
+    assert response.status_code == 416 and response.headers["content-range"] == "bytes */1034"
+
+
+@pytest.mark.parametrize(("dest", "disposition"), [
+    (None, "inline"), ("empty", "inline"), ("document", "attachment"), ("iframe", "attachment"),
+    ("embed", "attachment"),
+])
+def test_a_pdf_opened_as_a_page_is_a_download(world, dest, disposition):
+    """Chromium's PDF viewer does not run under the sandbox CSP: a page navigation gets a download instead,
+    an app's fetch keeps it inline. The CSP is never relaxed."""
+    headers = {"Sec-Fetch-Dest": dest} if dest else {}
+    response = world.client.get(_url(world.share("a.pdf", b"%PDF-1.7\n")), headers=headers)
+    assert response.headers["content-disposition"].split(";")[0] == disposition
+    assert response.headers["content-security-policy"] == "default-src 'none'; sandbox"
+
+
+def test_the_body_closes_its_file_when_never_iterated(world):
+    """A client that goes before the body is iterated: the generator never runs its ``finally``, but the
+    descriptor is held by a file object, which closes it when the response is dropped."""
+    import gc
+
+    record = world.share("clip.mp3", _MP3)
+    shared = outbox.open_shared(world.home, record["id"], record["name"])
+    fd = shared.fd
+    body = files_router._outbox_body(os.fdopen(fd, "rb", buffering=0), 0, 10)
+    os.fstat(fd)  # open while the body exists
+    del body
+    gc.collect()
+    with pytest.raises(OSError):
+        os.fstat(fd)

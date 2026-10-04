@@ -1663,7 +1663,12 @@ files:
   outbox_max_file_mb: 200      # a larger file is not shared
   outbox_max_total_mb: 2048    # per profile; the oldest shared files are removed first
   outbox_retention_days: 30    # shared files older than this are removed
+  outbox_max_turn_files: 20    # files one reply may share
+  outbox_max_turn_mb: 500      # bytes one reply may share
+  outbox_turn_timeout_s: 120   # the longest copying may delay a reply
 ```
+
+A file in any profile's `outbox/` or in a person's upload folder is never shared again, and a share never pushes out another conversation's recent files: when the outbox is full of them, the new file is refused. A file that is not shared shows as a note (`(1 file could not be shared.)`), never by its path. Deleting a conversation removes its shared files.
 
 The written contract (the attachment shape, the route's headers and ranges) is `contract/outbox/` in the repository.
 

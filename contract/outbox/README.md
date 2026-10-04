@@ -30,10 +30,19 @@ at the end of a completed turn the gateway:
    results;
 2. checks each path as native delivery does (the credential and system denylist, strict mode, a sandbox path
    mapped to the host), plus the read guard and a basename denylist (`.env*`, credential stores, keys),
-   resolves links first, and takes only a regular file of at most `files.outbox_max_file_mb` (200);
+   resolves links first, and reads exactly the judged file (every component opened without following a
+   link); it takes only a regular file with one link, of at most `files.outbox_max_file_mb` (200), and never
+   a file in any profile's `outbox/` or in a person's upload folder (`uploads/hermie/`): a copy shared in
+   one conversation is never handed to another;
 3. copies it to `<profile home>/outbox/<token>/` (a new random token per copy; the agent's file is not
-   touched);
+   touched), at most `files.outbox_max_turn_files` (20) files and `files.outbox_max_turn_mb` (500) per reply,
+   all within `files.outbox_turn_timeout_s` (120): a copy still running then is abandoned and removed, so a
+   slow file delays the reply by that much at most;
 4. sends the attachments with `message.complete` and records them on the reply's row.
+
+A file that cannot be shared (refused, over a limit, out of time) is never shown by its path: the text gets
+one note, `(1 file could not be shared.)` / `(N files could not be shared.)`, without a name or a reason (the
+gateway logs the reason).
 
 Other sessions (the TUI, the Desktop app, the dashboard Chat tab) are not changed: they keep the `MEDIA:` line
 in the text and render it from the path themselves.
@@ -69,16 +78,23 @@ A client:
 
 ## 3. Where attachments appear
 
-- `message.complete` carries `attachments: [...]`; its `text` then has no `MEDIA:` directive. `[]` when the
-  reply named files and none could be shared (a refused path is logged on the gateway, never shown). The key is
+- `message.complete` carries `attachments: [...]`; its `text` then has no `MEDIA:` directive (and the note
+  above when files could not be shared). `[]` when the reply named files and none could be shared. The key is
   absent when the reply named none, and on every session the outbox does not serve.
-- The `message.delta` frames of such a session never carry a `MEDIA:` directive: a line holding one is held
-  back and let through without it. The `message.complete` text is the authority, as before.
+- The `message.delta` frames of such a session never carry a `MEDIA:` directive outside a fenced code block: a
+  line holding one is held back and let through without it (what is held when the reply ends comes as one last
+  `message.delta` before `message.complete`). The `message.complete` text is the authority, as before.
 - `session.history`, the `messages` of `session.resume`, `GET /api/sessions/{id}/messages` and
   `GET /api/sessions/{id}/messages/around` show that assistant row with `attachments` beside `text` (`content` on the REST page) and without its
   directives. `display_metadata` does not repeat them.
 - The row the model reads keeps what the agent wrote: the agent's next turn sees its own `MEDIA:` line.
+- Session previews (`session.list`, the profile roster, `GET /api/sessions`), timeline entries and search
+  snippets never show a `MEDIA:` directive, on any surface.
 
+What still names a path (the agent's own working data, not a reply to the person): the `tool.*` frames and
+tool rows (a tool's result, as for every tool), `message.interim` notes, and the text of a turn that ended
+in an error or was interrupted (nothing is shared then). A client SHOULD NOT turn a `MEDIA:` line it sees
+there into a link.
 ## 4. The route
 
 `GET /api/files/outbox/{id}/{name}` (and `HEAD`), with `?profile=<name>` exactly like every other per-profile
@@ -95,15 +111,23 @@ route (the dashboard's own profile when absent).
   `Accept-Ranges: bytes`, `ETag` (strong, from the SHA-256) and `Cache-Control: private, max-age=86400`.
 - `Content-Disposition` is `inline` only for `image`, `video`, `audio` and `pdf`; every other file is
   `attachment` and is labelled `application/octet-stream` when its type is active content (HTML, SVG,
-  XML, JavaScript). The file name is given as `filename` (ASCII) and `filename*` (UTF-8).
+  XML, JavaScript). The file name is given as `filename` (ASCII) and `filename*` (UTF-8). A `pdf` requested
+  as a page by a browser (`Sec-Fetch-Dest` `document`, `iframe`, `frame`, `embed` or `object`) is an
+  `attachment`: browsers' built-in PDF viewers do not run under the sandbox, and the sandbox is not relaxed
+  for them. An app that fetches it (no `Sec-Fetch-Dest`, or `empty`) and shows it in its own viewer gets it
+  `inline`.
 - Ranges: one `bytes` range: `first-last`, `first-` or `-suffix` → `206` with `Content-Range`. A range that
-  starts past the end, ends before it starts, is malformed or asks for zero bytes → `416` with
+  starts past the end, ends before it starts, is malformed (a number of more than 18 digits included) or asks
+  for zero bytes → `416` with
   `Content-Range: bytes */<size>`. Another unit or several ranges → `200` with the whole file.
   `If-Range` with another validator → `200`. `If-None-Match` with the `ETag` → `304`.
 
 ## 5. Retention
 
-`files.outbox_retention_days` (30): older shared files are removed. `files.outbox_max_total_mb` (2048) per
-profile: the oldest go first when a new one needs room, and the gateway keeps at most 10,000. The dashboard
-prunes at start and every six hours; a share prunes before it copies. A removed file is `404`; a client SHOULD
-show the attachment as no longer available.
+`files.outbox_retention_days` (30): older shared files are removed. `files.outbox_max_total_mb` (2048) and
+10,000 files per profile: a new share first lets expired files go, then only the same conversation's oldest
+(never a file of the reply being shared); when that is not enough the new file is refused, so one
+conversation can never push out another's recent files. The periodic pass (dashboard start, then every six
+hours) removes expired files, and the oldest of any conversation only when the outbox is over its cap (the cap
+was lowered). Deleting a conversation (or pruning old sessions) removes its shared files. A removed file is
+`404`; a client SHOULD show the attachment as no longer available.

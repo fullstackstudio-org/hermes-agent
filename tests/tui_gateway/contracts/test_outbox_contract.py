@@ -74,9 +74,11 @@ def test_the_range_table_is_what_the_route_does(case):
         assert case["content_range"] == f"bytes {first}-{last}/{size}"
 
 
-@pytest.mark.parametrize("case", EXAMPLES["dispositions"], ids=lambda c: c["mime"])
+@pytest.mark.parametrize("case", EXAMPLES["dispositions"], ids=lambda c: c["mime"] + c.get("sec_fetch_dest", ""))
 def test_the_disposition_table_is_what_the_route_does(case):
     served = outbox.served_type(case["mime"])
     inline = case["kind"] in files_router._OUTBOX_INLINE_KINDS and served == case["mime"]
+    if case["kind"] == "pdf" and case.get("sec_fetch_dest") in files_router._OUTBOX_DOCUMENT_DESTS:
+        inline = False
     assert served == case["content_type"]
     assert ("inline" if inline else "attachment") == case["disposition"]

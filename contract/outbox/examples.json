@@ -171,6 +171,11 @@
         "content_range": "bytes */1034"
       },
       {
+        "range": "bytes=0-9999999999999999999999",
+        "status": 416,
+        "content_range": "bytes */1034"
+      },
+      {
         "range": "items=0-9",
         "status": 200,
         "content_range": null
@@ -230,6 +235,13 @@
       "mime": "application/octet-stream",
       "content_type": "application/octet-stream",
       "disposition": "attachment"
+    },
+    {
+      "kind": "pdf",
+      "mime": "application/pdf",
+      "content_type": "application/pdf",
+      "disposition": "attachment",
+      "sec_fetch_dest": "document"
     }
   ]
 }

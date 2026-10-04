@@ -1,6 +1,8 @@
-"""The interactive server→client requests ``input.form``, ``input.file``, ``review.draft`` and ``review.diff``: the
-agent asks the person for typed fields, files, the approval of a draft or of the hunks of a diff through a connected
-app (plan ``request-types-v2``, contract ``contract/requests``).
+"""The interactive server→client requests ``input.form``, ``input.file``, ``review.draft``, ``review.diff``,
+``input.signature`` and the device requests ``device.location``, ``device.contact``, ``device.calendar`` and
+``device.scan``: the agent asks the person for typed fields, files, the approval of a draft or of the hunks of a diff,
+a signature, a location, a contact, a calendar entry or a scanned code through a connected app (plan
+``request-types-v2``, contract ``contract/requests``).
 
 What this module adds on top of ``server_requests.send_gated`` (method-gated: a connection gets a request only after
 it listed the method under ``client.capabilities {requests}``; ``acting_user_target`` narrows it to the login the
@@ -32,8 +34,14 @@ turn acts for; ``send_gated`` parks the request until a capable device attaches 
 - a diff is read by ``diff_hunks`` into hunks the gateway numbers and keeps (the request's own ``hunks``); an approved
   diff hands the agent ``approved_patch``, composed by ``diff_hunks.compose_patch`` from those hunks and the file's
   head the gateway read, with the hunks the person approved, never from anything the client sent;
-- one open interactive request per conversation and :data:`MAX_PER_WINDOW` sent per :data:`WINDOW_SECONDS`
-  (:data:`_limiter`, a limiter of its own: ``confirm`` keeps its own key and numbers);
+- one open interactive request per conversation, whichever family (:func:`_reserve`), and per :data:`WINDOW_SECONDS`
+  :data:`MAX_PER_WINDOW` sent for ``input.*`` and ``review.*`` (:data:`_limiter`) and :data:`DEVICE_MAX_PER_WINDOW` for
+  ``device.*`` (:data:`_device_limiter`); ``confirm`` keeps its own key and numbers;
+- the device requests and the signature carry what is personal, so the gateway keeps them to what the person chose to
+  share (``interactive_device``): a location is rounded for an ``approximate`` request whatever the client sent, a
+  contact is cut down to the keys the request asked for, a scanned value is cleaned (untrusted text), a signature's
+  answer must carry the SHA-256 of the exact statement shown and its two files are checked to be a PNG and a plain
+  SVG; a calendar entry is saved by the person in the system sheet and only ``done`` comes back;
 - one audit record per request and per outcome in the dashboard auth audit log (``interactive_request`` /
   ``interactive_outcome``): session, request id, method, the login the turn acts for, connections reached,
   outcome, reason, and the login and peer address of the answering connection. Never a title, summary, value, path,
@@ -54,37 +62,50 @@ import os
 import posixpath
 import re
 import stat
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from tui_gateway import (
-    diff_hunks, interactive_fields, interactive_validate, request_limits, review_register, server_requests,
-    upload_dirs)
+    diff_hunks, interactive_device, interactive_fields, interactive_validate, request_limits, review_register,
+    server_requests, upload_dirs)
 from tui_gateway.contracts.server_requests import (
-    DRAFT_TEXT_MAX, INTERACTIVE_METHODS, INTERACTIVE_SUMMARY_MAX, INTERACTIVE_TITLE_MAX, UPLOAD_MAX_FILES,
-    DraftKind, FileAccept, FileCapture)
+    CONTACT_FIELDS_MAX, DRAFT_TEXT_MAX, INTERACTIVE_METHODS, INTERACTIVE_SUMMARY_MAX, INTERACTIVE_TITLE_MAX,
+    SCAN_FORMATS_MAX, SIGNATURE_SIGNER_MAX, SIGNATURE_STATEMENT_MAX, UPLOAD_MAX_FILES, CalendarKind, ContactField,
+    DraftKind, FileAccept, FileCapture, LocationPrecision, ScanFormat)
 from tui_gateway.request_text import clean_text, verbatim_problem
 
 logger = logging.getLogger(__name__)
 audit = logging.getLogger("tui_gateway.interactive.audit")
 
 TIMEOUT_SECONDS = 300.0
+#: How long a device request waits for the person (they pick, or the system asks for a permission).
+DEVICE_TIMEOUT_SECONDS = 180.0
 #: How long a request waits for a capable device to attach before it is ``unavailable (no_capable_client)``.
 PARK_SECONDS = 120.0
 #: Answers refused by the validator before the request is withdrawn (``unavailable (too_many_attempts)``).
 MAX_REFUSALS = 10
 MAX_PENDING = 1
 MAX_PER_WINDOW = 12
+#: ``device.*`` per conversation per :data:`WINDOW_SECONDS`: what is personal is asked for less often.
+DEVICE_MAX_PER_WINDOW = 6
 WINDOW_SECONDS = 600.0
+#: A signature is two small images (a PNG and an SVG of a pad): one MiB each is far more than a drawn line needs, and
+#: it lets the post-settle check read a whole file at once.
+SIGNATURE_MAX_BYTES = 1024 * 1024
+SIGNATURE_MAX_TOTAL_BYTES = 2 * 1024 * 1024
 #: Per file and for all files of one answer (the contract allows 100 MiB each; a photo, a scan or a voice note is
 #: far smaller, and the model reads what comes back).
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 UPLOAD_MAX_TOTAL_BYTES = 50 * 1024 * 1024
 DEFAULT_TITLES = {"input.form": "Fill in a form", "input.file": "Send a file", "review.draft": "Review a draft",
-                  "review.diff": "Review changes"}
+                  "review.diff": "Review changes", "input.signature": "Sign", "device.location": "Share your location",
+                  "device.contact": "Share a contact", "device.calendar": "Add to your calendar",
+                  "device.scan": "Scan a code"}
+REMINDER_TITLE = "Add a reminder"
 SUBJECT_MAX = 200
 RECIPIENT_MAX = 120
 RECIPIENTS_MAX = 10
@@ -93,14 +114,37 @@ ANSWER_STATUSES = frozenset({"answered", "skipped", "approved", "rejected"})
 NOT_SHOWN_REASONS = frozenset({"no_capable_client", "write_failed", server_requests.NO_ACTING_USER})
 #: The ``4041 cannot_show`` reasons the contract lists (``contract/requests`` §3), passed to the agent as
 #: ``cannot_show:<reason>``; any other reason (the set is open) is reported as plain ``error_response``.
-CANNOT_SHOW_REASONS = frozenset({"no_camera", "not_supported_on_device", "permission_denied", "upload_failed",
-                                 "unsupported_version", "shutting_down", "declined"})
+CANNOT_SHOW_REASONS = frozenset({"no_camera", "no_microphone", "not_supported_on_device", "permission_denied",
+                                 "location_unavailable", "upload_failed", "unsupported_version", "shutting_down",
+                                 "declined"})
 
 _MIME = re.compile(r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}")
 _HASH_CHUNK = 1024 * 1024
 
-#: ``interactive.request``'s pending slot and window, per conversation. Exposed (not copied) for tests.
+#: ``interactive.request``'s pending slot and window, per conversation, for ``input.*`` and ``review.*``; the device
+#: requests have a window of their own. Exposed (not copied) for tests.
 _limiter = request_limits.Limiter(MAX_PENDING, MAX_PER_WINDOW, WINDOW_SECONDS)
+_device_limiter = request_limits.Limiter(MAX_PENDING, DEVICE_MAX_PER_WINDOW, WINDOW_SECONDS)
+# One lock for taking a slot in either limiter: "one open request at a time across the families" is a check of the
+# other limiter's pending count and a reservation in this one, which must be one step.
+_reserve_lock = threading.Lock()
+
+
+def timeout_for(method: str) -> float:
+    """How long a *method* request waits for the person: :data:`DEVICE_TIMEOUT_SECONDS` for a device request, else
+    :data:`TIMEOUT_SECONDS`."""
+    return DEVICE_TIMEOUT_SECONDS if method.startswith("device.") else TIMEOUT_SECONDS
+
+
+def _reserve(method: str, key: str, now: float) -> tuple[request_limits.Limiter, str]:
+    """Take the conversation's slot for a *method* request: ``(the limiter to release, "")`` or ``(that limiter, the
+    reason it is refused)``. Only one interactive request is open per conversation across both families (a person is
+    asked one thing at a time); each family has its own number per window."""
+    own, other = (_device_limiter, _limiter) if method.startswith("device.") else (_limiter, _device_limiter)
+    with _reserve_lock:
+        if other.pending.get(key, 0) >= other.max_pending:
+            return own, request_limits.ALREADY_PENDING
+        return own, own.reserve(key, now)
 
 
 class InteractiveParamsError(ValueError):
@@ -325,8 +369,106 @@ def build_diff_params(sid: str, **kwargs: Any) -> dict:
     return build_diff(sid, **kwargs)[0]
 
 
+def build_signature_params(sid: str, *, summary: object, statement: object, signer_name: object = None,
+                           title: object = None, detail: object = None, optional: object = True,
+                           timeout: float = TIMEOUT_SECONDS) -> dict:
+    """The ``input.signature`` params. The statement is shown in full and VERBATIM above the pad and the answer
+    carries the SHA-256 of exactly these characters, so, like a draft, it is not cleaned: whitespace at the end of a
+    line or of the text is removed and text that still cannot be shown as it is is refused for the agent to fix.
+    ``signer_name`` is display text: cleaned, one line. The two files (a PNG and an SVG) go to ``upload.dir``."""
+    if not isinstance(statement, str):
+        raise InteractiveParamsError("statement is required: the text the person signs, as plain text")
+    body = interactive_validate.strip_line_ends(statement.replace("\r\n", "\n"))
+    if not body:
+        raise InteractiveParamsError("statement is required: the text the person signs, as plain text")
+    if len(body) > SIGNATURE_STATEMENT_MAX:
+        raise InteractiveParamsError(f"statement is {len(body)} characters; the limit is {SIGNATURE_STATEMENT_MAX}.")
+    if problem := verbatim_problem(body):
+        raise InteractiveParamsError(f"statement cannot be shown verbatim: {problem}")
+    params = _envelope(sid, "input.signature", summary=summary, title=title, detail=detail, optional=optional,
+                       timeout=timeout)
+    params["statement"] = body
+    if name := _line("signer_name", signer_name, SIGNATURE_SIGNER_MAX):
+        params["signer_name"] = name
+    params["upload"] = {"dir": _upload_dir(sid), "max_bytes": SIGNATURE_MAX_BYTES,
+                        "max_total_bytes": SIGNATURE_MAX_TOTAL_BYTES, "max_files": 2, "strip_metadata": False}
+    return params
+
+
+def build_location_params(sid: str, *, summary: object, precision: object = "approximate", title: object = None,
+                          detail: object = None, optional: object = True,
+                          timeout: float = DEVICE_TIMEOUT_SECONDS) -> dict:
+    """The ``device.location`` params: one fix, ``approximate`` unless the agent asks for ``precise``."""
+    _one_of("precision", precision, LocationPrecision)
+    params = _envelope(sid, "device.location", summary=summary, title=title, detail=detail, optional=optional,
+                       timeout=timeout)
+    params["precision"] = precision
+    return params
+
+
+def _distinct(name: str, value: object, choices, limit: int, *, required: bool) -> list[str] | None:
+    """A list of distinct members of the enum *choices*, at most *limit*; None when absent and not *required*."""
+    if value is None and not required:
+        return None
+    allowed = ", ".join(choice.value for choice in choices)
+    if not isinstance(value, list) or not value:
+        raise InteractiveParamsError(f"{name} must be a list of 1 to {limit} of: {allowed}")
+    if len(value) > limit:
+        raise InteractiveParamsError(f"{name} has {len(value)} entries; the limit is {limit}.")
+    for entry in value:
+        _one_of(f"{name} entry", entry, choices)
+    if len(set(value)) != len(value):
+        raise InteractiveParamsError(f"{name} lists the same entry twice")
+    return list(value)
+
+
+def build_contact_params(sid: str, *, summary: object, fields: object, title: object = None, detail: object = None,
+                         optional: object = True, timeout: float = DEVICE_TIMEOUT_SECONDS) -> dict:
+    """The ``device.contact`` params: the fields (1-6, no repeats) the person may share from the contact they pick.
+    The agent asks only for what it needs."""
+    asked = _distinct("fields", fields, ContactField, CONTACT_FIELDS_MAX, required=True)
+    params = _envelope(sid, "device.contact", summary=summary, title=title, detail=detail, optional=optional,
+                       timeout=timeout)
+    params["fields"] = asked
+    return params
+
+
+def build_calendar_params(sid: str, *, summary: object, kind: object, item: object, title: object = None,
+                          detail: object = None, optional: object = True,
+                          timeout: float = DEVICE_TIMEOUT_SECONDS) -> dict:
+    """The ``device.calendar`` params: *kind* (``event`` or ``reminder``) and the *item* the system sheet is prefilled
+    with (:func:`interactive_device.build_calendar_item`). Nothing is saved until the person saves in that sheet."""
+    _one_of("kind", kind, CalendarKind)
+    entry = interactive_device.build_calendar_item(item, InteractiveParamsError)
+    if kind == "reminder" and "end" in entry:
+        raise InteractiveParamsError("a reminder has one time: give start (when it is due) and no end")
+    params = _envelope(sid, "device.calendar", summary=summary, title=title, detail=detail, optional=optional,
+                       timeout=timeout)
+    if kind == "reminder" and params["title"] == DEFAULT_TITLES["device.calendar"]:
+        params["title"] = REMINDER_TITLE
+    params["kind"], params["item"] = kind, entry
+    return params
+
+
+def build_scan_params(sid: str, *, summary: object, formats: object = None, title: object = None,
+                      detail: object = None, optional: object = True,
+                      timeout: float = DEVICE_TIMEOUT_SECONDS) -> dict:
+    """The ``device.scan`` params: the symbologies to look for (1-7, no repeats), or every one the device reads."""
+    asked = _distinct("formats", formats, ScanFormat, SCAN_FORMATS_MAX, required=False)
+    params = _envelope(sid, "device.scan", summary=summary, title=title, detail=detail, optional=optional,
+                       timeout=timeout)
+    if asked is not None:
+        params["formats"] = asked
+    return params
+
+
+#: The methods that ask the person's device for something of theirs.
+DEVICE_METHODS = tuple(method for method in INTERACTIVE_METHODS if method.startswith("device."))
+
 BUILDERS = {"input.form": build_form_params, "input.file": build_file_params, "review.draft": build_draft_params,
-            "review.diff": build_diff_params}
+            "review.diff": build_diff_params, "input.signature": build_signature_params,
+            "device.location": build_location_params, "device.contact": build_contact_params,
+            "device.calendar": build_calendar_params, "device.scan": build_scan_params}
 
 
 # ── files, after the request settled ──────────────────────────────────────────────────────────
@@ -359,7 +501,8 @@ def _open_upload_dir(directory: str) -> tuple[int | None, str]:
     return fd, ""
 
 
-def verify_files(params: dict, files: list[dict]) -> tuple[str, list[str]]:
+def verify_files(params: dict, files: list[dict], *,
+                 sniff: Callable[[dict, bytes], str | None] | None = None) -> tuple[str, list[str]]:
     """Check on disk what an ``input.file`` answer claims, OUTSIDE every lock, without following a symbolic link
     at or below ``uploads``. ``upload.dir`` must be a real path (``realpath(dir) == dir``); its anchor (the folder
     holding ``uploads``) is opened normally, each component from ``uploads`` down with ``O_NOFOLLOW``, and the
@@ -372,7 +515,11 @@ def verify_files(params: dict, files: list[dict]) -> tuple[str, list[str]]:
     ``("file:<n>:<problem>" | "files:too_large" | "dir:unsafe", [])``; the file problems: ``path`` (a control or
     format character), ``outside_dir`` (not directly in the directory), ``missing``, ``link``, ``not_a_file``,
     ``size``, ``hash``; ``dir:unsafe`` when the directory itself is not a real path, is reached through a link or
-    changed under the check. Nothing is read beyond the declared size, and nothing is deleted."""
+    changed under the check. Nothing is read beyond the declared size, and nothing is deleted.
+
+    *sniff*, when given, is called for each file that passed with ``(entry, first_bytes)`` (the first chunk read for the
+    hash: the whole file when it is at most one MiB) and may return a problem word, which becomes
+    ``file:<n>:<word>`` (a signature's files must be what their ``mime`` says, ``interactive_device``)."""
     upload = params["upload"]
     directory = str(upload["dir"])
     dir_fd, problem = _open_upload_dir(directory)
@@ -406,8 +553,10 @@ def verify_files(params: dict, files: list[dict]) -> tuple[str, list[str]]:
                 total += info.st_size
                 if total > int(upload["max_total_bytes"]):
                     return "files:too_large", []
-                digest, read = hashlib.sha256(), 0
+                digest, read, first = hashlib.sha256(), 0, b""
                 while chunk := os.read(fd, min(_HASH_CHUNK, declared + 1 - read)):
+                    if not read:
+                        first = chunk
                     read += len(chunk)
                     digest.update(chunk)
                     if read > declared:
@@ -416,6 +565,8 @@ def verify_files(params: dict, files: list[dict]) -> tuple[str, list[str]]:
                     return f"file:{number}:size", []
                 if not hmac.compare_digest(digest.hexdigest(), str(entry["sha256"])):
                     return f"file:{number}:hash", []
+                if sniff is not None and (word := sniff(entry, first)):
+                    return f"file:{number}:{word}", []
             finally:
                 os.close(fd)
             real_paths.append(f"{directory}/{name}")
@@ -507,7 +658,7 @@ def _rate_key(sid: str) -> str:
     return str((server._sessions.get(sid) or {}).get("session_key") or sid)
 
 
-def request(sid: str, method: str, params: dict, *, timeout: float = TIMEOUT_SECONDS,
+def request(sid: str, method: str, params: dict, *, timeout: float | None = None,
             head: diff_hunks.FileHead | None = None) -> Outcome:
     """Ask the clients of *sid* that can show *method* (and belong to the person the turn acts for) and block for
     the outcome. *params* come from the matching builder (for ``review.diff``, *head* is the file head
@@ -519,10 +670,13 @@ def request(sid: str, method: str, params: dict, *, timeout: float = TIMEOUT_SEC
     if method == "review.diff" and head is None:
         raise ValueError("a review.diff request needs the file head build_diff returned")
     log = _Audit(sid, method)
+    if timeout is None:
+        timeout = timeout_for(method)
     if os.environ.get("HERMES_COMPUTE_HOST_CHILD") == "1":
         return log.outcome(Outcome("unavailable", reason="turn_isolation"))
     key = _rate_key(sid)
-    if refused := _limiter.reserve(key, time.monotonic()):
+    limiter, refused = _reserve(method, key, time.monotonic())
+    if refused:
         return log.outcome(Outcome("unavailable", reason=refused))
     sent_at: float | None = None
 
@@ -544,7 +698,7 @@ def request(sid: str, method: str, params: dict, *, timeout: float = TIMEOUT_SEC
         if result.status == "unavailable" and result.reason in NOT_SHOWN_REASONS:
             sent_at = None  # nothing reached a person: it does not count against the window
     finally:
-        _limiter.release(key, sent_at=sent_at)
+        limiter.release(key, sent_at=sent_at)
     return _outcome(sid, key, method, outgoing, result, log, head)
 
 
@@ -559,6 +713,42 @@ def _present_values(params: dict, values: dict) -> dict:
             instant, _, zone = value[:-1].partition("[")
             shown[field["id"]] = {"instant": instant, "zone": zone}
     return shown
+
+
+def _signature_sniff(entry: dict, head: bytes) -> str | None:
+    return interactive_device.png_or_svg_problem(str(entry.get("mime")), head)
+
+
+def _device_outcome(sid: str, method: str, params: dict, answer: dict, login: str | None) -> Outcome:
+    """What the agent receives of an ``input.signature`` or ``device.*`` answer that passed the validator: only what the
+    person chose to share, in the gateway's own form (:mod:`interactive_device`), never the client's claim as it was."""
+    if answer["status"] == "skipped":
+        return Outcome("skipped", answered_by=login)
+    if method == "device.location":
+        shared = interactive_device.round_location(answer, str(params["precision"]))
+        if shared["precision"] != params["precision"]:
+            shared["lowered"] = True  # the person shared less than the agent asked for
+        return Outcome("answered", payload=shared, answered_by=login)
+    if method == "device.contact":
+        return Outcome("answered", payload={"contact": interactive_device.present_contact(answer["contact"],
+                                                                                          params["fields"])},
+                       answered_by=login)
+    if method == "device.calendar":
+        return Outcome("answered", payload={"saved": True, "kind": params["kind"]}, answered_by=login)
+    if method == "device.scan":
+        cleaned = interactive_device.clean_scan_value(answer["value"])
+        return Outcome("answered", answered_by=login, payload={
+            "value": cleaned, "symbology": answer["symbology"], "cleaned": cleaned != answer["value"]})
+    # input.signature: the files are the person's drawing, checked to be what they say.
+    problem, real_paths = verify_files(params, answer["files"], sniff=_signature_sniff)
+    if problem:
+        return Outcome("unavailable", reason="bad_upload", payload={"problem": problem})
+    payload: dict = {"signed": True, "statement_sha256": answer["statement_sha256"],
+                     "signed_at": int(answer["signed_at"]), "received_at": int(time.time()),
+                     "files": [_file_payload(sid, entry, real) for entry, real in zip(answer["files"], real_paths)]}
+    if params.get("signer_name"):
+        payload["signer_name"] = params["signer_name"]
+    return Outcome("answered", payload=payload, answered_by=login)
 
 
 def _answer_outcome(sid: str, key: str, method: str, params: dict, answer: dict, shared: bool, answered_by,
@@ -582,6 +772,8 @@ def _answer_outcome(sid: str, key: str, method: str, params: dict, answer: dict,
         if (transcript := clean_text(answer.get("text"), multiline=True)):
             payload["text"] = transcript
         return Outcome("answered", payload=payload, answered_by=login)
+    if method in DEVICE_METHODS or method == "input.signature":
+        return _device_outcome(sid, method, params, answer, login)
     if method == "review.diff":
         # In the gateway's order and with the gateway's ids: what the client sent is only each hunk's decision.
         hunks = {hunk["id"]: answer["hunks"][hunk["id"]] for hunk in params["hunks"]}
@@ -637,16 +829,18 @@ def request_from_tool(sid: str, method: str, **kwargs: Any) -> Outcome:
     if not sid or sid not in server._sessions:
         return _Audit(sid or "-", method).outcome(Outcome("unavailable", reason="no_session"))
     head = None
+    timeout = timeout_for(method)
     try:
         if method == "review.diff":
-            params, head = build_diff(sid, **kwargs)
+            params, head = build_diff(sid, timeout=timeout, **kwargs)
         else:
-            params = BUILDERS[method](sid, **kwargs)
+            params = BUILDERS[method](sid, timeout=timeout, **kwargs)
     except UploadDirUnavailable as exc:
         return _Audit(sid, method).outcome(Outcome("unavailable", reason=exc.reason))
-    return request(sid, method, params, head=head)
+    return request(sid, method, params, timeout=timeout, head=head)
 
 
 def reset_for_tests() -> None:
     _limiter.reset()
+    _device_limiter.reset()
     review_register.reset_for_tests()

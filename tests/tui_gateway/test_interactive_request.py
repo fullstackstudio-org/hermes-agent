@@ -529,7 +529,8 @@ def test_a_diff_at_every_bound_is_valid(build):
 
 
 def test_every_builder_is_registered_and_the_diff_builder_returns_only_params(build):
-    assert set(build.BUILDERS) == set(METHODS)
+    from tui_gateway.contracts.server_requests import INTERACTIVE_METHODS
+    assert set(build.BUILDERS) == set(INTERACTIVE_METHODS) and set(METHODS) < set(INTERACTIVE_METHODS)
     assert build.BUILDERS["review.diff"] is build.build_diff_params
 
 

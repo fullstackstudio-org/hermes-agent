@@ -480,9 +480,10 @@ def _may_answer(req: ServerRequest, transport: Any) -> bool:
 
 
 #: Method prefixes whose requests need a NAMED acting person when more than one could be behind the session:
-#: approving a draft is consent given in somebody's name. ``input.*`` goes to every capable connection then
-#: (the result names who answered).
-STRICT_ACTING_USER_PREFIXES = ("review.",)
+#: approving a draft is consent given in somebody's name, a signature is a statement signed in somebody's name, and a
+#: ``device.*`` request asks for something personal (where they are, one of their contacts, their calendar, what
+#: their camera sees). ``input.*`` otherwise goes to every capable connection then (the result names who answered).
+STRICT_ACTING_USER_PREFIXES = ("review.", "device.", "input.signature")
 #: ``RequestOutcome.reason`` of a request :func:`send_gated` refused because nobody may answer it for the acting
 #: person: the session is shared and the turn names nobody, or the acting login could not be read.
 NO_ACTING_USER = "no_acting_user"
@@ -520,7 +521,7 @@ def acting_user_target(sid: str, method: str) -> ActingUserTarget:
 
     - no auth provider (one trust domain): every capable connection qualifies, as for ``confirm`` at ``plain``;
     - a shared session whose turn names nobody (``_session_identity_is_ambiguous``): every capable connection
-      for ``input.*`` (the result names who answered), NOBODY for ``review.*``
+      for ``input.*`` (the result names who answered), NOBODY for ``review.*``, ``device.*`` and ``input.signature``
       (:data:`STRICT_ACTING_USER_PREFIXES`; ``refusal`` :data:`NO_ACTING_USER`);
     - reading it fails: nobody, ``refusal`` :data:`NO_ACTING_USER` (a request for the wrong person is worse
       than none)."""

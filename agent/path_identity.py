@@ -27,6 +27,7 @@ from typing import Iterable
 _F_GETPATH = 50
 #: ``pathconf`` name ``_PC_CASE_SENSITIVE`` (macOS): 1 case-sensitive, 0 not.
 _PC_CASE_SENSITIVE = 11
+#: ``MAXPATHLEN``; ``F_GETPATH`` wants a buffer of exactly this size and Python's ``fcntl`` takes at most 1024 bytes.
 _MAXPATHLEN = 1024
 
 
@@ -36,7 +37,7 @@ def fd_path(fd: int) -> str | None:
     try:
         if sys.platform == "darwin":
             import fcntl
-            raw = fcntl.fcntl(fd, getattr(fcntl, "F_GETPATH", _F_GETPATH), bytes(_MAXPATHLEN + 1))
+            raw = fcntl.fcntl(fd, getattr(fcntl, "F_GETPATH", _F_GETPATH), bytes(_MAXPATHLEN))
             path = os.fsdecode(raw.split(b"\0", 1)[0])
         elif sys.platform.startswith("linux"):
             if os.fstat(fd).st_nlink == 0:

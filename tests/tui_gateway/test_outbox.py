@@ -828,3 +828,84 @@ def test_a_compacted_conversation_still_owns_what_it_shared_before(home, tmp_pat
     # Deleting a segment removes the copies its rows show; the conversation's other segment keeps its own.
     assert outbox.remove_session_files(home, ["S1"]) == 0
     assert outbox.remove_session_files(home, ["S2"]) == 1
+
+
+# ── review round 3: the real fd_path on macOS, and the operator allowlist by what the paths name ─────────────
+
+import sys  # noqa: E402
+import unicodedata  # noqa: E402
+
+_darwin_only = pytest.mark.skipif(sys.platform != "darwin", reason="F_GETPATH is macOS-only")
+
+
+@_darwin_only
+def test_fd_path_reports_the_spelling_the_volume_stores(tmp_path, case_insensitive_tmp):
+    """The real ``F_GETPATH`` (no stub): a case variant and an NFD spelling both come back as stored."""
+    folder = tmp_path.resolve()
+    stored = folder / "Report.txt"
+    stored.write_text("marker")
+    nfc = "café.txt"
+    (folder / nfc).write_text("marker")
+    for opened, expected in ((folder / "REPORT.TXT", stored),
+                             (folder / unicodedata.normalize("NFD", nfc), folder / nfc)):
+        fd = os.open(opened, os.O_RDONLY)
+        try:
+            reported = path_identity.fd_path(fd)
+        finally:
+            os.close(fd)
+        assert reported is not None, opened
+        assert unicodedata.normalize("NFC", reported) == unicodedata.normalize("NFC", str(expected))
+        assert Path(reported).name == expected.name  # the stored spelling, not the one that was opened
+
+
+@_darwin_only
+def test_a_case_variant_of_a_denied_file_is_refused_by_the_opened_file_check(home, case_insensitive_tmp):
+    """With the real ``fd_path`` the descriptor of ``STATE.DB`` is re-judged as ``state.db`` (denied), even
+    where the up-front checks were given an innocent spelling."""
+    (home / "state.db").write_text("marker")
+    fd = os.open(home / "STATE.DB", os.O_RDONLY)
+    try:
+        with pytest.raises(outbox.ShareRefused) as refused:
+            outbox._judge_opened(fd, home / "work" / "innocent.txt", home)
+    finally:
+        os.close(fd)
+    assert refused.value.reason == "denied"
+
+
+def _strict_old_file(root: Path, name: str = "scan.txt") -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / name
+    path.write_text("marker")
+    old = time.time() - 30 * 86400  # long outside any recency window
+    os.utime(path, (old, old))
+    return path
+
+
+def test_an_allowlist_root_holds_for_the_stored_spelling_when_the_case_differs(home, tmp_path, monkeypatch):
+    """Simulated case-insensitive volume: the root is written ``WORK/Shared`` and the kernel reports
+    ``work/shared``; the operator allowlist must contain by what the paths name, as the denylist does."""
+    from gateway.platforms.base import media_delivery_resolved_path_allowed
+    monkeypatch.setenv("HERMES_MEDIA_DELIVERY_STRICT", "1")
+    monkeypatch.setenv("HERMES_MEDIA_ALLOW_DIRS", str(tmp_path / "WORK" / "Shared"))
+    stored = _strict_old_file(tmp_path / "work" / "shared")
+    monkeypatch.setattr(path_identity, "case_insensitive", lambda path: True)
+    assert media_delivery_resolved_path_allowed(stored)
+    assert not media_delivery_resolved_path_allowed(_strict_old_file(tmp_path / "work" / "shared2"))
+
+
+@_darwin_only
+def test_strict_mode_keeps_sharing_a_file_under_a_differently_cased_allowlist_root(home, tmp_path,
+                                                                                    case_insensitive_tmp,
+                                                                                    monkeypatch):
+    """Real volume and real ``fd_path``: the agent spells the file as the operator spelled the root; the copy is
+    recorded under the stored spelling and strict mode must still allow it."""
+    monkeypatch.setenv("HERMES_MEDIA_DELIVERY_STRICT", "1")
+    stored = _strict_old_file(tmp_path / "work" / "shared")
+    spelled = tmp_path / "WORK" / "SHARED" / "scan.txt"
+    monkeypatch.setenv("HERMES_MEDIA_ALLOW_DIRS", str(tmp_path / "WORK" / "SHARED"))
+    record = _share(home, spelled)
+    assert record["name"] == stored.name and (home / "outbox" / record["id"] / "blob").read_bytes() == b"marker"
+    # Without the allowlist, strict mode refuses the same old file: the allowlist is what lets it through.
+    monkeypatch.delenv("HERMES_MEDIA_ALLOW_DIRS")
+    with pytest.raises(outbox.ShareRefused):
+        _share(home, spelled)

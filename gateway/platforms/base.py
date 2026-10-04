@@ -1137,10 +1137,14 @@ def media_delivery_resolved_path_allowed(resolved: Path) -> bool:
     """The delivery policy of :func:`validate_media_delivery_path` for a host path that is already resolved
     (no container mapping, no link left): the allowlist, then the denylist and strict mode. Fork: the outbox
     re-judges the path the kernel reports for the file it opened (``agent.path_identity.fd_path``)."""
-    # Cache / operator allowlist is trusted unconditionally, regardless of mode.
+    # Cache / operator allowlist is trusted unconditionally, regardless of mode. Fork: contained by what the
+    # paths name (agent/path_identity.py), not their spelling, so a root written in another case than on disk
+    # still holds for the file under the spelling the volume stores.
+    from agent.path_identity import PathProbe
+    probe = PathProbe(resolved)
     for root in _media_delivery_allowed_roots():
         resolved_root = _resolve_path(root, expand=True)
-        if resolved_root is not None and _path_is_within(resolved, resolved_root):
+        if resolved_root is not None and probe.within(resolved_root):
             return True
     # Non-strict (default): anything not denylisted (/etc, /proc, ~/.ssh, Hermes-root secrets).
     from gateway.media_policy import media_delivery_strict

@@ -780,14 +780,18 @@ class MCPStore:
         """*user_id*'s live grants, newest first (what Settings › MCP lists)."""
         return self.grants(user_id) if user_id else []
 
-    def revoke_grant(self, grant_id: str, *, by: str, user_id: Optional[str] = None) -> Optional[Grant]:
-        """Revoke the grant and every token of it. With *user_id*, only that person's grant. Returns the
-        grant after the call (``revoked_by`` tells who revoked it, if it was already), or None when there
-        is no such grant (of that person): the caller answers both the same way."""
+    def revoke_grant(self, grant_id: str, *, by: str, user_id: Optional[str] = None,
+                     live_only: bool = False) -> Optional[Grant]:
+        """Revoke the grant and every token of it. With *user_id*, only that person's grant; with
+        *live_only*, only a grant that is live now (not revoked, not ended). Returns the grant after the
+        call (``revoked_by`` tells who revoked it, if it was already), or None when there is no such grant
+        (of that person, live): the caller answers all of those the same way. The check and the revoke are
+        one transaction, so of two parallel revokes of one live grant exactly one gets it back."""
         now = self.now()
         with self._write() as db:
             grant = self._grant_row(db, grant_id or "", now)
-            if grant is None or (user_id is not None and grant.user_id != user_id):
+            if grant is None or (user_id is not None and grant.user_id != user_id) \
+                    or (live_only and not grant.live):
                 return None
             self._revoke(db, grant.id, by, now)
             return self._grant_row(db, grant.id, now)

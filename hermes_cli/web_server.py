@@ -979,6 +979,11 @@ app.include_router(_dashboard_auth_router)
 from hermes_cli.dashboard_auth.passkeys.routes import router as _passkey_router  # noqa: E402
 
 app.include_router(_passkey_router)
+# Fork: what the app's Settings > MCP page reads (/api/auth/mcp*). Never public: the gate runs first; it answers
+# as an unknown path while the MCP endpoint is off.
+from hermes_cli.dashboard_auth.mcp.api_routes import router as _mcp_api_router  # noqa: E402
+
+app.include_router(_mcp_api_router)
 # Fork: the MCP authorization server and endpoint (/mcp*, /.well-known/oauth-*): one route that matches only
 # while dashboard.mcp is on (decided at startup by _configure_auth_gate), so off is the same as absent.
 from hermes_cli.dashboard_auth.mcp import mount as _mcp_mount  # noqa: E402

@@ -437,8 +437,9 @@ class MCPProvider(OAuthAuthorizationServerProvider[MCPAuthorizationCode, MCPRefr
 
     # ── the registry, for the REST routes, the tools and the CLI's async callers ─────────────────
 
-    async def revoke_grant(self, grant_id: str, *, by: str, user_id: Optional[str] = None) -> Optional[Grant]:
-        return await self._run(self.store.revoke_grant, grant_id, by=by, user_id=user_id)
+    async def revoke_grant(self, grant_id: str, *, by: str, user_id: Optional[str] = None,
+                           live_only: bool = False) -> Optional[Grant]:
+        return await self._run(self.store.revoke_grant, grant_id, by=by, user_id=user_id, live_only=live_only)
 
     async def grants_for(self, user_id: str) -> list[Grant]:
         return await self._run(self.store.grants_for, user_id)

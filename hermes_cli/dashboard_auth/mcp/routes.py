@@ -71,10 +71,10 @@ from starlette.routing import Route, Router
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
-from hermes_cli.dashboard_auth.mcp import mount
+from hermes_cli.dashboard_auth.mcp import api_routes, mount
 from hermes_cli.dashboard_auth.mcp.provider import (
     MCPAuthorizationCode, MCPClientAuthenticator, MCPProvider, MCPRefreshToken, MCPTokenVerifier)
-from hermes_cli.dashboard_auth.mcp.settings import SCOPES, MCPSettings
+from hermes_cli.dashboard_auth.mcp.settings import SCOPES, MCPSettings, server_label
 from hermes_cli.dashboard_auth.mcp.store import (
     CodeInvalid, ConsentInvalid, LimitReached, MCPStore, StoreError, TokenInvalid)
 from hermes_cli.dashboard_auth.rate_limit import SlidingWindowLimiter, Verdict
@@ -361,6 +361,18 @@ async def authorize_endpoint(request: Request) -> Response:
     return response
 
 
+def announce_granted(store: MCPStore, grant_id: str) -> None:
+    """``mcp.changed {granted}`` to the person's live connections, so an open Settings › MCP page lists the new
+    client. After the exchange committed; never fails or delays the token response."""
+    try:
+        grant = store.grant(grant_id)
+    except StoreError:
+        _log.warning("mcp.changed (granted): the grant could not be read", exc_info=False)
+        return
+    if grant is not None:
+        api_routes.announce(grant.user_id, "granted", grant, grant.created_at)
+
+
 async def token_endpoint(request: Request) -> Response:
     rt = runtime()
     if (refusal := limited(TOKEN_PER_IP, request, "token")) is not None:
@@ -382,6 +394,8 @@ async def token_endpoint(request: Request) -> Response:
     if response.status_code == 200 and notes.grant_id:
         event = AuditEvent.MCP_TOKEN_REFRESHED if grant_type == "refresh_token" else AuditEvent.MCP_TOKEN_ISSUED
         audit_log(event, user_id=notes.user_id, grant_id=notes.grant_id, client_id=client_id, ip=ip)
+        if event is AuditEvent.MCP_TOKEN_ISSUED:  # a grant exists from its code exchange, not from the consent
+            await anyio.to_thread.run_sync(announce_granted, rt.store, notes.grant_id)
     else:
         audit_log(AuditEvent.MCP_TOKEN_REJECTED, client_id=client_id, grant_type=grant_type, ip=ip,
                   reason=_clip(_body_json(response).get("error"), 40), status=response.status_code)
@@ -524,7 +538,8 @@ def build_runtime(*, settings: MCPSettings, issuer_url: str, primary: Any, store
     as_metadata = authorization_server_metadata(issuer_url)
     resource_metadata = protected_resource_metadata(issuer_url)
     as_endpoint = cors_middleware(_metadata_endpoint(as_metadata), ["GET", "OPTIONS"])
-    mcp_app, session_manager = _mcp_server(store=store, settings=settings, issuer_url=issuer_url, origin=origin)
+    mcp_app, session_manager = _mcp_server(store=store, settings=settings, issuer_url=issuer_url, origin=origin,
+                                           host=primary.host)
     routes = [
         *(Route(path, endpoint=as_endpoint, methods=["GET", "OPTIONS"]) for path in mount.AS_METADATA_PATHS),
         Route(mount.RESOURCE_METADATA_PATH, methods=["GET", "OPTIONS"],
@@ -553,11 +568,13 @@ def _audit_event(event: str, **fields: Any) -> None:
     audit_log(AuditEvent(event), **fields)
 
 
-def _mcp_server(*, store: MCPStore, settings: MCPSettings, issuer_url: str, origin: str) -> tuple[ASGIApp, Any]:
-    """The MCP server's ASGI app and its session manager (``tui_gateway.mcp_bridge.server``)."""
+def _mcp_server(*, store: MCPStore, settings: MCPSettings, issuer_url: str, origin: str,
+                host: str = "") -> tuple[ASGIApp, Any]:
+    """The MCP server's ASGI app and its session manager (``tui_gateway.mcp_bridge.server``). Its ``whoami``
+    names the gateway by the same label as ``GET /api/auth/mcp`` (:func:`settings.server_label`)."""
     from tui_gateway.mcp_bridge.server import build_endpoint
     from tui_gateway.mcp_bridge.tools import Bridge
 
-    bridge = Bridge(store=store, settings=settings, endpoint_url=issuer_url, label=settings.label,
+    bridge = Bridge(store=store, settings=settings, endpoint_url=issuer_url, label=server_label(settings, host),
                     audit=_audit_event)
     return build_endpoint(bridge, primary_origin=origin)

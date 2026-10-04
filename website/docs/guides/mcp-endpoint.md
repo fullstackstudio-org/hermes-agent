@@ -48,7 +48,7 @@ dashboard:
     answer_clarify: true            # false: clarify questions also wait for the person's app
     max_running_turns_per_grant: 3
     max_grants_per_user: 5
-    label: ""                       # the server name shown in the add command; "" = from the dashboard label
+    label: ""                       # the server name in the add command; "" = hermie-<public host>
 ```
 
 Settings are read at start; restart the dashboard after a change. Check from outside that
@@ -110,6 +110,9 @@ restarts during a turn, the agent gets `restarted` and waits again; the turn con
 Every string the agent gets from a bot or a transcript is untrusted model output or other people's text; the
 server tells the client so.
 
+What an agent can and cannot see on a gateway several people share is set out in the dashboard guide's
+[privacy section](../user-guide/features/web-dashboard.md#mcp-clients-what-an-agent-can-and-cannot-see).
+
 ### Limits
 
 Per connection (grant): 60 tool calls a minute, 20 prompts in 10 minutes, 3 turns running at once, one
@@ -121,6 +124,14 @@ connected clients; the sixth consent asks to remove one first.
 The person sees every connected client (name, when it was connected and last used, from which address) in
 the app under **Settings › MCP**, and can revoke any of them; the client's next call is refused and it has to
 be allowed again.
+
+The page gets everything it shows from the gateway: the endpoint address, the `claude mcp add` command and
+the `.mcp.json` fragment (built from the public URL and the server name, which is also the name the `whoami`
+tool reports), and the person's own active grants, newest first. The server name is the slug of
+`dashboard.mcp.label` (lower-case letters, digits and hyphens), or `hermie-<public host>` when that is empty,
+so two gateways get two different names in one client. A grant that is revoked or has ended is no longer
+listed; the app refreshes by itself when a client is allowed or revoked (the `mcp.changed` event), and a
+revoke done with the operator's command shows up the next time the page is opened.
 
 The operator can do the same on the gateway host:
 
@@ -139,5 +150,5 @@ Setting `dashboard.mcp.enabled: false` (and restarting) turns everything off at 
 
 `$HERMES_HOME/logs/dashboard-auth.log` gets one line per registration, consent, token, revocation, tool call
 (`mcp_tool_call`: the tool, the chat, the outcome), chat opened (`mcp_chat_opened`), refused limit
-(`mcp_rate_limited`) and clarify answer. Lines carry ids, names, addresses and outcomes, never a prompt, a
-reply, an answer, a token or a code.
+(`mcp_rate_limited`), clarify answer and refused browser write to Settings › MCP (`mcp_write_refused`).
+Lines carry ids, names, addresses and outcomes, never a prompt, a reply, an answer, a token or a code.

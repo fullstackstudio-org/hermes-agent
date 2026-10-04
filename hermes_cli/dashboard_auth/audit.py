@@ -81,6 +81,9 @@ class AuditEvent(enum.Enum):
     MCP_TOOL_CALL = "mcp_tool_call"
     MCP_CHAT_OPENED = "mcp_chat_opened"
     MCP_RATE_LIMITED = "mcp_rate_limited"
+    # A write to the app's MCP routes (GET/POST /api/auth/mcp*) refused before it reached the store: a cookie
+    # caller without a listed Origin. User, address, how the caller authenticated, path, reason.
+    MCP_WRITE_REFUSED = "mcp_write_refused"
     # A server request answered from an agent's connection (tui_gateway/server_requests.py): a clarify answer
     # it gave (marked as the agent's before it reached the tool), or an answer refused because an agent may
     # answer nothing else. User, grant, client name, session, request id, method, outcome and reason; never

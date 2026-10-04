@@ -10,6 +10,8 @@ change what the gateway reads here (:func:`changes_protected`); ``config.set`` h
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -135,6 +137,27 @@ def audit_refusal_for_request(surface: str, request: Any) -> None:
         ip = ""
     audit_log(AuditEvent.PROTECTED_SETTING_REFUSED, surface=surface, key=PROTECTED_KEY, user_id=user_id, ip=ip,
               path=str(getattr(getattr(request, "url", None), "path", "")))
+
+
+SERVER_NAME_LIMIT = 48
+DEFAULT_SERVER_NAME = "hermie"
+
+
+def slug(text: Any) -> str:
+    """*text* as a server name an MCP client accepts in ``claude mcp add <name> <url>`` and as a key of
+    ``.mcp.json``: lower-case ASCII letters and digits, single hyphens between them, at most
+    :data:`SERVER_NAME_LIMIT` characters, or ``""`` when nothing is left."""
+    if not isinstance(text, str):
+        return ""
+    ascii_text = unicodedata.normalize("NFKD", text.strip().lower()).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "-", ascii_text).strip("-")[:SERVER_NAME_LIMIT].strip("-")
+
+
+def server_label(settings: MCPSettings, host: str = "") -> str:
+    """The name this gateway goes by in the ``claude mcp add`` command and the ``.mcp.json`` fragment, and
+    in the ``whoami`` tool: the slug of ``dashboard.mcp.label`` (the dashboard's display label), else
+    ``hermie-<primary public host>``, else ``hermie``. One function, so the REST page and the tool agree."""
+    return slug(settings.label) or slug(f"{DEFAULT_SERVER_NAME}-{host}") or DEFAULT_SERVER_NAME
 
 
 def from_config(cfg: Any) -> MCPSettings:

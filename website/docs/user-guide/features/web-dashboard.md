@@ -194,6 +194,32 @@ A login that keeps asking to resume conversations that do not exist (30 times in
 every resume for the rest of that window (`session_resume_throttled`, recorded once per window). That
 only slows guessing; it does not make ids secret while the session list hands them out.
 
+#### MCP clients: what an agent can and cannot see
+
+When the operator turns on the [MCP endpoint](../../guides/mcp-endpoint.md), a person can connect an agent
+such as Claude Code to their bots. The agent works **as that person, marked as an agent**, and it sees
+*less* than the person's own app does, because the section above says what a signed-in person can already
+read on a shared gateway and an agent must not widen it:
+
+- **It sees** the bots the person may use, the chats it opened itself through MCP, and the person's chats
+  that are live right now. The history it can read is that of the chats it opened.
+- **It does not see** the stored conversation list: there is no way to walk through every conversation on
+  the gateway, and another person's chats are never listed. A chat is opened by its id only, under the same
+  access rule as the person's app (and a conversation joined that way writes `session_foreign_attach`, plus
+  `mcp_chat_opened`, to the audit log).
+- **It cannot** approve or deny a command, confirm with a passkey, hand over a secret, answer a sudo or vault
+  prompt, change settings, or delete, rename or hide a chat. Those requests stay open for the person's own
+  app. A clarify question it answers is stored as the agent's answer, not the person's.
+- **Everything it writes is attributed**: the message carries the person and the client (`Alice via Claude
+  Code`), the bot is told an agent sent it, and each tool call and revocation is in
+  `$HERMES_HOME/logs/dashboard-auth.log` with the grant, never with prompt or reply text.
+
+Each person sees and revokes only their own connected clients (in the app under **Settings › MCP**, backed by
+`GET /api/auth/mcp` and `POST /api/auth/mcp/grants/{id}/revoke`); the operator can list and revoke every
+grant with `hermes dashboard mcp`. This is a narrower surface than the app's, not a privacy boundary between
+people: until conversations are private between people on one gateway, what the section above lists stays
+true for anyone who can sign in.
+
 To point [Hermes Desktop](#connecting-hermes-desktop-to-a-remote-backend) at a dashboard running on another machine instead of its own bundled backend, see the remote-backend section below.
 
 ### Connecting Hermes Desktop to a remote backend

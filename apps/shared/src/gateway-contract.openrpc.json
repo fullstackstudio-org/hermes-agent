@@ -17073,6 +17073,57 @@
         "title": "McpCatalogResult",
         "type": "object"
       },
+      "McpChange": {
+        "enum": [
+          "granted",
+          "revoked"
+        ],
+        "title": "McpChange",
+        "type": "string"
+      },
+      "McpChangedPayload": {
+        "additionalProperties": false,
+        "description": "``tui_gateway/user_events.py::announce_mcp_changed``: ``granted`` from the MCP token exchange\n(``hermes_cli/dashboard_auth/mcp/routes.py``), ``revoked`` from ``POST /api/auth/mcp/grants/{id}/revoke``\n(``mcp/api_routes.py``). Sent only to connections signed in as the person the grant belongs to. A revoke\ndone by the operator's CLI (another process) sends none.",
+        "properties": {
+          "change": {
+            "$ref": "#/components/schemas/McpChange"
+          },
+          "grant": {
+            "$ref": "#/components/schemas/McpGrantRef"
+          },
+          "at": {
+            "title": "At",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "change",
+          "grant",
+          "at"
+        ],
+        "title": "McpChangedPayload",
+        "type": "object"
+      },
+      "McpGrantRef": {
+        "additionalProperties": false,
+        "description": "One MCP grant as ``mcp.changed`` names it: never a token, address or scope.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "client_name": {
+            "title": "Client Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "client_name"
+        ],
+        "title": "McpGrantRef",
+        "type": "object"
+      },
       "McpOauthCallbackParams": {
         "additionalProperties": false,
         "properties": {
@@ -38578,6 +38629,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/LayoutApplyPayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "mcp.changed",
+      "summary": "An MCP client of the signed-in user was allowed or revoked; refetch GET /api/auth/mcp.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/McpChangedPayload"
           }
         }
       ]

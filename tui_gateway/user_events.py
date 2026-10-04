@@ -44,3 +44,15 @@ def announce_passkey_changed(user_id: str, payload: dict) -> int:
     frame = {"jsonrpc": "2.0", "method": "event", "params": {"type": "passkey.changed", "session_id": "",
                                                               "payload": payload}}
     return _deliver(user_id, frame)
+
+
+def announce_mcp_changed(user_id: str, payload: dict) -> int:
+    """``mcp.changed`` to *user_id*'s live connections; returns how many were written to."""
+    if not user_id:
+        return 0
+    from tui_gateway.contracts import registry
+
+    registry.check_payload("mcp.changed", payload)
+    frame = {"jsonrpc": "2.0", "method": "event", "params": {"type": "mcp.changed", "session_id": "",
+                                                              "payload": payload}}
+    return _deliver(user_id, frame)

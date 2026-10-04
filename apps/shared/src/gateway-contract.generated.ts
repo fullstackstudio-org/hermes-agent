@@ -4603,6 +4603,18 @@ export interface PasskeyCredentialRef {
   name: string
   rp_id: string
 }
+/** ``tui_gateway/user_events.py::announce_mcp_changed``: ``granted`` from the MCP token exchange (``hermes_cli/dashboard_auth/mcp/routes.py``), ``revoked`` from ``POST /api/auth/mcp/grants/{id}/revoke`` (``mcp/api_routes.py``). Sent only to connections signed in as the person the grant belongs to. A revoke done by the operator's CLI (another process) sends none. */
+export interface McpChangedPayload {
+  change: McpChange
+  grant: McpGrantRef
+  at: number
+}
+export type McpChange = 'granted' | 'revoked'
+/** One MCP grant as ``mcp.changed`` names it: never a token, address or scope. */
+export interface McpGrantRef {
+  id: string
+  client_name: string
+}
 export interface SessionControlUpdatePayload {
   control: SessionControlSnapshot
 }
@@ -5583,6 +5595,8 @@ export interface BackendGatewayEventMap {
   'gateway.restarting': GatewayRestartingPayload
   /** Apply a named desktop layout preset. */
   'layout.apply': LayoutApplyPayload
+  /** An MCP client of the signed-in user was allowed or revoked; refetch GET /api/auth/mcp. */
+  'mcp.changed': McpChangedPayload
   /** The turn ended: final text, usage and outcome. */
   'message.complete': MessageCompletePayload
   /** One streamed chunk of the assistant reply. */
@@ -5717,6 +5731,7 @@ export const GATEWAY_EVENT_TYPES = [
   'gateway.ready',
   'gateway.restarting',
   'layout.apply',
+  'mcp.changed',
   'message.complete',
   'message.delta',
   'message.interim',

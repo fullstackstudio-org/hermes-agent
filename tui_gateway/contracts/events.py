@@ -450,6 +450,33 @@ event("passkey.changed", PasskeyChangedPayload,
       doc="A passkey of the signed-in user was added or revoked; refetch GET /api/auth/passkeys.")
 
 
+class McpChange(WireEnum):
+    GRANTED = "granted"
+    REVOKED = "revoked"
+
+
+class McpGrantRef(Payload):
+    """One MCP grant as ``mcp.changed`` names it: never a token, address or scope."""
+
+    id: str
+    client_name: str  # the client's own registered name: untrusted text
+
+
+class McpChangedPayload(Payload):
+    """``tui_gateway/user_events.py::announce_mcp_changed``: ``granted`` from the MCP token exchange
+    (``hermes_cli/dashboard_auth/mcp/routes.py``), ``revoked`` from ``POST /api/auth/mcp/grants/{id}/revoke``
+    (``mcp/api_routes.py``). Sent only to connections signed in as the person the grant belongs to. A revoke
+    done by the operator's CLI (another process) sends none."""
+
+    change: McpChange
+    grant: McpGrantRef
+    at: int  # Unix seconds
+
+
+event("mcp.changed", McpChangedPayload,
+      doc="An MCP client of the signed-in user was allowed or revoked; refetch GET /api/auth/mcp.")
+
+
 class SessionControlUpdatePayload(Payload):
     control: SessionControlSnapshot
 

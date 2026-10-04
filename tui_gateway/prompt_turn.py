@@ -1052,7 +1052,7 @@ def _share_turn_outbox(session: dict, st: _TurnRun, raw: str, final_row_id: int 
         shared = outbox_share.share_turn_files(
             raw, turn_messages, home=home, session_id=session_id, logins=_outbox_logins(session),
             settings=st.outbox, session_key=str(session.get("session_key") or ""),
-            conversation_id=_outbox_conversation(agent, session_id))
+            conversation_id=lambda: _outbox_conversation(agent, session_id))
     except Exception:
         logger.exception("outbox: sharing the files of session %s failed", session_id)
         shown = outbox_share.strip_directives(raw)

@@ -176,10 +176,11 @@ class _Share:
 
 def share_turn_files(final_text: Any, turn_messages: list, *, home, session_id: str, logins: Iterable[str],
                      settings: outbox.OutboxSettings, session_key: str = "",
-                     conversation_id: str = "") -> SharedTurn:
+                     conversation_id: str | Callable[[], str] = "") -> SharedTurn:
     """Share every file the turn's reply names; return the text clients see and the attachments.
     *conversation_id* is the conversation that owns the copies (the root of *session_id*'s compression lineage,
-    so a conversation compaction moved to a new session id still owns what it shared before).
+    so a conversation compaction moved to a new session id still owns what it shared before). A callable is
+    called once, and only when a file is about to be shared: a reply that names none never pays for the lookup.
 
     Per turn: at most ``max_turn_files`` files and ``max_turn_bytes`` bytes, all within ``turn_timeout_seconds``
     (a copy still running then is abandoned and removed). A file over any limit is refused, never shared by
@@ -191,6 +192,7 @@ def share_turn_files(final_text: Any, turn_messages: list, *, home, session_id: 
     logins = [x for x in logins if x]
     deadline = time.monotonic() + settings.turn_timeout_seconds
     spent = 0
+    owner: str | None = None
     for path in paths:
         try:
             real = os.path.realpath(os.path.expanduser(path))
@@ -205,8 +207,10 @@ def share_turn_files(final_text: Any, turn_messages: list, *, home, session_id: 
         elif remaining <= 0:
             reason = "timeout"
         else:
+            if owner is None:
+                owner = (conversation_id() if callable(conversation_id) else conversation_id) or session_id
             share = _Share(path, home, dict(
-                session_id=session_id, conversation_id=conversation_id or session_id, logins=logins,
+                session_id=session_id, conversation_id=owner, logins=logins,
                 settings=settings, session_key=session_key, max_bytes=settings.max_turn_bytes - spent,
                 lock_timeout=remaining,
                 protect=frozenset(a["id"] for a in result.attachments)))

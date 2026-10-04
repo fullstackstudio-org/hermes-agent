@@ -303,3 +303,22 @@ def test_a_refused_file_shows_a_note_and_never_its_path(hermie):
     assert last["text"] == payload["text"] and last["attachments"] == []
     assert not (hermie.home / "outbox").exists() or not [
         n for n in (hermie.home / "outbox").iterdir() if n.name not in (outbox.LOCK_NAME, outbox.STAGING_NAME)]
+
+
+def test_the_lineage_is_read_only_when_the_reply_names_files(hermie, monkeypatch):
+    """A reply that names no file never pays for the compression-lineage lookup; one that does pays once."""
+    from tui_gateway import prompt_turn
+    calls = []
+    real = prompt_turn._outbox_conversation
+    monkeypatch.setattr(prompt_turn, "_outbox_conversation", lambda *a: calls.append(a) or real(*a))
+    agent = hermie.agent
+    steps = iter([_model_step(agent, "Nothing to attach here.")])
+    agent.client.chat.completions.create.side_effect = lambda **kwargs: next(steps)(**kwargs)
+    with (
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        _rpc("prompt.submit", text="just say something")
+        hermie.session["_run_thread"].join()
+    assert calls == [] and "attachments" not in _complete(hermie)

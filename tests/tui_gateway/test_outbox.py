@@ -950,3 +950,24 @@ def test_strict_mode_keeps_sharing_a_file_under_a_differently_cased_allowlist_ro
     monkeypatch.delenv("HERMES_MEDIA_ALLOW_DIRS")
     with pytest.raises(outbox.ShareRefused):
         _share(home, spelled)
+
+
+def test_the_conversation_is_looked_up_once_and_only_when_a_file_is_shared(home):
+    looked_up = []
+
+    def conversation() -> str:
+        looked_up.append(1)
+        return "root-session"
+
+    kwargs = dict(home=home, session_id="s-new", logins=["oidc:a"], settings=outbox.OutboxSettings(),
+                  conversation_id=conversation)
+    plain = outbox_share.share_turn_files("Nothing to attach.", [], **kwargs)
+    assert plain.attachments == [] and not plain.named and looked_up == []
+    one, two = home / "work" / "one.txt", home / "work" / "two.txt"
+    one.write_text("marker")
+    two.write_text("marker")
+    shared = outbox_share.share_turn_files(f"Here.\nMEDIA:{one}\nMEDIA:{two}", [], **kwargs)
+    assert len(shared.attachments) == 2 and looked_up == [1]
+    records = [json.loads((home / "outbox" / a["id"] / "record.json").read_text()) for a in shared.attachments]
+    assert {r["conversation_id"] for r in records} == {"root-session"}
+    assert {r["session_id"] for r in records} == {"s-new"}

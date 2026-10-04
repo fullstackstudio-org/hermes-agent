@@ -97,17 +97,21 @@ profile's does not, and that `os.environ` is unchanged afterwards.
 | Plugin compat notice | — | `plugins.compat_report` (see `plugins/AGENTS.md`) |
 | Connection operations (desktop card) | desktop `store/connection-request.ts` | `connection.request` → `connection.update`* → `connection.respond {op_id}`; `connectors.operation.status`. The op lives in `tools/connectors/live.py`; the card never parks the tool thread (`methods_connectors.py`). |
 | Confirm (fork) | the apps' own confirm sheet | server→client request `confirm` (levels `plain`, `passkey`), gated on `client.capabilities {confirm: [...]}`; structured `fields` only to `confirm_fields: true` (at `passkey` also `confirm_passkey {v: 2}`, text digest v2); `draft_id` takes the detail from `review_register`; tool `confirm_action`. Guide: `website/docs/guides/confirm-sensitive-actions.md`. |
-| Interactive requests (fork) | the apps' own form, file, draft and diff sheets | server→client requests `input.form`, `input.file`, `review.draft`, `review.diff`, gated on `client.capabilities {requests: [...]}`; tools `ask_form`, `ask_file`, `review_draft`, `review_diff`. See "Interactive requests" below. |
+| Interactive requests (fork) | the apps' own form, file, draft, diff, signature and device sheets | server→client requests `input.form`, `input.file`, `review.draft`, `review.diff`, `input.signature`, `device.location`, `device.contact`, `device.calendar`, `device.scan`, gated on `client.capabilities {requests: [...]}`; tools `ask_form`, `ask_file`, `review_draft`, `review_diff`, `ask_signature` (toolset `interactive`) and `device_location`, `device_contact`, `device_calendar`, `device_scan` (toolset `device`). See "Interactive requests" below. |
 
 ## Interactive requests (fork)
 
-Four server→client requests beyond `clarify`, `approval` and `confirm`: `input.form` (typed fields, 1-12),
-`input.file` (files, uploaded), `review.draft` (approve, edit or reject a draft) and `review.diff` (approve or
-reject each hunk of the changes to one file). Code: `server_requests.py`
+Nine server→client requests beyond `clarify`, `approval` and `confirm`: `input.form` (typed fields, 1-12),
+`input.file` (files, uploaded; a voice note is `accept: audio` with `capture: audio`), `review.draft` (approve, edit or
+reject a draft), `review.diff` (approve or reject each hunk of the changes to one file), `input.signature` (sign a
+statement), and four that ask the person's device for something of theirs: `device.location`, `device.contact`,
+`device.calendar` and `device.scan`. Code: `server_requests.py`
 (the gate and the parking), `interactive.py` (the builders, the validators' bridge, the outcomes, the audit),
-`interactive_validate.py` / `interactive_fields.py` (pure checks), `diff_hunks.py` (a unified diff into hunks, and
+`interactive_validate.py` / `interactive_fields.py` (pure checks), `interactive_device.py` (what the gateway does
+with the answers of the device requests and the signature: rounding, filtering, cleaning, the statement hash, the
+calendar item), `diff_hunks.py` (a unified diff into hunks, and
 the approved patch back), `review_register.py`, `upload_dirs.py`,
-`request_hooks.py`; the agent's side is `tools/interactive_tools.py`. The wire is declared in
+`request_hooks.py`; the agent's side is `tools/interactive_tools.py` and `tools/device_tools.py`. The wire is declared in
 `contracts/server_requests.py` (`INTERACTIVE_METHODS`) like every other request.
 
 **The written contract is `contract/requests/`** (`README.md`, `schema.json`, `examples.json`, `SHA256SUMS`).
@@ -156,16 +160,49 @@ Params and results are never logged; the audit log gets `interactive_request` an
 request id, method, acting user, connections reached, outcome, reason, answering login and peer; never a title,
 summary, value, path, name or draft).
 
-**Toolsets and tools.** `interactive` holds `ask_form`, `ask_file`, `review_draft` and `review_diff`. It is in
-`_DEFAULT_OFF_TOOLSETS` (`hermes_cli/tools_config.py`), like `confirm`, so a new install has it off; `hermes tools`
-turns it on per platform. `device` is reserved in the same set for a later phase and has no tools yet. The tools
-are withheld outside the interactive gateway (CLI, messaging, cron: the bridge is not installed) and a call that
+**Toolsets and tools.** `interactive` holds `ask_form`, `ask_file`, `review_draft`, `review_diff` and
+`ask_signature`; `device` holds `device_location`, `device_contact`, `device_calendar` and `device_scan`. Both are in
+`_DEFAULT_OFF_TOOLSETS` (`hermes_cli/tools_config.py`), like `confirm`, so a new install has them off; `hermes tools`
+turns each on per platform. The tools are withheld outside the interactive gateway (CLI, messaging, cron: the bridge is not installed) and a call that
 still arrives is `unavailable (no_session)`. Every tool result is JSON `{outcome, ..., reason?, message}` where
 `message` is one sentence that says only what is known; `unavailable` and `timeout` are never an answer (for a
 draft never an approval) and the agent is told to tell the person and not retry at once. One open request per
-conversation and 12 sent per 10 minutes (`interactive._limiter`, separate from `confirm`'s); a request that
-reached nobody does not count. An approved draft's final text goes into `review_register` under a `draft_id`
+conversation across both toolsets (`interactive._reserve`), and per 10 minutes 12 `input.*` / `review.*` sent
+(`interactive._limiter`) and 6 `device.*` (`interactive._device_limiter`), both separate from `confirm`'s; a request
+that reached nobody does not count. A device request waits 180 s, the others 300 s (`interactive.timeout_for`). An approved draft's final text goes into `review_register` under a `draft_id`
 (memory only, 1 hour, 20 per conversation, 256 conversations); no tool consumes the id yet.
+
+**Signature and the device requests** (contract README §8-§12). What is personal is kept to what the person chose to
+share, on the gateway as well as on the sheet (`interactive_device.py`, called by both the validator and the
+hand-off, so they cannot disagree). `input.signature`: the statement is shown VERBATIM (built like a draft: line-end
+whitespace removed, anything that cannot be shown as it is refused, at most 500 characters), the answer is a PNG and an
+SVG uploaded like `input.file`'s plus `statement_sha256`, which must be the SHA-256 of the exact UTF-8 bytes of the
+frame's `statement` (`statement:mismatch`); after the request settled, `verify_files(sniff=...)` also checks that the
+PNG begins with the PNG signature and the SVG is XML text starting with `<svg` with no script, event handler,
+`javascript:` URL, embedded document or image, stylesheet import or outside `<use>` (`bad_upload`). The agent gets
+`signed`, `statement_sha256`, `signed_at` (the client's clock), `received_at` (the gateway's), `signer_name?` and the
+two files. `device.location`: the answer is JSON numbers in range, refused as `precision:too_precise` for a
+`precise` answer to an `approximate` request; the agent receives coordinates ROUNDED by the gateway whatever the
+client sent (`approximate`: two decimals, `accuracy_m` at least 1,000; `precise`: six decimals), and `lowered: true`
+when the person shared less than asked. `device.contact`: `fields` names what may be shared; a key outside it is
+refused (`contact:<key>:not_requested`, a null included), as is a contact with nothing usable left once cleaned
+(`contact:empty`), and the hand-off cuts the contact to the requested keys again and cleans every string.
+`device.calendar`: the agent's item is cleaned, bounded and held to the contract model (dates when `all_day`, instants
+with an offset otherwise, `end` after `start`, a reminder has no `end`); the client opens the system sheet and only the
+person's Save is `done`; the agent receives `{saved: true, kind}` and nothing identifying. `device.scan`: the value is
+untrusted text, bounded at 4,096, shown to the person before it is sent; the agent receives it cleaned (control,
+format, private-use and invisible characters removed, spacing kept) with `cleaned` saying whether that changed it.
+`input.signature` and every `device.*` request go only to the acting person's own connections, and in a shared session
+that names nobody to nobody (`STRICT_ACTING_USER_PREFIXES`: `unavailable (no_acting_user)`), because where a person is,
+one of their contacts and a signature in their name are not for whoever answers first. No coordinate, contact, scanned
+value, statement, path or file name reaches a log, an audit record or a hook; the tool result is the one place values
+live.
+
+**Voice notes.** `input.file` with `accept: audio` and `capture: audio` asks for a recording; the contract holds
+`capture: audio` to `accept: audio` and the other way round, the answer check refuses a file that is not
+`audio/<subtype>` without parameters (`file:<n>:not_audio`) and a transcript for an image or a document request
+(`text:not_audio`), and the builder sends `strip_metadata: false`. The optional `text` is a transcript made ON the
+device (the web sends none); the agent receives it cleaned and is told it may be wrong.
 
 **Uploads.** `input.file` answers name files by reference; the bytes never travel in the answer. The app uploads
 through the existing upload route to `upload.dir`, which the gateway builds as the flat
@@ -212,8 +249,8 @@ calls a hook. The interactive methods are listed under `pre_server_request` in `
 hooks.md`, with `reached` possibly 0, and `tests/tui_gateway/test_request_hooks.py` pins that table against
 `request_hooks.METHODS`. Add a method to one and the test fails until the other follows.
 
-Tests: `tests/tui_gateway/test_interactive_request.py`, `test_interactive_validate.py`, `test_diff_hunks.py`, `test_request_hooks.py`,
-`tests/tui_gateway/contracts/test_requests_contract.py`, `tests/tools/test_interactive_tools.py`.
+Tests: `tests/tui_gateway/test_interactive_request.py`, `test_interactive_device.py`, `test_interactive_validate.py`, `test_diff_hunks.py`, `test_request_hooks.py`,
+`tests/tui_gateway/contracts/test_requests_contract.py`, `tests/tools/test_interactive_tools.py`, `tests/tools/test_device_tools.py`.
 
 ## Shared subagent snapshots
 

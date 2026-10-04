@@ -68,9 +68,11 @@ by :func:`deliver_late`, when it advertises the method while already attached) a
 error response counts like any other. ONE rule decides the wait of every method-gated request: while it has a
 target (a live connection it was written or listed to) it waits for its ``timeout``; while it has none it waits
 for the end of the park window (``min(timeout, park_seconds)`` from when it opened; 0 without parking) and after
-that settles ``unavailable (no_capable_client)``. A target is lost by a failed write and by a disconnect
-(:func:`forget`), so a request whose only device went away parks again until the window ends, and a phone that
-reconnects as a new connection replaces its old one instead of leaving it as a target. ``request.cancel {reason:
+that settles ``unavailable (no_capable_client)``. A target is lost by a failed write, by a disconnect
+(:func:`forget`) and by an advertisement that no longer lists the method (:func:`advertise`), so a phone that
+reconnects as a new connection replaces its old one instead of leaving it as a target. A request that was shown
+and then lost its last target gets a FRESH window from that moment, never past its ``timeout``
+(:func:`_drop_target_locked`): a phone that went to the background may come back to it. ``request.cancel {reason:
 timeout}`` accompanies ``no_capable_client`` only when some connection was ever shown the request: a request
 nobody saw ends silently (a cancel for an id nobody knows would only be noise). A cancel (interrupt, session
 close, shutdown) withdraws a parked request like any other; :func:`open_request_count` and :func:`pending_kind`
@@ -132,7 +134,8 @@ class ServerRequest:
     __slots__ = ("id", "sid", "method", "params", "event", "result", "answered", "created_at",
                  "qids", "locked", "on_result", "errored", "cancel_reason", "level", "validate", "targets",
                  "answered_by", "target", "max_refusals", "refusals", "exhausted", "on_refusal", "turn_author",
-                 "method_gated", "park_until", "listed", "shown")
+                 "method_gated", "park_until", "listed", "shown",
+                 "park_seconds", "deadline")
 
     def __init__(self, sid: str, method: str, params: dict, *, qids: list[str] | None = None,
                  on_result: Callable[[dict | None], None] | None = None, level: str | None = None,
@@ -172,6 +175,10 @@ class ServerRequest:
         # (nobody reached yet, or every connection it reached is gone) it waits until then, and after it settles
         # ``unavailable (no_capable_client)``. None for every other request.
         self.park_until: float | None = None
+        # Method-gated only: the park window's length (a shown request that loses its last target gets a fresh
+        # one) and the answer deadline (``time.monotonic()``, None without one) that bounds every window.
+        self.park_seconds = 0.0
+        self.deadline: float | None = None
         # Method-gated only: the connections ``open_requests`` handed it to (a target that must survive a failed
         # push to the same connection: it has the request already).
         self.listed: list = []
@@ -316,10 +323,15 @@ def advertise(transport: Any, server_requests: bool, confirm: Any = None,
                         if isinstance(method, str) and method in INTERACTIVE_METHODS
                         ) if server_requests and _agent_identity(transport) is None else frozenset()
     with _lock:
+        dropped = _handled.get(transport, frozenset()) - methods
         if methods:
             _handled[transport] = methods
         else:
             _handled.pop(transport, None)
+        # A method it no longer lists takes it out of those requests, as a disconnect would (forget).
+        for req in list(_open.values()):
+            if req.method_gated and req.method in dropped:
+                _drop_target_locked(req, transport)
         if server_requests:
             _answering_clients.add(transport)
         else:
@@ -351,14 +363,23 @@ def forget(transport: Any) -> None:
 
 def _drop_target_locked(req: ServerRequest, transport: Any) -> bool:
     """Caller holds ``_lock``. Take the connection *transport* out of the method-gated *req*'s targets (it is
-    gone, or the frame could not be written to it). When that leaves *req* with no target, wake its waiter: it
-    parks again until ``park_until`` or, when that has passed, settles ``unavailable (no_capable_client)``.
-    True when *transport* was a target. ``Event.set`` is the only call made here: no I/O, no callback."""
+    gone, stopped advertising the method, or the frame could not be written to it). When that leaves *req* with
+    no target, wake its waiter: it parks until ``park_until`` and then settles ``unavailable
+    (no_capable_client)``. A request that was SHOWN somewhere first gets a fresh window from now,
+    ``park_until = max(park_until, min(deadline, now + park_seconds))``: the person who saw it on a phone that
+    went to the background may come back to it, and the whole wait stays within the request's ``timeout``. A
+    request nobody saw keeps the window it opened with. True when *transport* was a target. ``Event.set`` and
+    the clock are the only calls made here: no I/O, no callback."""
     if not any(peer is transport for peer in req.targets):
         return False
     req.targets = [peer for peer in req.targets if peer is not transport]
     req.listed = [peer for peer in req.listed if peer is not transport]
     if not req.targets:
+        if req.shown and req.park_until is not None:
+            fresh = _monotonic() + req.park_seconds
+            if req.deadline is not None:
+                fresh = min(req.deadline, fresh)
+            req.park_until = max(req.park_until, fresh)
         req.event.set()
     return True
 
@@ -868,16 +889,19 @@ def send_gated(method: str, sid: str, params: dict, *, level: str | None = None,
     started = _monotonic()
     deadline = None if timeout is None else started + timeout
     if req.method_gated:
-        park = max(0.0, park_seconds)
-        req.park_until = started + (park if timeout is None else min(timeout, park))
+        req.park_seconds = max(0.0, park_seconds)
+        req.deadline = deadline
+        req.park_until = started + (req.park_seconds if timeout is None else min(timeout, req.park_seconds))
     candidates = list(_peers(sid))
     with _lock:
+        # Choice and registration are one step under the lock: a connection forgotten (disconnected, or no longer
+        # advertising) after ``_peers`` listed it no longer qualifies here, so it is never kept as a target.
         targets = [peer for peer in candidates if _qualifies(req, peer)]
+        if targets or parkable:
+            req.targets = list(targets)
+            _open[req.id] = req
     if not targets and not parkable:
         return RequestOutcome("unavailable", None, "no_capable_client")
-    req.targets = list(targets)
-    with _lock:
-        _open[req.id] = req
     frame = req.frame()
     reached = []
     for peer in targets:
@@ -895,11 +919,14 @@ def send_gated(method: str, sid: str, params: dict, *, level: str | None = None,
                 for peer in failed:
                     if not any(listed is peer for listed in req.listed):
                         _drop_target_locked(req, peer)
+                write_failed = not parkable and not req.targets
             else:
                 req.targets = [peer for peer in req.targets if any(peer is ok for ok in reached)]
-                if not req.targets and _open.get(req.id) is req and not req.answered:
-                    _open.pop(req.id, None)
-                    return RequestOutcome("unavailable", None, "write_failed", req.id)
+                write_failed = not req.targets
+            if write_failed and _open.get(req.id) is req and not req.answered:
+                # Settled at once, never shown: no on_open, no hook, no cancel (as before parking existed).
+                _open.pop(req.id, None)
+                return RequestOutcome("unavailable", None, "write_failed", req.id)
     if req.method_gated and not reached:
         # A connection that attached (and listed its open requests) between the scan above and the registration
         # would otherwise miss the request until it reattaches: scan once more now that it is open.

@@ -701,8 +701,9 @@ def test_a_target_that_disconnects_parks_the_request_again_for_its_replacement(s
     assert (outcome.status, outcome.reason) == ("unavailable", "error_response")
 
 
-def test_a_target_lost_after_the_park_window_ends_it_with_a_cancel(server, cancels, clock):
-    """Shown once, then the only device went away after the window: ``no_capable_client`` and a cancel."""
+def test_a_shown_request_that_loses_its_device_gets_a_fresh_bounded_window(server, cancels, clock):
+    """Lead decision: shown once, its last device gone after the first window, it parks again for
+    ``park_seconds`` from then; nobody back in that window ends it ``no_capable_client`` with a cancel."""
     from tui_gateway import server_requests
     phone = _WS("phone")
     _session(server, "s1", phone)
@@ -710,11 +711,119 @@ def test_a_target_lost_after_the_park_window_ends_it_with_a_cancel(server, cance
     box = _ask(park_seconds=60, timeout=300)
     request_id, _ = _opened(box)
     clock.advance(90)
-    assert server_requests.request_method(request_id) == "review.draft"
     server_requests.forget(phone)
+    clock.advance(59)  # inside the fresh window (until t=150)
+    assert server_requests.request_method(request_id) == "review.draft"
+    clock.advance(2)
     outcome = _done(box)
     assert (outcome.status, outcome.reason) == ("unavailable", "no_capable_client")
     assert ("s1", {"id": request_id, "method": "review.draft", "reason": "timeout"}) in cancels
+
+
+def test_a_backgrounded_phone_that_returns_in_its_fresh_window_answers(server, clock):
+    """review.draft, park 120 / timeout 600: shown at t=5, the app backgrounded at t=150 (its socket forgotten),
+    back at t=170 as a new connection: ``open_requests`` lists it again and the answer settles."""
+    from tui_gateway import server_requests
+    session = _session(server, "s1")
+    box = _ask(park_seconds=120, timeout=600)
+    request_id, _ = _opened(box)
+    clock.advance(5)
+    phone = _WS("phone")
+    _caps(server, phone)
+    server._attach_session_transport(session, phone)
+    assert [r["id"] for r in _as(phone, server_requests.open_requests, "s1")] == [request_id]
+    clock.advance(145)  # t=150
+    server._detach_session_transport(session, phone)
+    server_requests.forget(phone)
+    with server_requests._lock:
+        req = server_requests._open[request_id]
+        assert req.targets == [] and req.park_until == pytest.approx(1_000.0 + 150 + 120)
+    clock.advance(20)  # t=170
+    back = _WS("phone (back)")
+    _caps(server, back)
+    server._attach_session_transport(session, back)
+    assert [r["id"] for r in _as(back, server_requests.open_requests, "s1")] == [request_id]
+    _frame(server, back, request_id, result=APPROVED)
+    outcome = _done(box)
+    assert outcome.status == "answered" and outcome.answered_by is back
+
+
+def test_the_fresh_window_never_passes_the_timeout(server, cancels, clock):
+    from tui_gateway import server_requests
+    phone = _WS("phone")
+    _session(server, "s1", phone)
+    _caps(server, phone)
+    box = _ask(park_seconds=120, timeout=200)
+    request_id, _ = _opened(box)
+    clock.advance(150)
+    server_requests.forget(phone)
+    with server_requests._lock:
+        assert server_requests._open[request_id].park_until == pytest.approx(1_000.0 + 200)
+    clock.advance(51)
+    assert (_done(box).reason) == "no_capable_client"
+
+
+def test_a_connection_that_stops_advertising_the_method_is_dropped_like_a_disconnect(server, clock):
+    from tui_gateway import server_requests
+    phone = _WS("phone")
+    _session(server, "s1", phone)
+    _caps(server, phone)
+    box = _ask(park_seconds=60, timeout=300)
+    request_id, _ = _opened(box)
+    _caps(server, phone, requests=["input.form"])  # no longer review.draft
+    with server_requests._lock:
+        assert server_requests._open[request_id].targets == []
+    assert _rpc(server, phone, "request.answer", {"id": request_id, "result": APPROVED})["error"]["code"] == 4033
+    clock.advance(61)
+    assert _done(box).reason == "no_capable_client"
+
+
+def test_server_requests_false_drops_it_too(server):
+    from tui_gateway import server_requests
+    phone = _WS("phone")
+    _session(server, "s1", phone)
+    _caps(server, phone)
+    box = _ask(park_seconds=60, timeout=300)
+    request_id, _ = _opened(box)
+    server_requests.advertise(phone, False)
+    with server_requests._lock:
+        assert server_requests._open[request_id].targets == []
+    server_requests.cancel("s1")
+    _done(box)
+
+
+def test_a_connection_forgotten_between_the_peer_list_and_the_registration_is_no_target(server, monkeypatch):
+    """Seam: ``_peers`` lists the phone, which disconnects before the choice is made under the lock."""
+    from tui_gateway import server_requests
+    phone = _WS("phone")
+    _session(server, "s1", phone)
+    _caps(server, phone)
+    real = server_requests._peers
+
+    def peers(sid):
+        listed = real(sid)
+        server_requests.forget(phone)
+        return listed
+
+    monkeypatch.setattr(server_requests, "_peers", peers)
+    outcome = server_requests.send_gated("review.draft", "s1", DRAFT, timeout=300, validate=_validate)
+    assert (outcome.status, outcome.reason) == ("unavailable", "no_capable_client")
+    assert phone.frames == [] and server_requests.open_request_count() == 0
+
+
+def test_without_parking_every_failed_first_write_settles_write_failed_silently(server, cancels, monkeypatch):
+    from tui_gateway import request_hooks, server_requests
+    announced = []
+    monkeypatch.setattr(request_hooks, "opened", lambda *a, **k: announced.append(a))
+    dead = _WS("dead")
+    dead.fail_writes = True
+    _session(server, "s1", dead)
+    _caps(server, dead)
+    opened = []
+    outcome = server_requests.send_gated("review.draft", "s1", DRAFT, timeout=300, validate=_validate,
+                                         on_open=lambda rid, n: opened.append(rid))
+    assert (outcome.status, outcome.reason) == ("unavailable", "write_failed")
+    assert opened == [] and announced == [] and cancels == [] and server_requests.open_request_count() == 0
 
 
 def test_without_parking_a_lost_last_target_ends_it_at_once(server, cancels):

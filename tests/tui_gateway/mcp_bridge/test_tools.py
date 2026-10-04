@@ -460,6 +460,34 @@ def test_bot_interrupt_says_why_an_isolated_queued_turn_cannot_be_stopped(monkey
         "the running turn was not started by this agent"
 
 
+def test_bot_interrupt_of_its_own_turn_left_without_a_parent_record_says_why_end_to_end(bridge, monkeypatch):
+    """The agent's own turn, adopted by its watch, then run where the parent keeps no in-flight record of it (the
+    compute-host child a queued prompt drains to): the real ``session.interrupt`` refuses the stop and the real
+    probe reports the isolated reason. Nothing of the bridge is stubbed; only the session's routing is."""
+    first = tools.bot_prompt(bridge, ROBIN, "default", "marker gated", wait_seconds=0)
+    chat = first["chat_id"]
+    agent = bridge.live.agent_of(chat)
+    sid, session = bridge.live.session_of(chat)
+    watch = tools.turns.get(chat, first["turn_id"], identity=ROBIN.identity)
+    deadline = time.monotonic() + 5
+    while not watch.gateway_turn_id and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert watch.gateway_turn_id
+    real = server._session_uses_compute_host
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda *_a, **_k: True)
+    with session["history_lock"]:
+        session["inflight_turn"] = None
+    try:
+        assert turns.isolated_turn_unattributed(sid) is True
+        out = tools.bot_interrupt(bridge, ROBIN, chat)
+    finally:
+        monkeypatch.setattr(server, "_session_uses_compute_host", real)
+    assert out == {"ok": False, "was_running": True, "reason": turns.ISOLATED_UNATTRIBUTED}
+    assert agent._interrupt_requested is False and session["running"] is True
+    agent.gate.set()
+    assert tools.bot_wait(bridge, ROBIN, chat, first["turn_id"])["status"] == "done"
+
+
 def test_one_person_holds_at_most_ten_new_chats_across_their_grants(bridge):
     """Review X1c: a person with five grants could hold 25 drafts. The per-person cap evicts only the calling
     grant's own oldest, like the other caps, and leaves other people alone."""

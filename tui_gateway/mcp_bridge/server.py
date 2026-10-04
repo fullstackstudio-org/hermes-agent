@@ -167,12 +167,15 @@ class Endpoint:
         caller = caller_from_token()
         if caller is None:
             return _result(ToolFailure("unauthenticated", "no verified grant for this request").payload(), error=True)
-        session_key = self._audited_chat(caller, chat_id)
         fields = {"user_id": caller.login, "grant_id": caller.grant_id, "client_name": caller.client,
-                  "ip": caller.ip, "tool": tool, "session_key": session_key}
+                  "ip": caller.ip, "tool": tool, "session_key": ""}
         refusal = limits.check_tool_call(caller.grant_id)
-        if refusal is not None:
+        if refusal is not None:  # before any store read: a flood of refused calls costs no sqlite
             return self._refused(fields, refusal)
+        # A store read (sqlite): on a worker thread, never on the event loop.
+        session_key = await anyio.to_thread.run_sync(self._audited_chat, caller, chat_id,
+                                                     limiter=_thread_limiter())
+        fields["session_key"] = session_key
         if scope is not None and scope not in caller.scopes:
             self._audit("mcp_tool_call", **fields, outcome="refused", reason="forbidden")
             return _result(ToolFailure("forbidden", f"this connection was not granted {scope}").payload(), error=True)

@@ -358,6 +358,35 @@ def test_the_audit_names_a_chat_only_once_it_is_a_known_chat(bridge, monkeypatch
     assert keys == ["", "", known]
 
 
+def test_the_audits_chat_lookup_runs_after_the_rate_limit_and_off_the_event_loop(bridge, monkeypatch):
+    """Review X1c: the store read behind the audit's chat ran before the per-grant rate limit, on the event
+    loop, for every call; a flood of refused calls each paid a sqlite read on the loop."""
+    monkeypatch.setattr(bridge_server, "caller_from_token", lambda: ROBIN)
+    known = tools.bot_prompt(bridge, ROBIN, "default", "marker reply")["chat_id"]
+    reads: list = []
+    real = bridge.store.chats_for
+
+    def chats_for(login):
+        reads.append(threading.current_thread())
+        return real(login)
+
+    monkeypatch.setattr(bridge.store, "chats_for", chats_for)
+    endpoint = bridge_server.Endpoint(bridge)
+
+    async def call():
+        return threading.current_thread(), await endpoint.run(
+            None, "chat_history", "bots:read", tools.chat_history, known, chat_id=known)
+
+    loop_thread, _result = anyio.run(call)
+    assert reads and all(t is not loop_thread for t in reads)
+    reads.clear()
+    monkeypatch.setattr(limits, "check_tool_call", lambda _grant: limits.Refusal(
+        "rate_limited", "marker refused", retry_after_seconds=5))
+    _loop, refused = anyio.run(call)
+    assert json.loads(refused.content[0].text)["error"]["code"] == "rate_limited"
+    assert reads == []
+
+
 def test_a_full_draft_store_never_evicts_another_grants_new_chat(bridge):
     from tui_gateway.mcp_bridge.transport import AgentTransport
 

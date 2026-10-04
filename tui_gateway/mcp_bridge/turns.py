@@ -667,6 +667,12 @@ class TurnWatch:
     # ── reading ───────────────────────────────────────────────────────────────────────────────
 
     @property
+    def started(self) -> bool:
+        """The watch adopted its turn (``gateway_turn_id`` names it once a frame carried the id)."""
+        with self._cond:
+            return self._started
+
+    @property
     def concluded(self) -> bool:
         with self._cond:
             return self._status in TERMINAL_STATUSES

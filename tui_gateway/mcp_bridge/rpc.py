@@ -156,7 +156,10 @@ def _raise_for(method: str, response: dict) -> None:
     raise RpcError(code if isinstance(code, int) else -32603, message, error.get("data"))
 
 
-def _dispatch(transport: AgentTransport, method: str, params: dict, timeout: float | None) -> dict:
+def _dispatch(transport: AgentTransport, method: str, params: dict, timeout: float | None,
+              bind: dict | None = None) -> dict:
+    """*bind*: ``{ContextVar: value}`` set in the call's fresh context before dispatch (an in-process value the
+    gateway reads for an agent's connection only, never a parameter: see :func:`interrupt_turn`)."""
     from tui_gateway import server
 
     rid = f"mcp-{uuid.uuid4().hex[:16]}"
@@ -168,7 +171,7 @@ def _dispatch(transport: AgentTransport, method: str, params: dict, timeout: flo
     try:
         # A fresh context: the request sees only what dispatch binds (this transport), never the caller's
         # ContextVars. A pooled handler copies THIS context, so it inherits the same clean slate.
-        response = contextvars.Context().run(server.dispatch, request, transport)
+        response = contextvars.Context().run(_dispatch_bound, server.dispatch, request, transport, bind or {})
         if response is None:
             settled, response = pending.wait(timeout)
             if not settled:
@@ -183,6 +186,12 @@ def _dispatch(transport: AgentTransport, method: str, params: dict, timeout: flo
         _raise_for(method, response)
     result = response.get("result")
     return result if isinstance(result, dict) else {}
+
+
+def _dispatch_bound(dispatch, request: dict, transport: AgentTransport, bind: dict) -> Any:
+    for var, value in bind.items():
+        var.set(value)
+    return dispatch(request, transport)
 
 
 def ensure_capabilities(transport: AgentTransport, *, timeout: float | None = DEFAULT_TIMEOUT_S) -> None:
@@ -216,3 +225,25 @@ def call(transport: AgentTransport, method: str, params: dict | None = None, *,
         return result
     ensure_capabilities(transport, timeout=timeout)
     return _dispatch(transport, method, params, timeout)
+
+
+def interrupt_turn(transport: AgentTransport, session_id: str, gateway_turn_id: str, *,
+                   timeout: float | None = DEFAULT_TIMEOUT_S) -> bool:
+    """``session.interrupt`` of the one turn *gateway_turn_id* in *session_id*: True when the gateway stopped it.
+
+    The gateway stops an agent's turn only by its id, and only when that turn is the agent's own and still
+    running (``session_lifecycle._interrupt_agent_turn``); the id goes in ``agent_guard.INTERRUPT_TURN``,
+    bound in the call's fresh context, because no request parameter may carry it (a WebSocket client could send
+    one). Raises like :func:`call`."""
+    from tui_gateway.agent_guard import INTERRUPT_TURN
+
+    if not isinstance(transport, AgentTransport):
+        raise DisallowedCall("the MCP bridge dispatches on an AgentTransport only")
+    if not isinstance(gateway_turn_id, str) or not gateway_turn_id:
+        raise DisallowedCall("session.interrupt: an agent names the turn it stops")
+    params = check_call("session.interrupt", {"session_id": str(session_id)})
+    if transport.closed:
+        raise TransportClosed("session.interrupt: the agent transport is closed")
+    ensure_capabilities(transport, timeout=timeout)
+    result = _dispatch(transport, "session.interrupt", params, timeout, bind={INTERRUPT_TURN: gateway_turn_id})
+    return result.get("status") == "interrupted"

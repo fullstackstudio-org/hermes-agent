@@ -667,6 +667,83 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
     return use_compute_host
 
 
+def _agent_turn_is_running(session: dict, expected_turn_id: str, login: str | None, agent: dict | None) -> bool:
+    """Caller holds ``history_lock``. Whether the turn running in *session* now is *expected_turn_id* AND was sent
+    by *login* through the agent *agent* (the in-flight record's ``display_metadata``: ``turn_id`` and ``author``
+    with ``via``). The session's own current id must agree when it has one (inline turns): a turn that ended
+    leaves neither, and the next one names another id."""
+    from tui_gateway.row_author import agent_from_row_author
+    from tui_gateway.row_identity import turn_id_of
+
+    if not expected_turn_id or login is None or agent is None or not session.get("running"):
+        return False
+    inflight = session.get("inflight_turn")
+    if not isinstance(inflight, dict) or inflight.get("status") == "error":
+        return False
+    metadata = inflight.get("display_metadata")
+    if turn_id_of(metadata) != expected_turn_id:
+        return False
+    current = session.get("turn_id")
+    if current is not None and current != expected_turn_id:
+        return False
+    author = metadata.get("author")
+    return isinstance(author, dict) and author.get("id") == login and agent_from_row_author(author) == agent
+
+
+def _interrupt_agent_turn(sid: str, session: dict, transport, *, expected_turn_id: str,
+                          request_id: str | None = None) -> bool:
+    """``session.interrupt`` from an agent acting for its person through MCP: stop the turn *expected_turn_id*
+    only, and only when *transport*'s person sent it through that agent; returns whether it was stopped.
+
+    Narrower than a person's Stop (:func:`_interrupt_session_turn`), because an agent never alters a turn or a
+    message somebody else sent: the queued prompts this agent's connection (its grant) did not send stay queued
+    and run after the stopped turn (no queue generation bump, which would also cancel a drain in progress), and
+    background delegations are left running. The check and the stop hold the session's turn-start fence
+    (``agent_guard.turn_start_fence``), which every turn start takes before it clears the agent's interrupt
+    flag, so the stop cannot land on the turn after the one it checked. The open requests and approvals it
+    withdraws are therefore that turn's."""
+    from tui_gateway.agent_guard import grant_of, turn_start_fence
+
+    login, agent, grant = _transport_auth_user(transport)[0], _transport_agent(transport), grant_of(transport)
+    use_compute_host = _session_uses_compute_host(session)
+    with turn_start_fence(session):
+        with session["history_lock"]:
+            if not grant or not _agent_turn_is_running(session, expected_turn_id, login, agent):
+                return False
+            session["_turn_cancel_requested"] = True
+            queue = [entry for entry in (session.get("queued_prompt"), *(session.get("queued_prompts") or []))
+                     if isinstance(entry, dict)]
+            _ac_set_queue(session, [entry for entry in queue if grant_of(entry.get("transport")) != grant])
+            active_marker_key = str(session.pop("_active_turn_marker_key", "") or "")
+            for key in ("_shutdown_interrupt", "_shutdown_queued", "_shutdown_token"):
+                session.pop(key, None)
+            run_thread_alive = (rt := session.get("_run_thread")) is not None and rt.is_alive()
+        if use_compute_host:
+            _get_compute_host_supervisor().interrupt(sid, request_id=request_id)
+        else:
+            from agent.interrupt_compat import request_hard_interrupt
+            request_hard_interrupt(session.get("agent"))
+            if not run_thread_alive:
+                from tui_gateway.row_identity import release_turn_identity
+                with session["history_lock"]:
+                    if session.get("running"):
+                        session["running"] = False
+                        release_turn_identity(session)
+                        _clear_inflight_turn(session)
+        _clear_pending(sid)
+        with contextlib.suppress(Exception):
+            from tools.approval import resolve_gateway_approval
+            resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
+    try:
+        from hermes_cli.plugins import invoke_hook as _invoke_hook
+        _invoke_hook("agent_loop_stopped", session_key=session.get("session_key", ""), platform="tui",
+                     reason="user_stop", invalidation_reason="session_interrupt")
+    except Exception:
+        logger.debug("agent_loop_stopped hook dispatch failed", exc_info=True)
+    _retire_turn_marker(session, active_marker_key, keep_queued=True)
+    return True
+
+
 def _session_has_active_delegations(sid: str, session: dict | None = None) -> bool:
     """True when UI session ``sid`` still owns live background work — by live UI sid AND, when the TUI owns the durable
     lifecycle (never for gateway-viewer tabs), by session_key so a delegation from an earlier tab keeps it alive.

@@ -269,6 +269,63 @@ def test_a_queued_prompt_a_stop_dropped_concludes_without_a_waiter(gateway, monk
     limits.reset_for_tests()
 
 
+# ── an agent's stop (review X1b) ──────────────────────────────────────────────────────────
+
+
+def _running_turn_id(gateway):
+    assert _until(lambda: gateway.session.get("running") and gateway.session.get("turn_id"))
+    return gateway.session["turn_id"]
+
+
+def test_an_agent_stops_a_turn_only_by_its_id_and_never_the_persons(gateway):
+    assert gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker gated"})["result"]["status"] \
+        == "streaming"
+    persons = _running_turn_id(gateway)
+    transport = gateway.connect()
+    # Without the id the bridge binds, an agent's session.interrupt is refused outright.
+    with pytest.raises(rpc.RpcError) as refused:
+        rpc.call(transport, "session.interrupt", {"session_id": SID})
+    assert refused.value.code == 4033
+    # The person's own turn, named by its id: not the agent's, so not stopped.
+    assert rpc.interrupt_turn(transport, SID, persons) is False
+    assert gateway.agent._interrupt_requested is False and gateway.session["running"] is True
+    gateway.agent.gate.set()
+
+
+def test_a_stop_checked_against_the_agents_turn_never_lands_on_the_next_one(gateway):
+    """Regression (review X1b): the bridge checked the running turn, then interrupted the session; the agent's
+    turn could end in between and the person's next turn be the one stopped."""
+    transport, watch = _start(gateway, "marker gated")
+    agents = _running_turn_id(gateway)
+    assert _until(lambda: watch.gateway_turn_id == agents)
+    assert gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker clarify", "queued": True})[
+        "result"]["status"] == "queued"
+    gateway.agent.gate.set()  # the agent's turn ends; the person's queued prompt starts and asks a question
+    assert watch.wait(_deadline())["status"] == "done"
+    [clarify] = _app_request(gateway, "clarify")
+    assert _running_turn_id(gateway) != agents
+    # The stop the agent asked for names its own (finished) turn: the person's turn goes on.
+    assert rpc.interrupt_turn(gateway.connect(), SID, agents) is False
+    assert gateway.agent._interrupt_requested is False and gateway.session["running"] is True
+    from tui_gateway import server_requests
+    assert server_requests.request_method(clarify["id"]) == "clarify"
+    gateway.app.call("request.answer", {"id": clarify["id"], "result": {"answer": "one"}})
+
+
+def test_an_agents_stop_keeps_the_prompts_others_queued(gateway):
+    """Regression (review X1b): an agent's stop went through the person's Stop, which empties the queue."""
+    transport, watch = _start(gateway, "marker gated")
+    agents = _running_turn_id(gateway)
+    assert _until(lambda: watch.gateway_turn_id == agents)
+    assert gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker person", "queued": True})[
+        "result"]["status"] == "queued"
+    assert rpc.interrupt_turn(transport, SID, agents) is True
+    assert gateway.session["queued_prompt"]["text"] == "marker person"
+    gateway.agent.gate.set()
+    assert watch.wait(_deadline())["status"] in ("interrupted", "done")
+    assert _until(lambda: "marker person" in gateway.agent.texts)
+
+
 def test_a_cancelled_wait_returns_without_stopping_the_turn(gateway):
     _transport, watch = _start(gateway, "marker gated")
     stop = threading.Event()

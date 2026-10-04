@@ -100,6 +100,77 @@ def test_bot_interrupt_leaves_a_turn_the_agent_did_not_start_alone(bridge):
     agent.gate.set()
 
 
+def test_bot_interrupt_stops_the_agents_turn_and_keeps_the_persons_queued_prompt(bridge):
+    """Regression (review X1b): the agent's stop also dropped the prompt the person had queued."""
+    first = tools.bot_prompt(bridge, ROBIN, "default", "marker gated", wait_seconds=0)
+    chat = first["chat_id"]
+    app = AppPeer()
+    sid = app.call("session.resume", {"session_id": chat, "profile": "default", "omit_messages": True})[
+        "result"]["session_id"]
+    assert app.call("prompt.submit", {"session_id": sid, "text": "marker person", "queued": True})[
+        "result"]["status"] == "queued"
+    session = bridge.live.sessions[sid]
+    agent = bridge.live.agent_of(chat)
+    deadline = time.monotonic() + 5
+    while not tools.turns.get(chat, first["turn_id"], identity=ROBIN.identity).gateway_turn_id \
+            and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert tools.bot_interrupt(bridge, ROBIN, chat) == {"ok": True, "was_running": True}
+    assert session["queued_prompt"]["text"] == "marker person"
+    assert tools.bot_wait(bridge, ROBIN, chat, first["turn_id"])["status"] == "interrupted"
+    deadline = time.monotonic() + 5
+    while "marker person" not in agent.texts and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert "marker person" in agent.texts
+
+
+def test_bot_interrupt_racing_the_end_of_its_turn_never_stops_the_persons_next_turn(bridge, monkeypatch):
+    """Regression (review X1b): between the bridge's "is the running turn the agent's?" and the interrupt, the
+    agent's turn ended and the person's queued prompt started; the interrupt stopped the person's turn."""
+    first = tools.bot_prompt(bridge, ROBIN, "default", "marker gated", wait_seconds=0)
+    chat = first["chat_id"]
+    app = AppPeer()
+    sid = app.call("session.resume", {"session_id": chat, "profile": "default", "omit_messages": True})[
+        "result"]["session_id"]
+    assert app.call("prompt.submit", {"session_id": sid, "text": "marker clarify", "queued": True})[
+        "result"]["status"] == "queued"
+    agent, session = bridge.live.agent_of(chat), bridge.live.sessions[sid]
+    deadline = time.monotonic() + 5
+    while not tools.turns.get(chat, first["turn_id"], identity=ROBIN.identity).gateway_turn_id \
+            and time.monotonic() < deadline:
+        time.sleep(0.01)
+    real = server.dispatch
+
+    def racing(req, transport=None):
+        if req.get("method") == "session.interrupt" and (getattr(transport, "auth_identity", None) or {}).get("agent"):
+            agent.gate.set()  # the agent's turn ends now; the person's queued turn starts and asks
+            deadline = time.monotonic() + 5
+            while not app.requests("clarify") and time.monotonic() < deadline:
+                time.sleep(0.01)
+        return real(req, transport)
+
+    monkeypatch.setattr(server, "dispatch", racing)
+    out = tools.bot_interrupt(bridge, ROBIN, chat)
+    monkeypatch.setattr(server, "dispatch", real)
+    assert out == {"ok": False, "was_running": True, "reason": "the running turn was not started by this agent"}
+    [clarify] = app.requests("clarify")
+    from tui_gateway import server_requests
+    assert server_requests.request_method(clarify["id"]) == "clarify" and session["running"] is True
+    app.call("request.answer", {"id": clarify["id"], "result": {"answer": "one"}})
+
+
+def test_bot_interrupt_is_bound_to_the_grant_not_the_client_name(bridge):
+    """Two grants of one person under the same client name: one cannot stop the other's turn."""
+    other = Caller(**{**ROBIN.__dict__, "grant_id": "grant-g3"})
+    first = tools.bot_prompt(bridge, ROBIN, "default", "marker gated", wait_seconds=0)
+    tools.chat_open(bridge, other, "default", first["chat_id"])
+    agent = bridge.live.agent_of(first["chat_id"])
+    assert tools.bot_interrupt(bridge, other, first["chat_id"]) == {
+        "ok": False, "was_running": True, "reason": "the running turn was not started by this agent"}
+    assert agent._interrupt_requested is False
+    agent.gate.set()
+
+
 def test_a_turn_the_gateway_no_longer_knows_is_waited_on_or_reported_without_claiming_a_reply(bridge):
     first = tools.bot_prompt(bridge, ROBIN, "default", "marker gated", wait_seconds=0)
     assert first["status"] == "running"

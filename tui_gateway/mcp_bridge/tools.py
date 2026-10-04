@@ -27,7 +27,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from tui_gateway.mcp_bridge import live, rpc, turns
+from tui_gateway.mcp_bridge import rpc, turns
 from tui_gateway.mcp_bridge.transport import AgentTransport
 
 logger = logging.getLogger(__name__)
@@ -648,18 +648,24 @@ def _chat_transport(bridge: Bridge, caller: Caller, chat_id: Any, bot: Any) -> t
 
 
 def bot_interrupt(bridge: Bridge, caller: Caller, chat_id: Any, bot: Any = None) -> dict:
-    """Stops the running turn only when it is this agent's (sent by this person through a client of this name);
-    a turn somebody else started is left alone."""
+    """Stops the running turn only when it is this agent's: a turn this grant's own watch adopted, named to the
+    gateway by its id, which stops it only while that turn is the one running and was sent through this agent.
+    A turn somebody else started is left alone, and so is everything queued that this agent did not send."""
     chat, transport, sid, owned = _chat_transport(bridge, caller, chat_id, bot)
     try:
         row = _live_row(transport, sid) or {}
         running = str(row.get("status") or "idle") != "idle"
         if not running:
             return {"ok": True, "was_running": False}
-        if not live.running_turn_is_agents(transport, sid):
-            return {"ok": False, "was_running": True, "reason": "the running turn was not started by this agent"}
-        _call(transport, "session.interrupt", {"session_id": sid})
-        return {"ok": True, "was_running": True}
+        for watch in turns.watches_of(chat.session_key, identity=caller.identity):
+            if watch.grant != caller.grant_id or not watch.started or watch.concluded or not watch.gateway_turn_id:
+                continue
+            try:
+                if rpc.interrupt_turn(transport, sid, watch.gateway_turn_id):
+                    return {"ok": True, "was_running": True}
+            except rpc.BridgeError as exc:
+                raise _failure_from(exc) from exc
+        return {"ok": False, "was_running": True, "reason": "the running turn was not started by this agent"}
     finally:
         if owned:
             _release(transport)

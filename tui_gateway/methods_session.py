@@ -2199,6 +2199,15 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    from tui_gateway.agent_guard import INTERRUPT_TURN, agent_identity
+    if agent_identity(caller := current_transport()) is not None:
+        # An agent acting through MCP stops only the turn it names (bound by the bridge, never a parameter),
+        # and only its own: everything else a Stop does to the chat is the person's to do.
+        if not (expected_turn := INTERRUPT_TURN.get()):
+            return _err(rid, 4033, "an agent connected through MCP stops only its own turn, named by its id")
+        stopped = _interrupt_agent_turn(str(params.get("session_id") or ""), session, caller,
+                                        expected_turn_id=expected_turn, request_id=f"interrupt-{rid}")
+        return _ok(rid, {"status": "interrupted"} if stopped else {"status": "not_interrupted", "interrupted": False})
     if expected := _str_param(params, "expected_hosted_task_id"):
         with session["history_lock"]:
             task = session.get("_hosted_room_task")

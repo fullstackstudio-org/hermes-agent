@@ -1,5 +1,5 @@
 """What the bridge reads of a live session in process, beyond what the RPCs answer: which turn is the one a
-queued prompt became, where that prompt sits in the queue, and whether a running turn is the agent's own.
+queued prompt became, and where that prompt sits in the queue.
 
 ``prompt.submit`` answers ``queued`` without naming the turn the text will become, and no frame says whose
 turn starts next; a FIFO with other people's envelopes in it (or a Stop that drops the queue) makes "the
@@ -157,23 +157,3 @@ def queue_position(transport: Any, session_id: str, text: str) -> tuple[bool, in
             return running, position
     return running, None
 
-
-def running_turn_is_agents(transport: Any, session_id: str) -> bool:
-    """Whether the turn running in *session_id* now was sent by this person through a client of this name (the
-    in-flight record's author and ``via``). Waiter thread."""
-    session = session_record(transport, session_id)
-    if session is None:
-        return False
-    login, agent = _agent_of(transport)
-    lock = session.get("history_lock")
-    if lock is not None:
-        lock.acquire()
-    try:
-        if not session.get("running"):
-            return False
-        inflight = session.get("inflight_turn")
-        metadata = inflight.get("display_metadata") if isinstance(inflight, dict) else None
-        return isinstance(metadata, dict) and _author_is(metadata.get("author"), login, agent)
-    finally:
-        if lock is not None:
-            lock.release()

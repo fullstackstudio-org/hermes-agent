@@ -350,8 +350,12 @@ def _submit_prompt_to_compute_host(
                 session.pop("_compute_host_turn_id", None)
                 session.pop("_compute_host_activity_ns", None)
             _on_compute_host_turn_done(rid, sid, session, done)
+    from tui_gateway.agent_guard import turn_start_fence
     try:
-        _get_compute_host_supervisor(cfg).submit_turn(frame, on_complete=_complete)
+        # Under the turn-start fence: an agent's bound interrupt of the turn before is written to the child
+        # first, so it never reaches this one (``agent_guard``).
+        with turn_start_fence(session):
+            _get_compute_host_supervisor(cfg).submit_turn(frame, on_complete=_complete)
     except Exception as exc:
         with session["history_lock"]:
             if session.get("_compute_host_turn_id") == turn_id:

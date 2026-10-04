@@ -133,7 +133,10 @@ def _admit_prompt_turn(
             session.pop("_submit_user_row", None)  # no turn runs: the submit-time row stays as the send
         _emit("error", sid, {"message": str(ownership_refusal)})
         return None
-    with session["history_lock"]:
+    # The turn-start fence first: an agent's bound interrupt holds it from its check to its stop, so the
+    # interrupt flag cleared below is never the one meant for the turn before (``agent_guard``).
+    from tui_gateway.agent_guard import turn_start_fence
+    with turn_start_fence(session), session["history_lock"]:
         if session.get("_closing") or (
             queued_prompt_generation is not None
             and int(session.get("_queued_prompt_generation", 0)) != queued_prompt_generation):

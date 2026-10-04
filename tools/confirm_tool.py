@@ -21,8 +21,11 @@ from tools.registry import registry, tool_error
 # (:func:`_schema_overrides`); a call for it on a gateway without it is answered ``unavailable (disabled)``
 # by the gateway, never refused as a bad argument the model would "fix" by asking at ``plain``.
 LEVELS = ("plain", "passkey")
+# Kept equal to ``tui_gateway.contracts.server_requests.ConfirmFieldKind`` (a test pins that).
+_FIELD_KINDS = ("amount", "text", "recipient", "domain", "model", "count", "date")
 
-# (sid, summary=, detail=, title=, level=) -> an object with ``as_dict()`` (tui_gateway.confirm.ConfirmOutcome).
+# (sid, summary=, detail=, title=, level=, fields=, draft_id=) -> an object with ``as_dict()``
+# (tui_gateway.confirm.ConfirmOutcome).
 _bridge: Optional[Callable] = None
 
 
@@ -127,23 +130,37 @@ def _sentence(result: dict, level: str = "plain") -> str:
     return _REASON_SENTENCES.get(reason, _UNAVAILABLE)
 
 
-def _reply(result: dict, level: str = "plain") -> str:
-    return json.dumps({**result, "message": _sentence(result, level)}, ensure_ascii=False)
+# A request with ``fields`` that no attached app can show: the facts may go into the text instead (every app shows
+# that). Not at ``passkey`` after the window opened: that sentence is the passkey one and says no plain.
+_NO_FIELDS_CLIENT = ("No app attached to this conversation can show structured fields. Nothing was shown. You may "
+                     "ask again WITHOUT fields, with the same facts written out in summary or detail.")
+
+
+def _reply(result: dict, level: str = "plain", *, fields: bool = False) -> str:
+    message = _sentence(result, level)
+    if fields and result.get("outcome") == "unavailable" and result.get("reason") == "no_capable_client":
+        message = f"{_NO_FIELDS_CLIENT} {message}"
+    return json.dumps({**result, "message": message}, ensure_ascii=False)
 
 
 def confirm_action_tool(summary: str, detail: str | None = None, level: str = "plain",
-                        title: str | None = None) -> str:
+                        title: str | None = None, fields: list | None = None, draft_id: str | None = None) -> str:
     if level not in LEVELS:
         return tool_error(f"level must be one of: {', '.join(LEVELS)}.")
+    if fields is not None and not isinstance(fields, list):
+        return tool_error("fields must be a list of {kind, label, value, currency?, id?} objects.")
+    if draft_id is not None and not isinstance(draft_id, str):
+        return tool_error("draft_id must be the draft_id string a review_draft approval returned.")
     sid = get_session_env("HERMES_UI_SESSION_ID", "")
     if _bridge is None or not sid or session_is_messaging_surface():
         # No interactive session for this turn (CLI, messaging, cron, background work): nothing is sent.
         return _reply({"outcome": "unavailable", "method": None, "verified": False, "reason": "no_session"}, level)
     try:
-        outcome = _bridge(sid, summary=summary, detail=detail, title=title, level=level)
-    except ValueError as exc:  # text the agent must fix (empty / too long); nothing was sent
+        outcome = _bridge(sid, summary=summary, detail=detail, title=title, level=level, fields=fields or None,
+                          draft_id=draft_id or None)
+    except ValueError as exc:  # text the agent must fix, or an unknown draft_id; nothing was sent
         return tool_error(str(exc))
-    return _reply(outcome.as_dict(), level)
+    return _reply(outcome.as_dict(), level, fields=bool(fields))
 
 
 _DESCRIPTION_HEAD = (
@@ -165,6 +182,17 @@ _DESCRIPTION_PASSKEY = (
     "gateway verified the signature over exactly your text; verified true. Use 'passkey' for anything "
     "irreversible or costly. After a 'passkey' request that was declined, timed out or failed, never ask "
     "again at 'plain'. "
+)
+_DESCRIPTION_FIELDS = (
+    "fields: the key facts as a short list the app shows apart from your text (amount large, recipient and "
+    "domain monospaced), and that a passkey signs together with it; every one is shown exactly as you write it. "
+    "Use them whenever the action has an amount, a recipient, a domain or a model. Spending preset — before "
+    "you run or switch to an expensive model, or start work whose estimated cost is high, ask with fields "
+    "[{kind: 'amount', label: 'Estimated cost', value: '4.20', currency: 'USD'}, {kind: 'count', label: "
+    "'tokens', value: '1,200,000'}, {kind: 'model', label: 'Model', value: '<model name>'}]. "
+    "draft_id: after a review_draft approval, pass its draft_id to confirm sending exactly that approved text: "
+    "the gateway shows (and a passkey signs) the approved text itself as the detail, and your detail is "
+    "ignored. Send exactly that text, nothing else. "
 )
 _DESCRIPTION_TAIL = (
     "Outcomes: 'confirmed' — do exactly what you described, nothing more; 'declined' — do not do it; "
@@ -204,6 +232,30 @@ def _parameters(level: dict) -> dict:
                 "type": "string",
                 "description": "Optional short heading, at most 80 characters.",
             },
+            "fields": {
+                "type": "array",
+                "maxItems": 8,
+                "description": "Optional, at most 8: the key facts, in display order. Each label (at most 40 "
+                               "characters), value (at most 200) and currency is ONE line of plain text, shown "
+                               "exactly as written.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": list(_FIELD_KINDS)},
+                        "label": {"type": "string", "description": "What the value is, e.g. 'Amount', 'To'."},
+                        "value": {"type": "string", "description": "The value as it should be shown, e.g. "
+                                                                   "'120.00', 'alex@example.com'."},
+                        "currency": {"type": "string", "description": "Kind amount only, e.g. 'EUR' or '€'."},
+                        "id": {"type": "string", "description": "Optional lower-case identifier, unique."},
+                    },
+                    "required": ["kind", "label", "value"],
+                },
+            },
+            "draft_id": {
+                "type": "string",
+                "description": "Optional: the draft_id of a review_draft approval in this conversation. The "
+                               "approved text becomes the detail, verbatim (detail is ignored).",
+            },
         },
         "required": ["summary"],
     }
@@ -211,7 +263,7 @@ def _parameters(level: dict) -> dict:
 
 CONFIRM_ACTION_SCHEMA = {
     "name": "confirm_action",
-    "description": _DESCRIPTION_HEAD + _DESCRIPTION_PLAIN + _DESCRIPTION_TAIL,
+    "description": _DESCRIPTION_HEAD + _DESCRIPTION_PLAIN + _DESCRIPTION_FIELDS + _DESCRIPTION_TAIL,
     "parameters": _parameters(_LEVEL_PLAIN),
 }
 
@@ -229,7 +281,7 @@ def _schema_overrides() -> dict | None:
     changes). Whether it then works for a turn (identity, enrolment, an app attached) is the gateway's to say."""
     if not _passkey_enabled():
         return None
-    return {"description": _DESCRIPTION_HEAD + _DESCRIPTION_PASSKEY + _DESCRIPTION_TAIL,
+    return {"description": _DESCRIPTION_HEAD + _DESCRIPTION_PASSKEY + _DESCRIPTION_FIELDS + _DESCRIPTION_TAIL,
             "parameters": _parameters(_LEVEL_BOTH)}
 
 
@@ -237,5 +289,6 @@ registry.register(
     name="confirm_action", toolset="confirm", schema=CONFIRM_ACTION_SCHEMA, check_fn=available,
     handler=lambda args, **kw: confirm_action_tool(
         summary=args.get("summary", ""), detail=args.get("detail"),
-        level=args.get("level") or "plain", title=args.get("title")),
+        level=args.get("level") or "plain", title=args.get("title"), fields=args.get("fields"),
+        draft_id=args.get("draft_id")),
     dynamic_schema_overrides=_schema_overrides, emoji="🔐")

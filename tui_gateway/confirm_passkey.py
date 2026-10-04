@@ -22,7 +22,10 @@ One request, in order:
    id (minted here: the challenge commits to it), the gateway context, and a SNAPSHOT of the user's
    active credentials. Its :meth:`Verification.target` is ``send_gated``'s target predicate: a connection
    signed in as the bound user that advertised ``passkey`` with an accepted RP the user has a credential
-   for. The same predicate decides who gets the frame, who may answer and who sees it on reconnect.
+   for. The same predicate decides who gets the frame, who may answer and who sees it on reconnect. A
+   request with structured ``fields`` is version 2 (contract §4.1: ``text_digest_v2``, ``passkey.v: 2``) and
+   its target also needs ``confirm_passkey {v: 2}`` and ``confirm_fields: true``: a version-1 client never
+   gets a frame whose text it would hash differently, or show without its fields.
 4. :meth:`Verification.validate` is the pure validator ``send_gated`` runs on every answer, under its
    lock and again from ``request.answer``: no I/O, memoised per answer
    (``webauthn.memoised_assertion_validator``). A decline is exactly ``{decision: declined, method: tap}``
@@ -49,7 +52,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from hermes_cli.dashboard_auth.passkeys.challenge import GatewayContext, b64u
+from hermes_cli.dashboard_auth.passkeys.challenge import GatewayContext, b64u, field_tuple
 from hermes_cli.dashboard_auth.passkeys.settings import PasskeySettings, gateway_context, load_settings
 from hermes_cli.dashboard_auth.passkeys.store import CommitRefused, PasskeyStore, StoreError, default_path
 from hermes_cli.dashboard_auth.passkeys.webauthn import (
@@ -58,6 +61,8 @@ from hermes_cli.dashboard_auth.passkeys.webauthn import (
 logger = logging.getLogger(__name__)
 
 VERSION = 1
+#: The ``confirm_passkey.v`` values a client may advertise: 2 also computes ``text_digest_v2`` (contract §4.1).
+VERSIONS = (1, 2)
 NONCE_BYTES = 32
 #: Refused answers (from connections allowed to answer) after which the request is settled ``unavailable``.
 MAX_REFUSALS = 5
@@ -142,7 +147,8 @@ def _rps(ctx: GatewayContext) -> dict:
 
 def capability(transport: Any) -> dict:
     """The ``confirm_passkey`` object of a ``client.capabilities`` result for *transport* (contract §8)."""
-    off = {"v": VERSION, "enabled": False, "gateway_id": "", "rp": {"native": [], "web": []}}
+    off = {"v": VERSION, "enabled": False, "gateway_id": "", "rp": {"native": [], "web": []},
+           "versions": list(VERSIONS)}
     try:
         settings = _settings()
     except Exception:  # noqa: BLE001 - an unreadable config never enables the level
@@ -157,16 +163,17 @@ def capability(transport: Any) -> dict:
         return {**off, "reason": "store_unavailable"}
     reason = ctx.capability_reason(enabled=True, identity=_login(transport) is not None)
     return {"v": VERSION, "enabled": reason == "", "reason": reason, "gateway_id": b64u(ctx.gateway_id),
-            "rp": _rps(ctx)}
+            "rp": _rps(ctx), "versions": list(VERSIONS)}
 
 
 def accept_advertisement(transport: Any, advertisement: Any) -> dict | None:
     """The detail ``server_requests.advertise`` records with ``passkey`` for *transport*, or None when the
     level must not be accepted from it: the level is not enabled here, the connection has no signed-in user,
-    or ``{v: 1, kind, rp_id}`` names an RP this gateway does not accept for that kind. Whether the user has
-    a credential is decided per request."""
+    ``v`` is not one of :data:`VERSIONS`, or ``{v, kind, rp_id}`` names an RP this gateway does not accept for
+    that kind. The detail keeps ``v``: a version-2 frame goes only where it is 2. Whether the user has a
+    credential is decided per request."""
     if not isinstance(advertisement, dict) or type(advertisement.get("v")) is not int \
-            or advertisement.get("v") != VERSION:
+            or advertisement.get("v") not in VERSIONS:
         return None
     kind, rp_id = advertisement.get("kind"), advertisement.get("rp_id")
     if kind not in KINDS or not isinstance(rp_id, str) or _login(transport) is None:
@@ -182,7 +189,7 @@ def accept_advertisement(transport: Any, advertisement: Any) -> dict | None:
     if ctx.capability_reason(enabled=True, identity=True):
         return None
     accepted = ctx.native_rp_ids if kind == "native" else ctx.web_rp_ids
-    return {"kind": kind, "rp_id": rp_id} if rp_id in accepted else None
+    return {"kind": kind, "rp_id": rp_id, "v": advertisement["v"]} if rp_id in accepted else None
 
 
 # ── the bound user ────────────────────────────────────────────────────────────────────────────
@@ -253,18 +260,24 @@ class Verification:
     title: str
     summary: str
     detail: str | None
+    #: The frame's structured fields as ``challenge.field_tuple`` values (empty: a version-1 request).
+    fields: tuple = ()
     enrolled_rps: frozenset = field(init=False)
     _request: AssertionRequest = field(init=False, repr=False)
     _validator: Callable[[Any], Any] = field(init=False, repr=False)
     # The memo is a plain OrderedDict; the frame path (under send_gated's lock) and request.answer threads
     # share it. Order is always send_gated's lock → this one, never the reverse: no deadlock.
     _memo_lock: Any = field(init=False, repr=False, default_factory=threading.Lock)
+    # ``server_requests.shows_confirm_fields_locked``, bound here so the target predicate imports nothing.
+    _shows_fields: Callable[[Any], bool] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        from tui_gateway import server_requests
+        self._shows_fields = server_requests.shows_confirm_fields_locked
         self.enrolled_rps = frozenset(c.rp_id for c in self.snapshot)
         self._request = AssertionRequest(user_id=self.user_id, request_id=self.request_id, nonce=self.nonce,
                                          title=self.title, summary=self.summary, detail=self.detail,
-                                         session_id=self.sid, purpose="confirm")
+                                         session_id=self.sid, purpose="confirm", fields=self.fields)
         memo = memoised_assertion_validator(self.ctx, self._request, self.snapshot)
 
         def validator(answer: Any) -> Any:
@@ -277,12 +290,17 @@ class Verification:
     def text_digest(self) -> bytes:
         return self._request.text_digest
 
+    @property
+    def version(self) -> int:
+        """2 for a request with structured fields (``text_digest_v2``), else 1."""
+        return self._request.version
+
     def params(self) -> dict:
         """The ``passkey`` object added to the frame's params (contract §8)."""
         by_rp: dict[str, list[str]] = {}
         for credential in self.snapshot:
             by_rp.setdefault(credential.rp_id, []).append(b64u(credential.credential_id))
-        return {"passkey": {"v": VERSION, "nonce": b64u(self.nonce), "gateway_id": b64u(self.ctx.gateway_id),
+        return {"passkey": {"v": self.version, "nonce": b64u(self.nonce), "gateway_id": b64u(self.ctx.gateway_id),
                             "base_url": self.ctx.accepted_base_urls[0], "expires_at": self.expires_at,
                             "user": {"id": self.user_id, "name": self.user_name},
                             "credentials": [{"rp_id": rp, "ids": ids} for rp, ids in sorted(by_rp.items())]}}
@@ -291,8 +309,11 @@ class Verification:
 
     def target(self, transport: Any, detail: Any) -> bool:
         """``send_gated``'s target predicate: signed in as the bound user, advertised ``passkey`` with an RP
-        this gateway accepts for its kind, and the user has an active credential for that RP."""
+        this gateway accepts for its kind, and the user has an active credential for that RP. A version-2
+        request (structured fields) also needs ``confirm_passkey {v: 2}`` and ``confirm_fields: true``."""
         if _login(transport) != self.user_id or not isinstance(detail, dict):
+            return False
+        if self.version >= 2 and (detail.get("v") != 2 or not self._shows_fields(transport)):
             return False
         kind, rp_id = detail.get("kind"), detail.get("rp_id")
         accepted = self.ctx.native_rp_ids if kind == "native" else self.ctx.web_rp_ids if kind == "web" else ()
@@ -394,8 +415,9 @@ def open(sid: str, params: dict, *, timeout: float) -> Verification:  # noqa: A0
                         user_name=user_name, nonce=secrets.token_bytes(NONCE_BYTES),
                         expires_at=now + math.ceil(timeout), settings=settings, store=store, ctx=ctx,
                         snapshot=snapshot, title=params["title"], summary=params["summary"],
-                        detail=params.get("detail"))
+                        detail=params.get("detail"),
+                        fields=tuple(field_tuple(f) for f in params.get("fields") or ()))
 
 
-__all__ = ["DECLINE", "MAX_REFUSALS", "OPEN_REASONS", "Unavailable", "Verification", "accept_advertisement",
+__all__ = ["DECLINE", "MAX_REFUSALS", "OPEN_REASONS", "VERSIONS", "Unavailable", "Verification", "accept_advertisement",
            "bound_user", "capability", "open"]

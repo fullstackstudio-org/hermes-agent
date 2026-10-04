@@ -282,6 +282,9 @@ _confirm_levels: dict[Any, frozenset[str]] = {}
 # What a transport advertised WITH a level that needs more than its name (``passkey``: ``{kind, rp_id}``,
 # accepted by ``confirm_passkey.accept_advertisement``). Handed to a request's target predicate.
 _confirm_details: dict[Any, dict[str, Any]] = {}
+# Answering transports that advertised ``client.capabilities {confirm_fields: true}`` with at least one accepted
+# level: the only ones a ``confirm`` with structured ``fields`` may go to (:func:`shows_confirm_fields_locked`).
+_confirm_fields: set = set()
 # The interactive request methods each answering transport advertised (``client.capabilities {requests: [...]}``,
 # intersected with ``INTERACTIVE_METHODS``): what a method-gated request (``send_gated(level=None)``) needs.
 _handled: dict[Any, frozenset[str]] = {}
@@ -321,11 +324,13 @@ def _caller() -> Any:
 
 
 def advertise(transport: Any, server_requests: bool, confirm: Any = None,
-              details: dict[str, Any] | None = None, requests: Any = None) -> list[str]:
+              details: dict[str, Any] | None = None, requests: Any = None, confirm_fields: Any = None) -> list[str]:
     """Record whether *transport*'s client answers server→client requests (``client.capabilities``), which
-    ``confirm`` levels it can perform, and which interactive request methods it can show (*requests*). Levels
-    and methods count only together with ``server_requests``; unknown or malformed entries are dropped, and a
-    level in :data:`DETAILED_LEVELS` counts only with an entry in *details* (already checked by the caller).
+    ``confirm`` levels it can perform, whether it shows a ``confirm``'s structured fields (*confirm_fields*:
+    exactly ``True``, and only with an accepted level), and which interactive request methods it can show
+    (*requests*). Levels and methods count only together with ``server_requests``; unknown or malformed entries
+    are dropped, and a level in :data:`DETAILED_LEVELS` counts only with an entry in *details* (already checked
+    by the caller).
     Methods count only when they are in ``INTERACTIVE_METHODS`` and never for an agent's connection (an agent
     acting through MCP answers no interactive request). Every call replaces the previous advertisement (a call
     without *requests* clears the methods). Returns the levels accepted (sorted); :func:`handled_methods`
@@ -361,6 +366,10 @@ def advertise(transport: Any, server_requests: bool, confirm: Any = None,
             _confirm_details[transport] = kept
         else:
             _confirm_details.pop(transport, None)
+        if levels and confirm_fields is True:
+            _confirm_fields.add(transport)
+        else:
+            _confirm_fields.discard(transport)
     return sorted(levels)
 
 
@@ -372,6 +381,7 @@ def forget(transport: Any) -> None:
         _answering_clients.discard(transport)
         _confirm_levels.pop(transport, None)
         _confirm_details.pop(transport, None)
+        _confirm_fields.discard(transport)
         _handled.pop(transport, None)
         for req in list(_open.values()):
             if req.method_gated:
@@ -410,6 +420,24 @@ def confirm_levels(transport: Any) -> frozenset[str]:
     """The ``confirm`` levels *transport* advertised (empty when none, or when it is not an answering client)."""
     with _lock:
         return _confirm_levels.get(transport, frozenset()) if transport in _answering_clients else frozenset()
+
+
+def shows_confirm_fields(transport: Any) -> bool:
+    """Whether *transport* advertised ``confirm_fields: true`` and it was accepted (what ``client.capabilities``
+    echoes)."""
+    with _lock:
+        return transport in _confirm_fields and transport in _answering_clients
+
+
+def shows_confirm_fields_locked(transport: Any) -> bool:
+    """Caller holds ``_lock`` (a target predicate): :func:`shows_confirm_fields` without taking it. Pure."""
+    return transport in _confirm_fields and transport in _answering_clients
+
+
+def confirm_fields_target(transport: Any, detail: Any) -> bool:
+    """``send_gated``'s target predicate for a ``plain`` ``confirm`` with ``fields``: the connection shows
+    them. Runs under ``_lock``."""
+    return shows_confirm_fields_locked(transport)
 
 
 def handled_methods(transport: Any) -> list[str]:
@@ -1358,4 +1386,5 @@ def reset_for_tests() -> None:
         _answering_clients.clear()
         _confirm_levels.clear()
         _confirm_details.clear()
+        _confirm_fields.clear()
         _handled.clear()

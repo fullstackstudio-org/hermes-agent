@@ -262,7 +262,8 @@ def test_passkey_while_the_level_is_off_is_unavailable_at_once_and_nothing_is_se
     response = _advertise(server, app, confirm=["plain", "passkey"])
     assert response["result"]["confirm"] == ["plain"]
     assert response["result"]["confirm_passkey"] == {"v": 1, "enabled": False, "reason": "disabled",
-                                                     "gateway_id": "", "rp": {"native": [], "web": []}}
+                                                     "gateway_id": "", "rp": {"native": [], "web": []},
+                                                     "versions": [1, 2]}
     for _ in range(10):  # never sent, so never counted against the window either
         outcome = confirm.request("s1", confirm.build_params(summary="Pay.", level="passkey"), timeout=5)
         assert outcome.as_dict() == {"outcome": "unavailable", "method": None, "verified": False,

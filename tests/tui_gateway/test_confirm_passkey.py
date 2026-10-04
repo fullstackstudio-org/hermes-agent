@@ -155,17 +155,17 @@ def test_capability_and_advertisement(server, passkeys):
     phone, token_client = _Peer("phone", ALICE), _Peer("token")
     first = _advertise(server, phone)["result"]
     assert first["confirm_passkey"] == {"v": 1, "enabled": True, "reason": "", "gateway_id": b64u(
-        passkeys.store.gateway_id), "rp": {"native": [NATIVE_RP], "web": ["gw.example.com"]}}
+        passkeys.store.gateway_id), "rp": {"native": [NATIVE_RP], "web": ["gw.example.com"]}, "versions": [1, 2]}
     assert _advertise(server, token_client)["result"]["confirm_passkey"]["reason"] == "no_identity"
     # Accepted: a signed-in connection, an RP this gateway accepts for that kind.
     assert _advertise_passkey(server, phone)["result"]["confirm"] == ["passkey", "plain"]
-    assert server_requests._confirm_details[phone] == {"passkey": {"kind": "native", "rp_id": NATIVE_RP}}
+    assert server_requests._confirm_details[phone] == {"passkey": {"kind": "native", "rp_id": NATIVE_RP, "v": 1}}
     assert _advertise_passkey(server, phone, kind="web", rp_id="gw.example.com")["result"]["confirm"] == [
         "passkey", "plain"]
     # Not accepted (plain still is, and the call never fails): no identity, unknown RP, wrong kind, other v.
     for peer, kw in ((token_client, {}), (phone, {"rp_id": "evil.example"}),
                      (phone, {"kind": "web", "rp_id": NATIVE_RP}), (phone, {"kind": "carrier-pigeon"}),
-                     (phone, {"v": 2})):
+                     (phone, {"v": 3}), (phone, {"v": 0})):
         response = _advertise_passkey(server, peer, **kw)
         assert response["result"]["confirm"] == ["plain"], kw
     assert phone not in server_requests._confirm_details
@@ -199,7 +199,8 @@ def test_capability_reasons_follow_the_settings(server, passkeys):
     assert _advertise_passkey(server, phone)["result"]["confirm"] == ["plain"]
     passkeys.config["confirm"]["passkey"]["enabled"] = False
     cap = _advertise(server, phone)["result"]["confirm_passkey"]
-    assert cap == {"v": 1, "enabled": False, "reason": "disabled", "gateway_id": "", "rp": {"native": [], "web": []}}
+    assert cap == {"v": 1, "enabled": False, "reason": "disabled", "gateway_id": "", "rp": {"native": [], "web": []},
+                   "versions": [1, 2]}
 
 
 # ── the happy path ──────────────────────────────────────────────────────────────────────────

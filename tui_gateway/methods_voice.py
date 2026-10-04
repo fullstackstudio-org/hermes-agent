@@ -451,10 +451,13 @@ def _(rid, params: dict) -> dict:
     instead of stalling the agent for the deadline (#112548). ``confirm: [levels]`` (optional) lists the
     ``confirm`` levels this connection can perform; the result echoes the ones accepted. ``passkey`` is
     accepted only with a ``confirm_passkey {v, kind, rp_id}`` this gateway accepts, from a signed-in
-    connection, while the level is enabled (``confirm_passkey.accept_advertisement``). ``requests: [methods]``
-    (optional) lists the interactive request methods this connection can show; the result echoes the ones
-    accepted (``server_requests.advertise``), and open ones it can now answer are delivered to it. Every result
-    carries ``confirm_passkey``: the level as this connection sees it (contract §8)."""
+    connection, while the level is enabled (``confirm_passkey.accept_advertisement``; ``v: 2`` also takes a
+    ``confirm`` with structured fields). ``confirm_fields: true`` (optional) says this connection shows a
+    ``confirm``'s ``fields``; the result echoes whether it was accepted (with at least one accepted level).
+    ``requests: [methods]`` (optional) lists the interactive request methods this connection can show; the
+    result echoes the ones accepted (``server_requests.advertise``), and open ones it can now answer are
+    delivered to it. Every result carries ``confirm_passkey``: the level as this connection sees it (contract
+    §8), and ``confirm_fields``."""
     from tui_gateway.agent_guard import param_refusal
     # An agent receives the session's requests (read-only but clarify) and never advertises a confirm level.
     if (refused := param_refusal(rid, "client.capabilities", params)) is not None:
@@ -467,13 +470,14 @@ def _(rid, params: dict) -> dict:
     detail = (confirm_passkey.accept_advertisement(transport, params.get("confirm_passkey"))
               if answers and isinstance(confirm, list) and "passkey" in confirm else None)
     levels = server_requests.advertise(transport, answers, confirm, details={"passkey": detail} if detail else None,
-                                       requests=params.get("requests"))
+                                       requests=params.get("requests"), confirm_fields=params.get("confirm_fields"))
     methods = server_requests.handled_methods(transport)
     if methods:
         # Advertised while already attached: the open_requests of its attach could not list what it can now answer.
         server_requests.deliver_late(transport)
     return _ok(rid, {"server_requests": sorted(contracts.SERVER_REQUESTS), "confirm": levels,
-                     "confirm_passkey": confirm_passkey.capability(transport), "requests": methods})
+                     "confirm_passkey": confirm_passkey.capability(transport),
+                     "confirm_fields": server_requests.shows_confirm_fields(transport), "requests": methods})
 
 
 @method("ping")

@@ -11,6 +11,14 @@ What this module adds on top of ``server_requests.send_gated``:
 
 - the params are built here, never passed through: plain text only, control and format characters
   (bidi overrides, zero-width characters) stripped, lengths checked against the contract bounds;
+- structured ``fields`` (plan request-types-v2 D8): at most :data:`CONFIRM_FIELDS_MAX` one-line facts
+  (``amount``, ``recipient``, ``model``, …), each checked VERBATIM (refused, never rewritten); a request with
+  fields goes only to connections that advertised ``confirm_fields`` (at ``passkey`` also
+  ``confirm_passkey {v: 2}``: the challenge then commits to ``text_digest_v2``), and is ``unavailable
+  (no_capable_client)`` when none is attached, never sent without them;
+- ``draft_id`` (D7): the detail is the text the person approved in ``review.draft``, taken verbatim from
+  ``review_register`` (whatever detail the agent passed is ignored); an unknown or expired id is refused
+  before anything is sent;
 - four outcomes the caller can act on: ``confirmed``, ``declined``, ``unavailable`` (no connected client
   can answer the level, a client answered an error, the request was withdrawn, a rate limit, turn
   isolation, a ``plain`` request inside the no-downgrade window, or one of the ``passkey`` reasons),
@@ -30,7 +38,8 @@ What this module adds on top of ``server_requests.send_gated``:
 - one audit record per request and per outcome in the dashboard auth audit log
   (``$HERMES_HOME/logs/dashboard-auth.log``, events ``confirm_request`` / ``confirm_outcome``): session,
   request id, level, the login the turn acts for, the connections reached, outcome, method, reason, and the
-  login and peer address of the connection whose answer settled it — never the title, summary or detail.
+  login and peer address of the connection whose answer settled it, plus ``fields: <n>`` and ``draft: true``
+  when present — never the title, summary, detail or a field's label or value.
 
 A level that needs per-request state (``passkey``: the bound user, a nonce, a credential snapshot) builds it
 in its own module before the frame goes out; :class:`Level` covers the context-free part (the shape of a
@@ -41,13 +50,16 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
 
-from tui_gateway import request_hooks, request_limits, server_requests
-from tui_gateway.contracts.server_requests import (CONFIRM_DETAIL_MAX, CONFIRM_SUMMARY_MAX, CONFIRM_TITLE_MAX,
-                                                   ConfirmDecision, ConfirmMethod)
+from tui_gateway import request_hooks, request_limits, review_register, server_requests
+from tui_gateway.contracts.server_requests import (CONFIRM_DETAIL_MAX, CONFIRM_FIELD_CURRENCY_MAX, CONFIRM_FIELD_ID,
+                                                   CONFIRM_FIELD_LABEL_MAX, CONFIRM_FIELD_VALUE_MAX,
+                                                   CONFIRM_FIELDS_MAX, CONFIRM_SUMMARY_MAX, CONFIRM_TITLE_MAX,
+                                                   ConfirmDecision, ConfirmFieldKind, ConfirmMethod)
 # The text rules live in ``request_text``; these names are re-exported because the policy and the tests read them here.
 from tui_gateway.request_text import (DEFAULT_IGNORABLE, MAX_BLANK_LINES, MAX_COMBINING_MARKS, MAX_INDENT,  # noqa: F401
                                       MAX_LINE_CHARS, MAX_SPACE_RUN, clean_text, default_ignorable,  # noqa: F401
@@ -154,10 +166,88 @@ class ConfirmParamsError(ValueError):
 # ── params ────────────────────────────────────────────────────────────────────────────────────
 
 DETAIL_LAYOUTS = ("text", "json")
+FIELD_KINDS = tuple(kind.value for kind in ConfirmFieldKind)
+_FIELD_KEYS = frozenset({"id", "kind", "label", "value", "currency"})
+_FIELD_ID = re.compile(CONFIRM_FIELD_ID)
+
+
+def _field_text(index: int, key: str, raw: object, limit: int) -> str:
+    """One string of a structured field: ONE line, shown exactly as given. Spaces at either end are the only
+    thing removed; anything :func:`verbatim_problem` refuses (an invisible, bidi or control character, a
+    character that renders as nothing, padding) and a line break raise, never rewritten."""
+    if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+        raise ConfirmParamsError(f"fields[{index}].{key} must be a string")
+    text = str(raw).strip(" ")
+    if not text:
+        raise ConfirmParamsError(f"fields[{index}].{key} is empty")
+    if len(text) > limit:
+        raise ConfirmParamsError(f"fields[{index}].{key} is {len(text)} characters; the limit is {limit}.")
+    if "\n" in text:
+        raise ConfirmParamsError(f"fields[{index}].{key} must be one line")
+    if problem := verbatim_problem(text):
+        raise ConfirmParamsError(f"fields[{index}].{key} cannot be shown as it is: {problem}")
+    return text
+
+
+def build_fields(fields: object) -> list[dict] | None:
+    """The ``fields`` of a ``confirm`` (contract ``ConfirmField``), or None for none. Raises
+    :class:`ConfirmParamsError` for anything the person could not be shown exactly: more than
+    :data:`CONFIRM_FIELDS_MAX`, an unknown key or kind, an id that is not ``[a-z][a-z0-9_]{0,31}`` or not unique
+    (a missing id becomes ``field_<n>``), ``currency`` on anything but an ``amount``, and every string
+    :func:`_field_text` refuses."""
+    if fields is None or (isinstance(fields, (list, tuple)) and not fields):
+        return None
+    if not isinstance(fields, (list, tuple)):
+        raise ConfirmParamsError("fields must be a list of {kind, label, value, currency?, id?} objects")
+    if len(fields) > CONFIRM_FIELDS_MAX:
+        raise ConfirmParamsError(f"{len(fields)} fields; the limit is {CONFIRM_FIELDS_MAX}.")
+    built: list[dict] = []
+    for index, raw in enumerate(fields):
+        if not isinstance(raw, dict):
+            raise ConfirmParamsError(f"fields[{index}] must be an object with kind, label and value")
+        if unknown := sorted(str(key) for key in set(raw) - _FIELD_KEYS):
+            raise ConfirmParamsError(f"fields[{index}] has unknown keys: {', '.join(unknown)}")
+        kind = raw.get("kind")
+        if kind not in FIELD_KINDS:
+            raise ConfirmParamsError(f"fields[{index}].kind must be one of: {', '.join(FIELD_KINDS)}")
+        field_id = raw.get("id")
+        field_id = f"field_{index + 1}" if field_id is None else field_id
+        if not isinstance(field_id, str) or not _FIELD_ID.fullmatch(field_id):
+            raise ConfirmParamsError(f"fields[{index}].id must be a lower-case identifier ([a-z][a-z0-9_]*, at "
+                                     "most 32 characters)")
+        if any(field["id"] == field_id for field in built):
+            raise ConfirmParamsError(f"fields[{index}].id {field_id!r} is used twice")
+        field = {"id": field_id, "kind": kind,
+                 "label": _field_text(index, "label", raw.get("label"), CONFIRM_FIELD_LABEL_MAX),
+                 "value": _field_text(index, "value", raw.get("value"), CONFIRM_FIELD_VALUE_MAX)}
+        if raw.get("currency") is not None:
+            if kind != "amount":
+                raise ConfirmParamsError(f"fields[{index}].currency is only for kind amount")
+            field["currency"] = _field_text(index, "currency", raw["currency"], CONFIRM_FIELD_CURRENCY_MAX)
+        built.append(field)
+    return built
+
+
+def draft_detail(sid: str, draft_id: object) -> str:
+    """The text the person approved as draft *draft_id* in the conversation of session *sid*
+    (``review_register``), or :class:`ConfirmParamsError` when this conversation has no such live draft
+    (unknown, expired, or another conversation's): nothing is sent then."""
+    if not isinstance(draft_id, str) or not draft_id:
+        raise ConfirmParamsError("draft_id must be the draft_id a review_draft approval returned")
+    draft = review_register.get(_rate_key(sid), draft_id)
+    if draft is None:
+        raise ConfirmParamsError(f"draft {draft_id} is unknown or expired in this conversation (drafts are kept "
+                                 f"{int(review_register.TTL_SECONDS // 60)} minutes): ask for a review_draft "
+                                 "approval again; nothing was sent")
+    if len(draft.text) > CONFIRM_DETAIL_MAX:
+        raise ConfirmParamsError(f"draft {draft_id} is {len(draft.text)} characters; a confirmation shows at most "
+                                 f"{CONFIRM_DETAIL_MAX}, so it cannot be confirmed with draft_id; nothing was sent")
+    return draft.text
 
 
 def build_params(*, summary: object, detail: object = None, title: object = None,
-                 level: object = "plain", verbatim_detail: bool = False, detail_layout: str = "text") -> dict:
+                 level: object = "plain", verbatim_detail: bool = False, detail_layout: str = "text",
+                 fields: object = None) -> dict:
     """The ``confirm`` params (without ``session_id``), cleaned and bounded. Raises
     :class:`ConfirmParamsError` instead of truncating: the person must see the whole of what the agent
     asks, so text over a bound goes back to the agent to shorten.
@@ -167,7 +257,8 @@ def build_params(*, summary: object, detail: object = None, title: object = None
     :func:`verbatim_problem` refuses (hidden characters, trailing whitespace, padding that could push part
     of it out of view) raises instead, never rewritten. *detail_layout* ``json`` is a tool call's detail
     (:func:`verbatim_problem` with ``json_strings``). Clients render the detail monospaced with whitespace
-    preserved."""
+    preserved. A reviewed draft (:func:`draft_detail`) comes in as a *verbatim_detail* too. *fields*: see
+    :func:`build_fields`."""
     if detail_layout not in DETAIL_LAYOUTS:
         raise ConfirmParamsError(f"detail_layout must be one of: {', '.join(DETAIL_LAYOUTS)}")
     level = str(level or "").strip()
@@ -190,9 +281,12 @@ def build_params(*, summary: object, detail: object = None, title: object = None
     title_text = clean_text(title, multiline=False) if title is not None else ""
     if len(title_text) > CONFIRM_TITLE_MAX:
         raise ConfirmParamsError(f"title is {len(title_text)} characters; the limit is {CONFIRM_TITLE_MAX}.")
+    built_fields = build_fields(fields)
     params: dict = {"title": title_text or DEFAULT_TITLE, "summary": summary_text, "level": level}
     if detail_text:
         params["detail"] = detail_text
+    if built_fields:
+        params["fields"] = built_fields
     return params
 
 
@@ -274,10 +368,15 @@ def _connection(transport) -> tuple[str, str]:
 class _Audit:
     """The two audit records of one confirm request. Fields name who and what, never the text."""
 
-    def __init__(self, sid: str, level: str, *, forced: bool = False) -> None:
+    def __init__(self, sid: str, level: str, *, forced: bool = False, fields: int = 0, draft: bool = False) -> None:
         self.sid, self.level, self.request_id, self.reached = sid, level, "", 0
-        # Only set on a forced request, so the records of every other request keep their shape.
-        self.extra = {"forced": True} if forced else {}
+        # Only set where they apply, so the records of every other request keep their shape. ``fields`` is a
+        # count and ``draft`` a flag: never a label, value or the draft's text.
+        self.extra: dict = {"forced": True} if forced else {}
+        if fields:
+            self.extra["fields"] = fields
+        if draft:
+            self.extra["draft"] = True
         self.acting = "-"
         try:
             from tui_gateway import server
@@ -287,8 +386,9 @@ class _Audit:
 
     def opened(self, request_id: str, reached: int) -> None:
         self.request_id, self.reached = request_id, reached
-        audit.info("confirm request session=%s request=%s level=%s acting_user=%s reached=%d forced=%s",
-                   self.sid, request_id, self.level, self.acting, reached, bool(self.extra))
+        audit.info("confirm request session=%s request=%s level=%s acting_user=%s reached=%d forced=%s fields=%d "
+                   "draft=%s", self.sid, request_id, self.level, self.acting, reached, bool(self.extra.get("forced")),
+                   int(self.extra.get("fields", 0)), bool(self.extra.get("draft")))
         _audit_sink("confirm_request", session_id=self.sid, request_id=request_id, level=self.level,
                     acting_user=self.acting, reached=reached, **self.extra)
 
@@ -329,25 +429,28 @@ def forced_rate_key(key: str) -> str:
     return f"forced:{key}"
 
 
-def request(sid: str, params: dict, *, timeout: float = TIMEOUT_SECONDS, forced: bool = False) -> ConfirmOutcome:
+def request(sid: str, params: dict, *, timeout: float = TIMEOUT_SECONDS, forced: bool = False,
+            draft: bool = False) -> ConfirmOutcome:
     """Ask the clients of *sid* that advertised ``params["level"]`` to confirm, and block for the outcome.
     *params* come from :func:`build_params`. Never raises for a client-side failure: every way of not
     getting a valid answer is ``unavailable`` or ``timeout``, never ``declined`` and never ``confirmed``.
     A ``passkey`` request that ends in one of the post-send failures (:func:`opens_downgrade_window`) opens
     the no-downgrade window of the conversation, forced or not. *forced*: the gateway asks for an operator
-    rule (level ``passkey`` only); it counts under :func:`forced_rate_key` and is audited as forced."""
+    rule (level ``passkey`` only); it counts under :func:`forced_rate_key` and is audited as forced. *draft*:
+    the detail came from ``review_register`` (audited as ``draft: true``). A request with ``fields`` reaches
+    only connections that advertised ``confirm_fields`` (and, at ``passkey``, ``confirm_passkey {v: 2}``)."""
     if forced and params["level"] != "passkey":
         raise ValueError("a forced confirmation is at level passkey")
-    outcome = _request(sid, params, timeout=timeout, forced=forced)
+    outcome = _request(sid, params, timeout=timeout, forced=forced, draft=draft)
     if params["level"] == "passkey" and opens_downgrade_window(outcome):
         _note_passkey_failed(_rate_key(sid), time.monotonic())
     return outcome
 
 
-def _request(sid: str, params: dict, *, timeout: float, forced: bool = False) -> ConfirmOutcome:
+def _request(sid: str, params: dict, *, timeout: float, forced: bool = False, draft: bool = False) -> ConfirmOutcome:
     level_name = params["level"]
     level = LEVELS[level_name]
-    log = _Audit(sid, level_name, forced=forced)
+    log = _Audit(sid, level_name, forced=forced, fields=len(params.get("fields") or ()), draft=draft)
     if not level.implemented:
         return log.outcome(ConfirmOutcome("unavailable", reason="level_not_implemented"))
     if os.environ.get("HERMES_COMPUTE_HOST_CHILD") == "1":
@@ -377,6 +480,10 @@ def _request(sid: str, params: dict, *, timeout: float, forced: bool = False) ->
     else:
         outgoing = {**params, **level.challenge(sid, params)}
         gated = {"validate": result_problem(outgoing)}
+        if params.get("fields"):
+            # Only to connections that show the fields: a client that would drop them would ask the person to
+            # confirm less than the agent asked. None attached: ``unavailable (no_capable_client)``.
+            gated["target"] = server_requests.confirm_fields_target
         hook_user, expires_at = ("" if log.acting == "-" else log.acting), int(time.time() + timeout)
 
     tracked: list[request_hooks.Tracked] = []
@@ -445,12 +552,21 @@ def strong_confirm(sid: str):
 
 
 def request_from_tool(sid: str, *, summary: object, detail: object = None, title: object = None,
-                      level: object = "plain") -> ConfirmOutcome:
+                      level: object = "plain", fields: object = None, draft_id: object = None) -> ConfirmOutcome:
     """The bridge ``tools/confirm_tool.py`` calls (installed by ``tui_gateway/server.py``). *sid* is the turn's
     ``HERMES_UI_SESSION_ID``; a sid this process does not host is ``unavailable`` with nothing sent.
-    Raises :class:`ConfirmParamsError` for text the agent must fix."""
+    *draft_id* (``review.draft``'s approval): the detail is that draft's approved text, verbatim, from the
+    gateway's register; *detail* is ignored then. Raises :class:`ConfirmParamsError` for text the agent must
+    fix and for a *draft_id* this conversation does not have (nothing sent)."""
     from tui_gateway import server
-    params = build_params(summary=summary, detail=detail, title=title, level=level)
-    if not sid or sid not in server._sessions:
-        return _Audit(sid or "-", params["level"]).outcome(ConfirmOutcome("unavailable", reason="no_session"))
-    return request(sid, params)
+    hosted = bool(sid) and sid in server._sessions
+    if draft_id is not None and hosted:
+        params = build_params(summary=summary, detail=draft_detail(sid, draft_id), title=title, level=level,
+                              verbatim_detail=True, fields=fields)
+    else:
+        params = build_params(summary=summary, detail=detail, title=title, level=level, fields=fields)
+    log_extra = {"fields": len(params.get("fields") or ()), "draft": draft_id is not None}
+    if not hosted:
+        return _Audit(sid or "-", params["level"], **log_extra).outcome(
+            ConfirmOutcome("unavailable", reason="no_session"))
+    return request(sid, params, draft=draft_id is not None)

@@ -10,12 +10,14 @@ destination; future coverage belongs as a fourth "mechanical" tier next to agent
 import re
 import fnmatch
 import hashlib
+import io
 import json
+import tokenize
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 SCANNER_VERSION = "skills-guard-v6"
@@ -596,35 +598,86 @@ def _mask_prose_link_destinations(lines: List[str]) -> List[str]:
     return out
 
 
+PYTHON_SOURCE_SUFFIXES = {".py", ".pyw"}
+
+
+@dataclass
+class SourceText:
+    """A file's text as the scan reads it. *encoding* is what it was decoded as (a Python file's
+    PEP 263 cookie or BOM decides it, as it does for the interpreter); *strict* is False when bytes
+    had to be replaced or NUL bytes removed to read it at all."""
+    text: str
+    encoding: str
+    strict: bool
+
+
+def decode_python_source(data: bytes) -> Optional[SourceText]:
+    """*data* decoded the way the interpreter decodes a source file (``tokenize.detect_encoding``:
+    BOM, then a coding cookie on line 1 or 2, else UTF-8), or None when it cannot be."""
+    try:
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+        return SourceText(data.decode(encoding), encoding, b"\x00" not in data)
+    except (SyntaxError, LookupError, UnicodeDecodeError, ValueError):
+        return None
+
+
+def read_source_text(file_path: Path, *, any_text: bool = False, python: bool = False) -> Optional[SourceText]:
+    """The text ``scan_file`` scans, or None when it does not scan *file_path*. Python source is
+    decoded as the interpreter decodes it (a ``latin-1`` or ``utf-7`` cookie included); anything
+    else as UTF-8. Only ``SCANNABLE_EXTENSIONS`` are read, unless *any_text* (the plugin scanner,
+    HERM-195): then every file is read, a file that is not valid UTF-8 with its bad bytes replaced,
+    and NUL bytes are stripped from any file with a known extension or a shebang. A file with
+    neither that holds NUL bytes is binary and is not read. *python*: decode it as Python source
+    whatever its name (a script whose shebang names Python)."""
+    suffix = file_path.suffix.lower()
+    known = suffix in SCANNABLE_EXTENSIONS or file_path.name == "SKILL.md"
+    if not known and not any_text:
+        return None
+    try:
+        data = file_path.read_bytes()
+    except OSError:
+        return None
+    source = decode_python_source(data) if python or suffix in PYTHON_SOURCE_SUFFIXES else None
+    if source is None:
+        try:
+            source = SourceText(data.decode("utf-8"), "utf-8", True)
+        except UnicodeDecodeError:
+            if not any_text:
+                return None
+            source = SourceText(data.decode("utf-8", "replace"), "utf-8", False)
+    if any_text and "\x00" in source.text:
+        if not known and not data.startswith(b"#!"):
+            return None
+        source = SourceText(source.text.replace("\x00", ""), source.encoding, False)
+    return source
+
+
 def scan_file(file_path: Path, rel_path: str = "", *, any_text: bool = False) -> List[Finding]:
     """Threat-pattern + invisible-unicode scan of one file; *rel_path* is the display path (default: file
-    name). Regex findings dedupe per pattern per line; invisible chars yield one per line. Only
-    ``SCANNABLE_EXTENSIONS`` are read, unless *any_text* (the plugin scanner, HERM-195): then every
-    file that is UTF-8 without NUL bytes is read too, whatever its name."""
-    rel_path = rel_path or file_path.name
-    known = file_path.suffix.lower() in SCANNABLE_EXTENSIONS or file_path.name == "SKILL.md"
-    if not known and not any_text:
+    name). Regex findings dedupe per pattern per line; invisible chars yield one per line. What is
+    read, and how it is decoded: ``read_source_text``."""
+    source = read_source_text(file_path, any_text=any_text)
+    if source is None:
         return []
-    try:
-        text = file_path.read_text(encoding='utf-8')
-    except (UnicodeDecodeError, OSError):
-        return []
-    if not known and "\x00" in text:
-        return []
+    return scan_text(source.text, rel_path or file_path.name, file_path.suffix.lower())
+
+
+def scan_text(text: str, rel_path: str, suffix: str) -> List[Finding]:
+    """``scan_file`` on text already read; *suffix* is the extension it is judged by."""
     lines = text.split('\n')
     findings = []
     docstring_lines = _compute_docstring_lines(lines)  # so code patterns don't fire on prose
-    traversal_lines = _mask_prose_link_destinations(lines) if file_path.suffix.lower() == ".md" else lines
-    suffix, owners = file_path.suffix.lower(), _statement_owners(lines)  # per-file context for the demotion
+    traversal_lines = _mask_prose_link_destinations(lines) if suffix == ".md" else lines
+    owners = _statement_owners(lines)  # per-file context for the demotion
     for pattern, pid, severity, category, description in _COMPILED_THREAT_PATTERNS:
         for i, line in enumerate(lines, start=1):
             scan_line = traversal_lines[i - 1] if pid in _PATH_TRAVERSAL_PATTERN_IDS else line
             if i not in docstring_lines and pattern.search(scan_line):
-                text = line.strip()
+                shown = line.strip()
                 line_severity, line_description = _demote_inert_path_reference(
                     pid, severity, description, line, lines[owners[i - 1]], suffix)
                 findings.append(Finding(pid, line_severity, category, rel_path, i,
-                                        text if len(text) <= 120 else text[:117] + "...", line_description))
+                                        shown if len(shown) <= 120 else shown[:117] + "...", line_description))
     for i, line in enumerate(lines, start=1):
         if (char := next((c for c in INVISIBLE_CHARS if c in line), None)) is not None:
             name = _unicode_char_name(char)

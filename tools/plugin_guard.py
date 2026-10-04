@@ -25,10 +25,10 @@ from tools.plugin_guard_context import (
     JsSinkInventory, is_inert_fixture_line, is_loopback_only, is_pip_install_in_prose_literal,
     is_regex_alternation_token, is_self_uninstall_doc, is_test_tree, prose_cap)
 from tools.skills_guard import (
-    Finding, ScanResult, SCANNABLE_EXTENSIONS, SUSPICIOUS_BINARY_EXTENSIONS, _determine_verdict,
-    format_scan_report, scan_file)
+    Finding, ScanResult, SCANNABLE_EXTENSIONS, SUSPICIOUS_BINARY_EXTENSIONS, SourceText, _determine_verdict,
+    decode_python_source, format_scan_report, read_source_text, scan_text)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-fork-6"
+PLUGIN_SCANNER_VERSION = "plugin-guard-fork-7"
 
 # Caches and vendored environments a checkout makes for itself. Skipped only when nothing in
 # them is tracked by git: a TRACKED ``venv/evil.py`` or ``__pycache__/x.pyc`` ships with the
@@ -238,15 +238,15 @@ def _is_main_guard(node: ast.If) -> bool:
     )
 
 
-def _main_guard_body_lines(file_path: Path) -> set[int]:
+def _main_guard_body_lines(text: str) -> set[int]:
     """Return lines executed only by ``if __name__ == '__main__'`` blocks.
 
     Invalid Python deliberately returns no lines so its findings retain the
     conservative severity.
     """
     try:
-        tree = ast.parse(file_path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError, ValueError):  # ValueError: UnicodeDecodeError, NUL bytes
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):  # ValueError: NUL bytes
         return set()
     lines: set[int] = set()
     for node in ast.walk(tree):
@@ -258,18 +258,24 @@ def _main_guard_body_lines(file_path: Path) -> set[int]:
 
 
 def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path,
-                     js: Optional[JsSinkInventory] = None, *, parsed_python: bool = False) -> List[Finding]:
+                     js: Optional[JsSinkInventory] = None, *, parsed_python: bool = False,
+                     text: Optional[str] = None) -> List[Finding]:
     """Apply plugin-specific exemptions and severity remaps to raw findings. *js* is the scan's
     JavaScript inventory (``plugin_guard_context`` (5b)); without it no JS token rule applies.
     *parsed_python*: the findings come from parsing the file as Python, so it is code whatever its
-    name (a ``notes.txt`` a loader runs is not documentation)."""
+    name (a ``notes.txt`` a loader runs is not documentation). *text*: the file as the scan decoded
+    it (read here as UTF-8 when not given)."""
+    if not findings:
+        return []
     suffix = ".py" if parsed_python else _code_suffix(file_path)
     is_code = suffix in CODE_FILE_EXTENSIONS
-    main_guard_lines = _main_guard_body_lines(file_path) if suffix in PYTHON_SOURCE_EXTENSIONS else set()
+    if text is None:
+        text = "\n".join(_file_lines(file_path))
+    main_guard_lines: Optional[set] = None
     is_js = suffix in {".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx", ".mts", ".cts", ".vue", ".svelte"}
     # A CI workflow definition runs on the forge's runner, not the host: same cap as a README.
     doc_prose = not parsed_python and (is_doc_prose(rel_path) or is_ci_workflow(rel_path))
-    lines = _file_lines(file_path) if findings else []
+    lines = text.split("\n")
     out: List[Finding] = []
     for f in findings:
         if is_code and f.pattern_id in CODE_EXEMPT_PATTERN_IDS:
@@ -287,12 +293,12 @@ def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path,
             f.severity = _comment_severity(f)
         # Last and critical-only: a one-step cap that can never re-raise a finding an
         # earlier remap already lowered.
-        if (
-            f.pattern_id in MAIN_GUARD_DEMOTIONS
-            and f.severity == "critical"
-            and f.line in main_guard_lines
-        ):
-            f.severity = MAIN_GUARD_DEMOTIONS[f.pattern_id]
+        if f.pattern_id in MAIN_GUARD_DEMOTIONS and f.severity == "critical" \
+                and suffix in PYTHON_SOURCE_EXTENSIONS:
+            if main_guard_lines is None:     # parsed only when a finding needs it
+                main_guard_lines = _main_guard_body_lines(text)
+            if f.line in main_guard_lines:
+                f.severity = MAIN_GUARD_DEMOTIONS[f.pattern_id]
         out.append(f)
     return out
 
@@ -432,18 +438,65 @@ def _check_plugin_structure(plugin_dir: Path, tracked: Optional[set] = None) -> 
     return findings
 
 
-def _python_findings(file_path: Path, rel: str) -> List[Finding]:
-    """The Python checks (``plugin_guard_code``) for *file_path*: Python source in full, and any other
-    text file that parses as Python, because a loader can be pointed at a file of any name."""
+# A PEP 263 coding cookie (line 1 or 2). Python honours it on any file a loader compiles.
+_CODING_COOKIE = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
+_UTF8_NAMES = {"utf-8", "utf-8-sig", "utf8", "utf_8"}
+
+
+def _read_plugin_file(file_path: Path) -> Optional[SourceText]:
+    """*file_path* decoded as the scan reads it (``skills_guard.read_source_text``): Python source,
+    a script whose shebang names Python included, as the interpreter decodes it."""
+    return read_source_text(file_path, any_text=True,
+                            python=_code_suffix(file_path) in PYTHON_SOURCE_EXTENSIONS)
+
+
+def _encoding_findings(source: SourceText, rel: str, suffix: str) -> List[Finding]:
+    """Code whose bytes a UTF-8 reader and the interpreter (or shell) would read differently."""
+    out: List[Finding] = []
+    if suffix in PYTHON_SOURCE_EXTENSIONS and source.encoding.lower() not in _UTF8_NAMES:
+        out.append(Finding("source_encoding", "high", "obfuscation", rel, 1, f"encoding: {source.encoding}",
+                           f"Python source declares the {source.encoding} encoding: what runs is not what a "
+                           "UTF-8 reader shows (it is scanned as the interpreter decodes it)"))
+    if suffix in CODE_FILE_EXTENSIONS and not source.strict:
+        out.append(Finding("undecodable_source", "high", "obfuscation", rel, 0, "invalid bytes or NUL",
+                           "code file holds bytes that are not valid in its encoding, or NUL bytes "
+                           "(scanned with them replaced or removed)"))
+    return out
+
+
+# Text a Python loader could run but that is something else first; a ``.json`` never calls anything.
+_NEVER_PYTHON = {".html", ".htm", ".xhtml", ".svg", ".css", ".json", ".xml"}
+
+
+def _parses_as_code(text: str) -> bool:
+    """Whether *text* is Python that does something: it parses and holds an import or a call (a
+    one-word ``.txt`` parses too, and is not code)."""
     try:
-        text = file_path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError):
-        return []
-    if _code_suffix(file_path) in PYTHON_SOURCE_EXTENSIONS:
-        return python_code_findings(text, rel)
-    if "\x00" in text:
-        return []
-    return python_code_findings(text, rel, line_fallback=False)
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return False
+    return any(isinstance(node, (ast.Import, ast.ImportFrom, ast.Call)) for node in ast.walk(tree))
+
+
+def _python_view(file_path: Path, source: SourceText, suffix: str) -> Tuple[SourceText, bool]:
+    """The text the Python checks read and whether it is Python code. Python source as decoded; a
+    file of another name is code when it parses as Python that imports or calls something, because
+    a loader can be pointed at a file of any name. When such a file's coding cookie declares another
+    encoding it is read as a loader would read it."""
+    if suffix in PYTHON_SOURCE_EXTENSIONS:
+        return source, True
+    if suffix in CODE_FILE_EXTENSIONS or suffix in _NEVER_PYTHON:
+        return source, False      # another language's code, or markup: judged as what it is
+    head = source.text.split("\n", 2)[:2]
+    cookie = next((m.group(1) for m in map(_CODING_COOKIE.match, head) if m), None)
+    if cookie and cookie.lower() not in _UTF8_NAMES:
+        try:
+            as_python = decode_python_source(file_path.read_bytes())
+        except OSError:
+            as_python = None
+        if as_python is not None and _parses_as_code(as_python.text):
+            return as_python, True
+    return source, _parses_as_code(source.text)
 
 
 def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
@@ -455,10 +508,24 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
         js = JsSinkInventory(plugin_dir, frozenset(EXCLUDED_DIRS),
                              walk=lambda: _walk(plugin_dir, tracked, know_tracked=True))
         for f, rel in sorted(_walk(plugin_dir, tracked, know_tracked=True)):
-            if f.is_file() and not f.is_symlink():
-                # Every text file, whatever its name: a loader can be pointed at any of them (HERM-195).
-                all_findings.extend(_filter_findings(scan_file(f, rel_path=rel, any_text=True), rel, f, js))
-                all_findings.extend(_filter_findings(_python_findings(f, rel), rel, f, js, parsed_python=True))
+            if not f.is_file() or f.is_symlink():
+                continue
+            # Every text file, whatever its name: a loader can be pointed at any of them (HERM-195).
+            source = _read_plugin_file(f)
+            if source is None:
+                continue
+            suffix = _code_suffix(f)
+            view, is_python = _python_view(f, source, suffix)
+            # A file that parses as Python code is judged as code whatever its name.
+            judged = dict(parsed_python=is_python, text=view.text)
+            all_findings.extend(_filter_findings(scan_text(view.text, rel, ".py" if is_python else suffix),
+                                                 rel, f, js, **judged))
+            all_findings.extend(_filter_findings(
+                _encoding_findings(view, rel, ".py" if is_python else suffix), rel, f, js, **judged))
+            if is_python:
+                all_findings.extend(_filter_findings(
+                    python_code_findings(view.text, rel, line_fallback=suffix in PYTHON_SOURCE_EXTENSIONS),
+                    rel, f, js, **judged))
     verdict = _determine_verdict(all_findings)
     if all_findings:
         categories = sorted({f.category for f in all_findings})

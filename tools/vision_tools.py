@@ -872,7 +872,10 @@ VISION_ANALYZE_SCHEMA = {
         "properties": {
             "image_url": {
                 "type": "string",
-                "description": "Image URL (http/https), local file path, or data: URL to load."
+                "description": (
+                    "Image URL (http/https), local file path, or data: URL to load. An image attached "
+                    "earlier is the path in its [Image attached at: <path>] or @image:<path> line."
+                )
             },
             "question": {
                 "type": "string",

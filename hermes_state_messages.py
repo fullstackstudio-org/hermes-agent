@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agent.context_compressor import (
     _DB_PERSISTED_MARKER as _DB_PERSISTED_MARKER_KEY, MODEL_ONLY_DISPLAY_METADATA_KEY, _is_checkpoint_item,
     _newest_checkpoint_carrier, split_user_originated_turn)
+from agent.inline_images import strip_inline_images
 from agent.memory_manager import sanitize_context
 from agent.message_sanitization import _sanitize_surrogates
 from hermes_cli.timefmt import coerce_epoch
@@ -145,6 +146,10 @@ class SessionMessagesMixin:
             return _sanitize_surrogates(content)
         if content is None or isinstance(content, (bytes, int, float)):
             return content
+        # A stored row never holds an inline (base64) image: the file stays on disk and the text keeps its
+        # ``[Image attached at: <path>]`` handle (agent/inline_images.py). Every writer and every content
+        # comparison encodes through here, so stored and compared bytes stay the same.
+        content = strip_inline_images(content)
         try:
             return cls._CONTENT_JSON_PREFIX + json.dumps(content)  # ensure_ascii escapes surrogates: bindable
         except (TypeError, ValueError):

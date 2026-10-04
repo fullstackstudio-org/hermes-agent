@@ -17,6 +17,7 @@ from agent.context_compressor import (
     drop_shadowed_checkpoints,
     user_originated_turn_view,
 )
+from agent.inline_images import strip_inline_images
 from agent.lazy_forward import forward as _forward, forward_static as _forward_static
 from agent.memory_manager import sanitize_context
 
@@ -111,6 +112,8 @@ def _durable_content(content: Any) -> Any:
         return _multimodal_text_summary(content)
     if not isinstance(content, list):
         return content
+    # An uploaded image the text names by path: the handle is the record, no placeholder beside it.
+    content = strip_inline_images(content)
     txt = [
         str(p.get("text", "")) if p.get("type") == "text" else "[screenshot]"
         for p in content

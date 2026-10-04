@@ -1,0 +1,258 @@
+"""An uploaded image lives on disk: the conversation keeps its path, never its base64 bytes.
+
+The turn an image is sent in carries it inline (unless ``images.inline_current_turn`` is false); stored
+rows, later turns and the history clients read carry the ``[Image attached at: <path>]`` handle only.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+
+import pytest
+
+from agent.image_routing import build_native_content_parts
+from agent.inline_images import (
+    INLINE_IMAGE_NOTE,
+    drop_inline_images_in_place,
+    inline_current_turn_enabled,
+    inline_images_for_display,
+    strip_inline_images,
+    strip_replayed_inline_images,
+)
+from agent.replay_cleanup import canonicalize_replay_history
+from agent.turn_context import build_api_messages
+from hermes_state import SessionDB
+
+_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+    "01f15c4890000000a49444154789c6360000002000100ffff0300000600"
+    "0557bfabd40000000049454e44ae426082"
+)
+
+
+@pytest.fixture
+def upload(tmp_path):
+    img = tmp_path / "images" / "upload_20261004_120000_1.png"
+    img.parent.mkdir()
+    img.write_bytes(_PNG)
+    return img
+
+
+@pytest.fixture
+def native_parts(upload):
+    parts, skipped = build_native_content_parts("what is in this photo?", [str(upload)])
+    assert not skipped and any(p.get("type") == "image_url" for p in parts)
+    return parts
+
+
+def _has_data_url(value) -> bool:
+    return "data:image" in json.dumps(value)
+
+
+class _SendAgent:
+    api_mode = "chat_completions"
+    ephemeral_system_prompt = None
+    _compression_warning = None
+    _current_turn_timestamp = 10_000.0
+
+    @staticmethod
+    def _copy_reasoning_content_for_api(_source, _target):
+        return None
+
+    @staticmethod
+    def _should_sanitize_tool_calls():
+        return False
+
+
+def _send(history, idx):
+    request, _ = build_api_messages(
+        _SendAgent(), history, current_turn_user_idx=idx,
+        ext_prefetch_cache="", plugin_user_context="", moa_config=None, active_system_prompt="",
+    )
+    return request
+
+
+# ── persistence ──────────────────────────────────────────────────────────────
+
+
+def test_stored_rows_never_hold_an_inline_image(tmp_path, upload, native_parts):
+    """Every writer goes through the same encoding: append, batch append and a full rewrite
+    (edit/regenerate, compaction) store the handle, never the data URL."""
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        for sid in ("append", "batch", "replace"):
+            db.create_session(session_id=sid, source="tui")
+        db.append_message("append", role="user", content=native_parts)
+        db.append_messages_batch("batch", [{"role": "user", "content": native_parts}])
+        db.replace_messages("replace", [
+            {"role": "user", "content": native_parts}, {"role": "assistant", "content": "a cat"}])
+
+        for sid in ("append", "batch", "replace"):
+            stored = db.get_messages_as_conversation(sid)[0]["content"]
+            assert not _has_data_url(stored), sid
+            assert f"[Image attached at: {upload}]" in json.dumps(stored), sid
+            raw = db._conn.execute(
+                "SELECT content FROM messages WHERE session_id = ? AND role = 'user'", (sid,)).fetchone()[0]
+            assert "base64" not in raw, sid
+    finally:
+        db.close()
+
+
+def test_kept_prefix_still_matches_after_the_image_was_dropped(tmp_path, native_parts):
+    """A rewrite compares the live history to the stored rows through the same encoding, so the
+    stored (stripped) user row still counts as the same message as its live (inline) original."""
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session(session_id="s", source="tui")
+        live = [{"role": "user", "content": native_parts}, {"role": "assistant", "content": "a cat"}]
+        db.replace_messages("s", live)
+        first_ids = [m["_row_id"] for m in db.get_messages_as_conversation("s", include_row_ids=True)]
+        db.replace_messages("s", live + [{"role": "user", "content": "thanks"}], archive_dropped=True)
+        second = db.get_messages_as_conversation("s", include_row_ids=True)
+        assert [m["_row_id"] for m in second[:2]] == first_ids
+    finally:
+        db.close()
+
+
+def test_flushed_turn_row_names_the_file_without_a_placeholder(native_parts, upload):
+    """The agent's own flush projects list content to text: a named image adds no ``[screenshot]``."""
+    from agent.session_persistence import _durable_content
+
+    persisted = [{"type": "text", "text": f"what is in this photo?\n@image:{upload}"}, native_parts[1]]
+    assert _durable_content(persisted) == f"what is in this photo?\n@image:{upload}"
+    # An image nothing names keeps its placeholder.
+    assert _durable_content([{"type": "text", "text": "look"}, native_parts[1]]) == "look\n[screenshot]"
+
+
+# ── replay ───────────────────────────────────────────────────────────────────
+
+
+def test_later_turns_replay_the_handle_and_the_current_turn_keeps_the_pixels(upload, native_parts):
+    earlier = [
+        {"role": "user", "content": native_parts},
+        {"role": "assistant", "content": "a cat"},
+        {"role": "user", "content": "and its colour?"},
+    ]
+    frozen = copy.deepcopy(earlier)
+    request = _send(earlier, idx=2)
+    assert earlier == frozen  # the send path never rewrites the live list
+    assert not _has_data_url(request)
+    assert f"[Image attached at: {upload}]" in json.dumps(request[0]["content"])
+
+    current = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"},
+               {"role": "user", "content": native_parts}]
+    request = _send(current, idx=2)
+    assert any(p.get("type") == "image_url" for p in request[2]["content"])
+
+
+def test_replay_matches_what_a_resumed_session_sends(tmp_path, native_parts):
+    """Resume surfaces and the send path serialize the same prefix bytes."""
+    history = [{"role": "user", "content": native_parts}, {"role": "assistant", "content": "a cat"}]
+    replay = canonicalize_replay_history(history, now=10_000.0)
+    request = _send(history + [{"role": "user", "content": "more"}], idx=2)
+    assert request[0]["content"] == replay[0]["content"]
+    assert history[0]["content"] is native_parts  # pure
+
+
+def test_an_inline_image_no_handle_names_stays_for_the_model_and_shows_as_a_note(tmp_path):
+    """An OpenAI-compatible client sending a data: URL has no file on disk: the model keeps the image
+    (stored, replayed), and a client reading the history sees ``[image]``."""
+    unnamed = [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]
+    assert strip_inline_images(unnamed) is unnamed
+    history = [{"role": "user", "content": unnamed}, {"role": "assistant", "content": "ok"}]
+    assert strip_replayed_inline_images(history) is history
+    assert inline_images_for_display(unnamed) == [{"type": "text", "text": "look"}, {"type": "text", "text": INLINE_IMAGE_NOTE}]
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session(session_id="api", source="api_server")
+        db.append_message("api", role="user", content=unnamed)
+        assert db.get_messages_as_conversation("api")[0]["content"] == unnamed
+    finally:
+        db.close()
+
+
+def test_a_flattened_copy_of_a_named_turn_replays_without_the_data_url(upload):
+    text = f"look\n\n[Image attached at: {upload}]\ndata:image/png;base64," + "A" * 64
+    replay = strip_replayed_inline_images([{"role": "user", "content": text, "api_content": text}])
+    assert replay[0]["content"] == f"look\n\n[Image attached at: {upload}]\n{INLINE_IMAGE_NOTE}"
+    assert replay[0]["api_content"] == replay[0]["content"]
+    unnamed = [{"role": "user", "content": "data:image/png;base64," + "A" * 64}]
+    assert strip_replayed_inline_images(unnamed) is unnamed
+
+
+def test_remote_image_urls_and_other_roles_are_left_alone():
+    remote = [{"type": "text", "text": "x"}, {"type": "image_url", "image_url": {"url": "https://e.x/a.png"}}]
+    assert strip_inline_images(remote) is remote
+    tool = {"role": "tool", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}
+    assert strip_replayed_inline_images([tool])[0] is tool
+
+
+# ── the turn itself (run_conversation) ───────────────────────────────────────
+
+
+def _run(monkeypatch, user_message, cfg):
+    import agent.conversation_loop as loop
+
+    seen = {}
+
+    def _fake_turn(agent, message, **_kw):
+        seen["message"] = message
+        return {"messages": [{"role": "user", "content": message}, {"role": "assistant", "content": "a cat"}],
+                "completed": True}
+
+    monkeypatch.setattr(loop, "_run_conversation_turn", _fake_turn)
+    monkeypatch.setattr("agent.inline_images.inline_current_turn_enabled", lambda cfg_=None: inline_current_turn_enabled(cfg))
+    result = loop.run_conversation(type("A", (), {})(), user_message)
+    return seen["message"], result
+
+
+def test_the_current_turn_carries_the_image_and_its_history_drops_it(monkeypatch, upload, native_parts):
+    sent, result = _run(monkeypatch, native_parts, {})
+    assert any(p.get("type") == "image_url" for p in sent)
+    # The finished turn's history (what the next turn starts from) carries the handle only.
+    assert not _has_data_url(result["messages"])
+    assert f"[Image attached at: {upload}]" in json.dumps(result["messages"][0]["content"])
+
+
+def test_inline_current_turn_false_sends_the_handle_only(monkeypatch, upload, native_parts):
+    sent, _ = _run(monkeypatch, native_parts, {"images": {"inline_current_turn": False}})
+    assert not _has_data_url(sent)
+    assert f"[Image attached at: {upload}]" in json.dumps(sent)
+
+
+def test_inline_current_turn_config_parsing():
+    assert inline_current_turn_enabled({}) is True
+    assert inline_current_turn_enabled({"images": {"inline_current_turn": False}}) is False
+    assert inline_current_turn_enabled({"images": {"inline_current_turn": "false"}}) is False
+    assert inline_current_turn_enabled({"images": {"inline_current_turn": True}}) is True
+    assert inline_current_turn_enabled({"images": None}) is True
+
+
+def test_inline_current_turn_reads_the_profile_config(tmp_path, monkeypatch):
+    """Through the real loader: a profile's config.yaml turns the inline image off."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    assert inline_current_turn_enabled() is True
+    (home / "config.yaml").write_text("images:\n  inline_current_turn: false\n")
+    assert inline_current_turn_enabled() is False
+
+
+def test_drop_in_place_keeps_identity_and_markers(native_parts):
+    msg = {"role": "user", "content": native_parts, "_row_id": 7}
+    messages = [msg]
+    assert drop_inline_images_in_place(messages) == 1
+    assert messages[0] is msg and msg["_row_id"] == 7 and not _has_data_url(msg)
+
+
+def test_vision_guidance_names_the_handle_an_attachment_writes(native_parts):
+    """The model is told how an earlier attachment is named: the handle build_native_content_parts
+    writes is the one vision_analyze's image_url guidance describes."""
+    from tools.vision_tools import VISION_ANALYZE_SCHEMA
+
+    handle_line = native_parts[0]["text"].splitlines()[-1]
+    handle_prefix = handle_line.split(": ", 1)[0]  # "[Image attached at"
+    guidance = VISION_ANALYZE_SCHEMA["parameters"]["properties"]["image_url"]["description"]
+    assert handle_prefix in guidance and "@image:" in guidance

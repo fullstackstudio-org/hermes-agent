@@ -1268,6 +1268,13 @@ DEFAULT_CONFIG = {
         # an explicit number applies everywhere; 0 = unlimited.
         "max_calls_per_image": None,
     },
+    # Images a user attaches stay files on the server: stored rows, later turns and client history carry
+    # their ``[Image attached at: <path>]`` handle, never the base64 bytes (agent/inline_images.py).
+    "images": {
+        # The turn an image is sent in also carries it inline, so a vision model sees it without a tool
+        # call. false = that turn carries the handle only too; the model opens the file with vision_analyze.
+        "inline_current_turn": True,
+    },
     # "Hey Hermes" hands-free wake word: always-on, on-device hotword detection that starts a fresh
     # voice session. Off by default; toggle with /wake.
     "wake_word": {

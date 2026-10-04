@@ -1649,6 +1649,10 @@ Each entry supports the same three knobs as any auxiliary task config:
 
 Separate from `auxiliary.vision` (which picks the describer model): when the *main* model is vision-capable, `vision_analyze` and browser screenshots embed real pixels into tool results that are re-sent every later turn. `vision.embed_target_bytes` (default `262144`, clamped 64 KiB..4 MiB) sizes one embed; `vision.max_calls_per_image` caps how often the same image may be embedded per session (unset = 3 inside delegated subagents, unlimited for the main agent; `0` = unlimited). See [Vision → Native embeds ride the session](./features/vision.md#native-embeds-ride-the-session-visionembed_target_bytes-and-visionmax_calls_per_image).
 
+### Attached images (top-level `images:`)
+
+An image a person attaches is kept as a file on the gateway (client uploads under `<profile home>/images/`); stored history, later turns and client history carry its `[Image attached at: <path>]` handle, never the base64 bytes. `images.inline_current_turn` (default `true`) also sends the pixels inline on the turn the image arrives in; `false` sends the handle only there too, and the model opens the file with `vision_analyze`. See [Vision → Attached images stay files](./features/vision.md#attached-images-stay-files-imagesinline_current_turn).
+
 ### Limiting auxiliary concurrency
 
 `max_concurrency` caps in-flight LLM calls for auxiliary tasks such as `compression` and `title_generation` across the whole process. `auxiliary.vision.max_concurrency` is excluded: it already controls only vision's CPU-bound image encode/resize workers, not LLM requests. This is most useful when:

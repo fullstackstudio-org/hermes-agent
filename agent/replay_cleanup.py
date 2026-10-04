@@ -13,6 +13,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+from agent.inline_images import strip_replayed_inline_images
 from agent.tool_dispatch_helpers import make_tool_result_message
 from agent.tool_result_classification import tool_may_have_side_effect
 from agent.turn_context import drop_stale_api_content
@@ -168,7 +169,10 @@ def canonicalize_replay_history(
         now = time.time()
     cleaned = strip_interrupted_tool_tails(agent_history)
     cleaned = strip_dangling_tool_call_tail(cleaned)
-    return strip_stale_dangerous_confirmations(cleaned, now=now)
+    cleaned = strip_stale_dangerous_confirmations(cleaned, now=now)
+    # An image a user attached in an earlier turn replays as its ``[Image attached at: <path>]`` handle,
+    # never as inline base64 (agent/inline_images.py); the model re-reads the file with vision_analyze.
+    return strip_replayed_inline_images(cleaned)
 
 
 # --- Stale dangerous-confirmation text expiry ---

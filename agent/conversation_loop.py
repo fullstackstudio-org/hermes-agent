@@ -1639,8 +1639,14 @@ def run_conversation(
     ``{turn_id, current_turn_user_idx}`` pair is stamped beside the exact ``messages`` it
     addresses, after every history rewrite including post-turn micro-compaction.
     """
+    from agent import inline_images
     from agent.turn_context import export_current_turn_boundary
     from tools.vision_tools_history_budget import native_turn_images
+
+    # ``images.inline_current_turn: false``: even the turn an image was sent in carries only its
+    # ``[Image attached at: <path>]`` handle; the model opens the file with vision_analyze.
+    if inline_images.has_inline_images(user_message) and not inline_images.inline_current_turn_enabled():
+        user_message = inline_images.strip_inline_images(user_message)
 
     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
     # it does not embed the same pixels a second time into the same request (#76411).
@@ -1662,6 +1668,10 @@ def run_conversation(
         )
     result = export_current_turn_boundary(agent, result, user_message)
     _close_durable_failed_turn(agent, result)
+    # The turn is over: the history the next turn starts from (and that hosts keep, project to
+    # clients and count tokens on) carries the image handle, not the base64 bytes.
+    if isinstance(result, dict):
+        inline_images.drop_inline_images_in_place(result.get("messages"))
     return result
 
 

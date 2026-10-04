@@ -256,3 +256,56 @@ def test_vision_guidance_names_the_handle_an_attachment_writes(native_parts):
     handle_prefix = handle_line.split(": ", 1)[0]  # "[Image attached at"
     guidance = VISION_ANALYZE_SCHEMA["parameters"]["properties"]["image_url"]["description"]
     assert handle_prefix in guidance and "@image:" in guidance
+
+
+# ── handles name images one by one ───────────────────────────────────────────
+
+_UNNAMED = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "B" * 64}}
+
+
+def test_a_handle_names_one_image_and_an_extra_inline_image_is_kept(tmp_path, upload, native_parts):
+    """A delegated goal puts the caller's data: URL after the file images: one handle, two inline parts;
+    only the named one goes."""
+    mixed = [*native_parts, _UNNAMED]
+    stripped = strip_inline_images(mixed)
+    assert stripped == [native_parts[0], _UNNAMED]
+    assert strip_replayed_inline_images([{"role": "user", "content": mixed}])[0]["content"] == stripped
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session(session_id="mixed", source="tui")
+        db.append_message("mixed", role="user", content=mixed)
+        assert db.get_messages_as_conversation("mixed")[0]["content"] == stripped
+    finally:
+        db.close()
+    shown = inline_images_for_display(mixed)
+    assert shown == [native_parts[0], {"type": "text", "text": INLINE_IMAGE_NOTE}]
+
+
+def test_two_handles_drop_the_first_two_inline_images(tmp_path):
+    a, b = tmp_path / "a.png", tmp_path / "b.png"
+    for f in (a, b):
+        f.write_bytes(_PNG)
+    parts, _ = build_native_content_parts("compare", [str(a), str(b)])
+    assert [p["type"] for p in strip_inline_images([*parts, _UNNAMED])] == ["text", "image_url"]
+
+
+def test_prose_that_mentions_image_is_not_a_handle():
+    for text in ("see foo@image:bar", "the hint `[Image attached at: x]` looks like this"):
+        content = [{"type": "text", "text": text}, _UNNAMED]
+        assert strip_inline_images(content) is content, text
+
+
+def test_assistant_and_tool_rows_are_stored_as_they_are(tmp_path, native_parts):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session(session_id="roles", source="tui")
+        db.append_message("roles", role="user", content="hi")
+        db.append_message("roles", role="assistant", content=native_parts)
+        db.append_message("roles", role="tool", content=native_parts, tool_call_id="c1", tool_name="vision_analyze")
+        rows = db.get_messages_as_conversation("roles")
+        assert rows[1]["content"] == native_parts and rows[2]["content"] == native_parts
+    finally:
+        db.close()
+    assert strip_replayed_inline_images([{"role": "assistant", "content": native_parts}])[0]["content"] is native_parts
+

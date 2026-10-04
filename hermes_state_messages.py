@@ -137,7 +137,7 @@ class SessionMessagesMixin:
             conn.execute(_BUMP_GENERATION_SQL, (source, session_key))
 
     @classmethod
-    def _encode_content(cls, content: Any) -> Any:
+    def _encode_content(cls, content: Any, role: Optional[str] = None) -> Any:
         """Serialize list/dict content (multimodal parts) as a sentinel-prefixed JSON string (sqlite3 binds
         only scalars). Lone UTF-16 surrogates (unsanitized web-scraped tool results) are scrubbed here: left
         raw, sqlite3 raises UnicodeEncodeError and the session silently stops persisting. Pairs with
@@ -146,10 +146,12 @@ class SessionMessagesMixin:
             return _sanitize_surrogates(content)
         if content is None or isinstance(content, (bytes, int, float)):
             return content
-        # A stored row never holds an inline (base64) image: the file stays on disk and the text keeps its
-        # ``[Image attached at: <path>]`` handle (agent/inline_images.py). Every writer and every content
-        # comparison encodes through here, so stored and compared bytes stay the same.
-        content = strip_inline_images(content)
+        # A stored user row never holds an inline (base64) image its text names a file for: the file stays
+        # on disk and the ``[Image attached at: <path>]`` handle says where (agent/inline_images.py). Every
+        # writer and every user-content comparison encodes through here with its role, so stored and
+        # compared bytes stay the same. Other roles are stored as they are.
+        if role == "user":
+            content = strip_inline_images(content)
         try:
             return cls._CONTENT_JSON_PREFIX + json.dumps(content)  # ensure_ascii escapes surrogates: bindable
         except (TypeError, ValueError):
@@ -269,7 +271,7 @@ class SessionMessagesMixin:
         ``message_id`` (yuanbao's message-dict convention)."""
         _str_or_none = lambda v: _scrub_surrogates(v) if isinstance(v, str) else None  # noqa: E731
         _reasoning = lambda key: msg.get(key) if keep_reasoning else None  # noqa: E731
-        encoded_content = self._encode_content(msg.get("content"))
+        encoded_content = self._encode_content(msg.get("content"), role)
         encoded_tool_calls = json.dumps(tool_calls) if tool_calls else None
         encoded_tool_name = _scrub_surrogates(msg.get("tool_name"))
         display_metadata = self._encode_display_metadata(msg.get("display_metadata"))
@@ -401,7 +403,7 @@ class SessionMessagesMixin:
         def _do(conn):
             row = conn.execute("SELECT id FROM messages WHERE session_id = ? AND role = ? "
                 "AND content = ? AND active = 1 ORDER BY id DESC LIMIT 1",
-                (session_id, role, self._encode_content(content))).fetchone()
+                (session_id, role, self._encode_content(content, role))).fetchone()
             if row is None:
                 return False
             conn.execute("UPDATE messages SET display_kind = ?, display_metadata = ? WHERE id = ?",
@@ -609,7 +611,7 @@ class SessionMessagesMixin:
         """The (role, content, tool_call_id, tool_calls) columns a message writes — the identity the
         kept-prefix match compares. *content* is passed through the loader's lens first so a message
         read back from the DB matches the row it came from."""
-        return (role, cls._encode_content(cls._loaded_view_content(role, content)), tool_call_id,
+        return (role, cls._encode_content(cls._loaded_view_content(role, content), role), tool_call_id,
                 json.dumps(tool_calls) if tool_calls else None)
 
     def _stamp_kept_live_prefix(self, live: list, messages: List[Dict[str, Any]]) -> int:
@@ -832,7 +834,7 @@ class SessionMessagesMixin:
             "UPDATE messages SET api_content = ? WHERE id = (SELECT id FROM messages "
             "WHERE session_id = ? AND role = 'user' AND active = 1 ORDER BY id DESC LIMIT 1"
             ") AND content IS ?",
-            (_scrub_surrogates(api_content), session_id, self._encode_content(content)))
+            (_scrub_surrogates(api_content), session_id, self._encode_content(content, "user")))
 
     def set_message_api_content(
         self, session_id: str, row_id: int, content: Any, api_content: str
@@ -859,7 +861,7 @@ class SessionMessagesMixin:
         return self._write_rowcount(
             "UPDATE messages SET api_content = ? WHERE id = ? AND session_id = ? "
             "AND role = 'user' AND active = 1 AND content IS ?",
-            (_scrub_surrogates(api_content), row_id, session_id, self._encode_content(content)))
+            (_scrub_surrogates(api_content), row_id, session_id, self._encode_content(content, "user")))
 
     def set_user_message_content(self, session_id: str, row_id: int, content: Any) -> int:
         """Rewrite the content of ONE known active user row. Used when a user turn was written at submit
@@ -870,7 +872,7 @@ class SessionMessagesMixin:
             return 0
         return self._write_rowcount(
             "UPDATE messages SET content = ? WHERE id = ? AND session_id = ? AND role = 'user' AND active = 1",
-            (self._encode_content(content), row_id, session_id))
+            (self._encode_content(content, "user"), row_id, session_id))
 
     def _display_dedupe_key(self, row) -> Tuple[Any, ...]:
         """Historical display identity, including normalized live content from user handoff carriers."""
@@ -881,7 +883,7 @@ class SessionMessagesMixin:
                 "display_kind": row["display_kind"],
                 "display_metadata": self._decode_display_metadata(row["display_metadata"])})
             if handoff is not None and live_view is not None:
-                dedupe_content = self._encode_content(live_view.get("content"))
+                dedupe_content = self._encode_content(live_view.get("content"), "user")
         return (row["role"], dedupe_content, row["timestamp"],
                 row["tool_call_id"], row["tool_calls"], row["tool_name"])
 

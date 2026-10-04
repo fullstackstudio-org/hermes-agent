@@ -27,9 +27,10 @@ INLINE_IMAGE_NOTE = "[image]"
 
 _IMAGE_PART_TYPES = frozenset({"image_url", "input_image", "image"})
 
-#: The handles a message uses to name an attached image file: the native-attach hint
-#: (``[Image attached at: <path>]``) and the ``@image:<path>`` reference the TUI gateway persists.
-IMAGE_HANDLE_RE = re.compile(r"^\[Image attached at: .+\][ \t]*$|@image:\S", re.MULTILINE)
+#: The handles a message uses to name an attached image file, one per image and each at the start of
+#: its own line: the native-attach hint (``[Image attached at: <path>]``) and the ``@image:<path>``
+#: reference the TUI gateway persists. ``foo@image:bar`` inside prose is not a handle.
+IMAGE_HANDLE_RE = re.compile(r"^(?:\[Image attached at: .+\][ \t]*$|@image:\S)", re.MULTILINE)
 _LOCAL_HANDLE_RE = re.compile(r"^\[Image attached at: (.+?)\][ \t]*$", re.MULTILINE)
 
 # A base64 image data URL inside plain text (a legacy row flattened for display, a resent copy of one).
@@ -76,19 +77,41 @@ def _text_of(content: Any) -> str:
     )
 
 
+def named_image_count(text: str) -> int:
+    """How many attached image files ``text`` names (handle lines, see :data:`IMAGE_HANDLE_RE`)."""
+    return len(IMAGE_HANDLE_RE.findall(text)) if text else 0
+
+
 def names_an_image(text: str) -> bool:
     """Whether ``text`` names an attached image file (``[Image attached at: …]`` or ``@image:…``)."""
-    return bool(text) and IMAGE_HANDLE_RE.search(text) is not None
+    return named_image_count(text) > 0
+
+
+def named_inline_flags(content: List[Any]) -> List[bool]:
+    """For each part of ``content``: is it an inline image a handle names? Handles name images in order
+    and every producer puts its file images first (``build_native_content_parts``; a delegated goal
+    appends caller data: URLs after them), so the first N inline images are the N named ones and any
+    beyond N have no file."""
+    remaining = named_image_count(_text_of(content))
+    flags = []
+    for part in content:
+        named = remaining > 0 and is_inline_image_part(part)
+        remaining -= named
+        flags.append(named)
+    return flags
 
 
 def strip_inline_images(content: Any) -> Any:
     """``content`` without the inline images its text names a file for; the same object otherwise.
 
-    Text parts (which carry the ``[Image attached at: <path>]`` handle) and every other part are kept.
-    Content that names no image file is returned unchanged: its inline image is the only copy."""
-    if not has_inline_images(content) or not names_an_image(_text_of(content)):
+    Text parts (which carry the handles), every other part and any inline image beyond the named ones
+    (it is the only copy) are kept."""
+    if not has_inline_images(content):
         return content
-    return [p for p in content if not is_inline_image_part(p)]
+    flags = named_inline_flags(content)
+    if not any(flags):
+        return content
+    return [p for p, named in zip(content, flags) if not named]
 
 
 def inline_images_for_display(content: Any) -> Any:
@@ -98,9 +121,8 @@ def inline_images_for_display(content: Any) -> Any:
         return strip_inline_image_text(content)
     if not has_inline_images(content):
         return content
-    named = names_an_image(_text_of(content))
     out: List[Any] = []
-    for part in content:
+    for part, named in zip(content, named_inline_flags(content)):
         if not is_inline_image_part(part):
             out.append(part)
         elif not named:
@@ -203,6 +225,8 @@ __all__ = [
     "inline_current_turn_enabled",
     "inline_images_for_display",
     "is_inline_image_part",
+    "named_image_count",
+    "named_inline_flags",
     "names_an_image",
     "strip_inline_image_text",
     "strip_inline_images",

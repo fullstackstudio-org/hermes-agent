@@ -561,17 +561,19 @@ def _with_tool_call_labels(message: dict) -> dict:
     return {**message, "tool_call_labels": labels} if labels else message
 
 
-def _without_wire_copy(message: dict) -> dict:
+def _without_wire_copy(message: dict, *, display: bool = True) -> dict:
     """``message`` without ``api_content``: the exact bytes sent to the model provider, which carry the
     gateway's per-turn notes and injected context. An internal replay copy, never a client's.
 
-    A user row stored before inline images were dropped on write still carries a base64 ``data:`` image;
-    the client copy names it by its handle or ``[image]`` instead (agent/inline_images.py)."""
+    A user row stored before inline images were dropped on write can still carry a base64 ``data:`` image.
+    A page for display shows none (named ones by their handle, others as ``[image]``); an export keeps
+    the stored form (named ones dropped, an unnamed one kept: it is the only copy), so export then import
+    loses nothing (agent/inline_images.py)."""
     copy = {key: value for key, value in message.items() if key != "api_content"}
     if copy.get("role") == "user":
-        from agent.inline_images import inline_images_for_display
+        from agent.inline_images import inline_images_for_display, strip_inline_images
 
-        copy["content"] = inline_images_for_display(copy.get("content"))
+        copy["content"] = (inline_images_for_display if display else strip_inline_images)(copy.get("content"))
     return copy
 
 
@@ -835,7 +837,7 @@ async def export_session_endpoint(session_id: str, profile: Optional[str] = None
             while True:
                 messages = db.get_messages(sid, limit=500, after_id=last_id)
                 for message in messages:
-                    yield ("" if first else ",") + _compact_json(_without_wire_copy(message))
+                    yield ("" if first else ",") + _compact_json(_without_wire_copy(message, display=False))
                     first = False
                 last_id = messages[-1].get("id") if len(messages) == 500 else None
                 if last_id is None:  # short page, or cannot keyset without row ids

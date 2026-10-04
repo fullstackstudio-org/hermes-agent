@@ -115,7 +115,7 @@ def _coerce_message_text(content: Any) -> str:
 
     Inline (base64) images never reach this text: an uploaded image is named by its handle in the text
     part, and a legacy data URL with no handle becomes ``[image]`` (agent/inline_images.py)."""
-    from agent.inline_images import INLINE_IMAGE_NOTE, is_inline_image_part, names_an_image, strip_inline_image_text
+    from agent.inline_images import INLINE_IMAGE_NOTE, is_inline_image_part, named_inline_flags, strip_inline_image_text
 
     if isinstance(content, str):
         return strip_inline_image_text(content)
@@ -123,16 +123,11 @@ def _coerce_message_text(content: Any) -> str:
         return INLINE_IMAGE_NOTE
     if isinstance(content, list):
         chunks: list[str] = []
-        named = None  # computed on the first inline image only
-        for part in content:
+        for part, named in zip(content, named_inline_flags(content)):
             if isinstance(part, str) or (isinstance(part, dict) and isinstance(part.get("text"), str)):
                 chunks.append(part if isinstance(part, str) else part["text"])
             elif is_inline_image_part(part):
-                if named is None:
-                    named = names_an_image("\n".join(
-                        p if isinstance(p, str) else str(p.get("text") or "") for p in content
-                        if isinstance(p, str) or (isinstance(p, dict) and isinstance(p.get("text"), str))))
-                if not named:
+                if not named:  # a named one is shown by its handle; an unnamed one only as a note
                     chunks.append(f"\n{INLINE_IMAGE_NOTE}")
             elif isinstance(part, dict) and part.get("type"):
                 rendered = _history_dict_text(part, image_urls=True)

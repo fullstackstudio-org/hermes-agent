@@ -229,23 +229,23 @@ Responses-style backends (for example `openai-codex`) accept only inline JPEG, P
 
 ### Attached images stay files: `images.inline_current_turn`
 
-An image a person attaches is saved on the gateway: an upload from a connected client (`image.attach_bytes`) or a pasted screenshot under `<profile home>/images/` (for example `upload_20261004_120000_1.png`), a messaging-platform photo in the image cache. The user turn names it with a handle line:
+An image a person attaches is saved on the gateway: an upload from a connected client (`image.attach_bytes`) or a pasted screenshot under `<profile home>/images/` (for example `upload_20261004_120000_3f9c2a7b1d4e.png`), a messaging-platform photo in the image cache. The user turn names it with a handle line:
 
 ```
 what is in this photo?
 
-[Image attached at: /home/hermes/.hermes/images/upload_20261004_120000_1.png]
+[Image attached at: /home/hermes/.hermes/images/upload_20261004_120000_3f9c2a7b1d4e.png]
 ```
 
 On a vision-capable model the turn the image is sent in also carries the pixels inline (`image_url` with a `data:` URL), so the model sees the picture without a tool call. After that turn the image lives on as its path only:
 
 - **Stored history** (`state.db`) never holds the base64 bytes of a named image. The row keeps the text with its handle (the TUI gateway stores the `@image:<path>` reference instead), and nothing else.
 - **Later turns** replay the handle, not the image. To look again the model calls `vision_analyze` with that path; the tool's `image_url` description says an earlier attachment is the path on its `[Image attached at: <path>]` or `@image:<path>` line.
-- **Clients** reading history (`session.history`, `session.resume`, `GET /api/sessions/{id}/messages`, the export) never receive a `data:` image: a named image shows as an `@image:<path>` line, an inline image no handle names as `[image]`. A client fetches the file itself with [`GET /api/files/images/{name}`](./web-dashboard.md#get-apifilesimagesname).
+- **Clients** reading history (`session.history`, `session.resume`, `GET /api/sessions/{id}/messages`) never receive a `data:` image: a named image shows as an `@image:<path>` line, an inline image no handle names as `[image]`. The session export keeps the stored form, so an unnamed inline image survives an export and import. A client fetches a file in the profile's `images/` folder with [`GET /api/files/images/{name}`](./web-dashboard.md#get-apifilesimagesname).
 
 Sessions stored before this change are not rewritten: their old rows are cleaned the same way when they are read, both for clients and for the model.
 
-An inline image whose turn names no file (an OpenAI-compatible API client sending `data:` URLs) has no copy on disk, so the model keeps it in later turns and in stored history, as before; clients still see `[image]`.
+Handles name images in order, one handle line (`[Image attached at: …]` or an `@image:` line) per image, so a turn with two handles drops its first two inline images. An inline image beyond those (an OpenAI-compatible API client sending `data:` URLs, a delegated task's caller image) has no copy on disk, so the model keeps it in later turns and in stored history, as before; clients still see `[image]`. Assistant and tool rows are never changed.
 
 Set `images.inline_current_turn: false` to send even the current turn with the handle only. The model then opens the file with `vision_analyze` when it needs to see it, which costs a tool call but never puts the pixels in the request unasked:
 

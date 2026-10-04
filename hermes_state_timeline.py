@@ -90,7 +90,7 @@ def _register_functions(db, conn):
     def identity_content(content, display_kind):
         handoff, live = split_user_originated_turn({
             "role": "user", "content": db._decode_content(content), "display_kind": display_kind})
-        return db._encode_content(live.get("content")) if handoff is not None and live is not None else content
+        return db._encode_content(live.get("content"), "user") if handoff is not None and live is not None else content
 
     conn.create_function("timeline_identity_content", 2, identity_content, deterministic=True)
     conn.create_function("timeline_preview", 3,

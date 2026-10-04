@@ -104,3 +104,36 @@ def test_legacy_rows_reach_no_client_with_their_data_url(tmp_path, monkeypatch):
     assert page.status_code == 200 and export.status_code == 200
     assert "base64" not in page.text and "base64" not in export.text
     assert "[Image attached at:" in page.text
+
+
+def test_a_named_and_an_unnamed_inline_image_show_as_reference_and_note(tmp_path):
+    path = str(tmp_path / "images" / "upload_1.png")
+    history = [{"role": "user", "content": [
+        {"type": "text", "text": f"two\n\n[Image attached at: {path}]"},
+        {"type": "image_url", "image_url": {"url": _DATA}},
+        {"type": "image_url", "image_url": {"url": _DATA}}]}]
+    assert _user_text(history) == f"two\n\n@image:{format_reference_value(path)}\n[image]"
+
+
+def test_the_export_keeps_an_unnamed_inline_image(tmp_path, monkeypatch):
+    """An export is the stored form: a named image is dropped, an unnamed one (the only copy) stays."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    db = _legacy_db(tmp_path, monkeypatch, str(tmp_path / "images" / "upload_1.png"))
+    try:
+        db.append_message("legacy", role="user", content=[
+            {"type": "text", "text": "api client"}, {"type": "image_url", "image_url": {"url": _DATA}}])
+    finally:
+        db.close()
+    from hermes_cli.web_routers.sessions import manage_router
+
+    app = FastAPI()
+    app.include_router(manage_router)
+    with TestClient(app) as client:
+        exported = client.get("/api/sessions/legacy/export").json()["messages"]
+        page = client.get("/api/sessions/legacy/messages").text
+    users = [m["content"] for m in exported if m["role"] == "user"]
+    assert "base64" not in json.dumps(users[0])  # the named legacy image
+    assert _DATA in json.dumps(users[1])  # the unnamed one
+    assert "base64" not in page

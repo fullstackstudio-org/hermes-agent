@@ -18,8 +18,8 @@ processes (the CLI revokes while the gateway mints):
 - a person holds at most ``max_grants`` live grants, checked inside the transaction that would add one;
 - a refresh token is rotated at most once; a rotated token presented again revokes its grant (reuse
   detection), whether at load or at rotation -- except a parallel refresh (:data:`REFRESH_RACE_GRACE`):
-  the same client presenting it less than 30 s after it was rotated, while the token that replaced it has
-  not been used, is refused without revoking anything;
+  the same client presenting it less than 5 s after it was rotated, while the token that replaced it has
+  not been used, is refused without revoking anything (:class:`Raced`, audited by the route layer);
 - revoking a grant revokes every token of it.
 
 A grant is *live* while it is not revoked, its absolute lifetime has not passed and it has at least one
@@ -65,8 +65,10 @@ METADATA_MAX_BYTES = 8 * 1024
 LAST_USED_EVERY = 60  # ``grants.last_used_*`` is written at most once a minute per grant
 # A client that refreshes twice in parallel with one refresh token (two requests that each found their
 # access token expired) is not a thief: within this many seconds of the rotation, by the same client, while
-# the successor refresh token is unused, the late request is refused (``raced``) and the grant stays.
-REFRESH_RACE_GRACE = 30
+# the successor refresh token is unused, the late request is refused (``raced``) and the grant stays. Parallel
+# refreshes land within milliseconds; the window is kept short because a thief who refreshes first and the
+# real client inside it leaves the grant alive (plan D3 amendment), and each such refusal is audited.
+REFRESH_RACE_GRACE = 5
 TOKEN_KEEP_AFTER_EXPIRY = 7 * 86400
 GRANT_KEEP_AFTER_END = 90 * 86400
 CHAT_IDLE_KEEP = 180 * 86400
@@ -159,6 +161,9 @@ _LIVE = ("(g.revoked_at IS NULL AND g.expires_at > :now AND EXISTS (SELECT 1 FRO
 # token a rotation replaced (its successor's link back, for :data:`REFRESH_RACE_GRACE`); ``codes.reused_at``:
 # when a taken code was presented again (its exchange is then refused).
 _ADDED_COLUMNS = (("tokens", "parent_hash", "BLOB"), ("codes", "reused_at", "INTEGER"))
+# Indexes on added columns: created after them, on every open (``IF NOT EXISTS``), so an older file gains them
+# without a schema version. ``tokens_parent``: every rotated token presented again looks up its successor.
+_ADDED_INDEXES = ("CREATE INDEX IF NOT EXISTS tokens_parent ON tokens (parent_hash)",)
 
 
 class StoreError(Exception):
@@ -194,6 +199,16 @@ class TokenInvalid(StoreError):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+class Raced(TokenInvalid):
+    """A rotated refresh token came back within :data:`REFRESH_RACE_GRACE` from the client it belongs to while
+    its successor is unused: a parallel refresh, refused and nothing revoked. ``grant_id``: its grant (for the
+    audit line, so a thief racing the real client inside the window is visible). ``reason`` is ``raced``."""
+
+    def __init__(self, grant_id: str):
+        super().__init__("raced")
+        self.grant_id = grant_id
 
 
 class Reused(TokenInvalid):
@@ -427,6 +442,8 @@ class MCPStore:
             for table, column, kind in _ADDED_COLUMNS:
                 if column not in {r["name"] for r in db.execute(f"PRAGMA table_info({table})")}:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+            for statement in _ADDED_INDEXES:
+                db.execute(statement)
             row = db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
             if row is None:
                 db.execute("INSERT INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
@@ -729,7 +746,7 @@ class MCPStore:
     def load_refresh(self, token: str, *, client_id: str) -> Optional[TokenGrant]:
         """The refresh token if it can be rotated by *client_id*, else None. A rotated token presented
         again revokes its grant (``refresh_reuse``; :class:`Reused` when this call revoked it), unless it is
-        a parallel refresh (:meth:`_raced`)."""
+        a parallel refresh (:meth:`_raced`: :class:`Raced`, nothing revoked)."""
         if not token:
             return None
         now = self.now()
@@ -739,8 +756,9 @@ class MCPStore:
             if row is None:
                 return None
             if row["rotated_at"] is not None:
-                if not self._raced(db, row, client_id, now) \
-                        and self._revoke(db, row["grant_id"], BY_REFRESH_REUSE, now):
+                if self._raced(db, row, client_id, now):
+                    raise Raced(str(row["grant_id"]))  # nothing written: the transaction rolls back empty
+                if self._revoke(db, row["grant_id"], BY_REFRESH_REUSE, now):
                     revoked = self._grant_row(db, row["grant_id"], now)
                 if revoked is None:
                     return None
@@ -760,8 +778,8 @@ class MCPStore:
         again, never past the grant's end) are minted in the same family.
 
         Raises :class:`TokenInvalid`; with ``reused`` the grant has been revoked (and that is committed; a
-        :class:`Reused` when this call revoked it); with ``raced`` (a parallel refresh, :meth:`_raced`)
-        nothing changed."""
+        :class:`Reused` when this call revoked it); with ``raced`` (:class:`Raced`, a parallel refresh,
+        :meth:`_raced`) nothing changed."""
         now = self.now()
         reused = False
         revoked: Optional[Grant] = None
@@ -771,7 +789,7 @@ class MCPStore:
                 raise TokenInvalid("unknown")
             if row["rotated_at"] is not None:
                 if self._raced(db, row, client_id, now):
-                    raise TokenInvalid("raced")
+                    raise Raced(str(row["grant_id"]))
                 if self._revoke(db, row["grant_id"], BY_REFRESH_REUSE, now):
                     revoked = self._grant_row(db, row["grant_id"], now)
                 reused = True

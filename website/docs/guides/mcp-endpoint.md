@@ -143,8 +143,10 @@ disconnecting itself (the `mcp.changed` event), and a revoke done with the opera
 next time the page is opened. The gateway also revokes
 a client by itself when one of its sign-in codes or refresh tokens is presented a second time, a sign that it
 was copied; that shows up the same way, and the audit log says why (`code_reuse`, `refresh_reuse`). A client
-that refreshes twice at once with the same token is not treated as a copy: the late request is refused and
-the client stays connected.
+that refreshes twice at once with the same token is not treated as a copy: a late request within 5 seconds,
+while the new token is still unused, is refused and the client stays connected. The audit log names each
+such refusal (`mcp_token_rejected` with `reason: refresh_raced` and the grant id), so a copied token used
+in that window is still visible there.
 
 The operator can do the same on the gateway host:
 

@@ -557,6 +557,38 @@ def test_a_reused_refresh_token_revokes_audits_and_announces_once(gw, transports
     assert grants_of(gw) == []
 
 
+def _rejections() -> list[dict]:
+    return [x for x in audit_lines() if x["event"] == "mcp_token_rejected"]
+
+
+def test_a_late_copy_four_seconds_after_its_rotation_is_raced_audited_and_the_grant_stays(gw, transports, clock):
+    """Plan D3 amendment: within 5 s of its rotation, by the same client, while the successor is unused."""
+    mine = transports(ALICE_ID)
+    flow = gw.connect(ALICE)
+    [grant] = grants_of(gw)
+    assert gw.refresh(flow).status_code == 200
+    mine.frames.clear()
+    clock.advance(4)
+    r = gw.refresh(flow)
+    assert (r.status_code, r.json()["error"]) == (400, "invalid_grant")
+    [line] = _rejections()
+    assert (line["reason"], line["grant_id"], line["client_id"]) == ("refresh_raced", grant["id"], flow.client_id)
+    assert _revocations() == [] and mine.changes() == []
+    assert [g["id"] for g in grants_of(gw)] == [grant["id"]]
+
+
+def test_a_late_copy_six_seconds_after_its_rotation_revokes_the_grant(gw, transports, clock):
+    flow = gw.connect(ALICE)
+    [grant] = grants_of(gw)
+    assert gw.refresh(flow).status_code == 200
+    clock.advance(6)
+    assert gw.refresh(flow).status_code == 400
+    [line] = _revocations()
+    assert (line["by"], line["grant_id"]) == ("refresh_reuse", grant["id"])
+    assert all(x["reason"] != "refresh_raced" for x in _rejections())
+    assert grants_of(gw) == []
+
+
 def test_a_rotated_refresh_token_sent_to_revoke_is_a_reuse_too(gw, transports, clock):
     mine = transports(ALICE_ID)
     flow = gw.connect(ALICE)

@@ -42,7 +42,9 @@ What the route layer adds to the SDK's handlers:
   names, the address and an outcome; never a token, code, secret, state or nonce;
 - ``mcp.changed`` to the person: ``granted`` when a code is exchanged, ``revoked`` when the client revokes
   its own grant (RFC 7009) and when a code or refresh token presented again made the store revoke one
-  (``mcp_grant_revoked`` with ``by`` ``code_reuse`` / ``refresh_reuse``; the client hears ``invalid_grant``).
+  (``mcp_grant_revoked`` with ``by`` ``code_reuse`` / ``refresh_reuse``; the client hears ``invalid_grant``);
+  a rotated refresh token refused inside the parallel-refresh window (``store.Raced``, the grant stays) is
+  ``mcp_token_rejected`` with ``reason: refresh_raced`` and its ``grant_id``.
 
 ``POST /mcp`` is the MCP server (``tui_gateway.mcp_bridge.server``) behind the SDK's bearer check against this
 store: a missing or invalid token gets the SDK's 401 with
@@ -127,6 +129,7 @@ class CallNotes:
     user_id: str = ""
     extra: dict = field(default_factory=dict)
     revoked_by_reuse: list = field(default_factory=list)  # store.Reused: grants a reused code/token revoked
+    raced_grant: str = ""  # store.Raced: the grant of a refresh token refused inside the parallel-refresh window
 
 
 _notes: ContextVar[Optional[CallNotes]] = ContextVar("dashboard_mcp_call_notes", default=None)
@@ -155,6 +158,11 @@ class RouteProvider(MCPProvider):
         notes = _note()
         if notes is not None:
             notes.revoked_by_reuse.append(exc)
+
+    def raced(self, exc) -> None:
+        notes = _note()
+        if notes is not None:
+            notes.raced_grant = exc.grant_id
 
     async def get_client(self, client_id: str):
         info = await super().get_client(client_id)
@@ -455,6 +463,11 @@ async def token_endpoint(request: Request) -> Response:
         audit_log(event, user_id=notes.user_id, grant_id=notes.grant_id, client_id=client_id, ip=ip)
         if event is AuditEvent.MCP_TOKEN_ISSUED:  # a grant exists from its code exchange, not from the consent
             await anyio.to_thread.run_sync(announce_granted, rt.store, notes.grant_id)
+    elif notes.raced_grant and grant_type == "refresh_token":
+        # A parallel refresh, or a thief and the real client within the window (plan D3 amendment): the grant
+        # stays, so the refusal is named apart from an ordinary invalid_grant.
+        audit_log(AuditEvent.MCP_TOKEN_REJECTED, grant_id=notes.raced_grant, client_id=client_id,
+                  grant_type=grant_type, ip=ip, reason="refresh_raced", status=response.status_code)
     else:
         audit_log(AuditEvent.MCP_TOKEN_REJECTED, client_id=client_id, grant_type=grant_type, ip=ip,
                   reason=_clip(_body_json(response).get("error"), 40), status=response.status_code)

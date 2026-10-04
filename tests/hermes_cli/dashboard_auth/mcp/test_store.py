@@ -16,7 +16,7 @@ from hermes_cli.dashboard_auth.mcp.store import (
     BY_CLIENT, BY_CODE_REUSE, BY_REFRESH_REUSE, CHAT_IDLE_KEEP, CLIENT_UNUSED_TTL, CODE_TTL, CONSENT_TTL,
     CONSENTS_PER_ADDRESS, GRANT_KEEP_AFTER_END, LAST_USED_EVERY, METADATA_MAX_BYTES, OPERATOR,
     REFRESH_RACE_GRACE,
-    TOKEN_KEEP_AFTER_EXPIRY, CodeInvalid, ConsentInvalid, LimitReached, MCPStore, Reused, StoreError,
+    TOKEN_KEEP_AFTER_EXPIRY, CodeInvalid, ConsentInvalid, LimitReached, MCPStore, Raced, Reused, StoreError,
     TokenInvalid, hash_secret)
 
 ALICE = "self_hosted:alice"
@@ -590,7 +590,8 @@ def test_a_late_copy_is_refused_without_revoking_only_while_the_successor_is_unu
     issued = _grant(store)
     rotated = store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
     clock.t += REFRESH_RACE_GRACE - 1
-    assert store.load_refresh(issued.refresh_token, client_id="client-1") is None
+    with pytest.raises(Raced):
+        store.load_refresh(issued.refresh_token, client_id="client-1")
     with pytest.raises(TokenInvalid) as raced:
         store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
     assert raced.value.reason == "raced" and store.grant(issued.grant.id).live
@@ -627,6 +628,7 @@ def test_a_file_without_the_added_columns_gains_them(tmp_path, clock):
     path = tmp_path / "dashboard_auth" / "mcp.db"
     MCPStore(path, clock=clock).counts()
     db = sqlite3.connect(path)
+    db.execute("DROP INDEX tokens_parent")  # an older file had neither the column nor its index
     db.execute("ALTER TABLE tokens DROP COLUMN parent_hash")
     db.execute("ALTER TABLE codes DROP COLUMN reused_at")
     db.commit()
@@ -640,6 +642,57 @@ def test_a_file_without_the_added_columns_gains_them(tmp_path, clock):
                       (hash_secret(issued.refresh_token),)).fetchone()[0] == 1
     assert "reused_at" in {r[1] for r in db.execute("PRAGMA table_info(codes)")}
     assert db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "1"
+
+
+@pytest.mark.parametrize("load", [True, False], ids=["load", "rotate"])
+def test_a_late_copy_four_seconds_after_its_rotation_is_raced_with_its_grant(store, clock, load):
+    """Plan D3 amendment: the window is 5 s, and a raced refusal names its grant (for the audit line)."""
+    _client(store)
+    issued = _grant(store)
+    store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    clock.t += 4
+    with pytest.raises(Raced) as raced:
+        if load:
+            store.load_refresh(issued.refresh_token, client_id="client-1")
+        else:
+            store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    assert (raced.value.reason, raced.value.grant_id) == ("raced", issued.grant.id)
+    assert store.grant(issued.grant.id).live
+
+
+@pytest.mark.parametrize("load", [True, False], ids=["load", "rotate"])
+def test_a_late_copy_six_seconds_after_its_rotation_revokes(store, clock, load):
+    _client(store)
+    issued = _grant(store)
+    store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    clock.t += 6
+    with pytest.raises(Reused):
+        if load:
+            store.load_refresh(issued.refresh_token, client_id="client-1")
+        else:
+            store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    assert store.grant(issued.grant.id).revoked_by == BY_REFRESH_REUSE
+
+
+def test_the_race_window_is_five_seconds():
+    assert REFRESH_RACE_GRACE == 5
+
+
+def test_a_successor_is_found_by_an_index_and_an_older_file_gains_it(tmp_path, clock):
+    path = tmp_path / "dashboard_auth" / "mcp.db"
+    MCPStore(path, clock=clock).counts()
+    db = sqlite3.connect(path)
+    plan = " ".join(str(r[-1]) for r in db.execute(
+        "EXPLAIN QUERY PLAN SELECT 1 FROM tokens WHERE parent_hash = ? AND kind = 'refresh'", (b"x",)))
+    assert "tokens_parent" in plan, plan
+    db.execute("DROP INDEX tokens_parent")
+    db.commit()
+    db.close()
+    MCPStore(path, clock=clock).counts()  # opened again: the index is back, the schema version unchanged
+    db = sqlite3.connect(path)
+    assert "tokens_parent" in {r[1] for r in db.execute("PRAGMA index_list(tokens)")}
+    assert db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "1"
+    db.close()
 
 
 def test_refresh_scope_may_narrow_never_widen(store):

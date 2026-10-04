@@ -18,7 +18,9 @@ turn acts for; ``send_gated`` parks the request until a capable device attaches 
 - :func:`request` returns an :class:`Outcome`: ``answered``, ``skipped``, ``approved``, ``rejected``,
   ``unavailable`` (nobody can show it, the app answered an error, withdrawn, a rate limit, turn isolation, a bad
   upload, ...; NOT an answer) or ``timeout`` (300 s). A client's claim never decides an outcome: the gateway reads
-  the validated answer, computes ``edited`` itself, and checks uploaded files on disk;
+  the validated answer, computes ``edited`` itself, and checks uploaded files on disk. An app's ``4041``
+  ``cannot_show`` reaches the agent as ``cannot_show:<reason>`` when the reason is one the contract lists
+  (:data:`CANNOT_SHOW_REASONS`), else as ``error_response``;
 - ``input.file`` answers name files by reference. After the request settled, outside every lock, the upload
   directory is opened from ``/`` without following a symbolic link anywhere, each file is opened inside it by name
   (it must sit directly in the directory, and a link is refused, never followed), and its size and SHA-256 must
@@ -83,6 +85,10 @@ RECIPIENTS_MAX = 10
 #: Outcomes that carry an answer of the person's, and the ones where nothing reached a person.
 ANSWER_STATUSES = frozenset({"answered", "skipped", "approved", "rejected"})
 NOT_SHOWN_REASONS = frozenset({"no_capable_client", "write_failed", server_requests.NO_ACTING_USER})
+#: The ``4041 cannot_show`` reasons the contract lists (``contract/requests`` §3), passed to the agent as
+#: ``cannot_show:<reason>``; any other reason (the set is open) is reported as plain ``error_response``.
+CANNOT_SHOW_REASONS = frozenset({"no_camera", "not_supported_on_device", "permission_denied", "upload_failed",
+                                 "unsupported_version", "shutting_down"})
 
 _MIME = re.compile(r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}")
 _HASH_CHUNK = 1024 * 1024
@@ -381,8 +387,10 @@ def verify_files(params: dict, files: list[dict]) -> tuple[str, list[str]]:
 
 
 def _ref_text(sid: str, path: str) -> str | None:
-    """The ``@file:`` reference ``file.attach`` gives for *path* (workspace-relative inside the session's working
-    directory, absolute outside it, quoted by the same rule), None when the path cannot be quoted safely."""
+    """The ``@file:`` reference for *path*, built like ``file.attach``'s (workspace-relative inside the session's
+    working directory, absolute outside it, quoted by the same rule). Not always the same: where the path needs
+    quoting but no quote form fits it, ``file.attach`` hands the reference back unquoted and this returns None, so
+    the file then carries no ``ref_text`` (the agent still gets its ``path``). Safer, and deliberately so."""
     from tui_gateway import prompt_attachments, server
     ref = server._attachment_ref_path(server._sessions.get(sid), Path(path))
     quoted = prompt_attachments._format_ref_value(ref)
@@ -475,15 +483,22 @@ def request(sid: str, method: str, params: dict, *, timeout: float = TIMEOUT_SEC
     if refused := _limiter.reserve(key, time.monotonic()):
         return log.outcome(Outcome("unavailable", reason=refused))
     sent_at: float | None = None
+
+    def opened(request_id: str, reached: int) -> None:
+        # The window is charged from the moment the request is open (sent, or parked for a device), never for a
+        # call that failed before that (params the contract refuses raise ValueError from send_gated).
+        nonlocal sent_at
+        sent_at = time.monotonic()
+        log.opened(request_id, reached)
+
     try:
         target = server_requests.acting_user_target(sid, method)
         outgoing = {**params, "expires_at": int(time.time() + timeout)}
         interactive_validate.prepare(outgoing)
-        sent_at = time.monotonic()
         result = server_requests.send_gated(
             method, sid, outgoing, level=None, park_seconds=PARK_SECONDS, timeout=timeout, target=target,
             validate=interactive_validate.validator(method, outgoing), max_refusals=MAX_REFUSALS,
-            on_open=log.opened)
+            on_open=opened)
         if result.status == "unavailable" and result.reason in NOT_SHOWN_REASONS:
             sent_at = None  # nothing reached a person: it does not count against the window
     finally:
@@ -548,7 +563,16 @@ def _outcome(sid: str, key: str, method: str, params: dict, result, log: _Audit)
         return log.outcome(Outcome("timeout", reason="timeout"), request_id=rid)
     if result.status == "cancelled":
         return log.outcome(Outcome("unavailable", reason=f"cancelled:{result.reason}"), request_id=rid)
+    if result.reason == "error_response":
+        return log.outcome(Outcome("unavailable", reason=_error_reason(result)), request_id=rid)
     return log.outcome(Outcome("unavailable", reason=result.reason or "unavailable"), request_id=rid)
+
+
+def _error_reason(result) -> str:
+    """``cannot_show:<reason>`` for an app's ``4041`` whose ``data.reason`` the contract lists, else
+    ``error_response``: nothing else of the client's reaches the agent or the audit log."""
+    client = getattr(result, "error_reason", "") or ""
+    return f"cannot_show:{client}" if client in CANNOT_SHOW_REASONS else "error_response"
 
 
 def request_from_tool(sid: str, method: str, **kwargs: Any) -> Outcome:

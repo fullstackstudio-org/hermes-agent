@@ -5,9 +5,13 @@ FIRST problem as the reason string ``contract/requests/README.md`` §3-§6 names
 ``field:<id>:<problem>``, ``files:too_many``, ``file:<n>:outside_dir``, ``text:not_verbatim``, ...), or None for an
 answer that may settle the request. It runs under ``server_requests``' lock, so it is PURE and cheap: string,
 number and date arithmetic on the answer and the frame's own params, no I/O, no logging, no state. (The one
-exception is a datetime answer's time zone: the first lookup of a zone reads its tzdata file, once, and the set of
-known zones is built by :func:`prepare` before the request opens, off the lock.) Checks that need the disk (a file
-exists, its size and hash) are the caller's, after the request settled (``interactive.verify_files``).
+exception is a datetime answer's time zone: a zone is read from its tzdata file the first time this process looks
+it up and then kept in :data:`_zones` for good, a cache bounded by the zones the host knows. The set of known
+zones and a field's own ``tz`` are loaded by :func:`prepare` before the request opens, and the zone an answer names
+by the validator's :meth:`_Validator.warm`, which ``server_requests`` runs outside its lock before it judges a
+response frame; ``request.answer`` already judges outside the lock first. So a zone file is read under the lock
+only if a race beats both.) Checks that need the disk (a file exists, its size and hash) are the caller's, after
+the request settled (``interactive.verify_files``).
 
 The order is the README's: the result model (``bad_shape``), ``not_optional``, then per method. Within a form,
 the ``values`` keys first (``unknown``), then each field in the form's order; within a field the structural
@@ -50,14 +54,18 @@ _PARTS = re.compile(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?([+-])
 _INSTANT = re.compile(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?([+-])(\d{2}):(\d{2})")
 
 _known_zones: frozenset[str] | None = None
+#: Every zone looked up so far, by name: strong references (``ZoneInfo``'s own cache is small and weak), only for
+#: names in :func:`known_zones`, so it holds at most one entry per zone the host knows.
+_zones: dict[str, ZoneInfo] = {}
 
 
 # ── time zones and instants ────────────────────────────────────────────────────────────────────
 
 
 def known_zones() -> frozenset[str]:
-    """Every IANA zone name this host knows. Built once; :func:`prepare` calls it before a request opens, so an
-    answer check never scans the tz database under a lock."""
+    """Every IANA zone name this host knows; empty on a host without a time zone database (no system zoneinfo and
+    no ``tzdata`` package), where a datetime field is refused when the form is built. Built once; :func:`prepare`
+    calls it before a request opens, so an answer check never scans the tz database under a lock."""
     global _known_zones
     if _known_zones is None:
         import zoneinfo
@@ -66,13 +74,17 @@ def known_zones() -> frozenset[str]:
 
 
 def zone(name: str) -> ZoneInfo | None:
-    """The zone *name*, or None when it is not one this host knows (never raises)."""
-    if name not in known_zones():
+    """The zone *name*, or None when it is not one this host knows (never raises). Read from disk the first time
+    and kept in :data:`_zones` from then on."""
+    if not isinstance(name, str) or name not in known_zones():
         return None
+    if (info := _zones.get(name)) is not None:
+        return info
     try:
-        return ZoneInfo(name)
+        info = ZoneInfo(name)
     except Exception:  # noqa: BLE001 - an unreadable zone file is an unknown zone
         return None
+    return _zones.setdefault(name, info)
 
 
 def prepare(params: dict) -> None:
@@ -395,6 +407,42 @@ def validate_answer(method: str, params: dict, result: Any) -> str | None:
         return "bad_shape"
 
 
-def validator(method: str, params: dict):
+def _answer_zones(params: dict, result: Any) -> list[str]:
+    """The zone names a form answer's datetime values carry (for :meth:`_Validator.warm`)."""
+    values = result.get("values") if isinstance(result, dict) else None
+    if not isinstance(values, dict):
+        return []
+    names = []
+    for field in params.get("fields") or []:
+        value = values.get(field.get("id")) if isinstance(field, dict) and field.get("kind") == "datetime" else None
+        if isinstance(value, str) and (parts := _PARTS.fullmatch(value)) is not None:
+            names.append(parts.group(10))
+    return names
+
+
+class _Validator:
+    """``validate_answer`` bound to one request, for ``send_gated(validate=...)``. :meth:`warm` loads, outside the
+    request lock, the zones an answer names, so the check under the lock finds them in :data:`_zones`."""
+
+    __slots__ = ("method", "params")
+
+    def __init__(self, method: str, params: dict) -> None:
+        self.method, self.params = method, params
+
+    def __call__(self, result: Any) -> str | None:
+        return validate_answer(self.method, self.params, result)
+
+    def warm(self, result: Any) -> None:
+        """Never raises; at most one zone file per known zone is ever read."""
+        if self.method != "input.form":
+            return
+        try:
+            for name in _answer_zones(self.params, result):
+                zone(name)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def validator(method: str, params: dict) -> _Validator:
     """``validate_answer`` bound to one request, for ``send_gated(validate=...)``."""
-    return lambda result: validate_answer(method, params, result)
+    return _Validator(method, params)

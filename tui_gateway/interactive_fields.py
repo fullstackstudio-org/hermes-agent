@@ -241,6 +241,11 @@ class _Field:
         self._zone()
 
     def _datetime(self) -> None:
+        if not interactive_validate.known_zones():
+            # An answer must name its zone and the gateway must check the offset against it: without a time zone
+            # database no datetime answer could ever be accepted.
+            raise self.fail("kind", "datetime is not available: this gateway has no time zone database (tzdata); "
+                                    "ask for a date and a time as two fields instead")
         self._when(("min", "max", "default"), lambda text: interactive_validate.parse_instant(text) is not None,
                    "an instant with a numeric offset, like 2026-10-03T14:30+02:00 (no Z, no fractions)")
         self._zone()

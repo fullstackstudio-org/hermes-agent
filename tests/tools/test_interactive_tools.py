@@ -182,8 +182,10 @@ def test_a_session_the_gateway_does_not_host_is_no_session(server):
 
 REASONS = ("no_capable_client", "write_failed", "error_response", "no_session", "no_acting_user", "already_pending",
            "rate_limited", "turn_isolation", "cancelled:interrupted", "cancelled:session_closed",
-           "cancelled:shutdown", "too_many_attempts", "bad_upload", "upload_dir_unsafe", "upload_dir_unavailable",
-           "something_new", "")
+           "cancelled:shutdown", "too_many_attempts", "bad_upload", "cannot_show:no_camera",
+           "cannot_show:not_supported_on_device", "cannot_show:permission_denied", "cannot_show:upload_failed",
+           "cannot_show:unsupported_version", "cannot_show:shutting_down", "upload_dir_unsafe",
+           "upload_dir_unavailable", "something_new", "")
 METHODS = ("input.form", "input.file", "review.draft")
 
 
@@ -213,12 +215,27 @@ def test_every_reason_has_its_own_sentence():
 
 
 def test_no_capable_client_names_the_kind_of_app():
-    form = tool._sentence("input.form", {"outcome": "unavailable", "reason": "no_capable_client"})
-    file = tool._sentence("input.file", {"outcome": "unavailable", "reason": "no_capable_client"})
-    draft = tool._sentence("review.draft", {"outcome": "unavailable", "reason": "no_capable_client"})
+    unavailable = {"outcome": "unavailable", "reason": "no_capable_client"}
+    form = tool._sentence("input.form", unavailable)
+    draft = tool._sentence("review.draft", unavailable)
     assert "app that can show forms" in form
-    assert "app that can upload files" in file and "phone and Mac apps also take photos and scans" in file
     assert "app that can show drafts" in draft
+    # a file: the scanner is the phone and iPad app's; any other way of getting a file works on every app
+    scan = tool._sentence("input.file", unavailable, "scan")
+    assert "the Hermie app on a phone or iPad" in scan and "Mac app does not scan" in scan
+    for capture in (None, "photo", "audio"):
+        file = tool._sentence("input.file", unavailable, capture)
+        assert "the Hermie app on a phone, tablet or computer" in file and "scan" not in file
+
+
+def test_a_cannot_show_reason_gets_a_sentence_of_its_own():
+    for word, words in (("no_camera", "no camera"), ("not_supported_on_device", "does not support"),
+                        ("permission_denied", "permission"), ("upload_failed", "could not be uploaded"),
+                        ("unsupported_version", "update"), ("shutting_down", "closing")):
+        sentence = tool._sentence("input.file", {"outcome": "unavailable", "reason": f"cannot_show:{word}"})
+        assert words in sentence and "not an answer" in sentence
+    unsafe = tool._sentence("input.file", {"outcome": "unavailable", "reason": "upload_dir_unsafe"})
+    assert "symbolic link" in unsafe and "Nothing was sent" in unsafe
 
 
 def test_the_sentences_for_answers_say_only_what_is_known():
@@ -335,6 +352,23 @@ def test_a_timeout_and_a_missing_app_reach_the_model_as_not_an_answer(server, mo
         release()
     assert (data["outcome"], data["reason"]) == ("unavailable", "no_capable_client")
     assert "do not retry at once" in data["message"] and old.frames == []
+
+
+def test_a_scan_nobody_can_take_names_the_phone_or_ipad_app(server, monkeypatch, tmp_path):
+    from tui_gateway import interactive
+    monkeypatch.setattr(interactive, "PARK_SECONDS", 0.1)
+    old = _WS("old", ROBIN)
+    _session(server, "s1", old, creator=ROBIN)
+    server._sessions["s1"]["cwd"] = str(tmp_path)
+    _caps(server, old, requests=None)
+    release = _bind_ui_session("s1")
+    try:
+        scan = json.loads(tool.ask_file_tool(summary="Scan the letter.", accept="document", capture="scan"))
+        pick = json.loads(tool.ask_file_tool(summary="Send the letter.", accept="document"))
+    finally:
+        release()
+    assert scan["reason"] == pick["reason"] == "no_capable_client"
+    assert "phone or iPad" in scan["message"] and "phone, tablet or computer" in pick["message"]
 
 
 def test_a_symlinked_upload_folder_is_unavailable_with_nothing_sent(server, tmp_path):

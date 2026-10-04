@@ -95,13 +95,14 @@ clarify too. Each answer and each refusal is an audit line naming the grant.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import uuid
 from typing import Any, Callable, NamedTuple
 
 from tui_gateway import request_hooks
-from tui_gateway.contracts.server_requests import INTERACTIVE_METHODS
+from tui_gateway.contracts.server_requests import CANNOT_SHOW, INTERACTIVE_METHODS
 
 logger = logging.getLogger(__name__)
 
@@ -115,13 +116,28 @@ class RequestOutcome(NamedTuple):
     carries ``{"answers": <locked so far>, "timed_out": True}`` as ``result``) or ``cancelled``
     (withdrawn: interrupt, session close, shutdown; ``reason`` names which). ``request_id`` is the frame's id
     when one was minted; ``answered_by`` is the connection whose answer settled it (None when unknown or
-    in-process)."""
+    in-process). ``error_reason``: for ``unavailable (error_response)``, the settling error's ``data.reason``
+    when it was a ``4041`` (``CANNOT_SHOW``) with a short machine word there (:func:`_cannot_show_reason`), else
+    ""; the caller decides what of it to pass on."""
 
     status: str
     result: dict | None = None
     reason: str = ""
     request_id: str = ""
     answered_by: Any = None
+    error_reason: str = ""
+
+
+_MACHINE_WORD = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _cannot_show_reason(error: Any) -> str:
+    """The ``data.reason`` of a ``4041 cannot_show`` error object when it is a short machine word, else ""."""
+    if not isinstance(error, dict) or error.get("code") != CANNOT_SHOW:
+        return ""
+    data = error.get("data")
+    reason = data.get("reason") if isinstance(data, dict) else None
+    return reason if isinstance(reason, str) and _MACHINE_WORD.fullmatch(reason) else ""
 
 
 def new_request_id() -> str:
@@ -135,7 +151,7 @@ class ServerRequest:
                  "qids", "locked", "on_result", "errored", "cancel_reason", "level", "validate", "targets",
                  "answered_by", "target", "max_refusals", "refusals", "exhausted", "on_refusal", "turn_author",
                  "method_gated", "park_until", "listed", "shown",
-                 "park_seconds", "deadline")
+                 "park_seconds", "deadline", "error_reason")
 
     def __init__(self, sid: str, method: str, params: dict, *, qids: list[str] | None = None,
                  on_result: Callable[[dict | None], None] | None = None, level: str | None = None,
@@ -154,6 +170,7 @@ class ServerRequest:
         self.on_result = on_result
         # Why a request settled without an answer: an error response, or the cancel reason.
         self.errored = False
+        self.error_reason = ""
         self.cancel_reason = ""
         # Gated requests only: the advertised level a connection needs to receive or answer this
         # request, the validator a result must pass, and the connections the frame went to that have
@@ -779,7 +796,7 @@ def _await(req: ServerRequest, timeout: float | None, deadline: float | None = N
         return RequestOutcome("timeout", {"answers": locked, "timed_out": True} if req.qids is not None else None,
                               "timeout", req.id)
     if errored:
-        return RequestOutcome("unavailable", None, "error_response", req.id)
+        return RequestOutcome("unavailable", None, "error_response", req.id, error_reason=req.error_reason)
     return RequestOutcome("cancelled", None, cancel_reason or "cancelled", req.id)
 
 
@@ -1070,6 +1087,23 @@ def request_session(request_id: str) -> str | None:
         return req.sid if req is not None else None
 
 
+def _warm_validator(request_id: str, frame: dict) -> None:
+    """Let the validator of the open request *request_id* load what its check needs (an interactive form's time
+    zone file: ``interactive_validate._Validator.warm``) OUTSIDE the lock, before :func:`resolve_response` reaches
+    its verdict under it. Only a validator with a ``warm`` method takes part; never raises."""
+    if not isinstance(frame.get("result"), dict):
+        return
+    with _lock:
+        req = _open.get(request_id)
+        warm = getattr(req.validate, "warm", None) if req is not None else None
+    if warm is None:
+        return
+    try:
+        warm(frame["result"])
+    except Exception:  # noqa: BLE001 - warming is an optimisation; the verdict under the lock decides
+        logger.debug("server request %s: validator warm-up failed", request_id, exc_info=True)
+
+
 def resolve_response(frame: dict) -> bool:
     """Route one client response frame to its open request. False when nothing is waiting for that id
     (already timed out / cancelled, or owned by another process — see the compute-host bridge)."""
@@ -1092,6 +1126,7 @@ def resolve_response(frame: dict) -> bool:
         if "result" in frame:
             frame = {**frame, "result": mark_agent_answer(method, frame.get("result"), transport)}
         agent_answer = (sid, method)
+    _warm_validator(rid, frame)
     with _lock:
         req = _open.get(rid)
         if req is None:
@@ -1121,6 +1156,7 @@ def resolve_response(frame: dict) -> bool:
             if "error" in frame:
                 logger.debug("server request %s (%s) answered with error: %s", rid, req.method, frame.get("error"))
                 req.result, req.answered, req.errored = None, False, True
+                req.error_reason = _cannot_show_reason(frame.get("error"))
             else:
                 result = frame.get("result")
                 req.result = result if isinstance(result, dict) else {}

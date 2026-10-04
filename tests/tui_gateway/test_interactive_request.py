@@ -7,9 +7,10 @@ draft is checked verbatim, a bad field definition says which field); the params 
 of the contract; ``upload.dir`` lies under the session's working directory and is created there without following
 a link (a link below the working directory is ``unavailable (upload_dir_unsafe)``); an answered request returns what
 the person entered and nothing the client claimed (``edited`` is the gateway's); every way of not getting an answer
-is ``unavailable`` or ``timeout``; files are checked on disk after the request settled without following a link
-(missing, size, hash, escape, a link, a swapped parent, not a regular file, total) and become ``unavailable
-(bad_upload)``, never an answer; ``ref_text`` is what ``file.attach`` gives; one open request and twelve per window per conversation, apart from ``confirm``; the hooks
+is ``unavailable`` or ``timeout`` (an app's listed ``cannot_show`` reason passes through); files are checked on disk
+after the request settled without following a link (missing, size, hash, escape, a link, a swapped parent, not a
+regular file, total) and become ``unavailable (bad_upload)``, never an answer; ``ref_text`` is what ``file.attach``
+gives where it can be quoted; the window counts only a request that opened; one open request and twelve per window per conversation, apart from ``confirm``; the hooks
 are fired once, by ``send_gated``; the audit records name ids, never text; no logger ever sees a title, value,
 path or draft. Every payload is a harmless marker.
 """
@@ -492,6 +493,28 @@ def test_a_datetime_reaches_the_agent_as_an_instant_and_a_zone(server, build):
     assert answer["values"]["call_at"].endswith("]"), "the answer itself is not changed"
 
 
+def test_the_zone_of_a_response_frame_is_loaded_outside_the_request_lock(server, build, monkeypatch):
+    """A bare response frame is judged under ``server_requests``' lock; the zone its datetime names is loaded
+    before that, outside the lock (``_Validator.warm``), so the check under the lock reads no file."""
+    from tui_gateway import interactive_validate, server_requests
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+    seen: list[tuple[str, bool]] = []
+    real = interactive_validate.ZoneInfo
+
+    def counting(name):
+        seen.append((name, server_requests._lock.locked()))
+        return real(name)
+
+    monkeypatch.setattr(interactive_validate, "ZoneInfo", counting)
+    monkeypatch.setattr(interactive_validate, "_zones", {})
+    params = _form(build, fields=[{"id": "remind", "kind": "datetime", "label": "Remind"}])
+    answer = {"status": "answered", "values": {"remind": "2026-10-07T08:30:15+09:00[Asia/Tokyo]"}}
+    rid, outcome = _ask(server, build, "input.form", params, peer=phone, answer=answer)
+    assert outcome.status == "answered"
+    assert seen == [("Asia/Tokyo", False)]
+
+
 def test_skip_is_an_outcome_of_its_own_and_only_when_offered(server, build):
     phone = _WS("phone", ROBIN)
     _capable(server, phone)
@@ -640,15 +663,27 @@ def test_a_request_parks_until_a_capable_device_attaches(server, build, audit_re
     assert _finish(box).payload == {"values": {"name": "late"}}
 
 
-def test_an_error_response_is_unavailable_never_skipped(server, build):
+@pytest.mark.parametrize("error, reason", [
+    ({"code": 4041, "message": "cannot_show", "data": {"reason": "no_camera"}}, "cannot_show:no_camera"),
+    ({"code": 4041, "message": "cannot_show", "data": {"reason": "upload_failed"}}, "cannot_show:upload_failed"),
+    ({"code": 4041, "message": "cannot_show", "data": {"reason": "shutting_down"}}, "cannot_show:shutting_down"),
+    # a reason the contract does not list, one that is not a machine word, none, or another code: generic
+    ({"code": 4041, "message": "cannot_show", "data": {"reason": "battery_low"}}, "error_response"),
+    ({"code": 4041, "message": "cannot_show", "data": {"reason": f"no_camera {MARKER}"}}, "error_response"),
+    ({"code": 4041, "message": "cannot_show"}, "error_response"),
+    ({"code": -32601, "message": "method not found", "data": {"reason": "no_camera"}}, "error_response"),
+])
+def test_an_error_response_is_unavailable_never_skipped(server, build, audit_records, error, reason):
+    """An app's 4041 reaches the agent as ``cannot_show:<reason>`` only for a reason the contract lists; anything
+    else of the client's stays out of the outcome and the audit record."""
     phone = _WS("phone", ROBIN)
     _capable(server, phone)
     box = _start(build, "s1", "input.file", _file(build))
     rid = _open_id("input.file")
-    _as(phone, server.dispatch, {"jsonrpc": "2.0", "id": rid, "error": {"code": 4041, "message": "cannot_show",
-                                                                       "data": {"reason": "no_camera"}}}, phone)
+    _as(phone, server.dispatch, {"jsonrpc": "2.0", "id": rid, "error": error}, phone)
     outcome = _finish(box)
-    assert (outcome.status, outcome.reason) == ("unavailable", "error_response")
+    assert (outcome.status, outcome.reason, outcome.payload) == ("unavailable", reason, {})
+    assert audit_records[-1][1]["reason"] == reason and MARKER not in repr(audit_records)
 
 
 def test_an_interrupt_withdraws_it(server, build):
@@ -720,6 +755,27 @@ def test_one_open_request_per_conversation_and_twelve_per_window(server, build, 
     clock = time.monotonic() + build.WINDOW_SECONDS + 1
     monkeypatch.setattr(build.time, "monotonic", lambda: clock)
     assert build.request("s1", "input.form", _form(build), timeout=0.01).status == "timeout"
+
+
+def test_a_request_that_never_opened_does_not_count_against_the_window(server, build, monkeypatch):
+    """``send_gated`` refusing the params (a ValueError: our bug, nothing went out) frees the slot and charges
+    nothing; only a request that opened (sent, or parked for a device) counts."""
+    from tui_gateway import server_requests
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+
+    def refuse(*args, **kwargs):
+        raise ValueError("params refused by the contract")
+
+    real = server_requests.send_gated
+    monkeypatch.setattr(server_requests, "send_gated", refuse)
+    for _ in range(build.MAX_PER_WINDOW + 1):
+        with pytest.raises(ValueError):
+            build.request("s1", "input.form", _form(build), timeout=5)
+    assert build._limiter.sent == {} and build._limiter.pending == {}
+    monkeypatch.setattr(server_requests, "send_gated", real)
+    assert build.request("s1", "input.form", _form(build), timeout=0.01).status == "timeout"
+    assert len(build._limiter.sent["key-s1"]) == 1
 
 
 def test_confirm_keeps_its_own_limit_apart_from_interactive_requests(server, build):

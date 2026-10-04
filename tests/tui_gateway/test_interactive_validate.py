@@ -354,3 +354,55 @@ def test_the_examples_are_not_mutated_by_checking_them():
     for method, params, result, reason in validator_cases():
         v.validate_answer(method, params, result)
     assert EXAMPLES == before
+
+
+# ── time zones: one read per zone, outside the request lock ─────────────────────────────────────
+
+
+@pytest.fixture()
+def counted_zones(monkeypatch):
+    """``ZoneInfo`` construction counted per name, the strong cache emptied for the test."""
+    reads: list[str] = []
+    real = v.ZoneInfo
+
+    def counting(name):
+        reads.append(name)
+        return real(name)
+
+    monkeypatch.setattr(v, "ZoneInfo", counting)
+    monkeypatch.setattr(v, "_zones", {})
+    return reads
+
+
+def test_a_zone_is_read_once_and_then_kept(counted_zones):
+    assert v.zone("Europe/Amsterdam") is v.zone("Europe/Amsterdam") is not None
+    assert counted_zones == ["Europe/Amsterdam"]
+    # a name the host does not know is neither read nor kept: the cache stays bounded by the known zones
+    assert v.zone("Mars/Olympus_Mons") is None and v.zone("../../etc/passwd") is None
+    assert counted_zones == ["Europe/Amsterdam"] and set(v._zones) == {"Europe/Amsterdam"}
+
+
+def test_warm_loads_the_zones_an_answer_names_and_nothing_else(counted_zones):
+    params = _field_params({"id": "at", "kind": "datetime", "label": "At"},
+                           {"id": "note", "kind": "text", "label": "Note"})
+    check = v.validator("input.form", params)
+    answer = _answer(at="2026-10-07T08:30-04:00[America/New_York]", note="x[Europe/Paris]")
+    check.warm(answer)
+    assert counted_zones == ["America/New_York"]
+    assert check(answer) is None and counted_zones == ["America/New_York"], "the check under the lock reads nothing"
+    for junk in (None, [], {"values": "x"}, {"values": {"at": 5}}, _answer(at="2026-10-07T08:30-04:00[Nowhere/X]")):
+        check.warm(junk)  # never raises, reads nothing it does not know
+    assert counted_zones == ["America/New_York"]
+    v.validator("review.draft", {"text": "x"}).warm({"decision": "approved", "text": "x"})
+
+
+def test_a_datetime_field_is_refused_on_a_host_without_a_time_zone_database(monkeypatch):
+    from tui_gateway import interactive_fields
+    monkeypatch.setattr(v, "_known_zones", frozenset())
+    with pytest.raises(ValueError, match=r"fields\[0\]\.kind: datetime is not available.*tzdata"):
+        interactive_fields.build_fields([{"id": "at", "kind": "datetime", "label": "At"}], ValueError)
+    # the other kinds still work; a tz on them is refused as unknown
+    assert interactive_fields.build_fields([{"id": "on", "kind": "date", "label": "On"}], ValueError)
+    with pytest.raises(ValueError, match="tz"):
+        interactive_fields.build_fields([{"id": "on", "kind": "date", "label": "On", "tz": "Europe/Amsterdam"}],
+                                        ValueError)

@@ -409,6 +409,9 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     session_key = session.get("session_key")
     with contextlib.suppress(Exception):
         # The approved drafts the gateway kept for this conversation (``review_register``) go with its session.
+        # Keyed by the conversation, not the window: finalizing ANY session that carries this key (a second window
+        # of the same conversation closing too) drops every draft id of it. That fails closed (a later
+        # confirmation finds no draft and asks again); revisit when drafts bind to confirmations (P2-F2).
         from tui_gateway import review_register
         review_register.clear(session_key)
     session_id = getattr(agent, "session_id", None) or session_key

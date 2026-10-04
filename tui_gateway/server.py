@@ -723,6 +723,16 @@ with contextlib.suppress(Exception):
 
     _confirm_tool.set_bridge(_confirm_bridge)
 
+# ask_form / ask_file / review_draft reach the turn's clients the same way (``tui_gateway/interactive.py``).
+with contextlib.suppress(Exception):
+    from tools import interactive_tools as _interactive_tools
+
+    def _interactive_bridge(sid: str, method: str, **kwargs):
+        from tui_gateway import interactive as _interactive
+        return _interactive.request_from_tool(sid, method, **kwargs)
+
+    _interactive_tools.set_bridge(_interactive_bridge)
+
 
 def _register_strong_confirm(sid: str, key: str) -> None:
     """Fork: register this session's strong-confirm callback for its conversation *key*, beside the

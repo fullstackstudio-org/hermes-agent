@@ -338,3 +338,39 @@ def test_a_path_anchored_in_the_plugin_is_not_flagged(tmp_path, rel, source):
     _commit_all(plugin)
     assert not {pid for pid, _f in _found(plugin, at_least="medium")} & {
         "foreign_sys_path", "foreign_source_loader", "archive_on_sys_path", "non_source_loader"}, source
+
+
+# ── 8. the scan's time and memory are bounded ──────────────────────────────────────────────
+
+
+def test_a_text_file_too_large_to_analyse_is_not_parsed_and_is_flagged(tmp_path):
+    from tools.plugin_guard import MAX_PLUGIN_SINGLE_FILE_KB
+
+    big = "x = [" + "1, " * (MAX_PLUGIN_SINGLE_FILE_KB * 1024 // 3 + 10) + "]\n"
+    plugin = _plugin(tmp_path, {"__init__.py": "", "big.py": big, "data.json": "[" + "0," * 600_000 + "0]"})
+    _commit_all(plugin)
+    found = _found(plugin)
+    assert {("too_large_to_analyse", "big.py"), ("too_large_to_analyse", "data.json")} <= found
+    _blocked_or_asked(plugin)
+
+
+def test_text_past_the_total_budget_is_flagged_not_read(tmp_path, monkeypatch):
+    import tools.plugin_guard as guard
+
+    monkeypatch.setattr(guard, "MAX_PLUGIN_TOTAL_SIZE_KB", 64)
+    files = {"__init__.py": "", **{f"m{i}.py": "VALUE = 1\n" + "# pad\n" * 4000 for i in range(4)}}
+    plugin = _plugin(tmp_path, files)
+    _commit_all(plugin)
+    flagged = {f for pid, f in _found(plugin) if pid == "too_large_to_analyse"}
+    assert flagged and flagged < {f"m{i}.py" for i in range(4)}
+
+
+def test_a_long_line_of_brackets_is_scanned_in_linear_time():
+    """``\\[.*\\]\\(`` retried from every bracket was quadratic on one long minified line."""
+    import time
+
+    from tools.skills_guard import scan_text
+
+    start = time.monotonic()
+    scan_text("[]" * 60_000, "data.json", ".json")
+    assert time.monotonic() - start < 2.0

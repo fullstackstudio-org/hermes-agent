@@ -29,7 +29,7 @@ from tools.skills_guard import (
     Finding, ScanResult, SCANNABLE_EXTENSIONS, SUSPICIOUS_BINARY_EXTENSIONS, SourceText, _determine_verdict,
     decode_python_source, format_scan_report, read_source_text, scan_text)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-fork-10"
+PLUGIN_SCANNER_VERSION = "plugin-guard-fork-11"
 
 # Caches and vendored environments a checkout makes for itself. Skipped only when nothing in
 # them is tracked by git: a TRACKED ``venv/evil.py`` or ``__pycache__/x.pyc`` ships with the
@@ -677,6 +677,47 @@ _CODING_COOKIE = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
 _UTF8_NAMES = {"utf-8", "utf-8-sig", "utf8", "utf_8"}
 
 
+def _looks_like_text(file_path: Path) -> bool:
+    """A cheap look at the head of a file the scan will not read in full."""
+    if file_path.suffix.lower() in SCANNABLE_EXTENSIONS or file_path.suffix.lower() in CODE_FILE_EXTENSIONS:
+        return True
+    try:
+        with open(file_path, "rb") as handle:
+            head = handle.read(8192)
+    except OSError:
+        return False
+    return head.startswith(b"#!") or b"\x00" not in head
+
+
+def _read_within_limits(entries: List[Tuple[Path, str]]) -> Tuple[dict, List[Finding]]:
+    """Every file decoded for the scan, within the scan's limits: a text file over
+    ``MAX_PLUGIN_SINGLE_FILE_KB``, or past ``MAX_PLUGIN_TOTAL_SIZE_KB`` of text in all, is not read
+    (the regex and AST passes cost time and memory in proportion) and is a high finding instead,
+    so a plugin cannot hide code by being large. Binaries are not read either way."""
+    sources: dict = {}
+    findings: List[Finding] = []
+    budget = MAX_PLUGIN_TOTAL_SIZE_KB * 1024
+    for f, rel in entries:
+        try:
+            size = f.stat().st_size
+        except OSError:
+            sources[rel] = None
+            continue
+        if size > MAX_PLUGIN_SINGLE_FILE_KB * 1024 or size > budget:
+            sources[rel] = None
+            if _looks_like_text(f):
+                reason = (f"text file is {size // 1024}KB (limit: {MAX_PLUGIN_SINGLE_FILE_KB}KB)"
+                          if size > MAX_PLUGIN_SINGLE_FILE_KB * 1024 else
+                          f"the plugin holds more than {MAX_PLUGIN_TOTAL_SIZE_KB}KB of text")
+                findings.append(_finding("too_large_to_analyse", "high", "structural", rel, f"{size // 1024}KB",
+                                         f"{reason}: not analysed, review it by hand"))
+            continue
+        sources[rel] = _read_plugin_file(f)
+        if sources[rel] is not None:
+            budget -= size
+    return sources, findings
+
+
 def _read_plugin_file(file_path: Path) -> Optional[SourceText]:
     """*file_path* decoded as the scan reads it (``skills_guard.read_source_text``): Python source,
     a script whose shebang names Python included, as the interpreter decodes it."""
@@ -743,7 +784,8 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
                              walk=lambda: _walk(plugin_dir, tracked, know_tracked=True))
         entries = [(f, rel) for f, rel in sorted(_walk(plugin_dir, tracked, know_tracked=True))
                    if f.is_file() and not f.is_symlink()]
-        sources = {rel: _read_plugin_file(f) for f, rel in entries}
+        sources, too_large = _read_within_limits(entries)
+        all_findings.extend(too_large)
         python_refs = {rel: (module_refs(sources[rel].text) if sources[rel] is not None else None)
                        for f, rel in entries if _code_suffix(f) in PYTHON_SOURCE_EXTENSIONS}
         manifest_strings = {line for f, rel in entries if f.name.lower() in _MANIFEST_NAMES

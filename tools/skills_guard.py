@@ -202,9 +202,11 @@ THREAT_PATTERNS = [
     (r'>\s*/tmp/[^\s]*\s*&&\s*(curl|wget|nc|python)',  # no-tmp: ok — malicious-pattern regex
      "tmp_staging", "critical", "exfiltration", "writes to /tmp then exfiltrates"),  # no-tmp: ok — malicious-pattern label
     # ── Exfiltration: markdown/link based ──
-    (r'!\[.*\]\(https?://[^\)]*\$\{?',
+    # Anchored at the first ``![`` / ``[`` of the line: the same lines match as with a bare ``\[.*``,
+    # but the engine tries one start instead of every bracket (quadratic on a long minified line).
+    (r'^(?:[^!\n]|!(?!\[))*+!\[.*\]\(https?://[^\)]*\$\{?',
      "md_image_exfil", "high", "exfiltration", "markdown image URL with variable interpolation (image-based exfil)"),
-    (r'\[.*\]\(https?://[^\)]*\$\{?', "md_link_exfil", "high", "exfiltration", "markdown link with variable interpolation"),
+    (r'^[^\[\n]*+\[.*\]\(https?://[^\)]*\$\{?', "md_link_exfil", "high", "exfiltration", "markdown link with variable interpolation"),
     # ── Prompt injection ──
     (r'ignore\s+(?:\w+\s+)*(previous|all|above|prior)\s+instructions',
      "prompt_injection_ignore", "critical", "injection", "prompt injection: ignore previous instructions"),

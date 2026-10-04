@@ -112,7 +112,7 @@ class TestCoerceToolArgs:
 
     def test_coerces_integer_arg(self):
         schema = self._mock_schema({"limit": {"type": "integer"}})
-        with patch("tools.arg_coercion.registry.get_schema", return_value=schema):
+        with patch("tools.arg_coercion.registry.get_effective_schema", return_value=schema):
             args = {"limit": "10"}
             result = coerce_tool_args("test_tool", args)
             assert result["limit"] == 10
@@ -123,7 +123,7 @@ class TestCoerceToolArgs:
 
     def test_leaves_already_correct_types(self):
         schema = self._mock_schema({"limit": {"type": "integer"}})
-        with patch("tools.arg_coercion.registry.get_schema", return_value=schema):
+        with patch("tools.arg_coercion.registry.get_effective_schema", return_value=schema):
             args = {"limit": 10}
             result = coerce_tool_args("test_tool", args)
             assert result["limit"] == 10
@@ -225,7 +225,7 @@ class TestCoerceToolArgsNested:
 
     def test_array_elements_as_json_strings_are_parsed(self):
         schema = self._array_of_objects_schema()
-        with patch("tools.arg_coercion.registry.get_schema", return_value=schema):
+        with patch("tools.arg_coercion.registry.get_effective_schema", return_value=schema):
             args = {"items": ['{"id": "1", "content": "x"}']}
             result = coerce_tool_args("test_tool", args)
             assert result["items"] == [{"id": "1", "content": "x"}]
@@ -234,7 +234,7 @@ class TestCoerceToolArgsNested:
     def test_string_subfield_with_json_content_preserved(self):
         """A string-typed sub-field whose value looks like JSON must NOT be parsed."""
         schema = self._array_of_objects_schema()
-        with patch("tools.arg_coercion.registry.get_schema", return_value=schema):
+        with patch("tools.arg_coercion.registry.get_effective_schema", return_value=schema):
             args = {"items": [{"id": "1", "content": '{"not": "parsed"}'}]}
             result = coerce_tool_args("test_tool", args)
             assert result["items"][0]["content"] == '{"not": "parsed"}'

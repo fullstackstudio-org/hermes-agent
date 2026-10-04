@@ -84,7 +84,8 @@ def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str
     """
     try:
         from tools.registry import registry as _registry
-        schema = _registry.get_schema(name)
+        # The schema tool_describe shows (dynamic overrides applied), never the bare registration.
+        schema = _registry.get_effective_schema(name)
         if not isinstance(schema, dict):
             return None
         fn = schema.get("function") if schema.get("type") == "function" else schema

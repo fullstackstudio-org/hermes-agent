@@ -11,6 +11,7 @@ import json
 import os
 import sys
 from typing import Dict, Any
+from unittest.mock import patch
 
 import pytest
 
@@ -886,3 +887,82 @@ class TestDeferredCallSchemaProbe:
         }, calls)
 
         assert validate_deferred_call_args(name, {"payload": {"anything": True}}) is None
+
+
+class TestDynamicSchemaAgreement:
+    """``tool_describe`` and ``tool_call`` must judge a call against the same schema: the one the model is
+    shown, with a tool's ``dynamic_schema_overrides`` applied. ``confirm_action`` offers ``level: passkey``
+    only while the passkey level is on, so validating against the bare schema refused a call the description
+    had just offered."""
+
+    @pytest.fixture
+    def confirm(self, monkeypatch):
+        import model_tools  # noqa: F401 - registers the built-in tools
+        from tools import confirm_tool
+        from tools.registry import invalidate_check_fn_cache
+        saved = confirm_tool._bridge
+        confirm_tool.set_bridge(lambda *a, **k: None)  # the gateway's bridge: the tool passes its check
+        invalidate_check_fn_cache()
+        yield confirm_tool
+        confirm_tool.set_bridge(saved)
+        invalidate_check_fn_cache()
+
+    @staticmethod
+    def _described(name):
+        from tools.registry import registry
+        from tools.tool_search import dispatch_tool_describe
+        defs = registry.get_definitions({name}, quiet=True)
+        assert defs, f"{name} is not offered"
+        return json.loads(dispatch_tool_describe({"names": [name]}, current_tool_defs=defs))["tools"][name]
+
+    def test_passkey_is_accepted_when_the_level_is_on(self, confirm, monkeypatch):
+        from tools.tool_search import validate_deferred_call_args
+        monkeypatch.setattr(confirm, "_passkey_enabled", lambda: True)
+        assert self._described("confirm_action")["parameters"]["properties"]["level"]["enum"] == ["plain", "passkey"]
+        assert validate_deferred_call_args("confirm_action", {"summary": "Pay.", "level": "passkey"}) is None
+        assert validate_deferred_call_args("confirm_action", {"summary": "Pay.", "level": "plain"}) is None
+
+    def test_passkey_is_refused_as_before_when_the_level_is_off(self, confirm, monkeypatch):
+        from tools.tool_search import validate_deferred_call_args
+        monkeypatch.setattr(confirm, "_passkey_enabled", lambda: False)
+        assert self._described("confirm_action")["parameters"]["properties"]["level"]["enum"] == ["plain"]
+        err = json.loads(validate_deferred_call_args("confirm_action", {"summary": "Pay.", "level": "passkey"}))
+        assert err["constraint"] == "enum" and err["path"] == "arguments.level"
+        assert err["error"] == ("tool_call to 'confirm_action' failed argument validation at arguments.level "
+                                "(enum): 'passkey' is not one of ['plain']. The tool was NOT invoked.")
+        assert err["parameters"]["properties"]["level"]["enum"] == ["plain"]
+
+    def test_describe_and_validate_use_one_schema_for_every_dynamic_tool(self):
+        import model_tools  # noqa: F401
+        from tools.registry import registry
+        dynamic = [e for e in registry._snapshot_entries() if e.dynamic_schema_overrides is not None]
+        assert any(e.name == "confirm_action" for e in dynamic)
+        for entry in dynamic:
+            effective = registry.get_effective_schema(entry.name)
+            # What get_definitions (and so tool_describe) shows, check_fn aside, is exactly this schema.
+            with patch.object(entry, "check_fn", None):
+                shown = registry.get_definitions({entry.name}, quiet=True)
+            assert shown == [{"type": "function", "function": effective}], entry.name
+
+    def test_validation_reads_the_effective_schema(self, monkeypatch):
+        from tools import tool_search_validation
+        from tools.registry import registry
+        seen = []
+        real = registry.get_effective_schema
+        monkeypatch.setattr(registry, "get_effective_schema", lambda name: seen.append(name) or real(name))
+        monkeypatch.setattr(registry, "get_schema", lambda name: pytest.fail("validated against the bare schema"))
+        tool_search_validation.validate_deferred_call_args("confirm_action", {"summary": "Pay."})
+        assert seen and set(seen) == {"confirm_action"}
+
+    def test_coercion_reads_the_effective_schema(self):
+        # A property only the dynamic schema has is still repaired the way the model was told it is typed.
+        import model_tools  # noqa: F401
+        from tools.arg_coercion import coerce_tool_args
+        from tools.registry import registry
+        name = "mcp_probe_dynamic_only_property"
+        registry.register(
+            name=name, toolset="mcp-probe-dynamic", handler=lambda args, **kw: "{}",
+            schema={"name": name, "description": "d", "parameters": {"type": "object", "properties": {}}},
+            dynamic_schema_overrides=lambda: {"parameters": {
+                "type": "object", "properties": {"count": {"type": "integer"}}}})
+        assert coerce_tool_args(name, {"count": "3"}) == {"count": 3}

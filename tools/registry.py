@@ -395,6 +395,24 @@ def _core_tools_gated_by(fn: Callable) -> Set[str]:
     return {e.name for e in registry._snapshot_entries() if e.check_fn is fn and e.name in core}
 
 
+def _effective_schema(entry: ToolEntry) -> dict:
+    """*entry*'s schema with its name and runtime-dynamic overrides (e.g. delegate_task limits,
+    confirm_action's passkey level) applied. ``get_definitions`` memoizers key on config.yaml
+    mtime+size, so config changes invalidate them automatically."""
+    schema = {**entry.schema, "name": entry.name}
+    if entry.dynamic_schema_overrides is not None:
+        try:
+            overrides = entry.dynamic_schema_overrides()
+        except Exception as exc:
+            overrides = None
+            logger.warning(
+                "dynamic_schema_overrides for tool %s raised %s; using static schema",
+                entry.name, exc)
+        if isinstance(overrides, dict):
+            schema.update(overrides)
+    return schema
+
+
 def _memo_check(fn: Callable, memo: Dict[Callable, bool]) -> bool:
     """Per-pass memo on top of the TTL cache: one probe per distinct check_fn."""
     if fn not in memo:
@@ -848,21 +866,16 @@ class ToolRegistry:
                 if not quiet:
                     logger.debug("Tool %s unavailable (check failed)", name)
                 continue
-            schema_with_name = {**entry.schema, "name": entry.name}
-            # Runtime-dynamic overrides (e.g. delegate_task limits); the caller's memo is
-            # keyed on config.yaml mtime+size, so config changes invalidate it automatically.
-            if entry.dynamic_schema_overrides is not None:
-                try:
-                    overrides = entry.dynamic_schema_overrides()
-                except Exception as exc:
-                    overrides = None
-                    logger.warning(
-                        "dynamic_schema_overrides for tool %s raised %s; using static schema",
-                        name, exc)
-                if isinstance(overrides, dict):
-                    schema_with_name.update(overrides)
-            result.append({"type": "function", "function": schema_with_name})
+            result.append({"type": "function", "function": _effective_schema(entry)})
         return result
+
+    def get_effective_schema(self, name: str) -> Optional[dict]:
+        """The schema the model is shown for *name* — the registered schema with its
+        ``dynamic_schema_overrides`` applied — bypassing ``check_fn``. Whatever judges a call
+        (``tool_call`` validation, argument coercion) reads this, so it can never disagree with
+        what :meth:`get_definitions` and ``tool_describe`` offered."""
+        entry = self.get_entry(name)
+        return _effective_schema(entry) if entry is not None else None
 
     # ---- Dispatch ----------------------------------------------------
 
@@ -933,7 +946,8 @@ class ToolRegistry:
         return sorted(entry.name for entry in self._snapshot_entries())
 
     def get_schema(self, name: str) -> Optional[dict]:
-        """Raw schema dict, bypassing check_fn filtering (token estimates, introspection)."""
+        """Raw schema dict, bypassing check_fn filtering (token estimates, introspection). Not for
+        judging a call: dynamic overrides are not applied — use :meth:`get_effective_schema`."""
         return self._attr(name, "schema")
 
     def get_toolset_for_tool(self, name: str) -> Optional[str]:

@@ -22,7 +22,8 @@ def coerce_tool_args(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if not args or not isinstance(args, dict):
         return args
 
-    schema = registry.get_schema(tool_name)
+    # The schema the model was shown (dynamic overrides applied): what it typed its arguments against.
+    schema = registry.get_effective_schema(tool_name)
     properties = ((schema or {}).get("parameters") or {}).get("properties")
     if not properties:
         return args

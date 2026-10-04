@@ -100,11 +100,11 @@ _DROPPED_CONFIRM_S = 1.0
 DROPPED_MESSAGE = "the queued prompt did not run: the chat was stopped before its turn came"
 
 #: Why a turn's clarify is not answerable and its stop not available through MCP when the gateway holds no record
-#: of who sent it: a prompt queued behind a running turn and then run in an isolated (compute-host) worker leaves
-#: the parent no in-flight record, and the gateway takes an agent's answer or stop only by that record.
-ISOLATED_UNATTRIBUTED = ("this turn was queued and then run in an isolated worker, where the gateway keeps no "
-                         "record of who sent it, so it takes no answer or stop from an agent for it; the person "
-                         "answers or stops it in their own app")
+#: of who sent it: a turn run in an isolated (compute-host) worker with no in-flight author on the parent (a
+#: prompt drained there from the queue, a relayed bot message, a continuation), and the gateway takes an agent's
+#: answer or stop only by that record. Worded for every such turn: the bridge cannot tell which one it is.
+ISOLATED_UNATTRIBUTED = ("this turn runs in an isolated worker with no record of who sent it, so it takes no "
+                         "answer or stop from an agent; the person answers or stops it in their own app")
 
 _QUESTION_MAX = 2000
 _CHOICE_MAX = 200
@@ -144,42 +144,71 @@ def _question(entry: dict) -> dict:
             "multi_select": bool(entry.get("multi_select"))}
 
 
+def _isolated_unattributed(server: Any, session_id: str, session: Any, cfg: Callable[[], dict | None] = lambda: None
+                           ) -> bool:
+    """Lock-free. Cheapest first: a running turn with no in-flight author (dict reads), then whether the session
+    routes turns to the compute host (``cfg()``: the isolation config, read once by a caller that probes many)."""
+    return (isinstance(session, dict) and bool(session.get("running"))
+            and server._inflight_turn_author(session_id) is None
+            and server._session_uses_compute_host(session, cfg()))
+
+
 def isolated_turn_unattributed(session_id: str) -> bool:
     """Whether live session *session_id* runs a turn in an isolated (compute-host) worker that the parent holds no
-    record of (no in-flight author: a queued prompt drained to the child). The gateway refuses an agent's clarify
-    answer (``compute_host_bridge._compute_host_agent_refusal``) and stop (``_interrupt_agent_turn``) for such a
-    turn, so the bridge says :data:`ISOLATED_UNATTRIBUTED` instead of offering them. Read in-process, lock-free,
-    like the gateway's own check."""
+    record of (no in-flight author). The gateway refuses an agent's clarify answer
+    (``compute_host_bridge._compute_host_agent_refusal``) and stop (``_interrupt_agent_turn``) for such a turn, so
+    the bridge says :data:`ISOLATED_UNATTRIBUTED` instead of offering them. Read in-process and lock-free, like
+    the gateway's own check: one session's dict reads, and the isolation config only for a running turn that
+    names nobody."""
     from tui_gateway import server
 
     try:
-        session = server._sessions.get(str(session_id))
-        return (isinstance(session, dict) and bool(session.get("running"))
-                and server._session_uses_compute_host(session) and server._inflight_turn_author(str(session_id)) is None)
+        return _isolated_unattributed(server, str(session_id), server._sessions.get(str(session_id)))
     except Exception:  # noqa: BLE001 - a summary never fails on a probe
         return False
 
 
-def _request_isolated_unattributed(request_id: str) -> bool:
-    """:func:`isolated_turn_unattributed` for the session whose compute-host child owns *request_id*."""
+def _mirrors_request(session: Any, request_id: str) -> bool:
+    """Whether *session*'s compute-host child owns open request *request_id* (the parent's mirror of it). Read
+    without ``history_lock``: the mirror is set and popped whole, and a summary only reads its id."""
+    mirrored = session.get("_compute_host_open_request") if isinstance(session, dict) else None
+    return isinstance(mirrored, dict) and mirrored.get("id") == request_id
+
+
+def _request_isolated_unattributed(request_id: str, session_id: str = "") -> bool:
+    """:func:`isolated_turn_unattributed` for the session whose compute-host child owns *request_id*. With
+    *session_id* (the chat the request was listed for: a watch's own, a resume's) only that session is read.
+    Without one, every live session is screened lock-free, a session that does not route to the compute host or
+    runs an attributed turn is skipped, and no session's ``history_lock`` is taken."""
     from tui_gateway import server
 
     try:
-        located = server._compute_host_request_session(str(request_id))
+        if session_id:
+            session = server._sessions.get(session_id)
+            return _isolated_unattributed(server, session_id, session) and _mirrors_request(session, request_id)
+        loaded: list[dict] = []
+
+        def cfg() -> dict:  # read at most once, and only for a session that is a candidate at all
+            if not loaded:
+                loaded.append(server._load_dashboard_process_isolation_config())
+            return loaded[0]
+
+        return any(_isolated_unattributed(server, sid, session, cfg) and _mirrors_request(session, request_id)
+                   for sid, session in list(server._sessions.items()))
     except Exception:  # noqa: BLE001
         return False
-    return located is not None and isolated_turn_unattributed(located[0])
 
 
-def summarize_request(request_id: str, method: str, params: dict | None, transport: Any) -> dict:
-    """What the agent may know of one open server request (see the module docstring). Every string came
-    from the bot and is untrusted."""
+def summarize_request(request_id: str, method: str, params: dict | None, transport: Any,
+                      session_id: str = "") -> dict:
+    """What the agent may know of one open server request (see the module docstring), listed for live session
+    *session_id* (when known). Every string came from the bot and is untrusted."""
     from tui_gateway import server_requests
 
     params = params if isinstance(params, dict) else {}
     answerable = server_requests.agent_answer_refusal(str(method), transport) is None
     summary: dict[str, Any] = {"id": str(request_id), "kind": str(method), "answerable": answerable}
-    if answerable and _request_isolated_unattributed(str(request_id)):
+    if answerable and _request_isolated_unattributed(str(request_id), str(session_id or "")):
         summary["answerable"] = False
         summary["not_answerable_reason"] = ISOLATED_UNATTRIBUTED
     if method == "clarify":
@@ -196,10 +225,10 @@ def summarize_request(request_id: str, method: str, params: dict | None, transpo
     return summary
 
 
-def summarize_open_requests(open_requests: Any, transport: Any) -> list[dict]:
+def summarize_open_requests(open_requests: Any, transport: Any, session_id: str = "") -> list[dict]:
     """:func:`summarize_request` for each entry of an ``open_requests`` list (``session.resume`` /
-    ``session.events.since``)."""
-    return [summarize_request(entry["id"], entry["method"], entry.get("params"), transport)
+    ``session.events.since`` of live session *session_id*)."""
+    return [summarize_request(entry["id"], entry["method"], entry.get("params"), transport, session_id)
             for entry in (open_requests if isinstance(open_requests, list) else [])
             if isinstance(entry, dict) and isinstance(entry.get("id"), str) and isinstance(entry.get("method"), str)]
 
@@ -756,7 +785,7 @@ class TurnWatch:
             requests = list(self._requests.items())
             if mark_reported:
                 self._reported_req_version = self._req_version
-        data["requests"] = [summarize_request(request_id, method, params, self._transport)
+        data["requests"] = [summarize_request(request_id, method, params, self._transport, self.session_id)
                             for request_id, (method, params) in requests]
         return data
 

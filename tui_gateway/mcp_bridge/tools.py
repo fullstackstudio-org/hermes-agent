@@ -469,7 +469,7 @@ def chat_open(bridge: Bridge, caller: Caller, bot: Any, chat_id: Any) -> dict:
         sid = str(result.get("session_id") or "")
         row = _live_row(transport, sid) or {}
         open_requests = result.get("open_requests") if isinstance(result.get("open_requests"), list) else []
-        requests = turns.summarize_open_requests(open_requests, transport)
+        requests = turns.summarize_open_requests(open_requests, transport, sid)
         own = _own_requests(caller, chat_id, open_requests)
     finally:
         _release(transport)
@@ -722,7 +722,8 @@ def _open_requests(caller: Caller, chat_id: str, transport: AgentTransport, sid:
     """``(summaries, own ids)`` of the chat's open requests (see :func:`_own_requests`)."""
     result = _call(transport, "session.events.since", {"session_id": sid, "last_seen": turns._NO_EVENTS_SEQ})
     open_requests = result.get("open_requests") if isinstance(result.get("open_requests"), list) else []
-    return turns.summarize_open_requests(open_requests, transport), _own_requests(caller, chat_id, open_requests)
+    return (turns.summarize_open_requests(open_requests, transport, sid),
+            _own_requests(caller, chat_id, open_requests))
 
 
 def requests_open(bridge: Bridge, caller: Caller, chat_id: Any, bot: Any = None) -> dict:

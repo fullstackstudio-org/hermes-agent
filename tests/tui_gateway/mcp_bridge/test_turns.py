@@ -334,6 +334,59 @@ def test_a_clarify_of_an_isolated_turn_without_a_parent_record_is_reported_not_a
     assert turns.isolated_turn_unattributed(SID) is False
 
 
+def _summarize_off_thread(*args):
+    """``summarize_request(*args)`` on a thread of its own: ``(finished within 2 s, summary)``."""
+    out: list = []
+    worker = threading.Thread(target=lambda: out.append(turns.summarize_request(*args)), daemon=True)
+    worker.start()
+    worker.join(2)
+    return not worker.is_alive(), (out[0] if out else None)
+
+
+@pytest.mark.parametrize("named", [True, False], ids=["its_own_chat", "any_chat"])
+def test_summarizing_a_clarify_takes_no_sessions_history_lock(gateway, monkeypatch, named):
+    """Every snapshot and ``chat_open`` summarizes each open clarify: the isolation probe reads lock-free, and with
+    the chat it was listed for it reads that chat only. A session's ``history_lock`` held elsewhere (a turn
+    writing its history) never stalls it, whether or not the session is isolated."""
+    params = {"session_id": SID, "question": "Which marker?", "choices": ["one", "two"]}
+    _isolated(gateway, monkeypatch, {"id": "srq-iso", "method": "clarify", "params": params})
+    other = {"history_lock": threading.Lock(), "running": False, "inflight_turn": None}
+    monkeypatch.setitem(server._sessions, "sid-other", other)
+    transport = gateway.connect()
+    held = [gateway.session["history_lock"], other["history_lock"]]
+    for lock in held:
+        lock.acquire()
+    try:
+        finished, summary = _summarize_off_thread("srq-iso", "clarify", params, transport, SID if named else "")
+    finally:
+        for lock in held:
+            lock.release()
+    assert finished, "the probe waited on a session's history_lock"
+    assert summary["answerable"] is False and summary["not_answerable_reason"] == turns.ISOLATED_UNATTRIBUTED
+
+
+def test_the_isolation_probe_reads_only_the_chat_it_was_listed_for(gateway, monkeypatch):
+    """A request id listed for one chat is looked up in that chat's mirror only, and a chat that does not route to
+    the compute host is not probed further."""
+    params = {"session_id": SID, "question": "Which marker?", "choices": ["one", "two"]}
+    _isolated(gateway, monkeypatch, {"id": "srq-iso", "method": "clarify", "params": params})
+    probed: list = []
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda session, *_a, **_k: probed.append(session) or True)
+    transport = gateway.connect()
+    assert turns.summarize_request("srq-iso", "clarify", params, transport, "sid-unknown")["answerable"] is True
+    assert probed == []
+    gateway.session["running"] = False
+    assert turns.summarize_request("srq-iso", "clarify", params, transport, SID)["answerable"] is True
+    assert probed == []
+
+
+def test_the_isolated_reason_claims_no_queue():
+    """The same condition holds for an isolated turn nobody submitted (a relayed bot message, a continuation), so
+    the reason does not say the turn was queued; it stays not answerable either way."""
+    assert "queued" not in turns.ISOLATED_UNATTRIBUTED
+    assert "no answer or stop from an agent" in turns.ISOLATED_UNATTRIBUTED
+
+
 def test_an_inline_turn_is_never_reported_as_isolated(gateway):
     gateway.session.update(running=True, inflight_turn=None)
     assert turns.isolated_turn_unattributed(SID) is False

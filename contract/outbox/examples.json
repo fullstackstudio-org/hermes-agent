@@ -1,0 +1,235 @@
+{
+  "version": 1,
+  "about": "Normative examples for contract/outbox (README.md). Attachments are checked against schema.json and the gateway's model; ranges against the route.",
+  "attachments": {
+    "valid": [
+      {
+        "id": "q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe",
+        "name": "tts_20261004_225730_989324.mp3",
+        "mime": "audio/mpeg",
+        "kind": "audio",
+        "size": 48213,
+        "sha256": "a3f1c2e4b5d6978812ab34cd56ef7890a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        "created_at": 1791148287.08,
+        "url": "/api/files/outbox/q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe/tts_20261004_225730_989324.mp3"
+      },
+      {
+        "id": "Hk2_pQ9-rT5vWx8zA1bC3dE4fG6hJ7kL",
+        "name": "Q3 report.html",
+        "mime": "text/html",
+        "kind": "file",
+        "size": 10422,
+        "sha256": "0f9e8d7c6b5a49382716051f2e3d4c5b6a79881726354a5b6c7d8e9f0a1b2c3d",
+        "created_at": 1791148290.5,
+        "url": "/api/files/outbox/Hk2_pQ9-rT5vWx8zA1bC3dE4fG6hJ7kL/Q3%20report.html"
+      }
+    ],
+    "invalid": [
+      {
+        "why": "id is not a 32-character token",
+        "value": {
+          "id": "../../etc",
+          "name": "tts_20261004_225730_989324.mp3",
+          "mime": "audio/mpeg",
+          "kind": "audio",
+          "size": 48213,
+          "sha256": "a3f1c2e4b5d6978812ab34cd56ef7890a1b2c3d4e5f60718293a4b5c6d7e8f90",
+          "created_at": 1791148287.08,
+          "url": "/api/files/outbox/q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe/tts_20261004_225730_989324.mp3"
+        }
+      },
+      {
+        "why": "unknown kind",
+        "value": {
+          "id": "q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe",
+          "name": "tts_20261004_225730_989324.mp3",
+          "mime": "audio/mpeg",
+          "kind": "executable",
+          "size": 48213,
+          "sha256": "a3f1c2e4b5d6978812ab34cd56ef7890a1b2c3d4e5f60718293a4b5c6d7e8f90",
+          "created_at": 1791148287.08,
+          "url": "/api/files/outbox/q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe/tts_20261004_225730_989324.mp3"
+        }
+      },
+      {
+        "why": "a key the contract does not have (a server path)",
+        "value": {
+          "id": "q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe",
+          "name": "tts_20261004_225730_989324.mp3",
+          "mime": "audio/mpeg",
+          "kind": "audio",
+          "size": 48213,
+          "sha256": "a3f1c2e4b5d6978812ab34cd56ef7890a1b2c3d4e5f60718293a4b5c6d7e8f90",
+          "created_at": 1791148287.08,
+          "url": "/api/files/outbox/q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe/tts_20261004_225730_989324.mp3",
+          "path": "/root/.hermes/cache/audio/tts.mp3"
+        }
+      },
+      {
+        "why": "sha256 is not 64 lower-case hex",
+        "value": {
+          "id": "q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe",
+          "name": "tts_20261004_225730_989324.mp3",
+          "mime": "audio/mpeg",
+          "kind": "audio",
+          "size": 48213,
+          "sha256": "XYZ",
+          "created_at": 1791148287.08,
+          "url": "/api/files/outbox/q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe/tts_20261004_225730_989324.mp3"
+        }
+      },
+      {
+        "why": "missing url",
+        "value": {
+          "id": "q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe",
+          "name": "tts_20261004_225730_989324.mp3",
+          "mime": "audio/mpeg",
+          "kind": "audio",
+          "size": 48213,
+          "sha256": "a3f1c2e4b5d6978812ab34cd56ef7890a1b2c3d4e5f60718293a4b5c6d7e8f90",
+          "created_at": 1791148287.08
+        }
+      }
+    ]
+  },
+  "message_complete": {
+    "text": "Here is the recording.",
+    "status": "complete",
+    "row_id": 42,
+    "attachments": [
+      {
+        "id": "q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe",
+        "name": "tts_20261004_225730_989324.mp3",
+        "mime": "audio/mpeg",
+        "kind": "audio",
+        "size": 48213,
+        "sha256": "a3f1c2e4b5d6978812ab34cd56ef7890a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        "created_at": 1791148287.08,
+        "url": "/api/files/outbox/q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe/tts_20261004_225730_989324.mp3"
+      }
+    ]
+  },
+  "history_row": {
+    "role": "assistant",
+    "text": "Here is the recording.",
+    "row_id": 42,
+    "timestamp": 1791148287.2,
+    "attachments": [
+      {
+        "id": "q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe",
+        "name": "tts_20261004_225730_989324.mp3",
+        "mime": "audio/mpeg",
+        "kind": "audio",
+        "size": 48213,
+        "sha256": "a3f1c2e4b5d6978812ab34cd56ef7890a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        "created_at": 1791148287.08,
+        "url": "/api/files/outbox/q3Wm0B2v7yXk4Lr9TzPa1sDf6GhJ8cNe/tts_20261004_225730_989324.mp3"
+      }
+    ]
+  },
+  "ranges": {
+    "size": 1034,
+    "cases": [
+      {
+        "range": "bytes=0-9",
+        "status": 206,
+        "content_range": "bytes 0-9/1034"
+      },
+      {
+        "range": "bytes=1000-",
+        "status": 206,
+        "content_range": "bytes 1000-1033/1034"
+      },
+      {
+        "range": "bytes=-34",
+        "status": 206,
+        "content_range": "bytes 1000-1033/1034"
+      },
+      {
+        "range": "bytes=1030-5000",
+        "status": 206,
+        "content_range": "bytes 1030-1033/1034"
+      },
+      {
+        "range": "bytes=1034-",
+        "status": 416,
+        "content_range": "bytes */1034"
+      },
+      {
+        "range": "bytes=9-3",
+        "status": 416,
+        "content_range": "bytes */1034"
+      },
+      {
+        "range": "bytes=abc",
+        "status": 416,
+        "content_range": "bytes */1034"
+      },
+      {
+        "range": "bytes=-0",
+        "status": 416,
+        "content_range": "bytes */1034"
+      },
+      {
+        "range": "items=0-9",
+        "status": 200,
+        "content_range": null
+      },
+      {
+        "range": "bytes=0-1,4-5",
+        "status": 200,
+        "content_range": null
+      }
+    ]
+  },
+  "dispositions": [
+    {
+      "kind": "image",
+      "mime": "image/png",
+      "content_type": "image/png",
+      "disposition": "inline"
+    },
+    {
+      "kind": "video",
+      "mime": "video/mp4",
+      "content_type": "video/mp4",
+      "disposition": "inline"
+    },
+    {
+      "kind": "audio",
+      "mime": "audio/mpeg",
+      "content_type": "audio/mpeg",
+      "disposition": "inline"
+    },
+    {
+      "kind": "pdf",
+      "mime": "application/pdf",
+      "content_type": "application/pdf",
+      "disposition": "inline"
+    },
+    {
+      "kind": "file",
+      "mime": "image/svg+xml",
+      "content_type": "application/octet-stream",
+      "disposition": "attachment"
+    },
+    {
+      "kind": "file",
+      "mime": "text/html",
+      "content_type": "application/octet-stream",
+      "disposition": "attachment"
+    },
+    {
+      "kind": "file",
+      "mime": "application/zip",
+      "content_type": "application/zip",
+      "disposition": "attachment"
+    },
+    {
+      "kind": "file",
+      "mime": "application/octet-stream",
+      "content_type": "application/octet-stream",
+      "disposition": "attachment"
+    }
+  ]
+}

@@ -326,6 +326,9 @@ def _run_capability_probe(plugin_dir: Path, manifest: dict) -> Tuple[Optional[di
     with tempfile.TemporaryDirectory(prefix="hermes-validate-") as scratch:
         env = dict(os.environ)
         env["HERMES_HOME"] = scratch
+        # The probe imports the plugin; without this it leaves __pycache__ in the tree, and the
+        # security scan that follows reads that bytecode as shipped (compiled_bytecode: dangerous).
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         try:
             result = subprocess.run(
                 [

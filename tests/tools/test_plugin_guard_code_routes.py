@@ -261,7 +261,6 @@ def test_a_change_to_the_import_machinery_is_flagged(tmp_path, line):
     "exec(b'VALUE = 2')",
     "PATTERN = re.compile(r'\\d+')",
     "code = compile('1 + 1', '<x>', 'eval')",
-    "code = compile(source, '<x>', 'eval')",
     "model.eval()",
     "query.exec(statement)",
     "finders = [f for f in sys.meta_path]",

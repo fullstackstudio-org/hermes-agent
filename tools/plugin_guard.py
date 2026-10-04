@@ -17,7 +17,7 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
+from typing import Iterable, Iterator, List, Optional, Tuple
 
 from tools.plugin_guard_code import (
     PYTHON_SOURCE_EXTENSIONS, ROUTE_PATTERN_IDS, ModuleRefs, module_refs, python_code_findings)
@@ -29,7 +29,7 @@ from tools.skills_guard import (
     Finding, ScanResult, SCANNABLE_EXTENSIONS, SUSPICIOUS_BINARY_EXTENSIONS, SourceText, _determine_verdict,
     decode_python_source, format_scan_report, read_source_text, scan_text)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-fork-12"
+PLUGIN_SCANNER_VERSION = "plugin-guard-fork-13"
 
 # Caches and vendored environments a checkout makes for itself. Skipped only when nothing in
 # them is tracked by git: a TRACKED ``venv/evil.py`` or ``__pycache__/x.pyc`` ships with the
@@ -347,14 +347,14 @@ def _context_severity(f: Finding, rel_path: str, line: str, doc_prose: bool, is_
     context (where the text lives) to the narrowest (what the token sits inside)."""
     sev = f.severity
     if f.pattern_id in ROUTE_IDS:
-        # A route by which code runs unread steps down only in test or script code nothing the
-        # plugin runs imports: a file NAMED like a test is no reason (``from .tests import x``).
+        # A route by which code runs unread steps down only in test code nothing the plugin runs
+        # can import: a file NAMED like a test is no reason (``from .tests import x``).
         return STEP_DOWN.get(sev, sev) if unreached else sev
     if doc_prose:
         sev = prose_cap(f) or sev
         if is_self_uninstall_doc(f, line):
             sev = _at_most(sev, "medium")
-    if is_test_tree(rel_path):
+    if unreached:          # test code nothing the plugin runs can import (``_unreached_dev_files``)
         # A key-shaped literal or quoted-only hostile string in a fixture is the corpus the
         # plugin's own tests reject (#89610): a note. Executable test code steps down once.
         inert = f.category == "credential_exposure" or is_inert_fixture_line(f, line, is_code)
@@ -432,14 +432,7 @@ def _python_comment_lines(text: str) -> set:
 
 # Manifests whose strings can name a file the plugin runs (``hooks``, a dashboard ``api`` entry).
 _MANIFEST_NAMES = {"plugin.yaml", "plugin.yml", "manifest.json", "plugin.json"}
-# Test and script code: run by a developer or a test runner, not by the plugin loader.
-DEV_SCRIPT_DIRS = {"scripts"}
 ROUTE_IDS = ROUTE_PATTERN_IDS | {"source_encoding", "undecodable_source"}
-
-
-def _is_dev_file(rel: str) -> bool:
-    parts = rel.split("/")
-    return is_test_tree(rel) or (len(parts) > 1 and parts[0] in DEV_SCRIPT_DIRS)
 
 
 def _module_parts(rel: str) -> Tuple[str, ...]:
@@ -452,61 +445,102 @@ def _name_parts(value: str) -> set:
     return set(re.split(r"[./\\:]+", value))
 
 
-def _unreached_dev_files(refs: dict, manifest_strings: set) -> set:
-    """The test and script files (``_is_dev_file``) that nothing the plugin runs can import.
+def _manifest_strings(text: str) -> set:
+    """Every scalar in a YAML or JSON manifest, quotes and punctuation stripped (``{"api":
+    "test_api.py"}`` yields ``test_api.py``). A token reading, not a parser: it can only find more."""
+    return {token for token in re.split(r"[\s:,\[\]{}\"'#=|>]+", text) if token}
 
-    *refs* maps every Python file to its ``ModuleRefs`` (None: it does not parse). Starting from
-    the files that are not test or script code, a file is reached by a relative import that names
-    it or a package above it, an absolute import whose parts contain its module path, or a string
-    constant (or a manifest string in *manifest_strings*) holding its name; a reached file reaches
-    on in turn. A reached file that does not parse or imports something the scan cannot name could
-    load anything, so then nothing is unreached."""
-    dev = {rel for rel in refs if _is_dev_file(rel)}
+
+def _unreached_dev_files(refs: dict, manifest_strings: set, other_files: Iterable[str] = ()) -> Tuple[set, bool]:
+    """The test files (``is_test_tree``) that nothing the plugin runs can import, and whether the
+    analysis ran at all (False: too many files; then nothing is unreached).
+
+    *refs* maps every Python file to its ``ModuleRefs`` (None: it does not parse); *other_files* are
+    the plugin's other files (a fixture a loader is pointed at is reached too). Starting from
+    the files that are not test code, a file is reached by a relative import of it or a package
+    above it, an absolute import containing its module path, a path a loader or a process is given,
+    or a string constant (or a manifest scalar) holding its name; reached files reach on. If any
+    reached file does not parse, or imports, loads or runs something that is not one complete
+    constant, every test file counts as reached: nothing steps down."""
+    if len(refs) > MAX_PLUGIN_FILE_COUNT:
+        return set(), False
+    dev = {rel for rel in list(refs) + list(other_files) if is_test_tree(rel)}
     if not dev:
-        return set()
-    modules = {rel: _module_parts(rel) for rel in refs}
+        return set(), True
+    modules = {rel: _module_parts(rel) for rel in set(refs) | dev}
     by_module = {mod: rel for rel, mod in modules.items()}
+    dev_by_module = {modules[rel]: rel for rel in dev if modules[rel]}
+    dev_by_stem: dict = {}
+    for rel in dev:
+        if modules[rel]:
+            dev_by_stem.setdefault(modules[rel][-1], set()).add(rel)
     reached: set = set()
     queue = [rel for rel in refs if rel not in dev]
 
-    def reach(rel: str) -> None:
-        if rel in dev and rel not in reached:
+    def reach(rel: Optional[str]) -> None:
+        if rel is not None and rel in dev and rel not in reached:
             reached.add(rel)
             queue.append(rel)
 
     def reach_by_strings(strings: set) -> None:
-        parts = set().union(*map(_name_parts, strings)) if strings else set()
-        for rel in dev - reached:
-            if modules[rel] and modules[rel][-1] in parts:
-                reach(rel)
+        for value in strings:
+            for part in _name_parts(value):
+                for rel in dev_by_stem.get(part, ()):
+                    reach(rel)
 
     reach_by_strings(manifest_strings)
     while queue:
         rel = queue.pop()
+        if rel not in refs:
+            continue          # a non-Python file: reached, and it imports nothing
         found: Optional[ModuleRefs] = refs[rel]
         if found is None or found.dynamic:
-            return set()
+            return set(), True
         package = modules[rel] if rel.endswith(("/__init__.py", "/__init__.pyw")) or rel in (
             "__init__.py", "__init__.pyw") else modules[rel][:-1]
         targets = []
         for level, module, names in found.relative:
             if level - 1 > len(package):
                 continue
-            base = package[:len(package) - (level - 1)] + module
+            base = package[:len(package) - (level - 1)] + tuple(module)
             targets.append(base)
             targets.extend(base + (name,) for name in names)
         for target in targets:
             for k in range(1, len(target) + 1):
-                hit = by_module.get(target[:k])
-                if hit is not None:
-                    reach(hit)
+                reach(by_module.get(target[:k]))
         for parts in found.absolute:
-            for dev_rel in dev - reached:
-                mod = modules[dev_rel]
-                if mod and any(parts[i:i + len(mod)] == mod for i in range(len(parts) - len(mod) + 1)):
-                    reach(dev_rel)
+            for i in range(len(parts)):
+                for j in range(i + 1, len(parts) + 1):
+                    reach(dev_by_module.get(tuple(parts[i:j])))
+        for path in found.paths:
+            reach(path)
+            reach(by_module.get(_module_parts(path)) if path.endswith((".py", ".pyw")) else None)
         reach_by_strings(found.strings)
-    return dev - reached
+    return dev - reached, True
+
+
+def _package_names(sources: dict) -> dict:
+    """The names each package's ``__init__.py`` binds at top level, by package directory: what
+    ``from . import name`` can find without a module file."""
+    out: dict = {}
+    for rel, source in sources.items():
+        if source is None or rel.rsplit("/", 1)[-1] not in ("__init__.py", "__init__.pyw"):
+            continue
+        try:
+            tree = ast.parse(source.text)
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            continue
+        names: set = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(node.name)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                names.add(node.id)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)) and not (
+                    isinstance(node, ast.ImportFrom) and node.level == 1 and not node.module):
+                names.update((a.asname or a.name).split(".")[0] for a in node.names)
+        out[rel.rsplit("/", 1)[0] if "/" in rel else ""] = names
+    return out
 
 
 def _is_defensive_documentation(finding: Finding, rel_path: str, suffix: str = "") -> bool:
@@ -608,6 +642,30 @@ def _read_head(file_path: Path) -> bytes:
         return b""
 
 
+_MACHO_MAGICS = {bytes.fromhex(h) for h in ("feedface", "feedfacf", "cefaedfe", "cffaedfe", "cafebabe", "bebafeca")}
+
+
+def _machine_code_format(file_path: Path) -> Optional[str]:
+    """"ELF", "Mach-O" or "PE" when the file IS native code, by its bytes rather than its name."""
+    try:
+        with open(file_path, "rb") as handle:
+            head = handle.read(4096)
+    except OSError:
+        return None
+    if head.startswith(b"\x7fELF"):
+        return "ELF"
+    if head[:4] in _MACHO_MAGICS:
+        # 0xCAFEBABE is also a Java class file; a fat Mach-O names a small architecture count there.
+        if head[:4] == b"\xca\xfe\xba\xbe" and int.from_bytes(head[4:8], "big") > 30:
+            return None
+        return "Mach-O"
+    if head.startswith(b"MZ") and len(head) >= 0x40:
+        offset = int.from_bytes(head[0x3C:0x40], "little")
+        if offset + 4 <= len(head) and head[offset:offset + 4] == b"PE\x00\x00":
+            return "PE"
+    return None
+
+
 def _dangerous_findings_summary(findings: List[Finding]) -> str:
     """Describe the critical findings that made a plugin install dangerous."""
     critical = [finding for finding in findings if finding.severity == "critical"]
@@ -651,6 +709,12 @@ def _check_plugin_structure(plugin_dir: Path, tracked: Optional[set] = None) -> 
                                      f"file is {size // 1024}KB (limit: {MAX_PLUGIN_SINGLE_FILE_KB}KB)"))
         ext = f.suffix.lower()
         native = next((sfx for sfx in NATIVE_EXTENSION_SUFFIXES if f.name.lower().endswith(sfx)), None)
+        machine = _machine_code_format(f)
+        if machine and not (native and has_python):
+            findings.append(_finding("native_binary", "critical", "execution", rel, f"{machine} binary",
+                                     f"native machine code ({machine}) whatever the file is called: loadable "
+                                     "with ctypes, or as an extension module once copied or renamed"))
+            continue
         if ext in BYTECODE_EXTENSIONS:
             findings.append(_finding("compiled_bytecode", "critical", "execution", rel, f"bytecode: {ext}",
                                      "compiled Python bytecode: imported in place of (or without) source "
@@ -789,11 +853,19 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
                    if f.is_file() and not f.is_symlink()]
         sources, too_large = _read_within_limits(entries)
         all_findings.extend(too_large)
-        python_refs = {rel: (module_refs(sources[rel].text) if sources[rel] is not None else None)
+        python_refs = {rel: (module_refs(sources[rel].text, rel) if sources[rel] is not None else None)
                        for f, rel in entries if _code_suffix(f) in PYTHON_SOURCE_EXTENSIONS}
-        manifest_strings = {line for f, rel in entries if f.name.lower() in _MANIFEST_NAMES
-                            and sources[rel] is not None for line in sources[rel].text.split()}
-        unreached = _unreached_dev_files(python_refs, manifest_strings)
+        tree_files = {rel for _f, rel in entries}
+        package_names = _package_names(sources)
+        manifest_strings = {token for f, rel in entries if f.name.lower() in _MANIFEST_NAMES
+                            and sources[rel] is not None for token in _manifest_strings(sources[rel].text)}
+        unreached, analysed = _unreached_dev_files(python_refs, manifest_strings,
+                                                   [rel for _f, rel in entries if rel not in python_refs])
+        if not analysed:
+            all_findings.append(_finding("too_large_to_analyse", "high", "structural", "(directory)",
+                                         f"{len(python_refs)} Python files",
+                                         f"more than {MAX_PLUGIN_FILE_COUNT} Python files: which test code the "
+                                         "plugin can import was not worked out, so none of it steps down"))
         for f, rel in entries:
             for finding, member_text, where in _archive_findings(f, rel):
                 all_findings.append(finding)
@@ -818,7 +890,8 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
                 _encoding_findings(view, rel, ".py" if is_python else suffix), rel, f, js, from_ast=True, **judged))
             if is_python:
                 all_findings.extend(_filter_findings(
-                    python_code_findings(view.text, rel, line_fallback=suffix in PYTHON_SOURCE_EXTENSIONS),
+                    python_code_findings(view.text, rel, line_fallback=suffix in PYTHON_SOURCE_EXTENSIONS,
+                                         tree_files=tree_files, package_names=package_names),
                     rel, f, js, from_ast=True, **judged))
     verdict = _determine_verdict(all_findings)
     if all_findings:

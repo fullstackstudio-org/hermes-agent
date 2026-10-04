@@ -618,9 +618,16 @@ def decode_python_source(data: bytes) -> Optional[SourceText]:
     BOM, then a coding cookie on line 1 or 2, else UTF-8), or None when it cannot be."""
     try:
         encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
-        return SourceText(data.decode(encoding), encoding, b"\x00" not in data)
+        return SourceText(normalize_newlines(data.decode(encoding)), encoding, b"\x00" not in data)
     except (SyntaxError, LookupError, UnicodeDecodeError, ValueError):
         return None
+
+
+def normalize_newlines(text: str) -> str:
+    """``\\r\\n`` and a lone ``\\r`` as ``\\n``, as Python reads source (universal newlines): a file
+    whose only line breaks are ``\\r`` is many lines to the interpreter, not one line that starts
+    with a comment."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def read_source_text(file_path: Path, *, any_text: bool = False, python: bool = False) -> Optional[SourceText]:
@@ -651,6 +658,8 @@ def read_source_text(file_path: Path, *, any_text: bool = False, python: bool = 
         if not known and not data.startswith(b"#!"):
             return None
         source = SourceText(source.text.replace("\x00", ""), source.encoding, False)
+    if any_text:
+        source = SourceText(normalize_newlines(source.text), source.encoding, source.strict)
     return source
 
 

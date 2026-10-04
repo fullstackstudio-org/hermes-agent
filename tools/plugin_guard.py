@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import importlib.machinery as _machinery
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,10 +25,10 @@ from tools.plugin_guard_context import (
     JsSinkInventory, is_inert_fixture_line, is_loopback_only, is_pip_install_in_prose_literal,
     is_regex_alternation_token, is_self_uninstall_doc, is_test_tree, prose_cap)
 from tools.skills_guard import (
-    Finding, ScanResult, SUSPICIOUS_BINARY_EXTENSIONS, _determine_verdict, format_scan_report,
-    scan_file)
+    Finding, ScanResult, SCANNABLE_EXTENSIONS, SUSPICIOUS_BINARY_EXTENSIONS, _determine_verdict,
+    format_scan_report, scan_file)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-fork-5"
+PLUGIN_SCANNER_VERSION = "plugin-guard-fork-6"
 
 # Caches and vendored environments a checkout makes for itself. Skipped only when nothing in
 # them is tracked by git: a TRACKED ``venv/evil.py`` or ``__pycache__/x.pyc`` ships with the
@@ -69,6 +70,12 @@ COMMENT_PREFIXES_BY_EXTENSION = {
     ".py": "#", ".pyw": "#", ".sh": "#", ".bash": "#", ".rb": "#", ".pl": "#", ".r": "#", ".jl": "#",
     ".js": "//", ".ts": "//", ".php": "//", ".mjs": "//", ".cjs": "//", ".jsx": "//", ".tsx": "//",
     ".mts": "//", ".cts": "//", ".vue": "//", ".svelte": "//"}
+
+# A file whose name says nothing (``bin/tool``, ``hooks/pre-commit``) is read as the language its
+# shebang names, so a script is judged as code like its ``.py``/``.sh`` twin (HERM-195).
+SHEBANG_SUFFIXES = {"python": ".py", "sh": ".sh", "bash": ".sh", "zsh": ".sh", "dash": ".sh", "ksh": ".sh",
+                    "node": ".js", "deno": ".ts", "bun": ".js", "ruby": ".rb", "perl": ".pl", "php": ".php"}
+_SHEBANG = re.compile(r"#!\s*(?:/usr/bin/env\s+(?:-\S+\s+)*)?(?:\S*/)?([A-Za-z]+)")
 
 # One severity step down from the pattern's default.
 _COMMENT_SEVERITY_CAP = {"critical": "high", "high": "medium"}
@@ -192,6 +199,24 @@ def _walk(plugin_dir: Path, tracked: Optional[set] = None, *, know_tracked: bool
         yield f, rel
 
 
+def _code_suffix(file_path: Path) -> str:
+    """The extension *file_path* is judged by: its own when it has a known one, otherwise the one its
+    shebang names, otherwise its own (possibly empty)."""
+    suffix = file_path.suffix.lower()
+    if suffix in SCANNABLE_EXTENSIONS or suffix in CODE_FILE_EXTENSIONS:
+        return suffix
+    try:
+        with open(file_path, "rb") as handle:
+            first = handle.readline(256).decode("utf-8", "replace")
+    except OSError:
+        return suffix
+    match = _SHEBANG.match(first)
+    if match:
+        interpreter = re.sub(r"[\d.]+$", "", match.group(1).lower())
+        return SHEBANG_SUFFIXES.get(interpreter, suffix)
+    return suffix
+
+
 def _finding(pattern_id: str, severity: str, category: str, file: str, match: str, description: str) -> Finding:
     return Finding(pattern_id, severity, category, file, 0, match, description)
 
@@ -233,16 +258,17 @@ def _main_guard_body_lines(file_path: Path) -> set[int]:
 
 
 def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path,
-                     js: Optional[JsSinkInventory] = None) -> List[Finding]:
+                     js: Optional[JsSinkInventory] = None, *, parsed_python: bool = False) -> List[Finding]:
     """Apply plugin-specific exemptions and severity remaps to raw findings. *js* is the scan's
-    JavaScript inventory (``plugin_guard_context`` (5b)); without it no JS token rule applies."""
-    is_code = Path(rel_path).suffix.lower() in CODE_FILE_EXTENSIONS
-    main_guard_lines = (_main_guard_body_lines(file_path) if file_path.suffix.lower() in PYTHON_SOURCE_EXTENSIONS
-                        else set())
-    is_js = Path(rel_path).suffix.lower() in {".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx", ".mts", ".cts", ".vue",
-                                              ".svelte"}
+    JavaScript inventory (``plugin_guard_context`` (5b)); without it no JS token rule applies.
+    *parsed_python*: the findings come from parsing the file as Python, so it is code whatever its
+    name (a ``notes.txt`` a loader runs is not documentation)."""
+    suffix = ".py" if parsed_python else _code_suffix(file_path)
+    is_code = suffix in CODE_FILE_EXTENSIONS
+    main_guard_lines = _main_guard_body_lines(file_path) if suffix in PYTHON_SOURCE_EXTENSIONS else set()
+    is_js = suffix in {".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx", ".mts", ".cts", ".vue", ".svelte"}
     # A CI workflow definition runs on the forge's runner, not the host: same cap as a README.
-    doc_prose = is_doc_prose(rel_path) or is_ci_workflow(rel_path)
+    doc_prose = not parsed_python and (is_doc_prose(rel_path) or is_ci_workflow(rel_path))
     lines = _file_lines(file_path) if findings else []
     out: List[Finding] = []
     for f in findings:
@@ -257,7 +283,7 @@ def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path,
         line = lines[f.line - 1] if 0 < f.line <= len(lines) else f.match
         js_data = js is not None and js.js_data(f, rel_path, f.line, line)
         f.severity = _context_severity(f, rel_path, line, doc_prose, is_code, js_data)
-        if _is_defensive_documentation(f, rel_path):
+        if _is_defensive_documentation(f, rel_path, suffix):
             f.severity = _comment_severity(f)
         # Last and critical-only: a one-step cap that can never re-raise a finding an
         # earlier remap already lowered.
@@ -324,7 +350,7 @@ def _context_severity(f: Finding, rel_path: str, line: str, doc_prose: bool, is_
     return sev
 
 
-def _is_defensive_documentation(finding: Finding, rel_path: str) -> bool:
+def _is_defensive_documentation(finding: Finding, rel_path: str, suffix: str = "") -> bool:
     """A whole-line code comment or a changelog entry *describes* threats (the attack a
     defense rejects, the hardening a release shipped) instead of executing them, so its
     findings cap one severity step lower — visible and reviewable, never un-overridable
@@ -332,7 +358,7 @@ def _is_defensive_documentation(finding: Finding, rel_path: str) -> bool:
     """
     if Path(rel_path).name.lower() in CHANGELOG_FILENAMES:
         return True
-    prefix = COMMENT_PREFIXES_BY_EXTENSION.get(Path(rel_path).suffix.lower())
+    prefix = COMMENT_PREFIXES_BY_EXTENSION.get(suffix or Path(rel_path).suffix.lower())
     if prefix is None or not finding.match:
         return False
     stripped = finding.match.lstrip()
@@ -406,13 +432,18 @@ def _check_plugin_structure(plugin_dir: Path, tracked: Optional[set] = None) -> 
     return findings
 
 
-def _import_path_findings(file_path: Path, rel: str) -> List[Finding]:
-    """Findings for Python that imports code a text scan cannot read (``plugin_guard_code``)."""
+def _python_findings(file_path: Path, rel: str) -> List[Finding]:
+    """The Python checks (``plugin_guard_code``) for *file_path*: Python source in full, and any other
+    text file that parses as Python, because a loader can be pointed at a file of any name."""
     try:
         text = file_path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return []
-    return python_code_findings(text, rel)
+    if _code_suffix(file_path) in PYTHON_SOURCE_EXTENSIONS:
+        return python_code_findings(text, rel)
+    if "\x00" in text:
+        return []
+    return python_code_findings(text, rel, line_fallback=False)
 
 
 def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
@@ -425,9 +456,9 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
                              walk=lambda: _walk(plugin_dir, tracked, know_tracked=True))
         for f, rel in sorted(_walk(plugin_dir, tracked, know_tracked=True)):
             if f.is_file() and not f.is_symlink():
-                all_findings.extend(_filter_findings(scan_file(f, rel_path=rel), rel, f, js))
-                if f.suffix.lower() in PYTHON_SOURCE_EXTENSIONS:
-                    all_findings.extend(_filter_findings(_import_path_findings(f, rel), rel, f, js))
+                # Every text file, whatever its name: a loader can be pointed at any of them (HERM-195).
+                all_findings.extend(_filter_findings(scan_file(f, rel_path=rel, any_text=True), rel, f, js))
+                all_findings.extend(_filter_findings(_python_findings(f, rel), rel, f, js, parsed_python=True))
     verdict = _determine_verdict(all_findings)
     if all_findings:
         categories = sorted({f.category for f in all_findings})

@@ -596,16 +596,22 @@ def _mask_prose_link_destinations(lines: List[str]) -> List[str]:
     return out
 
 
-def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
+def scan_file(file_path: Path, rel_path: str = "", *, any_text: bool = False) -> List[Finding]:
     """Threat-pattern + invisible-unicode scan of one file; *rel_path* is the display path (default: file
-    name). Regex findings dedupe per pattern per line; invisible chars yield one per line."""
+    name). Regex findings dedupe per pattern per line; invisible chars yield one per line. Only
+    ``SCANNABLE_EXTENSIONS`` are read, unless *any_text* (the plugin scanner, HERM-195): then every
+    file that is UTF-8 without NUL bytes is read too, whatever its name."""
     rel_path = rel_path or file_path.name
-    if file_path.suffix.lower() not in SCANNABLE_EXTENSIONS and file_path.name != "SKILL.md":
+    known = file_path.suffix.lower() in SCANNABLE_EXTENSIONS or file_path.name == "SKILL.md"
+    if not known and not any_text:
         return []
     try:
-        lines = file_path.read_text(encoding='utf-8').split('\n')
+        text = file_path.read_text(encoding='utf-8')
     except (UnicodeDecodeError, OSError):
         return []
+    if not known and "\x00" in text:
+        return []
+    lines = text.split('\n')
     findings = []
     docstring_lines = _compute_docstring_lines(lines)  # so code patterns don't fire on prose
     traversal_lines = _mask_prose_link_destinations(lines) if file_path.suffix.lower() == ".md" else lines

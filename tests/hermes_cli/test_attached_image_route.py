@@ -115,3 +115,75 @@ def test_an_unauthenticated_client_gets_nothing(homes):
     assert response.status_code == 401
     assert client.get("/api/files/images/upload_20261004_120000_1.png",
                       params={"token": web_server._SESSION_TOKEN}).status_code == 401
+
+
+def test_an_uppercase_suffix_is_an_image_too(homes):
+    client, home, _lloyd = homes
+    (home / "images" / "upload_X.PNG").write_bytes(_PNG)
+    response = client.get("/api/files/images/upload_X.PNG")
+    assert response.status_code == 200 and response.headers["content-type"] == "image/png"
+
+
+def test_a_name_with_a_trailing_newline_is_refused(homes):
+    client, _home, _lloyd = homes
+    assert client.get("/api/files/images/upload_20261004_120000_1.png%0A").status_code == 404
+
+
+def test_an_image_over_the_cap_is_refused(homes, monkeypatch):
+    import hermes_cli.web_routers.files as files
+
+    client, _home, _lloyd = homes
+    monkeypatch.setattr(files, "_ATTACHED_IMAGE_MAX_BYTES", 4)
+    assert client.get("/api/files/images/upload_20261004_120000_1.png").status_code == 413
+
+
+def test_a_directory_or_fifo_named_like_an_image_is_not_served(homes):
+    client, home, _lloyd = homes
+    (home / "images" / "folder.png").mkdir()
+    assert client.get("/api/files/images/folder.png").status_code == 404
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(home / "images" / "pipe.png")  # must not hang the request
+        assert client.get("/api/files/images/pipe.png").status_code == 404
+
+
+def test_without_nofollow_support_links_and_odd_files_are_still_refused(homes, monkeypatch, tmp_path):
+    """The Windows path (no dir_fd / O_NOFOLLOW) checks with lstat instead."""
+    client, home, _lloyd = homes
+    monkeypatch.setattr(upload_dirs, "supported", lambda: False)
+    assert client.get("/api/files/images/upload_20261004_120000_1.png").content == _PNG
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(b"not yours")
+    os.symlink(secret, home / "images" / "link.png")
+    (home / "images" / "folder.png").mkdir()
+    for name in ("link.png", "folder.png", "missing.png"):
+        assert client.get(f"/api/files/images/{name}").status_code == 404, name
+
+
+def test_a_signed_in_browser_session_may_read_it_and_a_gated_dashboard_refuses_without_one(homes):
+    """Gated dashboard (OAuth): the session cookie authenticates the route, nothing else does."""
+    from hermes_cli.dashboard_auth import clear_providers, register_provider
+    from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
+
+    _client, _home, _lloyd = homes
+    clear_providers()
+    register_provider(StubAuthProvider())
+    prev = (web_server.app.state.bound_host, getattr(web_server.app.state, "bound_port", None))
+    web_server.app.state.bound_host, web_server.app.state.bound_port = "fly-app.fly.dev", 443
+    web_server.app.state.auth_required = True
+    try:
+        client = TestClient(web_server.app, base_url="https://fly-app.fly.dev")
+        url = "/api/files/images/upload_20261004_120000_1.png"
+        assert client.get(url).status_code == 401
+        assert client.get(url, headers={web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}).status_code == 401
+
+        start = client.get("/auth/login?provider=stub", follow_redirects=False)
+        pkce = next(c for c in start.headers.get_list("set-cookie") if "hermes_session_pkce" in c).split(";", 1)[0]
+        state = start.headers["location"].split("state=")[1]
+        done = client.get(f"/auth/callback?code=stub_code&state={state}", headers={"cookie": pkce},
+                          follow_redirects=False)
+        assert done.status_code == 302
+        signed_in = client.get(url)
+        assert signed_in.status_code == 200 and signed_in.content == _PNG
+    finally:
+        clear_providers()
+        web_server.app.state.bound_host, web_server.app.state.bound_port = prev

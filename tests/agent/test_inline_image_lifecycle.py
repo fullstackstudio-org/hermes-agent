@@ -309,3 +309,46 @@ def test_assistant_and_tool_rows_are_stored_as_they_are(tmp_path, native_parts):
         db.close()
     assert strip_replayed_inline_images([{"role": "assistant", "content": native_parts}])[0]["content"] is native_parts
 
+
+# ── attached image files ─────────────────────────────────────────────────────
+
+
+def test_image_files_get_distinct_names_and_are_created_exclusively(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    from agent import inline_images
+
+    first = inline_images.create_image_file(tmp_path / "images", "upload", ".png", b"one")
+    second = inline_images.create_image_file(tmp_path / "images", "upload", ".png", b"two")
+    assert first != second and first.read_bytes() == b"one" and second.read_bytes() == b"two"
+    assert stat.S_IMODE(os.stat(first).st_mode) == 0o600
+
+    # A name already taken (or a link planted under it) is never written: the next random name is used.
+    tokens = iter(["aaaaaaaaaaaa", "bbbbbbbbbbbb"])
+    monkeypatch.setattr(inline_images.secrets, "token_hex", lambda _n: next(tokens))
+    monkeypatch.setattr(inline_images, "datetime", type("D", (), {"now": staticmethod(
+        lambda: __import__("datetime").datetime(2026, 10, 4, 12, 0, 0))}))
+    taken = tmp_path / "images" / "upload_20261004_120000_aaaaaaaaaaaa.png"
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"keep")
+    taken.symlink_to(victim)
+    made = inline_images.create_image_file(tmp_path / "images", "upload", ".png", b"new")
+    assert made.name == "upload_20261004_120000_bbbbbbbbbbbb.png" and victim.read_bytes() == b"keep"
+
+    monkeypatch.setattr(inline_images.secrets, "token_hex", lambda _n: "aaaaaaaaaaaa")
+    with pytest.raises(FileExistsError):
+        inline_images.create_image_file(tmp_path / "images", "upload", ".png", b"x")
+
+
+def test_two_sessions_of_one_profile_never_share_an_upload(tmp_path):
+    """Same profile, same second, both at their first image: two files, each with its own bytes."""
+    from tui_gateway import server
+
+    a = {"profile_home": str(tmp_path)}
+    b = {"profile_home": str(tmp_path)}
+    path_a = server._queue_attached_image(a, b"from a", ".png", prefix="upload")
+    path_b = server._queue_attached_image(b, b"from b", ".png", prefix="upload")
+    assert path_a != path_b
+    assert path_a.read_bytes() == b"from a" and path_b.read_bytes() == b"from b"
+    assert a["attached_images"] == [str(path_a)] and b["attached_images"] == [str(path_b)]

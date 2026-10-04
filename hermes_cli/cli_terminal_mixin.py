@@ -572,14 +572,15 @@ class CLITerminalMixin:
 
     def _try_attach_clipboard_image(self) -> bool:
         """Save a clipboard image to ~/.hermes/images/ and attach it; True if attached."""
-        from cli import datetime
+        from agent.inline_images import create_image_file
         from hermes_cli.clipboard import save_clipboard_image
         self._image_counter += 1
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        img_path = get_hermes_home() / "images" / f"clip_{ts}_{self._image_counter}.png"
+        # A new, randomly named file reserved for the clipboard tool to fill (never another session's).
+        img_path = create_image_file(get_hermes_home() / "images", "clip", ".png")
         if save_clipboard_image(img_path):
             self._attached_images.append(img_path)
             return True
+        img_path.unlink(missing_ok=True)
         self._image_counter -= 1
         return False
 

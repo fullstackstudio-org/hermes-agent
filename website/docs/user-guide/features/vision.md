@@ -247,6 +247,8 @@ Sessions stored before this change are not rewritten: their old rows are cleaned
 
 Handles name images in order, one handle line (`[Image attached at: …]` or an `@image:` line) per image, so a turn with two handles drops its first two inline images. An inline image beyond those (an OpenAI-compatible API client sending `data:` URLs, a delegated task's caller image) has no copy on disk, so the model keeps it in later turns and in stored history, as before; clients still see `[image]`. Assistant and tool rows are never changed.
 
+Attached image files get a random name part (`upload_<time>_<12 hex>.png`) and are created exclusively, so two sessions of one profile never write to the same file.
+
 Set `images.inline_current_turn: false` to send even the current turn with the handle only. The model then opens the file with `vision_analyze` when it needs to see it, which costs a tool call but never puts the pixels in the request unasked:
 
 ```yaml

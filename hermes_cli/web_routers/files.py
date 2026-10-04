@@ -373,10 +373,11 @@ async def upload_chat_image(payload: ChatImageUpload, profile: Optional[str] = N
 
             stem = Path(_sanitize_chat_image_filename(payload.filename)).stem or "pasted-image"
             stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._-") or "pasted-image"
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            target = img_dir / f"dashboard_{ts}_{secrets.token_hex(4)}_{stem}{ext}"
+            from agent.inline_images import create_image_file
+
             with _io_errors("Image directory is not writable", "Could not write image"):
-                target.write_bytes(data)
+                # Random name, created exclusively: never another upload's file.
+                target = create_image_file(img_dir, f"dashboard_{stem}", ext, data)
 
         return {
             "ok": True,
@@ -512,7 +513,7 @@ async def stream_managed_file(request: Request, path: str):
 # them to ``<profile home>/images/upload_<ts>_<n>.<ext>``; the conversation names them by that path).
 # Only a plain file directly in that one directory, with an image suffix, is served: no other
 # directory, no link, no subfolder, whatever the managed-files root is.
-_ATTACHED_IMAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
+_ATTACHED_IMAGE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}")  # used with fullmatch
 _ATTACHED_IMAGE_TYPES = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
     ".webp": "image/webp", ".bmp": "image/bmp",
@@ -536,18 +537,27 @@ def _read_attached_image(images_dir: Path, name: str) -> bytes:
     except OSError:
         raise HTTPException(status_code=404, detail="Image not found")
     try:
-        fd = os.open(name, os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0), dir_fd=dir_fd)
+        # O_NONBLOCK: a FIFO named like an image must not hang the request; fstat below refuses it.
+        fd = os.open(name, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+                     dir_fd=dir_fd)
     except OSError:
         raise HTTPException(status_code=404, detail="Image not found")
     finally:
         os.close(dir_fd)
-    with os.fdopen(fd, "rb") as handle:
-        info = os.fstat(handle.fileno())
-        if not stat.S_ISREG(info.st_mode):
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):  # a folder, FIFO or device named like an image
             raise HTTPException(status_code=404, detail="Image not found")
         if info.st_size > _ATTACHED_IMAGE_MAX_BYTES:
             raise HTTPException(status_code=413, detail="Image is too large")
-        return handle.read(_ATTACHED_IMAGE_MAX_BYTES + 1)
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "rb") as handle:
+        data = handle.read(_ATTACHED_IMAGE_MAX_BYTES + 1)
+    if len(data) > _ATTACHED_IMAGE_MAX_BYTES:  # grew after the check
+        raise HTTPException(status_code=413, detail="Image is too large")
+    return data
 
 
 @router.get("/api/files/images/{name}")
@@ -560,7 +570,7 @@ async def get_attached_image(name: str, profile: Optional[str] = None):
     from hermes_cli.web_server_cron import _cron_profile_home
 
     suffix = Path(name).suffix.lower()
-    if not _ATTACHED_IMAGE_NAME_RE.match(name) or ".." in name or suffix not in _ATTACHED_IMAGE_TYPES:
+    if not _ATTACHED_IMAGE_NAME_RE.fullmatch(name) or ".." in name or suffix not in _ATTACHED_IMAGE_TYPES:
         raise HTTPException(status_code=404, detail="Image not found")
     _canon, home = _cron_profile_home(profile)
     try:

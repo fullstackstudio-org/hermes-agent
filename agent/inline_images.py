@@ -19,7 +19,11 @@ by its ``@image:`` reference and an unnamed one as ``[image]`` (:func:`inline_im
 
 from __future__ import annotations
 
+import os
 import re
+import secrets
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 #: What clients see in place of an inline image whose message names no file for it.
@@ -199,6 +203,34 @@ def display_image_handles(text: str, format_path=None) -> str:
     return _LOCAL_HANDLE_RE.sub(lambda m: f"@image:{fmt(m.group(1).strip())}", text)
 
 
+def create_image_file(directory: Path, prefix: str, ext: str, data: Optional[bytes] = None) -> Path:
+    """Create a NEW image file ``<directory>/<prefix>_<timestamp>_<random>.<ext>`` and return its path.
+
+    The file is the only record of an attached image and clients fetch it by name, so two sessions of
+    one profile attaching in the same second must never share a name: the name carries 48 random bits
+    and the file is created with ``O_CREAT | O_EXCL`` (never an existing file, never through a link),
+    mode 0600. ``data`` is written when given; without it the empty file reserves the name for a writer
+    that fills it (a clipboard tool), and the caller removes it if that writer fails."""
+    directory.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for _ in range(8):
+        path = directory / f"{prefix}_{stamp}_{secrets.token_hex(6)}{ext}"
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            continue
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                if data:
+                    handle.write(data)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        return path
+    raise FileExistsError(f"could not create a new image file in {directory}")
+
+
 def inline_current_turn_enabled(cfg: Optional[Dict[str, Any]] = None) -> bool:
     """``images.inline_current_turn`` (default true): may the turn an image was sent in carry the image
     inline? ``cfg`` None reads config.yaml; an unreadable config keeps the default."""
@@ -217,6 +249,7 @@ def inline_current_turn_enabled(cfg: Optional[Dict[str, Any]] = None) -> bool:
 
 
 __all__ = [
+    "create_image_file",
     "INLINE_IMAGE_NOTE",
     "IMAGE_HANDLE_RE",
     "display_image_handles",

@@ -48,6 +48,27 @@ level (``client.capabilities {confirm_passkey: ...}``). It may also cap refused 
 each refused answer from a connection allowed to answer counts, and the last one settles the request
 ``unavailable (too_many_attempts)``; ``request.answer`` then reports refusals as 4034 with ``data.reason``.
 
+METHOD GATE (the interactive requests ``input.form``, ``input.file``, ``review.draft``, ...: ``INTERACTIVE_METHODS``
+in ``contracts/server_requests.py``). :func:`send_gated` with ``level=None`` qualifies a connection on the METHOD
+instead of a level: it must have listed the method under ``client.capabilities {requests: [...]}``
+(:func:`advertise`, recorded per connection beside the confirm levels and cleared by :func:`forget`). Everything
+else above holds unchanged: the frame goes only to qualifying connections attached right now, the answer is
+accepted only from one (4033 otherwise, 4034 for a refused result), an error response from every connection the
+frame went to settles ``unavailable (error_response)``. The usual target predicate is :func:`acting_user_target`:
+only the connections signed in as the login the turn acts for (anyone qualifying when the gateway cannot name
+one). An agent's connection never qualifies for a method-gated request (its advertisement is ignored too).
+
+PARKING (``send_gated(park_seconds=...)``, method-gated requests only; ``confirm`` keeps declining at once). When
+no qualifying connection is attached, the request is still registered open, with no targets, ``on_open`` runs
+with 0 connections reached and the ``pre_server_request`` hook fires with ``reached: 0`` (the push that brings
+the person's phone). A qualifying connection that attaches later gets it from :func:`open_requests` (or pushed
+by :func:`deliver_late`, when it advertises the method while already attached) and becomes a target, so its
+error response counts like any other. The wait is two-stage: ``min(timeout, park_seconds)`` while nobody was
+reached, the rest of ``timeout`` once somebody was. Nobody within ``park_seconds`` settles ``unavailable
+(no_capable_client)`` and emits NO ``request.cancel``: no client was ever shown the request, and a cancel for an
+id nobody knows would only be noise. A cancel (interrupt, session close, shutdown) withdraws a parked request
+like any other; :func:`open_request_count` and :func:`pending_kind` count it while it waits.
+
 AGENTS (a connection whose ``auth_identity`` carries ``agent``: an agent acting for its signed-in person
 through MCP). Such a connection still receives every frame its session fans out, and :func:`open_requests`
 still lists the ungated ones to it, read-only, so it can say what the person is being asked. It may answer
@@ -71,6 +92,7 @@ import uuid
 from typing import Any, Callable, NamedTuple
 
 from tui_gateway import request_hooks
+from tui_gateway.contracts.server_requests import INTERACTIVE_METHODS
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +124,8 @@ def new_request_id() -> str:
 class ServerRequest:
     __slots__ = ("id", "sid", "method", "params", "event", "result", "answered", "created_at",
                  "qids", "locked", "on_result", "errored", "cancel_reason", "level", "validate", "targets",
-                 "answered_by", "target", "max_refusals", "refusals", "exhausted", "on_refusal", "turn_author")
+                 "answered_by", "target", "max_refusals", "refusals", "exhausted", "on_refusal", "turn_author",
+                 "method_gated")
 
     def __init__(self, sid: str, method: str, params: dict, *, qids: list[str] | None = None,
                  on_result: Callable[[dict | None], None] | None = None, level: str | None = None,
@@ -135,6 +158,9 @@ class ServerRequest:
         self.refusals = 0
         self.exhausted = False
         self.on_refusal: Callable[[Any, str, Any, bool], None] | None = None
+        # Gated on the METHOD (``send_gated(level=None)``): a connection qualifies by having listed it under
+        # ``client.capabilities {requests}`` instead of by a ``confirm`` level.
+        self.method_gated = False
         # Who sent the turn this request was opened in (the in-flight record's ``author``, with ``via`` when an
         # agent sent it), read once now: an agent may answer only a request of its own turn.
         self.turn_author = _read_turn_author(sid)
@@ -174,6 +200,26 @@ _peers: Callable[[str], list] = lambda sid: []  # noqa: E731
 _turn_author: Callable[[str], dict | None] = lambda sid: None  # noqa: E731
 
 
+def _identity_login(transport: Any) -> str | None:
+    """``<provider>:<user id>`` of *transport*'s signed-in identity, None when it carries none (the unbound
+    default of :data:`_transport_user`; server.py binds ``_transport_auth_user_id``)."""
+    identity = getattr(transport, "auth_identity", None)
+    if not isinstance(identity, dict):
+        return None
+    provider, user_id = identity.get("provider"), identity.get("user_id")
+    if not isinstance(provider, str) or not provider.strip() or not isinstance(user_id, str) or not user_id.strip():
+        return None
+    return f"{provider.strip()}:{user_id.strip()}"
+
+
+# ``acting_user(sid)``: the login session *sid*'s work is attributed to right now, None when the gateway cannot
+# name one (``server._acting_auth_user(session)[0]``). Read on the calling thread: it depends on the turn's context.
+_acting_user: Callable[[str], str | None] = lambda sid: None  # noqa: E731
+# ``transport_user(transport)``: the login a connection is signed in as (``server._transport_auth_user_id``).
+# Pure: it runs under ``_lock`` inside a target predicate.
+_transport_user: Callable[[Any], str | None] = _identity_login
+
+
 def _read_turn_author(sid: str) -> dict | None:
     try:
         author = _turn_author(sid)
@@ -190,6 +236,9 @@ _confirm_levels: dict[Any, frozenset[str]] = {}
 # What a transport advertised WITH a level that needs more than its name (``passkey``: ``{kind, rp_id}``,
 # accepted by ``confirm_passkey.accept_advertisement``). Handed to a request's target predicate.
 _confirm_details: dict[Any, dict[str, Any]] = {}
+# The interactive request methods each answering transport advertised (``client.capabilities {requests: [...]}``,
+# intersected with ``INTERACTIVE_METHODS``): what a method-gated request (``send_gated(level=None)``) needs.
+_handled: dict[Any, frozenset[str]] = {}
 
 #: The ``confirm`` levels a CLIENT may advertise; anything else it lists is ignored. Kept equal to the
 #: advertisable levels in ``tui_gateway/confirm.py::LEVELS`` (a test pins that).
@@ -202,8 +251,10 @@ DETAILED_LEVELS = frozenset({"passkey"})
 def bind_sinks(write_json: Callable[[dict], Any], emit: Callable[[str, str, dict], Any],
                answerable: Callable[[str], bool], peers: Callable[[str], list] | None = None,
                access: Callable[[str, Any], bool] | None = None,
-               turn_author: Callable[[str], dict | None] | None = None) -> None:
-    global _write, _emit, _answerable, _peers, _access, _turn_author
+               turn_author: Callable[[str], dict | None] | None = None,
+               acting_user: Callable[[str], str | None] | None = None,
+               transport_user: Callable[[Any], str | None] | None = None) -> None:
+    global _write, _emit, _answerable, _peers, _access, _turn_author, _acting_user, _transport_user
     _write, _emit, _answerable = write_json, emit, answerable
     if peers is not None:
         _peers = peers
@@ -211,6 +262,10 @@ def bind_sinks(write_json: Callable[[dict], Any], emit: Callable[[str, str, dict
         _access = access
     if turn_author is not None:
         _turn_author = turn_author
+    if acting_user is not None:
+        _acting_user = acting_user
+    if transport_user is not None:
+        _transport_user = transport_user
 
 
 def _caller() -> Any:
@@ -220,19 +275,29 @@ def _caller() -> Any:
 
 
 def advertise(transport: Any, server_requests: bool, confirm: Any = None,
-              details: dict[str, Any] | None = None) -> list[str]:
-    """Record whether *transport*'s client answers server→client requests (``client.capabilities``), and
-    which ``confirm`` levels it can perform. Levels count only together with ``server_requests``; unknown
-    or malformed entries are dropped, and a level in :data:`DETAILED_LEVELS` counts only with an entry in
-    *details* (already checked by the caller). Every call replaces the previous advertisement. Returns the
-    levels accepted (sorted)."""
+              details: dict[str, Any] | None = None, requests: Any = None) -> list[str]:
+    """Record whether *transport*'s client answers server→client requests (``client.capabilities``), which
+    ``confirm`` levels it can perform, and which interactive request methods it can show (*requests*). Levels
+    and methods count only together with ``server_requests``; unknown or malformed entries are dropped, and a
+    level in :data:`DETAILED_LEVELS` counts only with an entry in *details* (already checked by the caller).
+    Methods count only when they are in ``INTERACTIVE_METHODS`` and never for an agent's connection (an agent
+    acting through MCP answers no interactive request). Every call replaces the previous advertisement (a call
+    without *requests* clears the methods). Returns the levels accepted (sorted); :func:`handled_methods`
+    reads the methods accepted."""
     details = details or {}
     levels = frozenset(level for level in (confirm if isinstance(confirm, (list, tuple)) else ())
                        if isinstance(level, str) and level in CONFIRM_LEVELS
                        and (level not in DETAILED_LEVELS or details.get(level) is not None)
                        ) if server_requests else frozenset()
     kept = {level: details[level] for level in levels if level in DETAILED_LEVELS}
+    methods = frozenset(method for method in (requests if isinstance(requests, (list, tuple)) else ())
+                        if isinstance(method, str) and method in INTERACTIVE_METHODS
+                        ) if server_requests and _agent_identity(transport) is None else frozenset()
     with _lock:
+        if methods:
+            _handled[transport] = methods
+        else:
+            _handled.pop(transport, None)
         if server_requests:
             _answering_clients.add(transport)
         else:
@@ -254,6 +319,7 @@ def forget(transport: Any) -> None:
         _answering_clients.discard(transport)
         _confirm_levels.pop(transport, None)
         _confirm_details.pop(transport, None)
+        _handled.pop(transport, None)
 
 
 def answers_requests(transport: Any) -> bool:
@@ -267,9 +333,27 @@ def confirm_levels(transport: Any) -> frozenset[str]:
         return _confirm_levels.get(transport, frozenset()) if transport in _answering_clients else frozenset()
 
 
+def handled_methods(transport: Any) -> list[str]:
+    """The interactive request methods *transport* advertised and this gateway accepted (sorted; empty when
+    none, or when it is not an answering client): what ``client.capabilities`` echoes as ``requests``."""
+    with _lock:
+        return sorted(_handled.get(transport, frozenset())) if transport in _answering_clients else []
+
+
+def _gated(req: ServerRequest) -> bool:
+    """*req* goes only to, and is answered only by, qualifying connections (a ``confirm`` level or a method)."""
+    return req.level is not None or req.method_gated
+
+
 def _qualifies(req: ServerRequest, transport: Any) -> bool:
-    """Caller holds ``_lock``. *transport* advertised *req*'s level and passes its target predicate (attachment
-    is checked by the caller). The predicate runs under ``_lock``: it must be pure and must not call back here."""
+    """Caller holds ``_lock``. *transport* advertised *req*'s level (or, method-gated, its method) and passes its
+    target predicate (attachment is checked by the caller). The predicate runs under ``_lock``: it must be pure
+    and must not call back here. An agent's connection never qualifies for a method-gated request."""
+    if req.method_gated:
+        return (transport is not None and transport in _answering_clients
+                and req.method in _handled.get(transport, frozenset())
+                and _agent_identity(transport) is None
+                and (req.target is None or bool(req.target(transport, None))))
     return (transport is not None and transport in _answering_clients
             and req.level in _confirm_levels.get(transport, frozenset())
             and (req.target is None or bool(req.target(transport, _confirm_details.get(transport, {}).get(req.level)))))
@@ -283,9 +367,34 @@ def _may_answer(req: ServerRequest, transport: Any) -> bool:
     (``session.resume`` / ``activate``) and advertises the level again."""
     if not _access(req.sid, transport):
         return False
-    if req.level is None:
+    if not _gated(req):
         return True
     return _qualifies(req, transport) and any(peer is transport for peer in _peers(req.sid))
+
+
+def acting_user_target(sid: str) -> Callable[[Any, Any], bool]:
+    """The target predicate "signed in as the login session *sid*'s work is attributed to RIGHT NOW"
+    (``server._acting_auth_user``), for ``send_gated(target=...)``. The login is resolved here, on the calling
+    thread (it depends on the turn's context), and the returned ``target(transport, detail)`` only compares
+    against it: pure, safe under ``_lock``. When the gateway cannot name the acting login (no auth provider, an
+    ambiguous shared session) every qualifying connection passes, as for ``confirm`` at level ``plain``. When
+    resolving it fails, nobody passes: a request for the wrong person is worse than none."""
+    try:
+        login = _acting_user(sid)
+    except Exception:  # noqa: BLE001 - fail closed: the request then settles unavailable
+        logger.warning("server request: acting user of %s unresolved; no connection qualifies", sid, exc_info=True)
+        return lambda transport, detail: False
+    if not login:
+        return lambda transport, detail: True
+    transport_user = _transport_user
+
+    def target(transport: Any, detail: Any) -> bool:
+        try:
+            return transport_user(transport) == login
+        except Exception:  # noqa: BLE001 - pure and fail closed, never raise under the module lock
+            return False
+
+    return target
 
 
 #: The server requests an agent acting through MCP may answer: a clarify answer is words, the capability a
@@ -542,9 +651,25 @@ def send_detailed(method: str, sid: str, params: dict, *, timeout: float | None,
     return outcome
 
 
-def _await(req: ServerRequest, timeout: float | None) -> RequestOutcome:
-    """Block until *req* settles or *timeout* passes; withdraw it on timeout (``request.cancel``)."""
+def _await(req: ServerRequest, timeout: float | None, park_seconds: float = 0) -> RequestOutcome:
+    """Block until *req* settles or *timeout* passes; withdraw it on timeout (``request.cancel``).
+
+    *park_seconds* > 0 (a parked request, no targets yet): first wait ``min(timeout, park_seconds)``; if by then
+    no connection was reached (``req.targets`` still empty, decided under the lock that adds one), withdraw it
+    as ``unavailable (no_capable_client)`` WITHOUT ``request.cancel`` (nobody was shown it); otherwise wait the
+    rest of *timeout*."""
     try:
+        if park_seconds > 0:
+            started = time.monotonic()
+            if not req.event.wait(park_seconds if timeout is None else min(timeout, park_seconds)):
+                with _lock:
+                    unreached = not req.targets and _open.get(req.id) is req
+                    if unreached:
+                        _open.pop(req.id, None)
+                if unreached:
+                    return RequestOutcome("unavailable", None, "no_capable_client", req.id)
+                if timeout is not None:
+                    timeout = max(0.0, timeout - (time.monotonic() - started))
         req.event.wait(timeout)
     except BaseException:
         # The wait itself died (KeyboardInterrupt, SystemExit, injected error): withdraw the request
@@ -575,17 +700,26 @@ def _await(req: ServerRequest, timeout: float | None) -> RequestOutcome:
     return RequestOutcome("cancelled", None, cancel_reason or "cancelled", req.id)
 
 
-def send_gated(method: str, sid: str, params: dict, *, level: str, timeout: float | None,
-               validate: Callable[[dict], str | None],
+def send_gated(method: str, sid: str, params: dict, *, level: str | None = None, methods_gate: bool = True,
+               timeout: float | None, validate: Callable[[dict], str | None],
                on_open: Callable[[str, int], None] | None = None,
                target: Callable[[Any, Any], bool] | None = None, request_id: str | None = None,
                max_refusals: int | None = None,
-               on_refusal: Callable[[Any, str, Any, bool], None] | None = None) -> RequestOutcome:
-    """Send *method* only to the connections attached to *sid* that advertised *level* (today: the
-    ``confirm`` levels), and wait like :func:`send_detailed`.
+               on_refusal: Callable[[Any, str, Any, bool], None] | None = None,
+               park_seconds: float = 0) -> RequestOutcome:
+    """Send *method* only to the connections attached to *sid* that advertised *level* (the ``confirm``
+    levels) or, with ``level=None``, the METHOD itself (``client.capabilities {requests}``, the interactive
+    requests; ``methods_gate`` must then be True: a gated request needs a gate), and wait like
+    :func:`send_detailed`.
 
     ``unavailable`` at once, with nothing written and nothing left open, when no such connection is
-    attached (``reason: no_capable_client``) or every write failed. ``params`` are validated against the
+    attached (``reason: no_capable_client``) or every write failed — unless the request is method-gated and
+    ``park_seconds`` > 0: it is then PARKED (module docstring): registered open with no targets, ``on_open``
+    runs with 0 reached, a later qualifying connection gets it through :func:`open_requests` or
+    :func:`deliver_late`, and nobody within ``min(timeout, park_seconds)`` settles ``unavailable
+    (no_capable_client)`` without a ``request.cancel``. A method-gated request covered by ``request_hooks``
+    fires ``pre_server_request`` (with ``reached``, 0 when parked) and ``post_server_request`` itself; a
+    level-gated one leaves its hooks to the caller (``confirm``). ``params`` are validated against the
     request's contract in full (not only unknown keys): a gated request is built by the gateway, so a
     violation is our bug and raises ``ValueError``. ``validate(result)`` returns a problem string for an
     answer that must not settle the request (the request stays open for a valid one). A valid answer
@@ -605,7 +739,9 @@ def send_gated(method: str, sid: str, params: dict, *, level: str, timeout: floa
     fan-out mailbox, so it may overtake events already queued for that connection; that is harmless for a
     request, which a client keys by id. A connection that was not attached when the frame went out never
     gets it pushed: it sees the request only through ``open_requests`` once it has reattached
-    (``session.resume`` / ``activate``) and advertised the level (the second ``client.capabilities``).
+    (``session.resume`` / ``activate``) and advertised the level (the second ``client.capabilities``). A
+    method-gated request is also pushed to a connection that advertises the method while attached
+    (:func:`deliver_late`), and a connection it reaches late becomes one of its targets.
     ``request.cancel`` goes through ``_emit`` to EVERY client of the session, including ones that never
     received the request; it carries only the id, the method and the reason."""
     from pydantic import ValidationError
@@ -615,14 +751,21 @@ def send_gated(method: str, sid: str, params: dict, *, level: str, timeout: floa
         contract.params.model_validate({"session_id": sid, **params})
     except ValidationError as exc:
         raise ValueError(f"invalid {method} params: {exc}") from exc
-    if level not in CONFIRM_LEVELS:
+    if level is None:
+        if not methods_gate:
+            raise ValueError("send_gated needs a gate: a level, or methods_gate")
+        if method not in INTERACTIVE_METHODS:
+            raise ValueError(f"{method!r} is not an interactive request method; only those are method-gated")
+    elif level not in CONFIRM_LEVELS:
         raise ValueError(f"unknown level {level!r}")
+    parkable = level is None and park_seconds > 0
     req = ServerRequest(sid, method, params, level=level, validate=validate, request_id=request_id)
     req.target, req.max_refusals, req.on_refusal = target, max_refusals, on_refusal
+    req.method_gated = level is None
     candidates = list(_peers(sid))
     with _lock:
         targets = [peer for peer in candidates if _qualifies(req, peer)]
-    if not targets:
+    if not targets and not parkable:
         return RequestOutcome("unavailable", None, "no_capable_client")
     req.targets = list(targets)
     with _lock:
@@ -635,14 +778,39 @@ def send_gated(method: str, sid: str, params: dict, *, level: str, timeout: floa
                 reached.append(peer)
         except Exception:
             logger.debug("server request %s: write to one client failed", req.id, exc_info=True)
-    with _lock:
-        req.targets = [peer for peer in req.targets if any(peer is ok for ok in reached)]
-        if not req.targets and _open.get(req.id) is req and not req.answered:
-            _open.pop(req.id, None)
-            return RequestOutcome("unavailable", None, "write_failed", req.id)
+    if targets:
+        with _lock:
+            # Keep a connection added meanwhile by ``open_requests`` (method-gated): it got the request there.
+            req.targets = [peer for peer in req.targets if any(peer is ok for ok in reached)
+                           or not any(peer is sent for sent in targets)]
+            if not req.targets and _open.get(req.id) is req and not req.answered:
+                _open.pop(req.id, None)
+                return RequestOutcome("unavailable", None, "write_failed", req.id)
+    parked = not targets
+    if parked:
+        # A connection that attached (and listed its open requests) between the scan above and the registration
+        # would otherwise miss the request until it reattaches: scan once more now that it is open.
+        late_peers = list(_peers(sid))
+        with _lock:
+            late = [peer for peer in late_peers if _qualifies(req, peer) and _add_target_locked(req, peer)]
+            parked = not req.targets
+        reached = [peer for peer in late if _write_late([req], peer)]
     if on_open is not None:
         on_open(req.id, len(reached))
-    outcome = _await(req, timeout)
+    tracked = None
+    if req.method_gated and request_hooks.covers(method):
+        # A parked request's push is about reaching a device before the park deadline, not the answer's.
+        wait = park_seconds if parked and (timeout is None or park_seconds < timeout) else timeout
+        tracked = request_hooks.opened(method, sid, req.id, reached=len(reached),
+                                       expires_at=None if wait is None else int(time.time() + wait))
+    try:
+        outcome = _await(req, timeout, park_seconds if parked else 0)
+    except BaseException:
+        if tracked is not None:
+            tracked.settled("interrupted")
+        raise
+    if tracked is not None:
+        tracked.settled(request_hooks.settle_reason(outcome))
     if outcome.status == "answered":
         # The other connections still show the card: withdraw it there (the answering one ignores it).
         _emit_cancel(req, "resolved")
@@ -692,10 +860,10 @@ def answer_problem(request_id: str, result: Any) -> tuple[int, str] | tuple[int,
         if req is None:
             return None
         if not _may_answer(req, transport):
-            if req.level is None or not _access(req.sid, transport):
+            if not _gated(req) or not _access(req.sid, transport):
                 return 4033, "this connection may not answer requests of that session"
-            return 4033, f"this connection is not attached or may not answer {req.method} level {req.level!r}"
-        if req.level is None:
+            return 4033, _not_qualified_message(req)
+        if not _gated(req):
             return None
         validate = req.validate
     # Outside the lock: a validator may be slow (a signature check). It is pure, so the answer path that
@@ -710,10 +878,17 @@ def answer_problem(request_id: str, result: Any) -> tuple[int, str] | tuple[int,
         if _open.get(request_id) is not req:
             return None  # settled meanwhile: the ordinary path answers "expired"
         if not _may_answer(req, transport):
-            return 4033, f"this connection is not attached or may not answer {req.method} level {req.level!r}"
+            return 4033, _not_qualified_message(req)
         exhausted = _count_refusal(req)
     _after_refusal(req, transport, problem, result, exhausted)
     return 4034, "answer refused", {"reason": "too_many_attempts" if exhausted else problem}
+
+
+def _not_qualified_message(req: ServerRequest) -> str:
+    """The 4033 message for a connection that may act on the session but not answer the gated *req*."""
+    if req.level is None:
+        return f"this connection is not attached or did not advertise {req.method} requests"
+    return f"this connection is not attached or may not answer {req.method} level {req.level!r}"
 
 
 def _count_refusal(req: ServerRequest) -> bool:
@@ -782,7 +957,7 @@ def resolve_response(frame: dict) -> bool:
             # Checked here, under the lock that settles: the person may lock a question until this very moment.
             agent_refused = _agent_request_refusal_locked(req, frame.get("result"), transport)
         verdict, problem = ("refused", "") if agent_refused is not None else (
-            _gated_verdict(req, frame) if req.level is not None else ("settle", ""))
+            _gated_verdict(req, frame) if _gated(req) else ("settle", ""))
         if verdict == "counted":
             exhausted = _count_refusal(req)
         elif verdict != "settle":
@@ -850,7 +1025,7 @@ def _gated_verdict(req: ServerRequest, frame: dict) -> tuple[str, str]:
             return "kept", ""
         return "settle", ""
     if not _may_answer(req, transport):
-        logger.warning("server request %s (%s): answer refused, the connection may not answer level %r",
+        logger.warning("server request %s (%s): answer refused, the connection may not answer it (level %r)",
                        req.id, req.method, req.level)
         return "refused", ""
     result = frame.get("result")
@@ -918,7 +1093,46 @@ def open_requests(sid: str) -> list[dict]:
     with _lock:
         reqs = sorted((req for req in _open.values() if req.sid == sid and _may_answer(req, caller)),
                       key=lambda r: r.created_at)
+        for req in reqs:
+            _add_target_locked(req, caller)
     return [req.snapshot() for req in reqs]
+
+
+def _add_target_locked(req: ServerRequest, transport: Any) -> bool:
+    """Caller holds ``_lock`` and *transport* may answer *req*. A method-gated request delivered to *transport*
+    after it opened (``open_requests``, :func:`deliver_late`) makes it a target: its error response then counts,
+    and a parked request counts as reached. True when it was added (it was not a target yet). A level-gated
+    request (``confirm``) is left as it always was: only the connections its frame went to are targets."""
+    if not req.method_gated or any(peer is transport for peer in req.targets):
+        return False
+    req.targets.append(transport)
+    return True
+
+
+def deliver_late(transport: Any) -> int:
+    """Write every open method-gated request *transport* may answer now but was never given (it advertised the
+    method while already attached to the session, so the ``open_requests`` of its attach did not list it), and
+    make it a target. Call it after :func:`advertise`. The frames are written outside the lock. Returns how many
+    were delivered."""
+    if transport is None:
+        return 0
+    with _lock:
+        late = sorted((req for req in _open.values()
+                       if req.method_gated and _may_answer(req, transport) and _add_target_locked(req, transport)),
+                      key=lambda r: r.created_at)
+    return _write_late(late, transport)
+
+
+def _write_late(reqs: list[ServerRequest], transport: Any) -> int:
+    """Outside the lock: write each of *reqs* (already targets of *transport*) to *transport*."""
+    delivered = 0
+    for req in reqs:
+        try:
+            if transport.write(req.frame()) is not False:
+                delivered += 1
+        except Exception:  # noqa: BLE001 - the request stays listed in open_requests for a reattach
+            logger.debug("server request %s: late write failed", req.id, exc_info=True)
+    return delivered
 
 
 def open_request_count() -> int:
@@ -946,3 +1160,4 @@ def reset_for_tests() -> None:
         _answering_clients.clear()
         _confirm_levels.clear()
         _confirm_details.clear()
+        _handled.clear()

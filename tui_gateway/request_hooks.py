@@ -5,9 +5,11 @@ bounded by ``plugins.hook_callback_timeout`` (``plugins_dispatch._HOOK_TIMEOUT_B
 every exception, and none of them ever carrying what the person is asked or answers (no question, choices,
 prompt, command, site, answer, secret or task result):
 
-- ``pre_server_request``: a ``clarify``, ``secret``, ``sudo`` or ``vault.*`` request was written to the
-  session's clients (:func:`covers`). ``confirm`` is not announced here: it keeps ``pre_confirm_request``
-  (``tui_gateway/confirm.py``), which also says the level and who the request is bound to.
+- ``pre_server_request``: a ``clarify``, ``secret``, ``sudo``, ``vault.*`` or interactive (``input.form``,
+  ``input.file``, ``review.draft``, ...) request was written to the session's clients, or, interactive only,
+  parked until a capable device attaches (``reached: 0``) (:func:`covers`). ``confirm`` is not announced here:
+  it keeps ``pre_confirm_request`` (``tui_gateway/confirm.py``), which also says the level and who the request
+  is bound to.
 - ``post_server_request``: that request stopped being open, for the methods above and for ``confirm``.
 - ``on_background_complete``: a ``/background`` task finished (``methods_prompt._spawn_side_agent``).
 
@@ -29,6 +31,8 @@ import logging
 import threading
 from typing import Any, Callable
 
+from tui_gateway.contracts.server_requests import INTERACTIVE_METHODS
+
 logger = logging.getLogger(__name__)
 
 #: ``pre_server_request`` kwargs (kept in step with ``VALID_HOOKS`` and hooks.md by a test).
@@ -38,8 +42,10 @@ POST_KWARGS = ("session_id", "session_key", "request_id", "method", "user_id", "
 #: ``on_background_complete`` kwargs.
 BACKGROUND_KWARGS = ("session_id", "session_key", "task_id", "user_id")
 
-#: The methods ``pre_server_request`` is fired for; ``vault.*`` is every method with that prefix.
-METHODS = ("clarify", "secret", "sudo")
+#: The methods ``pre_server_request`` is fired for; ``vault.*`` is every method with that prefix. The interactive
+#: requests (``INTERACTIVE_METHODS``) are fired by ``server_requests.send_gated``, with ``reached: 0`` while a
+#: request is parked waiting for a capable device.
+METHODS = ("clarify", "secret", "sudo", *INTERACTIVE_METHODS)
 VAULT_PREFIX = "vault."
 #: How long a ``post_server_request`` waits for the hook that announced the same request.
 ORDER_WAIT_SECONDS = 5.0

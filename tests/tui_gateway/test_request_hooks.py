@@ -2,7 +2,8 @@
 ``pre_server_request``, ``post_server_request`` and ``on_background_complete``.
 
 What is pinned here: the exact kwargs of each hook (and that they match ``VALID_HOOKS`` and ``hooks.md``);
-that ``pre_server_request`` covers ``clarify``, ``secret``, ``sudo`` and ``vault.*`` and nothing else, and that
+that ``pre_server_request`` covers ``clarify``, ``secret``, ``sudo``, ``vault.*`` and the interactive requests
+(announced with ``reached: 0`` while parked) and nothing else, and that
 ``confirm`` is announced by ``pre_confirm_request`` and ended by ``post_server_request``; every way a request
 ends maps to a ``reason``; ``post`` never overtakes the hook that announced the same request; no kwarg ever
 carries the question, prompt, command, site, answer or result; with no plugin registered nothing is started;
@@ -246,6 +247,62 @@ def test_a_confirm_request_is_announced_by_its_own_hook_not_pre_server_request(s
                      "user_id": announced["user_id"], "reason": "answered"}
     assert hooks.order == ["pre_confirm_request", "post_server_request"]
     assert "SUMMARY-TEXT-7" not in hooks.every_kwarg
+
+
+DRAFT = {"v": 1, "title": "TITLE-TEXT-7", "summary": "SUMMARY-TEXT-7", "expires_at": 1_791_119_400,
+         "optional": False, "kind": "mail", "text": "DRAFT-TEXT-7"}
+
+
+def _ask_gated_in_thread(sid="s1", *, timeout=10, park_seconds=0):
+    """``server_requests.send_gated`` for a ``review.draft`` on a thread; the box gets the outcome."""
+    from tui_gateway import server_requests
+    box: dict = {}
+
+    def run():
+        box["outcome"] = server_requests.send_gated(
+            "review.draft", sid, DRAFT, timeout=timeout, park_seconds=park_seconds,
+            validate=lambda result: None if result.get("decision") in ("approved", "rejected") else "bad_shape")
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, box
+
+
+def test_an_interactive_request_is_announced_by_pre_server_request_without_the_text(server, hooks):
+    from tui_gateway import server_requests
+    phone = _Peer("phone", ALICE)
+    _session(server, "s1", phone, creator=ALICE)
+    server_requests.advertise(phone, True, None, requests=["review.draft"])
+    before = int(time.time())
+    thread, box = _ask_gated_in_thread(timeout=60)
+    frame = _wait_frame(phone, "review.draft")
+    (fired,) = hooks.wait("pre_server_request")
+    assert fired == {"session_id": "s1", "session_key": "key-s1", "request_id": frame["id"],
+                     "method": "review.draft", "user_id": ALICE, "expires_at": fired["expires_at"], "reached": 1}
+    assert before + 59 <= fired["expires_at"] <= int(time.time()) + 60
+    _respond(server, phone, frame["id"], {"decision": "approved", "text": ANSWER_TEXT})
+    thread.join(5)
+    assert box["outcome"].status == "answered"
+    (ended,) = hooks.wait("post_server_request")
+    assert ended["reason"] == "answered" and ended["method"] == "review.draft"
+    assert not any(text in hooks.every_kwarg for text in ("TITLE-TEXT-7", "SUMMARY-TEXT-7", "DRAFT-TEXT-7",
+                                                           ANSWER_TEXT))
+
+
+def test_a_parked_interactive_request_is_announced_with_nobody_reached(server, hooks):
+    """The push for a request no capable device was attached for: ``reached: 0``, the deadline is the park's."""
+    from tui_gateway import server_requests
+    _session(server, "s1", _Peer("old app"), creator=ALICE)
+    before = int(time.time())
+    thread, box = _ask_gated_in_thread(timeout=60, park_seconds=0.2)
+    (fired,) = hooks.wait("pre_server_request")
+    assert fired["reached"] == 0 and fired["method"] == "review.draft" and fired["user_id"] == ALICE
+    assert before <= fired["expires_at"] <= int(time.time()) + 1
+    thread.join(5)
+    assert (box["outcome"].status, box["outcome"].reason) == ("unavailable", "no_capable_client")
+    (ended,) = hooks.wait("post_server_request")
+    assert ended["reason"] == "no_capable_client"
+    assert server_requests.open_request_count() == 0
 
 
 # ── post_server_request ──────────────────────────────────────────────────────────────────────
@@ -502,9 +559,12 @@ def test_the_hooks_are_declared_bounded_and_documented_with_the_kwargs_they_fire
         assert f"`{hook}`" in plugins_md
 
 
-def test_covers_is_clarify_secret_sudo_and_the_vault_methods_only():
+def test_covers_is_clarify_secret_sudo_the_vault_and_the_interactive_methods_only():
     from tui_gateway import request_hooks
     from tui_gateway.contracts import registry as contracts
+    from tui_gateway.contracts.server_requests import INTERACTIVE_METHODS
     covered = {method for method in contracts.SERVER_REQUESTS if request_hooks.covers(method)}
-    assert covered == {"clarify", "secret", "sudo", "vault.unlock_prompt", "vault.save_login", "vault.code"}
+    assert covered == {"clarify", "secret", "sudo", "vault.unlock_prompt", "vault.save_login", "vault.code",
+                       *INTERACTIVE_METHODS}
+    assert {"input.form", "input.file", "review.draft"} <= covered
     assert not request_hooks.covers("confirm") and not request_hooks.covers("approval")

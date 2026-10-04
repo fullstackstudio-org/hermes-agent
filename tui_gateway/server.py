@@ -683,7 +683,9 @@ _server_requests.bind_sinks(lambda frame: write_json(frame), lambda event, sid, 
                             access=lambda sid, transport: _transport_may_access_session(
                                 _sessions.get(sid), transport, sid=sid),
                             peers=lambda sid: _session_client_peers(sid),
-                            turn_author=lambda sid: _inflight_turn_author(sid))
+                            turn_author=lambda sid: _inflight_turn_author(sid),
+                            acting_user=lambda sid: _acting_auth_user(_sessions.get(sid))[0],
+                            transport_user=lambda transport: _transport_auth_user_id(transport))
 
 # ``pre_server_request`` / ``post_server_request`` / ``on_background_complete`` (``request_hooks``) name the
 # conversation and the login a turn acts for; both are read here, on the calling thread.

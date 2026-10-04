@@ -667,6 +667,25 @@ def _emit(event: str, sid: str, payload: dict | None = None) -> bool:
 
 from tui_gateway import server_requests as _server_requests  # noqa: E402
 
+def _request_acting_user(sid: str) -> tuple[str | None, bool]:
+    """``(login, ambiguous)`` for a gated request of live session *sid* (``server_requests.acting_user_target``):
+    the login :func:`_acting_auth_user` attributes the work to, and, when it names none, whether that is because
+    more than one person could be behind the session (:func:`_session_identity_is_ambiguous`) rather than because
+    nobody is signed in at all. Reads the turn's ContextVar: call it on the turn's thread."""
+    session = _sessions.get(sid)
+    login = _acting_auth_user(session)[0]
+    return login, login is None and _session_identity_is_ambiguous(session)
+
+
+def _transport_login(transport) -> str | None:
+    """The login half of :func:`_transport_auth_user` without building its ``AuthUser``: pure (attribute reads and
+    string work), so it may run under ``server_requests``' lock inside a target predicate."""
+    identity = getattr(transport, "auth_identity", None)
+    if not _methods_browser_control._is_authenticated_identity(identity):
+        return None
+    return f"{str(identity['provider']).strip()}:{str(identity['user_id']).strip()}"
+
+
 def _inflight_turn_author(sid: str) -> dict | None:
     """The ``author`` of the turn running in live session *sid* (its in-flight record's ``display_metadata``, with
     ``via`` when an agent sent it); None when none runs or it names nobody. Lock-free: a request may open on a
@@ -684,8 +703,8 @@ _server_requests.bind_sinks(lambda frame: write_json(frame), lambda event, sid, 
                                 _sessions.get(sid), transport, sid=sid),
                             peers=lambda sid: _session_client_peers(sid),
                             turn_author=lambda sid: _inflight_turn_author(sid),
-                            acting_user=lambda sid: _acting_auth_user(_sessions.get(sid))[0],
-                            transport_user=lambda transport: _transport_auth_user_id(transport))
+                            acting_user=lambda sid: _request_acting_user(sid),
+                            transport_user=lambda transport: _transport_login(transport))
 
 # ``pre_server_request`` / ``post_server_request`` / ``on_background_complete`` (``request_hooks``) name the
 # conversation and the login a turn acts for; both are read here, on the calling thread.

@@ -289,20 +289,56 @@ def test_an_interactive_request_is_announced_by_pre_server_request_without_the_t
                                                            ANSWER_TEXT))
 
 
-def test_a_parked_interactive_request_is_announced_with_nobody_reached(server, hooks):
+def _fake_clock(monkeypatch):
+    """Move ``server_requests``' method-gated clock by hand; ``advance`` wakes the waits (no sleeping)."""
+    from tui_gateway import server_requests
+    state = {"now": 1_000.0}
+    monkeypatch.setattr(server_requests, "_monotonic", lambda: state["now"])
+
+    def advance(seconds):
+        state["now"] += seconds
+        with server_requests._lock:
+            for req in server_requests._open.values():
+                if req.method_gated:
+                    req.event.set()
+
+    return advance
+
+
+def test_a_parked_interactive_request_is_announced_with_nobody_reached(server, hooks, monkeypatch):
     """The push for a request no capable device was attached for: ``reached: 0``, the deadline is the park's."""
     from tui_gateway import server_requests
+    advance = _fake_clock(monkeypatch)
     _session(server, "s1", _Peer("old app"), creator=ALICE)
     before = int(time.time())
-    thread, box = _ask_gated_in_thread(timeout=60, park_seconds=0.2)
+    thread, box = _ask_gated_in_thread(timeout=300, park_seconds=60)
     (fired,) = hooks.wait("pre_server_request")
     assert fired["reached"] == 0 and fired["method"] == "review.draft" and fired["user_id"] == ALICE
-    assert before <= fired["expires_at"] <= int(time.time()) + 1
+    assert before + 59 <= fired["expires_at"] <= int(time.time()) + 61
+    advance(61)
     thread.join(5)
     assert (box["outcome"].status, box["outcome"].reason) == ("unavailable", "no_capable_client")
     (ended,) = hooks.wait("post_server_request")
     assert ended["reason"] == "no_capable_client"
     assert server_requests.open_request_count() == 0
+
+
+def test_a_parked_request_reached_later_is_announced_exactly_once(server, hooks):
+    from tui_gateway import server_requests
+    old = _Peer("old app")
+    _session(server, "s1", old, creator=ALICE)
+    thread, box = _ask_gated_in_thread(timeout=300, park_seconds=60)
+    (fired,) = hooks.wait("pre_server_request")
+    phone = _Peer("phone", ALICE)
+    server._sessions["s1"]["transport"] = phone
+    server_requests.advertise(phone, True, None, requests=["review.draft"])
+    listed = _as(phone, server_requests.open_requests, "s1")
+    assert [r["id"] for r in listed] == [fired["request_id"]]
+    _respond(server, phone, fired["request_id"], {"decision": "approved", "text": ANSWER_TEXT})
+    thread.join(5)
+    assert box["outcome"].status == "answered"
+    hooks.wait("post_server_request")
+    assert hooks.order == ["pre_server_request", "post_server_request"]
 
 
 # ── post_server_request ──────────────────────────────────────────────────────────────────────

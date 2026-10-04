@@ -15,6 +15,12 @@ basename denylist, opens it without following a link, refuses anything but a reg
 - ``blob`` holds the bytes (``O_CREAT | O_EXCL | O_NOFOLLOW``, mode 0600), ``record.json`` what is known
   about them: :data:`RECORD_KEYS`.
 
+The copy is made in ``outbox/.staging/<token>/`` without holding the outbox (a slow or hung read stalls only
+its own share) and moved into place under the lock, after room was made for it (:func:`_prune_locked`).
+Every check judges what the path names, not how it is spelled (``agent/path_identity.py``): after the file is
+opened the checks run again on the path the kernel reports for that descriptor, so on a case-insensitive volume
+``<home>/STATE.DB`` or ``<home>/OUTBOX/...`` is refused like the file it opens.
+
 The agent's own file is never touched. Clients see the record's public part, :func:`attachment_of`, and fetch
 the bytes from ``GET /api/files/outbox/{token}/{name}`` (``hermes_cli/web_routers/files.py``), which reads them
 back through :func:`open_shared`. :func:`prune_outbox` applies ``files.outbox_retention_days`` and
@@ -54,10 +60,11 @@ RECORD_NAME = "record.json"
 RECORD_VERSION = 1
 #: ``secrets.token_urlsafe(24)``: 32 URL-safe characters.
 TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
-#: The keys of ``record.json``. ``source`` (the agent's path), ``session_id`` and ``logins`` never leave the
-#: server: :func:`attachment_of` is what a client sees.
-RECORD_KEYS = ("v", "id", "name", "mime", "kind", "inline", "size", "sha256", "created_at", "session_id", "logins",
-               "source")
+#: The keys of ``record.json``. ``source`` (the agent's path), ``session_id`` (the session whose row shows the
+#: file), ``conversation_id`` (the root of that session's compression lineage: the conversation that owns the
+#: copy for eviction) and ``logins`` never leave the server: :func:`attachment_of` is what a client sees.
+RECORD_KEYS = ("v", "id", "name", "mime", "kind", "inline", "size", "sha256", "created_at", "session_id",
+               "conversation_id", "logins", "source")
 #: What a client sees of a shared file (``contract/outbox``).
 ATTACHMENT_KEYS = ("id", "name", "mime", "kind", "size", "sha256", "created_at", "url")
 URL_PREFIX = "/api/files/outbox"
@@ -74,6 +81,14 @@ DEFAULT_MAX_TURN_MB = 500
 DEFAULT_TURN_TIMEOUT_S = 120
 #: The cross-process lock file inside ``outbox/`` (``flock``); never a share, never pruned.
 LOCK_NAME = ".lock"
+#: Where a copy is made before it is moved into place (``outbox/.staging/<token>/``); never a share.
+STAGING_NAME = ".staging"
+#: A staging entry untouched this long is a copy that was abandoned (a crash, a read that never returned).
+STAGING_MAX_AGE_SECONDS = 6 * 3600.0
+#: The share of ``files.outbox_max_total_mb`` one conversation may hold.
+DEFAULT_CONVERSATION_SHARE = 0.5
+#: For how long a shared file is safe from being evicted by ANOTHER conversation's share.
+DEFAULT_EVICT_GRACE_SECONDS = 24 * 3600.0
 #: A hard ceiling on the number of shared files per profile, whatever their size: pruning reads every entry.
 MAX_ENTRIES = 10_000
 _NAME_MAX_CHARS = 180
@@ -94,7 +109,8 @@ class ShareRefused(Exception):
 
 
 #: ``linked``: the file has another hard link; ``turn_limit``: the turn shared its maximum number of files;
-#: ``no_room``: the outbox is full of other conversations' recent files; ``busy``: the outbox stayed locked;
+#: ``no_room``: the conversation's share of the outbox is full of this reply's files, or the outbox is full of
+#: other conversations' files shared within the grace period; ``busy``: the outbox stayed locked;
 #: ``timeout``: the copy did not finish within the turn's time.
 REFUSAL_REASONS = ("unsupported", "invalid_path", "denied", "not_found", "not_regular", "linked", "too_large",
                    "turn_limit", "no_room", "busy", "timeout", "io_error")
@@ -222,6 +238,15 @@ class OutboxSettings:
     max_turn_files: int = DEFAULT_MAX_TURN_FILES
     max_turn_bytes: int = DEFAULT_MAX_TURN_MB * 1024 * 1024
     turn_timeout_seconds: float = float(DEFAULT_TURN_TIMEOUT_S)
+    #: Fixed rules (not configured): the share of the total one conversation may hold, and how long a file is
+    #: safe from another conversation's share.
+    conversation_share: float = DEFAULT_CONVERSATION_SHARE
+    evict_grace_seconds: float = DEFAULT_EVICT_GRACE_SECONDS
+
+    @property
+    def max_conversation_bytes(self) -> int:
+        """The most one conversation may hold in the outbox."""
+        return max(1, int(self.max_total_bytes * min(1.0, max(0.0, self.conversation_share))))
 
 
 def _positive(value: Any, default: float) -> float:
@@ -341,14 +366,15 @@ _DENIED_PARTS = frozenset({"mcp-tokens", "pairing", ".ssh", ".gnupg"})
 
 
 def _denied_basename(path: Path) -> bool:
-    lowered = path.name.lower()
+    from agent.path_identity import fold
+    lowered = fold(path.name)
     if lowered in _DENIED_BASENAMES or lowered.startswith(".env."):
         return True
     with contextlib.suppress(Exception):
         from hermes_cli.dashboard_auth.passkeys.paths import is_store_file_name
         if is_store_file_name(path.name):
             return True
-    return any(part.lower() in _DENIED_PARTS for part in path.parent.parts)
+    return any(fold(part) in _DENIED_PARTS for part in path.parent.parts)
 
 
 def hermes_homes(*extra: Path | str) -> list[Path]:
@@ -371,11 +397,13 @@ def hermes_homes(*extra: Path | str) -> list[Path]:
 
 def _is_shared_store(resolved: Path, homes: Iterable[Path]) -> bool:
     """Whether *resolved* is inside a home's ``outbox/`` (another conversation's copy: re-sharing it would hand
-    it to whoever is in THIS conversation) or a person's upload folder (``.../uploads/hermie/...``)."""
-    for home in homes:
-        if resolved == home / OUTBOX_DIR or (home / OUTBOX_DIR) in resolved.parents:
-            return True
-    parts = resolved.parts
+    it to whoever is in THIS conversation) or a person's upload folder (``.../uploads/hermie/...``). By what the
+    path names (``agent.path_identity``), and the upload segments in any case: fail closed."""
+    from agent.path_identity import PathProbe, fold
+    probe = PathProbe(resolved)
+    if probe.within_any(home / OUTBOX_DIR for home in homes):
+        return True
+    parts = [fold(part) for part in resolved.parts]
     return any((parts[i], parts[i + 1]) == upload_dirs.UPLOAD_SEGMENTS for i in range(len(parts) - 1))
 
 
@@ -391,6 +419,13 @@ def check_source(path: str, *, session_key: str = "", home: Path | str | None = 
     if not safe:
         raise ShareRefused("denied")
     resolved = Path(safe)
+    _judge(resolved, home)
+    return resolved
+
+
+def _judge(resolved: Path, home: Path | str | None) -> None:
+    """The checks beyond native delivery's, on a resolved host path: the read guard, the basename denylist, and
+    never a shared copy or an upload."""
     from agent.file_safety import get_read_block_error
     try:
         blocked = get_read_block_error(str(resolved))
@@ -400,7 +435,26 @@ def check_source(path: str, *, session_key: str = "", home: Path | str | None = 
         raise ShareRefused("denied")
     if _is_shared_store(resolved, hermes_homes(*(() if home is None else (home,)))):
         raise ShareRefused("denied")
-    return resolved
+
+
+def _judge_opened(fd: int, resolved: Path, home: Path) -> Path:
+    """The path the kernel reports for the opened file (``agent.path_identity.fd_path``: the spelling the volume
+    stores, so ``STATE.DB`` is ``state.db`` on a case-insensitive volume), judged again by every check when it
+    differs from *resolved*. Returns the path the file is recorded under."""
+    from agent.path_identity import fd_path
+    actual = fd_path(fd)
+    if not actual or actual == str(resolved):
+        return resolved
+    canonical = Path(actual)
+    from gateway.platforms.base import media_delivery_resolved_path_allowed
+    try:
+        allowed = media_delivery_resolved_path_allowed(canonical)
+    except Exception:
+        allowed = False
+    if not allowed:
+        raise ShareRefused("denied")
+    _judge(canonical, home)
+    return canonical
 
 
 _SOURCE_FLAGS = os.O_RDONLY | _NOFOLLOW | _CLOEXEC | _NONBLOCK
@@ -536,40 +590,132 @@ def _flock(outbox_fd: int, deadline: float | None) -> int:
 def share_file(source: str, *, home: Path | str, session_id: str, logins: Iterable[str] = (),
                settings: OutboxSettings | None = None, session_key: str = "", now: float | None = None,
                max_bytes: int | None = None, protect: Iterable[str] = (), cancel: threading.Event | None = None,
-               lock_timeout: float | None = None) -> dict:
+               lock_timeout: float | None = None, conversation_id: str = "") -> dict:
     """Copy the file *source* names into *home*'s outbox and return its record (:data:`RECORD_KEYS`).
     :class:`ShareRefused` when it may not or cannot be shared; nothing is left behind then.
 
-    *max_bytes* is what is left of the turn's byte budget; *protect* the tokens this turn already shared (never
-    evicted to make room); *cancel* stops a copy in progress (``timeout``); *lock_timeout* bounds the wait for the
-    outbox (``busy``)."""
+    *session_id* is the session whose row will show the file, *conversation_id* the conversation that owns the
+    copy (the root of that session's compression lineage; *session_id* when empty). *max_bytes* is what is left
+    of the turn's byte budget; *protect* the tokens this turn already shared (never evicted to make room);
+    *cancel* stops a copy in progress (``timeout``); *lock_timeout* bounds the whole share's wait for the outbox
+    (``busy``). The copy is made in ``outbox/.staging/`` without the lock; only making room and moving it into
+    place hold the outbox."""
     if not upload_dirs.supported():
         raise ShareRefused("unsupported")
     settings = settings or OutboxSettings()
+    started = time.monotonic()
     root = _resolved_home(home)
     resolved = check_source(source, session_key=session_key, home=root)
     src_fd = _open_source(resolved)
     try:
+        resolved = _judge_opened(src_fd, resolved, root)
         size = os.fstat(src_fd).st_size
-        limit = min(settings.max_file_bytes, settings.max_total_bytes,
+        limit = min(settings.max_file_bytes, settings.max_total_bytes, settings.max_conversation_bytes,
                     settings.max_turn_bytes if max_bytes is None else max_bytes)
         if size > limit:
             raise ShareRefused("too_large")
-        name = display_name(resolved.name)
-        with _locked_outbox(root, create=True, timeout=lock_timeout) as outbox_fd:
-            _prune_locked(outbox_fd, root, settings, now=now, room_for=size, session_id=str(session_id or ""),
-                          protect=frozenset(protect))
-            return _copy_in(outbox_fd, src_fd, name, size, session_id=session_id, logins=logins,
-                            limit=limit, source=str(resolved), now=now, cancel=cancel)
+        record = _stage(root, src_fd, display_name(resolved.name), size, session_id=str(session_id or ""),
+                        conversation_id=str(conversation_id or session_id or ""), logins=logins, limit=limit,
+                        source=str(resolved), now=now, cancel=cancel)
     finally:
         os.close(src_fd)
+    token = record["id"]
+    try:
+        if cancel is not None and cancel.is_set():
+            raise ShareRefused("timeout")
+        wait = None if lock_timeout is None else lock_timeout - (time.monotonic() - started)
+        with _locked_outbox(root, create=True, timeout=wait) as outbox_fd:
+            _prune_locked(outbox_fd, root, settings, now=now, room_for=int(record["size"]),
+                          conversation=record["conversation_id"], protect=frozenset(protect), staging_keep=token)
+            _publish(outbox_fd, token)
+        return record
+    except BaseException:
+        _discard_staged(root, token)
+        raise
 
 
-def _copy_in(outbox_fd: int, src_fd: int, name: str, size: int, *, session_id: str, logins: Iterable[str],
-             limit: int, source: str, now: float | None, cancel: threading.Event | None) -> dict:
+def _stage(root: Path, src_fd: int, name: str, size: int, **kwargs: Any) -> dict:
+    """Copy the opened file into ``outbox/.staging/<token>/`` (blob and record), outside the outbox lock."""
+    try:
+        outbox_fd = upload_dirs.walk([OUTBOX_DIR], create_from=0, start=str(root))
+        try:
+            staging_fd = _staging_dir(outbox_fd)
+        except BaseException:
+            os.close(outbox_fd)
+            raise
+    except OSError as exc:
+        logger.warning("outbox: cannot open %s/%s/%s: %s", root, OUTBOX_DIR, STAGING_NAME, type(exc).__name__)
+        raise ShareRefused("io_error")
+    try:
+        return _copy_in(staging_fd, src_fd, name, size, taken_fd=outbox_fd, **kwargs)
+    finally:
+        os.close(staging_fd)
+        os.close(outbox_fd)
+
+
+def _staging_dir(outbox_fd: int) -> int:
+    """``outbox/.staging``, created when missing, opened without following a link."""
+    for attempt in range(2):
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(STAGING_NAME, upload_dirs.DIR_MODE, dir_fd=outbox_fd)
+        try:
+            return upload_dirs.open_dir(STAGING_NAME, dir_fd=outbox_fd)
+        except upload_dirs.UnsafePath:
+            if attempt:
+                raise
+            os.unlink(STAGING_NAME, dir_fd=outbox_fd)  # a link or a file planted under the name: never followed
+    raise upload_dirs.UnsafePath(errno.ENOTDIR, "not a directory", STAGING_NAME)
+
+
+def _publish(outbox_fd: int, token: str) -> None:
+    """Move the staged ``.staging/<token>`` to ``<token>`` (the outbox is locked): the entry appears whole."""
+    try:
+        staging_fd = upload_dirs.open_dir(STAGING_NAME, dir_fd=outbox_fd)
+    except OSError:
+        raise ShareRefused("io_error")
+    try:
+        try:
+            os.stat(token, dir_fd=outbox_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ShareRefused("io_error")  # a 192-bit token taken twice: never in practice, never overwritten
+        if not stat.S_ISDIR(os.stat(token, dir_fd=staging_fd, follow_symlinks=False).st_mode):
+            raise ShareRefused("io_error")  # a link or a file planted in its place
+        os.rename(token, token, src_dir_fd=staging_fd, dst_dir_fd=outbox_fd)
+    except OSError:
+        raise ShareRefused("io_error")
+    finally:
+        os.close(staging_fd)
+
+
+def _discard_staged(root: Path, token: str) -> None:
+    """Remove ``.staging/<token>`` (a share that failed or was given up on). Never raises."""
+    with contextlib.suppress(OSError):
+        staging_fd = upload_dirs.walk([OUTBOX_DIR, STAGING_NAME], start=str(root))
+        try:
+            _remove_entry(staging_fd, token)
+        finally:
+            os.close(staging_fd)
+
+
+def _copy_in(outbox_fd: int, src_fd: int, name: str, size: int, *, session_id: str, conversation_id: str,
+             logins: Iterable[str], limit: int, source: str, now: float | None,
+             cancel: threading.Event | None, taken_fd: int | None = None) -> dict:
+    """Make ``<token>/`` in *outbox_fd* (a new token, also not taken in *taken_fd*: the published outbox when
+    copying into staging) and fill it."""
     token = ""
     for _ in range(8):
         token = secrets.token_urlsafe(24)
+        if taken_fd is not None:
+            try:
+                os.stat(token, dir_fd=taken_fd, follow_symlinks=False)
+                token = ""
+                continue
+            except FileNotFoundError:
+                pass
+            except OSError:
+                raise ShareRefused("io_error")
         try:
             os.mkdir(token, upload_dirs.DIR_MODE, dir_fd=outbox_fd)
             break
@@ -578,15 +724,16 @@ def _copy_in(outbox_fd: int, src_fd: int, name: str, size: int, *, session_id: s
     if not token:
         raise ShareRefused("io_error")
     try:
-        return _fill_entry(outbox_fd, token, src_fd, name, size, session_id=session_id, logins=logins,
-                           limit=limit, source=source, now=now, cancel=cancel)
+        return _fill_entry(outbox_fd, token, src_fd, name, size, session_id=session_id,
+                           conversation_id=conversation_id, logins=logins, limit=limit, source=source, now=now,
+                           cancel=cancel)
     except BaseException:
         _remove_entry(outbox_fd, token)
         raise
 
 
 def _fill_entry(outbox_fd: int, token: str, src_fd: int, name: str, size: int, *, session_id: str,
-                logins: Iterable[str], limit: int, source: str, now: float | None,
+                conversation_id: str, logins: Iterable[str], limit: int, source: str, now: float | None,
                 cancel: threading.Event | None) -> dict:
     entry_fd = upload_dirs.open_dir(token, dir_fd=outbox_fd)
     try:
@@ -618,7 +765,8 @@ def _fill_entry(outbox_fd: int, token: str, src_fd: int, name: str, size: int, *
         record = {
             "v": RECORD_VERSION, "id": token, "name": name, "mime": mime, "kind": kind, "inline": inline,
             "size": copied, "sha256": digest.hexdigest(), "created_at": created_at,
-            "session_id": str(session_id or ""), "logins": sorted({str(x) for x in logins if x}),
+            "session_id": str(session_id or ""), "conversation_id": str(conversation_id or session_id or ""),
+            "logins": sorted({str(x) for x in logins if x}),
             "source": source,
         }
         record_fd = os.open(RECORD_NAME, create, 0o600, dir_fd=entry_fd)
@@ -756,14 +904,16 @@ class _Entry:
     size: int
     token: str
     session_id: str = ""
+    #: The conversation that owns the copy (``record.conversation_id``; the session id for older records).
+    conversation: str = ""
 
 
 def _entries(outbox_fd: int) -> list[_Entry]:
     """Every entry (oldest first by its blob's mtime); a planted non-token name is aged 0 (removed first). The
-    lock file is not an entry."""
+    lock file and the staging folder are not entries."""
     out: list[_Entry] = []
     for entry in os.listdir(outbox_fd):
-        if entry == LOCK_NAME:
+        if entry in (LOCK_NAME, STAGING_NAME):
             continue
         if not TOKEN_RE.match(entry):
             out.append(_Entry(0.0, 0, entry))
@@ -777,11 +927,13 @@ def _entries(outbox_fd: int) -> list[_Entry]:
             try:
                 record = _read_record(entry_fd) or {}
                 session_id = str(record.get("session_id") or "")
+                conversation = str(record.get("conversation_id") or session_id)
                 try:
                     blob = os.stat(BLOB_NAME, dir_fd=entry_fd, follow_symlinks=False)
-                    out.append(_Entry(blob.st_mtime, blob.st_size, entry, session_id))
+                    out.append(_Entry(blob.st_mtime, blob.st_size, entry, session_id, conversation))
                 except FileNotFoundError:
-                    out.append(_Entry(info.st_mtime, 0, entry, session_id))  # interrupted: aged like the folder
+                    # interrupted: aged like the folder
+                    out.append(_Entry(info.st_mtime, 0, entry, session_id, conversation))
             finally:
                 os.close(entry_fd)
         except OSError:
@@ -789,19 +941,62 @@ def _entries(outbox_fd: int) -> list[_Entry]:
     return sorted(out)
 
 
-def _prune_locked(outbox_fd: int | None, root: Path, settings: OutboxSettings, *, now: float | None = None,
-                  room_for: int | None = None, session_id: str = "", protect: frozenset[str] = frozenset()) -> int:
-    """Prune the locked outbox. Always: every entry past the retention. Then:
+def _clean_staging(outbox_fd: int, keep: str = "") -> int:
+    """Remove abandoned copies from ``.staging/``: anything that is not a token folder, and a token folder
+    nothing was written to for :data:`STAGING_MAX_AGE_SECONDS` (wall clock; a copy in progress writes every
+    chunk). *keep* is the caller's own copy. Returns how many were removed."""
+    try:
+        staging_fd = upload_dirs.open_dir(STAGING_NAME, dir_fd=outbox_fd)
+    except FileNotFoundError:
+        return 0
+    except OSError:  # a link or a file planted under the name
+        with contextlib.suppress(OSError):
+            os.unlink(STAGING_NAME, dir_fd=outbox_fd)
+        return 0
+    removed = 0
+    cutoff = time.time() - STAGING_MAX_AGE_SECONDS
+    try:
+        for entry in os.listdir(staging_fd):
+            if entry == keep:
+                continue
+            try:
+                info = os.stat(entry, dir_fd=staging_fd, follow_symlinks=False)
+                newest = info.st_mtime if stat.S_ISDIR(info.st_mode) else 0.0
+                if newest and TOKEN_RE.match(entry):
+                    entry_fd = upload_dirs.open_dir(entry, dir_fd=staging_fd)
+                    try:
+                        for name in (BLOB_NAME, RECORD_NAME):
+                            with contextlib.suppress(FileNotFoundError):
+                                newest = max(newest, os.stat(name, dir_fd=entry_fd, follow_symlinks=False).st_mtime)
+                    finally:
+                        os.close(entry_fd)
+            except OSError:
+                newest = 0.0
+            if not TOKEN_RE.match(entry) or newest < cutoff:
+                _remove_entry(staging_fd, entry)
+                removed += 1
+    finally:
+        os.close(staging_fd)
+    return removed
 
-    - making room for a share (*room_for* bytes, one more entry): only the SAME conversation's oldest
-      (*session_id*), never a token in *protect* (this turn's own); still over the cap means
-      ``ShareRefused("no_room")``: one conversation cannot push out another's recent files;
-    - the periodic pass (*room_for* None): the oldest of any conversation until within the cap (it only bites
-      when the cap was lowered).
+
+def _prune_locked(outbox_fd: int | None, root: Path, settings: OutboxSettings, *, now: float | None = None,
+                  room_for: int | None = None, conversation: str = "", protect: frozenset[str] = frozenset(),
+                  staging_keep: str = "") -> int:
+    """Prune the locked outbox. Always: abandoned staging copies, and every entry past the retention. Then:
+
+    - making room for a share (*room_for* bytes, one more entry) of the conversation *conversation*: first
+      within the conversation's own share of the outbox (``max_conversation_bytes``, half the total): its own
+      oldest go until the new file fits. Then within the profile's cap (and :data:`MAX_ENTRIES`), oldest first
+      among the conversation's own files and OTHER conversations' files shared more than
+      ``evict_grace_seconds`` (24 h) ago. Never a token in *protect* (this reply's own), never another
+      conversation's file within the grace period: still over a cap means ``ShareRefused("no_room")``;
+    - the periodic pass (*room_for* None): each conversation's oldest until it is within its share, then the
+      oldest of any conversation until within the cap (both only bite when a cap was lowered).
     """
     if outbox_fd is None:
         return 0
-    removed = 0
+    removed = _clean_staging(outbox_fd, staging_keep)
     now = time.time() if now is None else float(now)
     cutoff = now - settings.retention_seconds
     keep: list[_Entry] = []
@@ -812,27 +1007,67 @@ def _prune_locked(outbox_fd: int | None, root: Path, settings: OutboxSettings, *
         else:
             keep.append(entry)
     total = sum(entry.size for entry in keep)
-    budget = settings.max_total_bytes - (room_for or 0)
-    max_entries = MAX_ENTRIES - (0 if room_for is None else 1)
-    for entry in list(keep):
-        if total <= budget and len(keep) <= max_entries:
-            break
-        if room_for is not None and (entry.token in protect or not session_id or entry.session_id != session_id):
-            continue
+    conversation_cap = settings.max_conversation_bytes
+
+    def evict(entry: _Entry) -> None:
+        nonlocal total, removed
         _remove_entry(outbox_fd, entry.token)
         keep.remove(entry)
         total -= entry.size
         removed += 1
-    if removed:
-        logger.info("outbox: removed %d shared file(s) from %s", removed, root)
-    if room_for is not None and (total > budget or len(keep) > max_entries):
-        raise ShareRefused("no_room")
+
+    if room_for is None:
+        held: dict[str, int] = {}
+        for entry in keep:
+            if entry.conversation:
+                held[entry.conversation] = held.get(entry.conversation, 0) + entry.size
+        for entry in list(keep):
+            if entry.conversation and held[entry.conversation] > conversation_cap:
+                held[entry.conversation] -= entry.size
+                evict(entry)
+        for entry in list(keep):
+            if total <= settings.max_total_bytes and len(keep) <= MAX_ENTRIES:
+                break
+            evict(entry)
+    else:
+        own = [entry for entry in keep if conversation and entry.conversation == conversation]
+        own_total = sum(entry.size for entry in own)
+        for entry in own:
+            if own_total + room_for <= conversation_cap:
+                break
+            if entry.token not in protect:
+                own_total -= entry.size
+                evict(entry)
+        if own_total + room_for > conversation_cap:
+            _log_removed(removed, root)
+            raise ShareRefused("no_room")
+        budget, max_entries = settings.max_total_bytes - room_for, MAX_ENTRIES - 1
+        grace_cutoff = now - settings.evict_grace_seconds
+        for entry in list(keep):
+            if total <= budget and len(keep) <= max_entries:
+                break
+            if entry.token in protect:
+                continue
+            mine = bool(conversation) and entry.conversation == conversation
+            if not mine and entry.mtime > grace_cutoff:
+                continue  # another conversation's file within the grace period: never pushed out
+            evict(entry)
+        if total > budget or len(keep) > max_entries:
+            _log_removed(removed, root)
+            raise ShareRefused("no_room")
+    _log_removed(removed, root)
     return removed
 
 
+def _log_removed(removed: int, root: Path) -> None:
+    if removed:
+        logger.info("outbox: removed %d shared file(s) from %s", removed, root)
+
+
 def prune_outbox(home: Path | str, settings: OutboxSettings | None = None, *, now: float | None = None) -> int:
-    """Remove *home*'s shared files older than the retention, then the oldest until the outbox is within its
-    total size (and :data:`MAX_ENTRIES`). Returns how many were removed."""
+    """Remove *home*'s abandoned staging copies and shared files older than the retention, then each
+    conversation's oldest until it is within its share, then the oldest until the outbox is within its total
+    size (and :data:`MAX_ENTRIES`). Returns how many were removed."""
     if not upload_dirs.supported():
         return 0
     try:

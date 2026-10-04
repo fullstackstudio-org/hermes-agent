@@ -900,12 +900,15 @@ def _path_under_denied_prefix(resolved: Path) -> bool:
     another user's home, but a root-run gateway's own deliverables live under ``$HOME=/root``.
     Credential sub-dirs (``~/.ssh``, ``~/.hermes/.env``) stay blocked (more-specific entries)."""
     home = _resolve_path(Path(os.path.expanduser("~")))
+    # Fork: compared by what the paths name (device/inode of the path and its ancestors, and folded case where
+    # the volume ignores case), so ``<home>/STATE.DB`` or ``~/.CONFIG/...`` on macOS is the denied file it opens.
+    from agent.path_identity import PathProbe
+    probe = PathProbe(resolved)
     for denied in _media_delivery_denied_paths():
         resolved_denied = _resolve_path(denied, expand=True)
-        if resolved_denied is None:
+        if resolved_denied is None or resolved_denied == home:
             continue
-        hit = resolved == resolved_denied or _path_is_within(resolved, resolved_denied)
-        if hit and resolved_denied != home:
+        if probe.within(resolved_denied):
             return True
     return False
 
@@ -1127,21 +1130,26 @@ def validate_media_delivery_path(path: str, session_key: str = "") -> Optional[s
         resolved = _resolve_path(expanded, strict=True)
     if resolved is None or not resolved.is_file():
         return None
+    return str(resolved) if media_delivery_resolved_path_allowed(resolved) else None
+
+
+def media_delivery_resolved_path_allowed(resolved: Path) -> bool:
+    """The delivery policy of :func:`validate_media_delivery_path` for a host path that is already resolved
+    (no container mapping, no link left): the allowlist, then the denylist and strict mode. Fork: the outbox
+    re-judges the path the kernel reports for the file it opened (``agent.path_identity.fd_path``)."""
     # Cache / operator allowlist is trusted unconditionally, regardless of mode.
     for root in _media_delivery_allowed_roots():
         resolved_root = _resolve_path(root, expand=True)
         if resolved_root is not None and _path_is_within(resolved, resolved_root):
-            return str(resolved)
+            return True
     # Non-strict (default): anything not denylisted (/etc, /proc, ~/.ssh, Hermes-root secrets).
     from gateway.media_policy import media_delivery_strict
     if not media_delivery_strict():
-        return None if _path_under_denied_prefix(resolved) else str(resolved)
+        return not _path_under_denied_prefix(resolved)
     # Strict: recency trust for fresh files (pandoc -o /tmp/x.pdf); denylist still applies.
     window = _media_delivery_recency_seconds()
-    if (window > 0 and not _path_under_denied_prefix(resolved)
-            and _file_is_recently_produced(resolved, window)):
-        return str(resolved)
-    return None
+    return (window > 0 and not _path_under_denied_prefix(resolved)
+            and _file_is_recently_produced(resolved, window))
 
 
 # Control chars + Unicode line separators (NEL, LS, PS) that log aggregators treat as breaks: a

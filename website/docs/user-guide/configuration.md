@@ -1668,7 +1668,7 @@ files:
   outbox_turn_timeout_s: 120   # the longest copying may delay a reply
 ```
 
-A file in any profile's `outbox/` or in a person's upload folder is never shared again, and a share never pushes out another conversation's recent files: when the outbox is full of them, the new file is refused. A file that is not shared shows as a note (`(1 file could not be shared.)`), never by its path. Deleting a conversation removes its shared files.
+A file in any profile's `outbox/` or in a person's upload folder is never shared again; paths are compared by the file they name, so on a case-insensitive volume (macOS) a differently spelled path to a denied file is refused too. One conversation holds at most half of `outbox_max_total_mb`; past that its own oldest files make room. A share may also push out another conversation's files, oldest first, but only those shared more than 24 hours ago; when that is not enough the new file is refused. A file that is not shared shows as a note (`(1 file could not be shared.)`), never by its path. Deleting a conversation removes its shared files.
 
 The written contract (the attachment shape, the route's headers and ranges) is `contract/outbox/` in the repository.
 

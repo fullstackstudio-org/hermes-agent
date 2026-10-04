@@ -302,4 +302,4 @@ def test_a_refused_file_shows_a_note_and_never_its_path(hermie):
     last = _rpc("session.history")["messages"][-1]
     assert last["text"] == payload["text"] and last["attachments"] == []
     assert not (hermie.home / "outbox").exists() or not [
-        n for n in (hermie.home / "outbox").iterdir() if n.name != outbox.LOCK_NAME]
+        n for n in (hermie.home / "outbox").iterdir() if n.name not in (outbox.LOCK_NAME, outbox.STAGING_NAME)]

@@ -131,9 +131,20 @@ _PREVIEW_RAW_SELECT = (
 
 
 # A ``MEDIA:<path>`` directive (any quoting) and the voice/document markers. Previews and search snippets are
-# cut-outs of stored text, so a path may be truncated: this is deliberately looser than the delivery regex.
+# cut-outs of stored text, so a path may be truncated: looser than the delivery regex at the end of the path, but
+# like it a directive is ``MEDIA:`` followed by something that looks like a path. Anywhere in a line: an absolute,
+# ``~/`` or drive-letter path, bare or quoted (what native delivery takes). At the start of a line (after
+# whitespace and Markdown emphasis): also a relative name with an extension. Prose that names the convention
+# ("Use the MEDIA: directive to attach files.") is not a directive and stays.
+_MEDIA_ABS = r"""(?:~/|/|[A-Za-z]:[/\\])"""
+_MEDIA_REL = r"""[^\s"'`/~][^\s"'`]*\.[A-Za-z0-9]{1,10}(?![^\s`"'*_,;:)\]}])"""
 _PREVIEW_MEDIA_RE = re.compile(
-    r"""[`"'*_]{0,3}MEDIA:[ \t]*(?:"[^"\n]*"?|'[^'\n]*'?|`[^`\n]*`?|\S+)[`"'*_]{0,3}"""
+    r"""[`"'*_]{0,3}MEDIA:[ \t]*(?:"""
+    rf""""{_MEDIA_ABS}[^"\n]*"?|'{_MEDIA_ABS}[^'\n]*'?|`{_MEDIA_ABS}[^`\n]*`?|{_MEDIA_ABS}\S*"""
+    r""")[`"'*_]{0,3}"""
+    r"""|(?:^|(?<=\n))[ \t]*[`"'*_]{0,3}MEDIA:[ \t]*(?:"""
+    rf""""[^"\n]*\.[A-Za-z0-9]{{1,10}}"|'[^'\n]*\.[A-Za-z0-9]{{1,10}}'|`[^`\n]*\.[A-Za-z0-9]{{1,10}}`|{_MEDIA_REL}"""
+    r""")[`"'*_]{0,3}"""
     r"""|\[\[(?:audio_as_voice|as_document)\]\]""")
 
 

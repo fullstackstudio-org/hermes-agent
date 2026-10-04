@@ -12,6 +12,8 @@ from pathlib import Path
 from contextlib import suppress
 from typing import Optional
 
+from agent.path_identity import PathProbe
+
 
 def _constants_path(getter_name: str) -> Path:
     """Call ``hermes_constants.<getter_name>()`` (local import avoids cycles); ``~/.hermes`` on any failure."""
@@ -254,15 +256,18 @@ def _classify_write_denial(path: str) -> Optional[str]:
     if is_nt_namespace_path(path):
         return "nt_namespace"
     homes, resolved = _homes_and_resolved(path)
+    # Fork: by what the path names, not its spelling (agent/path_identity.py; see get_read_block_error).
+    probe = PathProbe(resolved)
 
     # Approval-gated paths are allowed at this layer so interactive tools can
     # prompt; checked first so the ``.ssh/`` prefix deny doesn't swallow them.
-    if any(resolved in build_write_approval_paths(home) for home in homes):
+    if any(probe.is_(p) for home in homes for p in build_write_approval_paths(home)):
         return None
 
     if any(
-        resolved in build_write_denied_paths(home)
-        or any(resolved.startswith(prefix) for prefix in build_write_denied_prefixes(home))
+        any(probe.is_(p) for p in build_write_denied_paths(home))
+        or any(resolved.startswith(prefix) or probe.within(prefix.rstrip(os.sep))
+               for prefix in build_write_denied_prefixes(home))
         for home in homes
     ):
         return "credential"
@@ -270,7 +275,7 @@ def _classify_write_denial(path: str) -> Optional[str]:
     for base in _hermes_dirs():
         for sub in _HERMES_PROTECTED_SUBPATHS:
             with suppress(Exception):
-                if _is_under(resolved, os.path.realpath(os.path.join(str(base), sub))):
+                if probe.within(os.path.realpath(os.path.join(str(base), sub))):
                     return "credential"
 
     safe_roots = get_safe_write_roots()
@@ -303,7 +308,8 @@ def is_write_approval_required(path: str) -> bool:
     """True if ``path`` is approval-gated (``~/.ssh/config``): interactive callers
     prompt, callers without a channel treat it as a block (fail closed)."""
     homes, resolved = _homes_and_resolved(path)
-    return any(resolved in build_write_approval_paths(home) for home in homes)
+    probe = PathProbe(resolved)
+    return any(probe.is_(p) for home in homes for p in build_write_approval_paths(home))
 
 
 # Secret-bearing project-local env file basenames, blocked anywhere on disk.
@@ -366,14 +372,18 @@ def get_read_block_error(path: str) -> Optional[str]:
     if nt_error:
         return nt_error
     resolved = Path(path).expanduser().resolve()
+    # Fork: judged by what the path names, not its spelling (agent/path_identity.py): on a case-insensitive
+    # volume ``<home>/AUTH.JSON`` or ``<home>/OUTBOX/...`` is the denied file or folder it opens.
+    probe = PathProbe(resolved)
     hermes_dirs = _hermes_dirs()
     reason = None
-    if any(_is_under(resolved, hd / "skills" / ".hub") for hd in hermes_dirs):
+    if any(probe.within(hd / "skills" / ".hub") for hd in hermes_dirs):
         reason = (
             "is an internal Hermes cache file and cannot be read directly to prevent "
             "prompt injection. Use the skills_list or skill_view tools instead."
         )
-    elif any(resolved in _resolve_each(hd / name for hd in hermes_dirs) for name in _CREDENTIAL_FILE_NAMES):
+    elif any(probe.is_(target) for name in _CREDENTIAL_FILE_NAMES
+             for target in _resolve_each(hd / name for hd in hermes_dirs)):
         reason = (
             "is a Hermes credential store and cannot be read directly. Provider tools "
             "consume these credentials through internal channels." + _DID_SUFFIX
@@ -381,8 +391,8 @@ def get_read_block_error(path: str) -> Optional[str]:
     else:
         for subdir, dir_msg, file_msg in _READ_DENIED_DIRS:
             for blocked_dir in _resolve_each(hd / subdir for hd in hermes_dirs):
-                if _is_under(resolved, blocked_dir):
-                    reason = (dir_msg if resolved == blocked_dir else file_msg) + _DID_SUFFIX
+                if probe.within(blocked_dir):
+                    reason = (dir_msg if probe.is_(blocked_dir) else file_msg) + _DID_SUFFIX
                     break
             if reason:
                 break

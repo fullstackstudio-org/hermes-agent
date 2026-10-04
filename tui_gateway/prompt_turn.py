@@ -1022,6 +1022,21 @@ def _outbox_logins(session: dict) -> set[str]:
     return {login for login in logins if isinstance(login, str) and login}
 
 
+def _outbox_conversation(agent: Any, session_id: str) -> str:
+    """The conversation a shared file belongs to for the outbox's quotas: the root of *session_id*'s compression
+    lineage (compaction moves a conversation to a new session id; it still owns what it shared before). The
+    session id itself when the store cannot say."""
+    db = getattr(agent, "_session_db", None)
+    if db is None or not session_id:
+        return session_id
+    try:
+        lineage = db.get_compression_lineage(session_id)
+    except Exception:
+        logger.debug("outbox: compression lineage of %s unreadable", session_id, exc_info=True)
+        return session_id
+    return str(lineage[0]) if lineage and lineage[0] else session_id
+
+
 def _share_turn_outbox(session: dict, st: _TurnRun, raw: str, final_row_id: int | None, payload: dict) -> str:
     """Share the files the reply names (tui_gateway/outbox_share.py): ``payload`` gets the text without their
     directives and ``attachments``, the final row and the live history get ``display_metadata.attachments``.
@@ -1036,7 +1051,8 @@ def _share_turn_outbox(session: dict, st: _TurnRun, raw: str, final_row_id: int 
     try:
         shared = outbox_share.share_turn_files(
             raw, turn_messages, home=home, session_id=session_id, logins=_outbox_logins(session),
-            settings=st.outbox, session_key=str(session.get("session_key") or ""))
+            settings=st.outbox, session_key=str(session.get("session_key") or ""),
+            conversation_id=_outbox_conversation(agent, session_id))
     except Exception:
         logger.exception("outbox: sharing the files of session %s failed", session_id)
         shown = outbox_share.strip_directives(raw)

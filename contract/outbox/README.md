@@ -27,15 +27,22 @@ the gateway's `files.outbox_sources` (default `["hermie"]`, the source the Hermi
 at the end of a completed turn the gateway:
 
 1. takes the reply's `MEDIA:` directives (examples in code and quotes excluded) and this turn's producer tool
-   results;
+   results. A directive is `MEDIA:` followed by something that looks like a path: an absolute, `~/` or
+   drive-letter path (bare or quoted) anywhere in a line, or a relative name with an extension at the start of
+   a line. Prose that names the convention ("Use the MEDIA: directive to attach files.") is text, left as
+   written and never counted as a file;
 2. checks each path as native delivery does (the credential and system denylist, strict mode, a sandbox path
    mapped to the host), plus the read guard and a basename denylist (`.env*`, credential stores, keys),
    resolves links first, and reads exactly the judged file (every component opened without following a
    link); it takes only a regular file with one link, of at most `files.outbox_max_file_mb` (200), and never
    a file in any profile's `outbox/` or in a person's upload folder (`uploads/hermie/`): a copy shared in
-   one conversation is never handed to another;
-3. copies it to `<profile home>/outbox/<token>/` (a new random token per copy; the agent's file is not
-   touched), at most `files.outbox_max_turn_files` (20) files and `files.outbox_max_turn_mb` (500) per reply,
+   one conversation is never handed to another. Paths are compared by the file they name, not by how they are
+   spelled: on a case-insensitive volume (macOS and Windows by default) `<home>/STATE.DB`, `<home>/OUTBOX/...`
+   or `~/.CONFIG/...` is refused like the file it opens, and once the file is open every check runs again on
+   the path the system reports for it;
+3. copies it to `<profile home>/outbox/<token>/` (a new random token per copy, made in `outbox/.staging/`
+   and moved into place whole, so a slow file never holds up another conversation's share; the agent's file
+   is not touched), at most `files.outbox_max_turn_files` (20) files and `files.outbox_max_turn_mb` (500) per reply,
    all within `files.outbox_turn_timeout_s` (120): a copy still running then is abandoned and removed, so a
    slow file delays the reply by that much at most;
 4. sends the attachments with `message.complete` and records them on the reply's row.
@@ -125,9 +132,19 @@ route (the dashboard's own profile when absent).
 ## 5. Retention
 
 `files.outbox_retention_days` (30): older shared files are removed. `files.outbox_max_total_mb` (2048) and
-10,000 files per profile: a new share first lets expired files go, then only the same conversation's oldest
-(never a file of the reply being shared); when that is not enough the new file is refused, so one
-conversation can never push out another's recent files. The periodic pass (dashboard start, then every six
-hours) removes expired files, and the oldest of any conversation only when the outbox is over its cap (the cap
-was lowered). Deleting a conversation (or pruning old sessions) removes its shared files. A removed file is
-`404`; a client SHOULD show the attachment as no longer available.
+10,000 files per profile, and one conversation holds at most half of that size (a larger file is refused as
+too large). A conversation is a session and the sessions compaction continued it in (its compression
+lineage): it keeps owning what it shared before. A new share:
+
+1. lets expired files go;
+2. within the conversation's half: its own oldest go until the new file fits;
+3. within the profile's cap: the oldest go among the conversation's own files and other conversations' files
+   shared more than 24 hours ago.
+
+A file of the reply being shared never goes, and another conversation's file is never pushed out within 24
+hours of being shared: when that is not enough the new file is refused. So no conversation can fill the outbox
+for the others, and none can make a file another one just shared disappear. The periodic pass (dashboard start,
+then every six hours) removes expired files, and only when a cap was lowered a conversation's oldest until it
+is within its half, then the oldest of any conversation until the outbox is within its cap. Deleting a session
+(or pruning old sessions) removes the files its replies shared; a conversation's files are all gone once all its
+sessions are. A removed file is `404`; a client SHOULD show the attachment as no longer available.

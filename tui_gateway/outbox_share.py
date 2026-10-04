@@ -175,12 +175,15 @@ class _Share:
 
 
 def share_turn_files(final_text: Any, turn_messages: list, *, home, session_id: str, logins: Iterable[str],
-                     settings: outbox.OutboxSettings, session_key: str = "") -> SharedTurn:
+                     settings: outbox.OutboxSettings, session_key: str = "",
+                     conversation_id: str = "") -> SharedTurn:
     """Share every file the turn's reply names; return the text clients see and the attachments.
+    *conversation_id* is the conversation that owns the copies (the root of *session_id*'s compression lineage,
+    so a conversation compaction moved to a new session id still owns what it shared before).
 
     Per turn: at most ``max_turn_files`` files and ``max_turn_bytes`` bytes, all within ``turn_timeout_seconds``
     (a copy still running then is abandoned and removed). A file over any limit is refused, never shared by
-    pushing out another conversation's files (``outbox._prune_locked``)."""
+    pushing out another conversation's recent files (``outbox._prune_locked``)."""
     paths = media_paths(final_text, turn_messages)
     shown, leftovers = _strip_leftovers(final_text)
     result = SharedTurn(text=shown, named=bool(paths) or bool(leftovers), refused=["denied"] * leftovers)
@@ -203,8 +206,9 @@ def share_turn_files(final_text: Any, turn_messages: list, *, home, session_id: 
             reason = "timeout"
         else:
             share = _Share(path, home, dict(
-                session_id=session_id, logins=logins, settings=settings, session_key=session_key,
-                max_bytes=settings.max_turn_bytes - spent, lock_timeout=remaining,
+                session_id=session_id, conversation_id=conversation_id or session_id, logins=logins,
+                settings=settings, session_key=session_key, max_bytes=settings.max_turn_bytes - spent,
+                lock_timeout=remaining,
                 protect=frozenset(a["id"] for a in result.attachments)))
             share.wait(remaining)
             if share.record is not None:

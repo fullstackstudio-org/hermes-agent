@@ -44,7 +44,7 @@ def _share(home: Path, path: Path | str, **kwargs):
 
 def _entries(home: Path) -> list[str]:
     root = home / "outbox"
-    return sorted(n for n in os.listdir(root) if n != outbox.LOCK_NAME) if root.exists() else []
+    return sorted(n for n in os.listdir(root) if n not in (outbox.LOCK_NAME, outbox.STAGING_NAME)) if root.exists() else []
 
 
 def test_a_shared_file_is_a_private_copy_under_a_random_token(home):
@@ -251,13 +251,14 @@ def test_retention_and_size_cap_remove_the_oldest(home):
     os.utime(home / "outbox" / records[0]["id"] / "blob", (old, old))
     assert outbox.prune_outbox(home, outbox.OutboxSettings(), now=now) == 1
     assert _entries(home) == sorted(r["id"] for r in records[1:])
-    # A 250-byte cap keeps the two newest.
-    assert outbox.prune_outbox(home, outbox.OutboxSettings(max_total_bytes=250), now=now) == 1
+    # A 250-byte cap keeps the two newest (one conversation allowed the whole cap: the profile cap at work).
+    whole = outbox.OutboxSettings(max_total_bytes=250, conversation_share=1.0)
+    assert outbox.prune_outbox(home, whole, now=now) == 1
     assert _entries(home) == sorted(r["id"] for r in records[2:])
 
 
 def test_sharing_makes_room_by_evicting_the_oldest(home):
-    settings = outbox.OutboxSettings(max_total_bytes=250)
+    settings = outbox.OutboxSettings(max_total_bytes=250, conversation_share=1.0)
     ids = []
     for index in range(3):
         source = home / "work" / f"f{index}.bin"
@@ -401,12 +402,18 @@ def test_the_read_guard_and_native_delivery_refuse_the_outbox(home):
 
 
 def test_a_hard_linked_source_is_refused(home):
-    (home / "auth.json").write_text("{}")
+    (home / "work" / "original.txt").write_text("plain")
     alias = home / "work" / "notes.txt"
-    os.link(home / "auth.json", alias)
+    os.link(home / "work" / "original.txt", alias)
     with pytest.raises(outbox.ShareRefused) as refused:
         _share(home, alias)
     assert refused.value.reason == "linked"
+    # A hard link to a credential store is the store itself to the guards (same file), whatever its name.
+    (home / "auth.json").write_text("{}")
+    os.link(home / "auth.json", home / "work" / "auth-notes.txt")
+    with pytest.raises(outbox.ShareRefused) as refused:
+        _share(home, home / "work" / "auth-notes.txt")
+    assert refused.value.reason == "denied"
 
 
 def test_a_source_swapped_for_a_link_after_the_check_is_not_read(home, tmp_path, monkeypatch):
@@ -442,7 +449,8 @@ def _big(home, name, size):
 
 def test_one_conversation_cannot_evict_anothers_recent_files(home):
     """The reviewer's scenario, scaled down (x200 MB -> x200 B): A shares one file; then a reply in B names
-    eleven files that do not all fit. A's file stays; B's turn gets what fits and the rest is refused."""
+    eleven files that do not all fit. A's file stays; B's turn gets what fits in B's half of the outbox and the
+    rest is refused."""
     settings = outbox.OutboxSettings(max_total_bytes=2000, max_file_bytes=200, max_turn_bytes=100_000)
     a = outbox.share_file(str(_big(home, "a.bin", 200)), home=home, session_id="A", logins=["oidc:a"],
                           settings=settings)
@@ -450,7 +458,7 @@ def test_one_conversation_cannot_evict_anothers_recent_files(home):
     shared = outbox_share.share_turn_files(text, [], home=home, session_id="B", logins=["oidc:b"],
                                            settings=settings)
     assert a["id"] in _entries(home)
-    assert len(shared.attachments) == 9 and shared.refused == ["no_room", "no_room"]
+    assert len(shared.attachments) == 5 and shared.refused == ["no_room"] * 6
     assert all(att["id"] in _entries(home) for att in shared.attachments)
     # A later turn of B may push out B's own oldest, still never A's.
     later = outbox.share_file(str(_big(home, "b-late.bin", 200)), home=home, session_id="B", settings=settings,
@@ -460,7 +468,7 @@ def test_one_conversation_cannot_evict_anothers_recent_files(home):
 
 
 def test_room_is_made_from_the_same_conversations_oldest_but_never_this_turns(home):
-    settings = outbox.OutboxSettings(max_total_bytes=450, max_file_bytes=200)
+    settings = outbox.OutboxSettings(max_total_bytes=450, max_file_bytes=200, conversation_share=1.0)
     old = outbox.share_file(str(_big(home, "o.bin", 200)), home=home, session_id="A", settings=settings)
     first = outbox.share_file(str(_big(home, "f.bin", 200)), home=home, session_id="A", settings=settings,
                               now=time.time() + 1)
@@ -580,3 +588,243 @@ def test_every_preview_surface_strips_media_paths(tmp_path):
     item = server._session_live_item("x", {"history": [{"role": "assistant", "content": "Here MEDIA:/a/b.png"}],
                                            "session_key": "x"})
     assert item["preview"] == "Here"
+
+
+# ── review round 2: paths by identity, per-conversation share, prose, staging, compaction ────────────────────
+
+from agent import path_identity  # noqa: E402
+
+@pytest.fixture
+def case_insensitive_tmp(tmp_path):
+    if not path_identity.case_insensitive(tmp_path):
+        pytest.skip("needs a case-insensitive temp volume (macOS default); the simulated tests cover the logic")
+
+
+@pytest.fixture
+def secrets_on_disk(home, tmp_path):
+    """A shared copy, a store, a credential under ~/.config and a person's upload: each a harmless marker."""
+    source = home / "work" / "a.txt"
+    source.write_text("marker")
+    record = _share(home, source)
+    (home / "state.db").write_text("marker")
+    (home / "auth.json").write_text("{}")
+    (tmp_path / ".config" / "gh").mkdir(parents=True)
+    (tmp_path / ".config" / "gh" / "hosts.yml").write_text("marker")
+    (tmp_path / ".ssh").mkdir()
+    upload = tmp_path / "work" / "uploads" / "hermie" / "2026-10-05"
+    upload.mkdir(parents=True)
+    (upload / "0123456789abcdef-scan.pdf").write_bytes(b"%PDF-1.7\n")
+    return record
+
+
+def test_a_case_variant_of_a_denied_path_is_never_shared(home, tmp_path, case_insensitive_tmp, secrets_on_disk):
+    """realpath keeps the spelling it is given; on a case-insensitive volume these open the denied files."""
+    token = secrets_on_disk["id"]
+    for variant in (home / "OUTBOX" / token / "blob", home / "Outbox" / token / "record.json",
+                    home / "STATE.DB", home / "Auth.Json", tmp_path / ".CONFIG" / "gh" / "hosts.yml",
+                    tmp_path / "work" / "Uploads" / "Hermie" / "2026-10-05" / "0123456789abcdef-scan.pdf"):
+        assert variant.exists()
+        with pytest.raises(outbox.ShareRefused) as refused:
+            outbox.share_file(str(variant), home=home, session_id="s2", logins=["oidc:b"])
+        assert refused.value.reason == "denied", variant
+    assert _entries(home) == [token]
+
+
+def test_native_delivery_and_the_file_guards_see_through_case(home, tmp_path, case_insensitive_tmp,
+                                                              secrets_on_disk):
+    from agent.file_safety import get_read_block_error, get_write_denied_error
+    from gateway.platforms.base import validate_media_delivery_path
+    blob = home / "OUTBOX" / secrets_on_disk["id"] / "blob"
+    for variant in (blob, home / "STATE.DB", tmp_path / ".CONFIG" / "gh" / "hosts.yml"):
+        assert validate_media_delivery_path(str(variant)) is None, variant
+    assert get_read_block_error(str(blob)) is not None
+    assert get_read_block_error(str(home / "AUTH.JSON")) is not None
+    assert get_write_denied_error(str(tmp_path / ".SSH" / "authorized_keys")) is not None
+    assert get_write_denied_error(str(home / "State.db")) is not None
+    # An ordinary file in any spelling is still fine.
+    (home / "work" / "Report.txt").write_text("marker")
+    assert validate_media_delivery_path(str(home / "work" / "REPORT.TXT")) is not None
+
+
+def test_the_opened_file_is_judged_by_the_path_the_kernel_reports(home, monkeypatch):
+    """Simulated canonicaliser (any platform): an innocent spelling whose descriptor resolves to the store."""
+    (home / "state.db").write_text("marker")
+    source = home / "work" / "notes.txt"
+    source.write_text("marker")
+    monkeypatch.setattr(path_identity, "fd_path", lambda fd: str(home / "state.db"))
+    with pytest.raises(outbox.ShareRefused) as refused:
+        _share(home, source)
+    assert refused.value.reason == "denied"
+    # The stored spelling is what the copy is recorded under.
+    renamed = home / "work" / "Notes.TXT"
+    monkeypatch.setattr(path_identity, "fd_path", lambda fd: str(renamed))
+    record = _share(home, source)
+    assert record["name"] == "Notes.TXT" and record["source"] == str(renamed)
+
+
+def test_folded_comparison_covers_names_that_do_not_exist_yet(home, tmp_path, monkeypatch):
+    """Simulated case-insensitive volume: a name not on disk has no inode, so it is compared folded."""
+    from agent.file_safety import get_read_block_error, get_write_denied_error
+    monkeypatch.setattr(path_identity, "case_insensitive", lambda path: True)
+    assert get_read_block_error(str(home / "MCP-Tokens" / "server.json")) is not None
+    assert get_write_denied_error(str(tmp_path / ".NETRC")) is not None
+    probe = path_identity.PathProbe(home / "OUTBOX" / "x")
+    assert probe.within(home / "outbox") and not probe.within(home / "outbox2")
+    monkeypatch.setattr(path_identity, "case_insensitive", lambda path: False)
+    assert not path_identity.PathProbe(home / "OUTBOX" / "x").within(home / "outbox")
+
+
+def test_a_hard_link_to_a_store_is_not_delivered_natively_either(home):
+    from gateway.platforms.base import validate_media_delivery_path
+    (home / "state.db").write_text("marker")
+    alias = home / "work" / "history.txt"
+    os.link(home / "state.db", alias)
+    assert validate_media_delivery_path(str(alias)) is None
+
+
+def test_a_conversation_holds_at_most_half_the_outbox(home):
+    """A's shares never take more than half; past that A's own oldest go, and B still has room."""
+    settings = outbox.OutboxSettings(max_total_bytes=1000, max_file_bytes=200)
+    a = [outbox.share_file(str(_big(home, f"a{i}.bin", 200)), home=home, session_id="A", settings=settings,
+                           now=time.time() + i)["id"] for i in range(4)]
+    assert _entries(home) == sorted(a[2:])  # 400 of 500: the third and fourth pushed out A's oldest
+    b = [outbox.share_file(str(_big(home, f"b{i}.bin", 200)), home=home, session_id="B", settings=settings,
+                           now=time.time() + 10 + i)["id"] for i in range(2)]
+    assert _entries(home) == sorted(a[2:] + b)
+    with pytest.raises(outbox.ShareRefused) as refused:  # bigger than a conversation's share
+        outbox.share_file(str(_big(home, "huge.bin", 600)), home=home, session_id="C",
+                          settings=outbox.OutboxSettings(max_total_bytes=1000, max_file_bytes=1000))
+    assert refused.value.reason == "too_large"
+
+
+def test_another_conversations_files_go_only_after_the_grace_period(home):
+    """The outbox full of A and B (each within its half): C's share waits out the grace period, then takes the
+    oldest of theirs, never one of this reply's or a file younger than the grace."""
+    settings = outbox.OutboxSettings(max_total_bytes=800, max_file_bytes=200, evict_grace_seconds=3600)
+    start = time.time()
+    held = {}
+    for index, sid in enumerate(("A", "A", "B", "B")):
+        held[f"{sid}{index}"] = outbox.share_file(str(_big(home, f"{sid}{index}.bin", 200)), home=home,
+                                                  session_id=sid, settings=settings, now=start + index)["id"]
+    with pytest.raises(outbox.ShareRefused) as refused:
+        outbox.share_file(str(_big(home, "c0.bin", 200)), home=home, session_id="C", settings=settings,
+                          now=start + 60)
+    assert refused.value.reason == "no_room"
+    assert _entries(home) == sorted(held.values())
+    later = start + 2 * 3600
+    c = outbox.share_file(str(_big(home, "c1.bin", 200)), home=home, session_id="C", settings=settings, now=later)
+    assert held["A0"] not in _entries(home)
+    assert _entries(home) == sorted([held["A1"], held["B2"], held["B3"], c["id"]])
+
+
+def test_the_periodic_pass_holds_each_conversation_to_its_share(home):
+    """A cap lowered under what a conversation holds: its oldest go until it is within half the new cap."""
+    ids = [outbox.share_file(str(_big(home, f"a{index}.bin", 100)), home=home, session_id="A",
+                             now=time.time() + index)["id"] for index in range(4)]
+    assert outbox.prune_outbox(home, outbox.OutboxSettings(max_total_bytes=500)) == 2  # 250 each: two stay
+    assert _entries(home) == sorted(ids[2:])
+
+
+def test_prose_that_names_the_convention_is_left_alone(home):
+    text = "Use the MEDIA: directive to attach files."
+    shared = outbox_share.share_turn_files(text, [], home=home, session_id="s", logins=[],
+                                           settings=outbox.OutboxSettings())
+    assert shared.text == text and shared.refused == [] and not shared.named
+    assert outbox_share.strip_directives(text) == text
+    from hermes_state_common import strip_media_for_preview
+    assert strip_media_for_preview(text) == text
+    assert strip_media_for_preview("Say MEDIA: then a path, e.g. MEDIA:notes") == \
+        "Say MEDIA: then a path, e.g. MEDIA:notes"
+
+
+def test_a_directive_at_a_line_start_with_a_relative_name_is_still_hidden(home):
+    text = "Here it is.\n  **MEDIA:out/chart.png**\nMEDIA:/no/such/file.weird"
+    shared = outbox_share.share_turn_files(text, [], home=home, session_id="s", logins=[],
+                                           settings=outbox.OutboxSettings())
+    assert "MEDIA:" not in shared.text and "chart.png" not in shared.text and "/no/such" not in shared.text
+    assert shared.text.startswith("Here it is.") and len(shared.refused) == 2
+
+
+def test_a_hung_copy_does_not_hold_the_outbox(home, monkeypatch):
+    """The copy runs outside the lock: another conversation's share completes while one read is stuck."""
+    import threading
+    release, entered = threading.Event(), threading.Event()
+    real_fill = outbox._fill_entry
+    slow = home / "work" / "slow.bin"
+    slow.write_bytes(b"x" * 10)
+
+    def stuck_fill(entry_dir_fd, token, src_fd, name, *args, **kwargs):
+        if name == "slow.bin":
+            entered.set()
+            release.wait(10)
+        return real_fill(entry_dir_fd, token, src_fd, name, *args, **kwargs)
+
+    monkeypatch.setattr(outbox, "_fill_entry", stuck_fill)
+    stuck = threading.Thread(target=lambda: outbox.share_file(str(slow), home=home, session_id="A"), daemon=True)
+    stuck.start()
+    assert entered.wait(5)
+    try:
+        fast = outbox.share_file(str(_big(home, "fast.bin", 10)), home=home, session_id="B", lock_timeout=1.0)
+        assert fast["id"] in _entries(home)
+        assert len(os.listdir(home / "outbox" / outbox.STAGING_NAME)) == 1  # the stuck copy, not published
+    finally:
+        release.set()
+        stuck.join(10)
+    assert len(_entries(home)) == 2 and os.listdir(home / "outbox" / outbox.STAGING_NAME) == []
+
+
+def test_abandoned_staging_copies_are_cleaned_but_a_fresh_one_is_kept(home, tmp_path):
+    staging = home / "outbox" / outbox.STAGING_NAME
+    old, fresh = staging / ("O" * 32), staging / ("F" * 32)
+    for entry in (old, fresh):
+        entry.mkdir(parents=True)
+        (entry / "blob").write_text("marker")
+    long_ago = time.time() - outbox.STAGING_MAX_AGE_SECONDS - 60
+    for path in (old / "blob", old):
+        os.utime(path, (long_ago, long_ago))
+    keep = tmp_path / "keep.txt"
+    keep.write_text("mine")
+    (staging / "planted").symlink_to(keep)
+    outbox.prune_outbox(home, outbox.OutboxSettings())
+    assert sorted(os.listdir(staging)) == ["F" * 32] and keep.read_text() == "mine"
+
+
+def test_a_link_planted_as_the_staging_folder_is_replaced_not_followed(home, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (home / "outbox").mkdir()
+    (home / "outbox" / outbox.STAGING_NAME).symlink_to(elsewhere)
+    record = _share(home, _big(home, "a.bin", 10))
+    assert record["id"] in _entries(home) and os.listdir(elsewhere) == []
+    assert not (home / "outbox" / outbox.STAGING_NAME).is_symlink()
+
+
+def test_a_compacted_conversation_still_owns_what_it_shared_before(home, tmp_path):
+    """Compaction moves the conversation to a new session id; its copies are keyed on the lineage root, so its
+    own quota covers both segments and its newer shares push out its older ones, not someone else's."""
+    from hermes_state import SessionDB
+    from tui_gateway.prompt_turn import _outbox_conversation
+    db = SessionDB(db_path=tmp_path / "lineage.db")
+    try:
+        db.create_session(session_id="S1", source="hermie", model="m")
+        db.end_session("S1", "compression")
+        db.create_session(session_id="S2", source="hermie", model="m", parent_session_id="S1")
+
+        class Agent:
+            _session_db = db
+
+        assert _outbox_conversation(Agent(), "S2") == "S1"
+        assert _outbox_conversation(Agent(), "S1") == "S1"
+        assert _outbox_conversation(object(), "S2") == "S2"
+    finally:
+        db.close()
+    settings = outbox.OutboxSettings(max_total_bytes=500, max_file_bytes=200)
+    first = outbox.share_file(str(_big(home, "s1.bin", 200)), home=home, session_id="S1", conversation_id="S1",
+                              settings=settings, now=time.time())
+    assert first["conversation_id"] == "S1"
+    second = outbox.share_file(str(_big(home, "s2.bin", 200)), home=home, session_id="S2", conversation_id="S1",
+                               settings=settings, now=time.time() + 1)
+    assert _entries(home) == [second["id"]]  # one conversation, 250 bytes: the older segment's copy went
+    # Deleting a segment removes the copies its rows show; the conversation's other segment keeps its own.
+    assert outbox.remove_session_files(home, ["S1"]) == 0
+    assert outbox.remove_session_files(home, ["S2"]) == 1

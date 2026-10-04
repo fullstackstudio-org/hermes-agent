@@ -57,6 +57,13 @@ def test_the_gateway_sees_the_person_with_the_marker_beside_them():
     assert transport.login == ROBIN[0] and transport.grant == "grant-g1"
 
 
+def test_an_agents_turns_never_carry_the_persons_profile():
+    from agent.person_profile import profile_of
+    transport = AgentTransport({**identity(), "profile": {"email": "robin@example.invalid", "job_title": "marker"}})
+    assert "profile" not in transport.auth_identity
+    assert profile_of(server._transport_auth_user(transport)) == {}
+
+
 def test_liveness_is_what_the_gateways_helpers_read():
     transport = AgentTransport(identity())
     assert server._transport_is_live_peer(transport) and not server._transport_is_dead(transport)

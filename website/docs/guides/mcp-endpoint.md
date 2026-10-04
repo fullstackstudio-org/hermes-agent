@@ -111,7 +111,9 @@ restarts during a turn, the agent gets `restarted` and waits again; the turn con
 - Change settings, delete, rename or hide chats, or read chats it was not given: it sees the chats it opened
   and your live chats, not every stored conversation on the gateway. A chat you have only in your app can be
   opened by its id with `chat_open`; that is logged.
-- Act on someone else's chats: the same access rules apply as for your own app.
+- Act on someone else's chats: the same access rules apply as for your own app. In a chat opened by its id
+  the agent can read what your app can read there today (HERM-185 will narrow both alike), and the bot is
+  never told your profile (email, job title, groups) in a turn the agent sent.
 
 Every string the agent gets from a bot or a transcript is untrusted model output or other people's text; the
 server tells the client so.

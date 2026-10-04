@@ -56,6 +56,9 @@ def validate_identity(identity: Any) -> dict:
         raise ValueError("an agent identity names the grant it was minted from")
     if not isinstance(agent.get("client"), str):
         raise ValueError("an agent identity names its client")
+    # The person's profile (email, job title, groups: ``agent/person_profile.py``) is told to the model only
+    # for a turn the person sent from her own signed-in app; an agent's turn never carries it.
+    copy.pop("profile", None)
     return copy
 
 

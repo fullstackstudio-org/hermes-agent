@@ -83,7 +83,7 @@ The first valid answer wins; the other connections get the request withdrawn.
   There is no Skip: the person rejects. The text the person approved is the text the agent gets back, not the
   agent's earlier version; the gateway works out whether it was edited.
 
-- **A diff review**: the file's path and each hunk of the change in monospace, one row per line, with the
+- **A diff review**: the file's path, whether it is a new, deleted or renamed file (a rename shows the old path too), and each hunk of the change in monospace, one row per line, with the
   marker (`+`, `-` or a space) apart from the text and every line exactly as written, and a way to approve or
   reject each hunk. There is no Skip and no editing: the person approves hunks. What the agent gets back is a patch
   the gateway wrote from the hunks it showed, containing the approved ones only, never the agent's own diff.
@@ -162,10 +162,13 @@ background) gets a fresh two-minute window from that moment, never past the 300-
 - A diff is one file's unified diff (`git diff -- <file>` or `diff -u`), at most 64 KiB, 200 hunks, 400 lines per
   hunk and 500 characters per line. The gateway reads it itself and refuses what cannot be shown as written, naming
   the hunk and the line: a carriage return (a CRLF file), whitespace at the end of a line, a hidden or
-  bidirectional character, more than 16 spaces in a row, a line indented by more than 32 spaces; also a binary diff,
-  a diff of several files (one call per file), a quoted file name, an absolute path or one with `..`, and anything
-  around the diff such as a Markdown fence. Tabs are fine (apps show them visibly). The agent is told what to
-  change, nothing is rewritten.
+  bidirectional character, more than 16 columns of spaces in a row, a line indented by more than 32 columns (a tab
+  counts as a stop every 8 columns, so four tab levels fit); also a binary diff, a diff of several files (one call
+  per file), a quoted file name, an absolute path or one with `..` or `.git`, a change of file mode, a new or deleted
+  symbolic link, submodule or executable file (only regular files, mode 100644), a `\ No newline at end of file`
+  line anywhere but directly after the last `-` or `+` line of the last hunk, and anything around the diff such as
+  a Markdown fence. A diff of bare hunks must come with the file's `path`. The agent is told what to change,
+  nothing is rewritten.
 - Ten refused answers end a request.
 - Each request and each outcome writes one record to the dashboard auth audit log
   (`$HERMES_HOME/logs/dashboard-auth.log`, events `interactive_request` and `interactive_outcome`): the session,

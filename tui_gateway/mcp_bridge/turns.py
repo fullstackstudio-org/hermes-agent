@@ -6,6 +6,8 @@ the ordinary detached/reaper path. While attached it records what the session st
 (at most :data:`TEXT_CAP_BYTES`), the server requests that open and close, the turn's end -- and
 :meth:`TurnWatch.wait` answers with the turn's status:
 
+``queued``              the text was queued behind a turn that runs now, and the turn it becomes has not
+                        started yet (or has, and is not yet known to be it): ``queue_position`` says where;
 ``running``             the turn has not concluded and nobody is being asked anything;
 ``waiting_for_person``  it has not concluded and at least one server request is open (a clarify the agent
                         may answer; an approval, sudo, secret or vault prompt only the person's app can);
@@ -18,9 +20,14 @@ the ordinary detached/reaper path. While attached it records what the session st
 
 Which turn is ours. ``prompt.submit`` answers before the turn's first frame and does not name the turn, so
 the watch is ARMED before the submit and keeps every frame that arrives until the submit's answer says
-how the text was taken: ``streaming`` (a new turn: the next ``message.start``), ``queued`` (the turn after
-the one running now), ``steered`` / ``redirected`` (the running turn). Frames of a turn that ran before
-the watch armed are never adopted. A turn that fails before it starts sends no ``message.start``; its
+how the text was taken: ``streaming`` (a new turn: the next ``message.start``), ``queued`` (a turn that starts
+later), ``steered`` / ``redirected`` (the running turn). Frames of a turn that ran before the watch armed are
+never adopted. A queued text is matched EXACTLY, never by position (other people's envelopes may sit in the
+queue, a Stop drops it): each turn that starts is checked against the gateway's own record of it (the
+in-flight turn's ``turn_id``, ``author`` with ``via`` and text, :mod:`.live`) when its ``message.start``
+arrives, or against its stored user row when it ends; a turn that is not provably the agent's is never
+adopted, and one that cannot be told yet is buffered until it can. When the session is idle and no envelope
+holds the text any more, the prompt was dropped (``interrupted``). A turn that fails before it starts sends no ``message.start``; its
 terminal frame is held as a candidate until ``session.active_list`` shows the session idle (or the
 stored user row of ``message.complete`` matches the submit's ``user_row_id``). The public ``turn_id`` is
 the bridge's own handle (minted at submit, so it exists before the turn starts); ``gateway_turn_id`` is
@@ -57,7 +64,7 @@ from tui_gateway.row_identity import TURN_STREAM_EVENTS
 
 logger = logging.getLogger(__name__)
 
-STATUSES = ("running", "done", "waiting_for_person", "interrupted", "error", "restarted")
+STATUSES = ("queued", "running", "done", "waiting_for_person", "interrupted", "error", "restarted")
 TERMINAL_STATUSES = frozenset({"done", "interrupted", "error", "restarted"})
 
 MAX_WATCHES = 200
@@ -77,6 +84,13 @@ _PRE_ARM_TURNS_MAX = 64
 #: ``session.events.since`` with this watermark returns no events, only ``open_requests``.
 _NO_EVENTS_SEQ = 2**53 - 1
 _SUBMIT_MODES = frozenset({"streaming", "queued", "steered", "redirected"})
+#: Turns of a queued watch that started but cannot be told to be the agent's yet, buffered at most this many
+#: (each at most :data:`_EARLY_FRAMES_MAX` frames).
+_PENDING_TURNS_MAX = 8
+#: A queued prompt counts as dropped once the session was seen idle with no envelope holding it, twice this far
+#: apart (a drain pops the envelope and claims the turn in two steps).
+_DROPPED_CONFIRM_S = 1.0
+DROPPED_MESSAGE = "the queued prompt did not run: the chat was stopped before its turn came"
 
 _QUESTION_MAX = 2000
 _CHOICE_MAX = 200
@@ -216,7 +230,10 @@ def _cap_bytes(text: str, limit: int) -> tuple[str, bool]:
 class TurnWatch:
     """See the module docstring. Built by :func:`start_turn`; found again with :func:`get`."""
 
-    def __init__(self, transport: AgentTransport, *, chat_id: str, session_id: str) -> None:
+    def __init__(self, transport: AgentTransport, *, chat_id: str, session_id: str,
+                 verify_start: Callable[[str], bool | None] | None = None,
+                 verify_end: Callable[[str, int | None], bool | None] | None = None,
+                 queue_probe: Callable[[], tuple[bool, int | None]] | None = None) -> None:
         self.chat_id = str(chat_id)
         self.session_id = str(session_id)
         #: The bridge's handle for the turn, given to the agent (``bot_wait(chat_id, turn_id)``).
@@ -236,7 +253,6 @@ class TurnWatch:
         self._early: list[tuple] = []
         self._pre_tids: OrderedDict[str, None] = OrderedDict()
         self._running_tid: str | None = None
-        self._after_complete = False
         self._started = False
         self._candidate: tuple | None = None
         self._user_row_id: int | None = None
@@ -257,6 +273,18 @@ class TurnWatch:
         self._waiter_gen = 0
         self._detach_timer: threading.Timer | None = None
         self._detached = False
+        # A queued text (see the module docstring): how a started turn is told to be ours, on the emitting
+        # thread (``verify_start``, lock-free) or at its end on the waiter's (``verify_end``); where the text
+        # sits in the queue (``queue_probe``, waiter's thread).
+        self._verify_start = verify_start
+        self._verify_end = verify_end
+        self._queue_probe = queue_probe
+        self._rejected: set[str] = set()
+        self._pending: OrderedDict[str, list[tuple]] = OrderedDict()
+        self._pending_open: str | None = None
+        self._pending_end: list[tuple[str, int | None]] = []
+        self._queue_position: int | None = None
+        self._idle_unqueued_at: float | None = None
         transport.set_event_sink(self._feed)
 
     # ── the emitting side (never blocks, never calls the gateway) ────────────────────────────
@@ -304,6 +332,9 @@ class TurnWatch:
         """Caller holds the lock and the submit's mode is known."""
         if self._status in TERMINAL_STATUSES:
             return
+        if self._mode == "queued" and not self._started:
+            self._apply_queued(item)
+            return
         if item[0] == "request":
             _, method, request_id, params = item
             if self._started:
@@ -334,11 +365,6 @@ class TurnWatch:
             if tid is None or (self._running_tid is not None and tid != self._running_tid):
                 return False
             return self._start(tid)
-        if self._mode == "queued" and not self._after_complete:
-            # The turn running at submit time ends first; ours is the one after it.
-            if kind == "message.complete":
-                self._after_complete = True
-            return False
         if tid is not None and tid in self._pre_tids:
             return False
         if kind == "message.start":
@@ -352,6 +378,133 @@ class TurnWatch:
             self._candidate = (kind, tid, data)
             self._requests_dirty = True  # settle it at the waiter's next reconcile, not the periodic one
         return False
+
+    def _apply_queued(self, item: tuple) -> None:
+        """Caller holds the lock; a queued text whose turn is not known yet. Only a ``message.start`` (or a turn's
+        end whose start was never seen) makes a candidate; the frames of a candidate that cannot be told yet are
+        buffered, a candidate known to be someone else's is dropped with everything it sends."""
+        if item[0] == "request" or item[1] == "request.cancel":
+            # Requests carry no turn id: they belong to the turn running now, i.e. the open candidate.
+            if self._pending_open is not None:
+                self._buffer(self._pending_open, item)
+            return
+        _, kind, tid, data = item
+        if kind == "status.update":
+            if data.get("kind") == "restart":
+                self._restarting = True
+            return
+        if kind not in TURN_STREAM_EVENTS or tid is None or tid in self._pre_tids or tid in self._rejected:
+            return
+        if tid in self._pending:
+            self._buffer(tid, item)
+            if kind == "message.complete":
+                self._pending_open = None if self._pending_open == tid else self._pending_open
+                self._pending_end.append((tid, data.get("user_row_id")))
+                self._requests_dirty = True
+            return
+        if kind == "message.start":
+            verdict = self._verdict_at_start(tid)
+            if verdict is True:
+                self._start(tid)
+                self._on_turn_frame(kind, data)
+            elif verdict is False:
+                self._reject(tid)
+            else:
+                self._open_pending(tid, item)
+        elif kind == "message.complete" and self._verify_end is not None:
+            # A turn that ended without a start we saw (it began before this connection attached, or failed
+            # before it started): only its stored row can say whose it was.
+            self._open_pending(tid, item, open_turn=False)
+            self._pending_end.append((tid, data.get("user_row_id")))
+            self._requests_dirty = True
+
+    def _verdict_at_start(self, tid: str) -> bool | None:
+        if self._verify_start is None:
+            return None
+        try:
+            return self._verify_start(tid)
+        except Exception:  # noqa: BLE001 - a check that fails cannot tell
+            logger.debug("turn watch: start check failed", exc_info=True)
+            return None
+
+    def _open_pending(self, tid: str, item: tuple, *, open_turn: bool = True) -> None:
+        while len(self._pending) >= _PENDING_TURNS_MAX:
+            old, _ = self._pending.popitem(last=False)
+            self._rejected.add(old)
+        self._pending[tid] = [item]
+        if open_turn:
+            self._pending_open = tid
+
+    def _buffer(self, tid: str, item: tuple) -> None:
+        frames = self._pending.get(tid)
+        if frames is not None and len(frames) < _EARLY_FRAMES_MAX:
+            frames.append(item)
+
+    def _reject(self, tid: str) -> None:
+        self._rejected.add(tid)
+        self._pending.pop(tid, None)
+        if self._pending_open == tid:
+            self._pending_open = None
+        if len(self._rejected) > _PRE_ARM_TURNS_MAX * 4:
+            self._rejected = set(list(self._rejected)[-_PRE_ARM_TURNS_MAX:])
+
+    def _adopt_pending(self, tid: str) -> None:
+        """Caller holds the lock: *tid* is ours; replay what it sent so far."""
+        frames = self._pending.pop(tid, None) or []
+        self._pending.clear()
+        self._pending_open = None
+        self._pending_end = []
+        self._start(tid)
+        for item in frames:
+            self._apply(item)
+
+    def _settle_pending_ends(self) -> None:
+        """Waiter's thread: tell each ended candidate by its stored user row."""
+        with self._cond:
+            ends, self._pending_end = self._pending_end, []
+        for tid, user_row_id in ends:
+            verdict = None
+            if self._verify_end is not None:
+                try:
+                    verdict = self._verify_end(tid, user_row_id)
+                except Exception:  # noqa: BLE001
+                    logger.debug("turn watch: end check failed", exc_info=True)
+            with self._cond:
+                if self._started or self._status in TERMINAL_STATUSES:
+                    return
+                if verdict is True:
+                    self._adopt_pending(tid)
+                    self._cond.notify_all()
+                    return
+                # Someone else's, or nobody can tell any more: never ours.
+                self._reject(tid)
+
+    def _probe_queue(self) -> None:
+        """Waiter's thread: where the queued text sits; dropped once idle with no envelope holding it."""
+        if self._queue_probe is None:
+            return
+        try:
+            running, position = self._queue_probe()
+        except Exception:  # noqa: BLE001
+            logger.debug("turn watch: queue probe failed", exc_info=True)
+            return
+        now = time.monotonic()
+        with self._cond:
+            if self._started or self._status in TERMINAL_STATUSES:
+                return
+            self._queue_position = position
+            if position is not None or running or self._pending or self._pending_end:
+                self._idle_unqueued_at = None
+                return
+            if self._idle_unqueued_at is None:
+                self._idle_unqueued_at = now
+                return
+            if now - self._idle_unqueued_at >= _DROPPED_CONFIRM_S:
+                self._conclude("interrupted", "", DROPPED_MESSAGE, None)
+
+    def _queued_unstarted(self) -> bool:
+        """Caller holds the lock."""
+        return self._mode == "queued" and not self._started and self._status not in TERMINAL_STATUSES
 
     def _start(self, tid: str | None) -> bool:
         self._started = True
@@ -449,6 +602,19 @@ class TurnWatch:
     # ── reading ───────────────────────────────────────────────────────────────────────────────
 
     @property
+    def concluded(self) -> bool:
+        with self._cond:
+            return self._status in TERMINAL_STATUSES
+
+    def has_request(self, request_id: str) -> bool:
+        with self._cond:
+            return str(request_id) in self._requests
+
+    @property
+    def transport(self) -> AgentTransport:
+        return self._transport
+
+    @property
     def status(self) -> str:
         with self._cond:
             return self._status_locked()
@@ -456,6 +622,8 @@ class TurnWatch:
     def _status_locked(self) -> str:
         if self._status in TERMINAL_STATUSES:
             return self._status
+        if self._queued_unstarted():
+            return "queued"
         return "waiting_for_person" if self._requests else "running"
 
     def snapshot(self, *, mark_reported: bool = True) -> dict:
@@ -469,8 +637,10 @@ class TurnWatch:
                 "text_truncated": self._truncated, "submit_status": self.submit_status}
             if self.gateway_turn_id:
                 data["gateway_turn_id"] = self.gateway_turn_id
-            if self._error and status == "error":
+            if self._error and status in ("error", "interrupted"):
                 data["error"] = self._error
+            if status == "queued":
+                data["queue_position"] = self._queue_position
             if self._row_id is not None:
                 data["row_id"] = self._row_id
             if status == "restarted" or (self._restarting and status not in TERMINAL_STATUSES):
@@ -495,7 +665,7 @@ class TurnWatch:
             generation = self._waiter_gen
             self._cond.notify_all()
             started = self._started
-        if started:
+        if started or self._pending_end:
             self._reconcile()
         last_reconcile = time.monotonic()
         last_progress, progress_version = 0.0, self._text_version
@@ -512,7 +682,8 @@ class TurnWatch:
                 if (on_progress is not None and self._text_version != progress_version
                         and now - last_progress >= PROGRESS_INTERVAL_S):
                     tail, progress_version, last_progress = self._tail, self._text_version, now
-                elif (self._requests or self._candidate is not None) and now - last_reconcile >= _RECONCILE_MIN_GAP_S \
+                elif (self._requests or self._candidate is not None or self._pending_end or self._queued_unstarted()) \
+                        and now - last_reconcile >= _RECONCILE_MIN_GAP_S \
                         and (self._requests_dirty or now - last_reconcile >= RECONCILE_INTERVAL_S):
                     reconcile = True
                 else:
@@ -533,9 +704,16 @@ class TurnWatch:
         with self._cond:
             if self._status in TERMINAL_STATUSES or self._transport.closed:
                 return
+            queued = self._queued_unstarted()
+            self._requests_dirty = False
+        if queued:
+            self._settle_pending_ends()
+            self._probe_queue()
+        with self._cond:
+            if self._status in TERMINAL_STATUSES:
+                return
             check_requests = self._started
             candidate = self._candidate is not None and not self._started
-            self._requests_dirty = False
         try:
             if check_requests:
                 result = rpc.call(self._transport, "session.events.since",
@@ -677,6 +855,21 @@ def watch_count() -> int:
         return len(_registry)
 
 
+def watches() -> list[TurnWatch]:
+    """Every watch now registered (a snapshot)."""
+    with _registry_lock:
+        return list(_registry.values())
+
+
+def watches_of(chat_id: str, *, identity: dict) -> list[TurnWatch]:
+    """The registered watches of *chat_id* that belong to the person *identity* names, newest first."""
+    login = login_of(identity)
+    with _registry_lock:
+        found = [w for (chat, _), w in _registry.items() if chat == str(chat_id)]
+    return sorted((w for w in found if login is not None and w.owner == login),
+                  key=lambda w: w.created_at, reverse=True)
+
+
 def start_turn(transport: AgentTransport, *, chat_id: str, session_id: str, text: str,
                params: dict | None = None, timeout: float | None = rpc.DEFAULT_TIMEOUT_S) -> TurnWatch:
     """Submit *text* to the live session *session_id* (the stored chat *chat_id*, already resumed or created
@@ -684,7 +877,8 @@ def start_turn(transport: AgentTransport, *, chat_id: str, session_id: str, text
 
     On success the watch OWNS *transport*: it releases it :data:`DETACH_AFTER_END_S` after the turn
     concludes (or when evicted). On failure nothing is watched, the transport stays the caller's, and the
-    error propagates: :class:`WatchLimitReached`, :class:`~tui_gateway.mcp_bridge.rpc.GatewayRestarting`
+    error propagates (a queued text is matched to its turn exactly, see the module docstring):
+    :class:`WatchLimitReached`, :class:`~tui_gateway.mcp_bridge.rpc.GatewayRestarting`
     (5035), :class:`~tui_gateway.mcp_bridge.rpc.RpcError` (4001 for a session this person may not act on,
     4009 busy, ...), or any other :class:`~tui_gateway.mcp_bridge.rpc.BridgeError`. *params* adds
     ``prompt.submit`` parameters (``queued``, ...), checked by the RPC allowlist."""
@@ -692,7 +886,14 @@ def start_turn(transport: AgentTransport, *, chat_id: str, session_id: str, text
         raise rpc.DisallowedCall("a turn is watched on an AgentTransport only")
     if transport.has_event_sink:
         raise rpc.DisallowedCall("one turn per agent transport: this one already feeds a watch")
-    watch = TurnWatch(transport, chat_id=chat_id, session_id=session_id)
+    from tui_gateway.mcp_bridge import live
+
+    sid = str(session_id)
+    watch = TurnWatch(
+        transport, chat_id=chat_id, session_id=sid,
+        verify_start=lambda tid: live.turn_verdict_from_inflight(transport, sid, tid, text),
+        verify_end=lambda tid, row: live.turn_verdict_from_store(transport, sid, tid, text, row),
+        queue_probe=lambda: live.queue_position(transport, sid, text))
     try:
         _register(watch)
     except BaseException:
@@ -709,6 +910,8 @@ def start_turn(transport: AgentTransport, *, chat_id: str, session_id: str, text
         transport.set_event_sink(None)
         raise
     watch._set_mode(str(result.get("status") or ""), result.get("user_row_id"))
+    if watch.submit_status == "queued":
+        watch._probe_queue()
     return watch
 
 

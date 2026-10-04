@@ -211,6 +211,38 @@ class _refuse_admission:
         return False
 
 
+def test_a_queued_prompt_behind_the_persons_queued_prompt_gets_its_own_turn(gateway):
+    # The person's turn runs; the person queues a follow-up; then the agent's text queues behind it. The turn
+    # after the running one is the PERSON's: the agent's watch must wait for its own.
+    assert gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker gated"})["result"]["status"] \
+        == "streaming"
+    assert gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker person", "queued": True})[
+        "result"]["status"] == "queued"
+    transport = gateway.connect()
+    watch = turns.start_turn(transport, chat_id=KEY, session_id=SID, text="marker reply", params={"queued": True})
+    snap = watch.snapshot()
+    assert (snap["status"], snap["queue_position"]) == ("queued", 2)
+    gateway.agent.gate.set()
+    done = watch.wait(_deadline())
+    assert (done["status"], done["text"]) == ("done", "marker reply done"), done
+    assert gateway.agent.texts[-2:] == ["marker person", "marker reply"]
+
+
+def test_a_queued_prompt_a_stop_dropped_ends_interrupted(gateway, monkeypatch):
+    monkeypatch.setattr(turns, "_DROPPED_CONFIRM_S", 0.2)
+    monkeypatch.setattr(turns, "RECONCILE_INTERVAL_S", 0.2)
+    assert gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker gated"})["result"]["status"] \
+        == "streaming"
+    transport = gateway.connect()
+    watch = turns.start_turn(transport, chat_id=KEY, session_id=SID, text="marker reply", params={"queued": True})
+    assert watch.snapshot()["queue_position"] == 1
+    gateway.app.call("session.interrupt", {"session_id": SID})  # the person's Stop clears the queue
+    gateway.agent.gate.set()
+    ended = watch.wait(_deadline())
+    assert (ended["status"], ended["error"]) == ("interrupted", turns.DROPPED_MESSAGE)
+    assert "marker reply" not in gateway.agent.texts
+
+
 def test_a_cancelled_wait_returns_without_stopping_the_turn(gateway):
     _transport, watch = _start(gateway, "marker gated")
     stop = threading.Event()
@@ -224,9 +256,9 @@ def test_a_cancelled_wait_returns_without_stopping_the_turn(gateway):
 # ── which turn is ours, from frames ─────────────────────────────────────────────────────────
 
 
-def _watch(*, pre=()):
+def _watch(*, pre=(), **kw):
     transport = AgentTransport(identity())
-    watch = turns.TurnWatch(transport, chat_id=KEY, session_id=SID)
+    watch = turns.TurnWatch(transport, chat_id=KEY, session_id=SID, **kw)
     for frame in pre:
         watch._feed(frame)
     watch._arm()
@@ -279,15 +311,71 @@ def test_a_turn_that_ran_before_the_watch_armed_is_never_adopted():
     assert watch.snapshot()["text"] == "marker ours"
 
 
-def test_a_queued_prompt_is_the_turn_after_the_running_one():
-    watch = _watch()
+def test_a_queued_prompt_adopts_only_the_turn_known_to_be_the_agents():
+    # The queue holds someone else's envelope ahead of ours: position would pick the wrong turn.
+    ours = {"t-ours"}
+    watch = _watch(verify_start=lambda tid: tid in ours)
     watch._set_mode("queued", None)
     watch._feed(_event("message.delta", "t-running", {"text": "theirs"}))
     watch._feed(_complete("t-running", "their reply"))
-    assert watch.status == "running"
-    watch._feed(_event("message.start", "t-next"))
-    watch._feed(_complete("t-next", "marker queued"))
-    assert watch.snapshot()["text"] == "marker queued"
+    assert watch.status == "queued"
+    watch._feed(_event("message.start", "t-person"))
+    watch._feed(_event("message.delta", "t-person", {"text": "the person's words"}))
+    watch._feed(_request("rq-person", question="Theirs?"))
+    watch._feed(_complete("t-person", "the person's reply"))
+    snap = watch.snapshot()
+    assert (snap["status"], snap["text"], snap["requests"]) == ("queued", "", [])
+    watch._feed(_event("message.start", "t-ours"))
+    watch._feed(_complete("t-ours", "marker queued"))
+    snap = watch.snapshot()
+    assert (snap["status"], snap["text"], snap["gateway_turn_id"]) == ("done", "marker queued", "t-ours")
+
+
+def test_a_queued_turn_that_cannot_be_told_at_its_start_is_told_by_its_stored_row():
+    ends = []
+
+    def verify_end(tid, row):
+        ends.append((tid, row))
+        return row == 7
+
+    watch = _watch(verify_start=lambda tid: None, verify_end=verify_end)
+    watch._set_mode("queued", None)
+    watch._feed(_event("message.start", "t-a"))
+    watch._feed(_event("message.delta", "t-a", {"text": "not ours"}))
+    watch._feed(_complete("t-a", "theirs", persisted_turn={"user_row_id": 6}))
+    watch._feed(_event("message.start", "t-b"))
+    watch._feed(_request("rq-b", question="Which marker?"))
+    watch._feed(_event("message.delta", "t-b", {"text": "marker "}))
+    assert watch.wait(time.monotonic() + 1)["status"] == "queued"
+    watch._feed(_complete("t-b", "marker ours", persisted_turn={"user_row_id": 7}))
+    snap = watch.wait(time.monotonic() + 2)
+    assert (snap["status"], snap["text"], snap["gateway_turn_id"]) == ("done", "marker ours", "t-b")
+    assert ends == [("t-a", 6), ("t-b", 7)]
+
+
+def test_a_queued_turn_is_adopted_mid_turn_with_its_open_request(monkeypatch):
+    watch = _watch(verify_start=lambda tid: True)
+    watch._set_mode("queued", None)
+    watch._feed(_event("message.start", "t-ours"))
+    watch._feed(_request("rq-1", question="Which marker?"))
+    snap = watch.snapshot()
+    assert snap["status"] == "waiting_for_person" and [r["id"] for r in snap["requests"]] == ["rq-1"]
+
+
+def test_a_queued_prompt_reports_its_position_and_ends_when_dropped(monkeypatch):
+    monkeypatch.setattr(turns, "_DROPPED_CONFIRM_S", 0.2)
+    monkeypatch.setattr(turns, "RECONCILE_INTERVAL_S", 0.1)
+    monkeypatch.setattr(turns, "_RECONCILE_MIN_GAP_S", 0.05)
+    state = {"probe": (True, 2)}
+    watch = _watch(verify_start=lambda tid: False, queue_probe=lambda: state["probe"])
+    watch._set_mode("queued", None)
+    watch._probe_queue()
+    snap = watch.snapshot()
+    assert (snap["status"], snap["queue_position"]) == ("queued", 2)
+    # A Stop dropped the queue: idle, and no envelope holds the text.
+    state["probe"] = (False, None)
+    snap = watch.wait(time.monotonic() + 3)
+    assert (snap["status"], snap["error"]) == ("interrupted", turns.DROPPED_MESSAGE)
 
 
 def test_a_steer_joins_the_running_turn():

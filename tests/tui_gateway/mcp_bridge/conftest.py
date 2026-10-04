@@ -50,6 +50,19 @@ class AppPeer:
     def close(self):
         return None
 
+    def call(self, method, params, rid=None, timeout=10.0):
+        """Dispatch as this connection and return the response (a pooled handler answers through write)."""
+        rid = rid or f"app-{time.monotonic_ns()}"
+        response = server.dispatch({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}, self)
+        deadline = time.monotonic() + timeout
+        while response is None and time.monotonic() < deadline:
+            with self._lock:
+                response = next((f for f in self.frames if f.get("id") == rid and "method" not in f), None)
+            if response is None:
+                time.sleep(0.01)
+        assert response is not None, f"no answer to {method}"
+        return response
+
     def requests(self, method):
         with self._lock:
             return [f for f in self.frames if f.get("method") == method and isinstance(f.get("id"), str)]
@@ -100,6 +113,8 @@ class ScriptedAgent:
             if "then gated" in message:
                 self.gate.wait(30)
             return {"final_response": "marker approved"}
+        if "marker person" in message:
+            return {"final_response": "marker person reply"}
         if "marker gated" in message:
             for _ in range(3):
                 stream_callback("tick ")
@@ -152,6 +167,80 @@ def gateway(tmp_path, monkeypatch):
     turns.reset_for_tests()
     for transport in transports:
         transport.close()
+    server_requests.reset_for_tests()
+    event_replay.reset_replay_state()
+    db.close()
+
+
+class BuiltAgent(ScriptedAgent):
+    """A :class:`ScriptedAgent` the gateway builds for a session it creates or resumes; a stop releases a
+    gated turn, which then reports itself interrupted (as ``AIAgent`` does)."""
+
+    def __init__(self, sid, key):
+        super().__init__(sid)
+        self.session_id = key
+        self.model = "test/model"
+
+    def interrupt(self, *_a, **_k):
+        self._interrupt_requested = True
+        self.gate.set()
+        return True
+
+    def run_conversation(self, message, conversation_history=None, stream_callback=None, **kw):
+        result = super().run_conversation(message, conversation_history, stream_callback, **kw)
+        if self._interrupt_requested:
+            return {"final_response": "", "interrupted": True}
+        return result
+
+
+@pytest.fixture()
+def live_gateway(monkeypatch):
+    """The real session handlers over a state.db in the test's HERMES_HOME: ``session.create`` and
+    ``session.resume`` build a :class:`BuiltAgent` (``agents[stored id]``)."""
+    from hermes_constants import get_hermes_home
+    from tui_gateway import event_replay, server_requests
+    from tui_gateway.mcp_bridge import turns
+
+    event_replay.reset_replay_state()
+    server_requests.reset_for_tests()
+    db = SessionDB(db_path=get_hermes_home() / "state.db")
+    sessions: dict = {}
+    agents: dict = {}
+
+    def make_agent(sid, key, session_id=None, session_db=None, **_kw):
+        agent = agents[session_id or key] = BuiltAgent(sid, session_id or key)
+        agent.session = sessions.get(sid)
+        return agent
+
+    monkeypatch.setattr(server, "_db", db, raising=False)
+    monkeypatch.setattr(server, "_sessions", sessions, raising=False)
+    monkeypatch.setattr(server, "_make_agent", make_agent)
+    monkeypatch.setattr(server, "_get_usage", lambda _agent: {})
+    monkeypatch.setattr(server, "render_message", lambda *_a: "")
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
+    monkeypatch.setattr(server_requests, "_agent_clarify_allowed", lambda: True)
+
+    def session_of(key):
+        return next(((sid, s) for sid, s in sessions.items() if s.get("session_key") == key), (None, None))
+
+    def agent_of(key, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            sid, session = session_of(key)
+            agent = session.get("agent") if session else None
+            if isinstance(agent, BuiltAgent):
+                agent.session = session
+                return agent
+            time.sleep(0.01)
+        raise AssertionError(f"no agent was built for {key}")
+
+    yield SimpleNamespace(db=db, sessions=sessions, agents=agents, session_of=session_of, agent_of=agent_of)
+    for agent in list(agents.values()):
+        agent.gate.set()
+    deadline = time.monotonic() + 5
+    while any(s.get("running") for s in sessions.values()) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    turns.reset_for_tests()
     server_requests.reset_for_tests()
     event_replay.reset_replay_state()
     db.close()

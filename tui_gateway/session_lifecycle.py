@@ -407,6 +407,10 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
                 agent.commit_memory_session(history)
 
     session_key = session.get("session_key")
+    with contextlib.suppress(Exception):
+        # The approved drafts the gateway kept for this conversation (``review_register``) go with its session.
+        from tui_gateway import review_register
+        review_register.clear(session_key)
     session_id = getattr(agent, "session_id", None) or session_key
     _notify_session_boundary("on_session_finalize", session_id, _session_source(session))
     # End the state.db row so it doesn't linger as a ghost in /resume. Use session_id (agent.session_id), not

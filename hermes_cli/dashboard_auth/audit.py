@@ -49,6 +49,10 @@ class AuditEvent(enum.Enum):
     # The ``confirm`` server request (tui_gateway/confirm.py): who was asked and who answered, never the text.
     CONFIRM_REQUEST = "confirm_request"
     CONFIRM_OUTCOME = "confirm_outcome"
+    # The interactive server requests (tui_gateway/interactive.py: input.form, input.file, review.draft): who was
+    # asked and who answered, never a title, value, path, name or draft.
+    INTERACTIVE_REQUEST = "interactive_request"
+    INTERACTIVE_OUTCOME = "interactive_outcome"
     # Passkeys for the confirm level ``passkey`` (hermes_cli/dashboard_auth/passkeys): enrolment codes,
     # credentials, step-ups and verified answers. Fields name the user, the first 16 characters of the
     # credential id, the RP, the base URL, the request and a reason; never a code, text or signature.

@@ -215,7 +215,12 @@ def test_the_statement_hash_is_sha256_of_the_exact_utf8_bytes():
     ("image/png", b"\x89PNG\r\n\x1a\nrest", True), ("image/png", b"\x89PNG\r\n", False), ("image/png", b"GIF89a", False),
     ("image/png", b"", False),
     ("image/svg+xml", SVG_BYTES, True), ("image/svg+xml", b"<svg xmlns='http://www.w3.org/2000/svg'/>", True),
-    ("image/svg+xml", b"\xef\xbb\xbf<?xml version='1.0'?><!-- c --><!DOCTYPE svg PUBLIC 'x' 'y'><svg>", True),
+    ("image/svg+xml", b"\xef\xbb\xbf<?xml version='1.0'?><!-- c --><!-- d -->\n<svg>", True),
+    ("image/svg+xml", b"<?xml version='1.0'?><!DOCTYPE svg PUBLIC 'x' 'y'><svg>", False),
+    ("image/svg+xml", b"<!DOCTYPE svg [<!ENTITY a 'b'>]><svg>&a;</svg>", False),
+    ("image/svg+xml", b"<?xml-stylesheet href='x.css'?><svg/>", False),
+    ("image/svg+xml", b"<svg/><?xml version='1.0'?>", True), ("image/svg+xml", b" <?xml version='1.0'?><svg/>", False),
+    ("image/svg+xml", b"<!-- never closed <svg>", False), ("image/svg+xml", b"<svgx/>", False),
     ("image/svg+xml", b"<html><svg></svg></html>", False), ("image/svg+xml", b"\x89PNG\r\n\x1a\n", False),
     ("image/svg+xml", b"", False), ("image/jpeg", b"\xff\xd8\xff", False),
     ("image/svg+xml", b"<svg><script>alert(1)</script></svg>", False),
@@ -224,10 +229,9 @@ def test_the_statement_hash_is_sha256_of_the_exact_utf8_bytes():
     ("image/svg+xml", b"<svg><a href='javascript:x'/></svg>", False),
     ("image/svg+xml", b"<svg><foreignObject/></svg>", False), ("image/svg+xml", b"<svg><image href='x'/></svg>", False),
     ("image/svg+xml", b"<svg><style>@import url(x)</style></svg>", False),
-    ("image/svg+xml", b"<svg><use href='#a'/></svg>", True),
-    ("image/svg+xml", b"<svg><use xlink:href=\"#a\"/></svg>", True),
+    ("image/svg+xml", b"<svg><use href='#a'/></svg>", False),
+    ("image/svg+xml", b"<svg><USE xlink:href=\"#a\"/></svg>", False),
     ("image/svg+xml", b"<svg><use href='http://x/y.svg#a'/></svg>", False),
-    ("image/svg+xml", b"<svg><use href=\"file.svg#a\"/></svg>", False),
 ])
 def test_a_signature_file_is_what_its_declared_type_says(mime, head, ok):
     assert (dev.png_or_svg_problem(mime, head) is None) is ok
@@ -1044,3 +1048,12 @@ def test_a_voice_answer_that_is_not_audio_is_refused_and_the_request_stays_open(
     assert reply["error"]["data"]["reason"] == "file:0:not_audio"
     _frame(server, phone, rid, result={"status": "skipped"})
     assert _finish(box).status == "skipped"
+
+
+@pytest.mark.parametrize("blob", [b"<!---->" * 150_000 + b"x", b"<use " * 200_000, b" on" + b"a" * 1_000_000,
+                                  b"<!--" * 250_000, b"<svg " + b"onx " * 250_000, b" " * 1_000_000 + b"<svg>"])
+def test_checking_a_signature_file_is_linear_in_its_size(blob):
+    """A client can send a million bytes of anything: no pattern may backtrack over it."""
+    started = time.monotonic()
+    dev.png_or_svg_problem("image/svg+xml", blob)
+    assert time.monotonic() - started < 2.0

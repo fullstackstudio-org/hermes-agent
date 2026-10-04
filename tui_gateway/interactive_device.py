@@ -46,12 +46,13 @@ CONTACT_KEYS = tuple(field.value for field in ContactField)
 _LISTS = {"phones": CONTACT_PHONES_MAX, "emails": CONTACT_EMAILS_MAX, "postal": CONTACT_POSTALS_MAX}
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-_SVG_START = re.compile(rb"\A(\xef\xbb\xbf)?\s*(<\?xml[^>]*\?>\s*)?(<!--.*?-->\s*)*(<!DOCTYPE\s+svg[^>]*>\s*)?<svg[\s>]",
-                        re.IGNORECASE | re.DOTALL)
+_SVG_WHITESPACE = b" \t\r\n"
+_SVG_ROOT = re.compile(rb"<svg[\s>/]")
 # What a signature drawn on a pad never needs and an SVG viewer would act on: script, event handlers, ``javascript:``,
-# embedded documents and images, a stylesheet import, and a ``<use>`` that points anywhere but inside the file.
-_SVG_ACTIVE = re.compile(rb"<script|\son[a-z]+\s*=|javascript:|<foreignObject|<iframe|<embed|<object|<image|@import"
-                         rb"|<use\b[^>]*href\s*=\s*(?:\"(?!\#)|'(?!\#)|(?![\"'\#]))", re.IGNORECASE)
+# embedded documents, images and references (``<use>`` too), a stylesheet import. Every alternative is a literal or a
+# word and a short run, so a scan of a MiB is linear.
+_SVG_ACTIVE = re.compile(rb"<script|\son[a-z]+\s*=|javascript:|<foreignObject|<iframe|<embed|<object|<image|<use\b"
+                         rb"|@import|<!ENTITY", re.IGNORECASE)
 
 
 # ── location ───────────────────────────────────────────────────────────────────────────────────
@@ -177,17 +178,38 @@ def statement_sha256(statement: str) -> str:
     return hashlib.sha256(statement.encode("utf-8")).hexdigest()
 
 
+def _svg_root_follows_prologue(head: bytes) -> bool:
+    """Whether *head* is XML text whose first element is ``<svg``: after an optional byte order mark, whitespace, an
+    optional XML declaration and comments, nothing else (no doctype, no processing instruction). A linear walk with
+    ``bytes.find``, never a regular expression over the prologue: a file of a million comments costs a million steps."""
+    data = head[3:] if head.startswith(b"\xef\xbb\xbf") else head
+    pos, size = 0, len(data)
+    while True:
+        while pos < size and data[pos] in _SVG_WHITESPACE:
+            pos += 1
+        if pos == 0 and data[:5] == b"<?xml" and data[5:6] in (b" ", b"\t", b"\r", b"\n", b"?"):
+            end = data.find(b"?>")
+            if end < 0:
+                return False
+            pos = end + 2
+        elif data.startswith(b"<!--", pos):
+            end = data.find(b"-->", pos + 4)
+            if end < 0:
+                return False
+            pos = end + 3
+        else:
+            return _SVG_ROOT.match(data, pos) is not None
+
+
 def png_or_svg_problem(mime: str, head: bytes) -> str | None:
     """``type`` when the start of a signature file (*head*: at most its first MiB, all of it for a file within the
     signature's own size bound) is not what its declared *mime* says: a PNG begins with the PNG signature; an SVG is
-    XML text that begins with ``<svg`` (after an XML declaration, comments or a doctype) and holds no ``<script``,
-    event-handler attribute, ``javascript:`` URL, embedded object or external ``<use>`` reference."""
+    XML text that begins with ``<svg`` (after an XML declaration or comments; a doctype is refused) and holds no
+    ``<script``, event-handler attribute, ``javascript:`` URL, embedded object, image or ``<use>``, or stylesheet import."""
     if mime == "image/png":
         return None if head.startswith(_PNG_SIGNATURE) else "type"
     if mime == "image/svg+xml":
-        if not _SVG_START.match(head) or _SVG_ACTIVE.search(head):
-            return "type"
-        return None
+        return None if _svg_root_follows_prologue(head) and not _SVG_ACTIVE.search(head) else "type"
     return "type"
 
 

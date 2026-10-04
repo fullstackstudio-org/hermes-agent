@@ -178,8 +178,9 @@ hand-off, so they cannot disagree). `input.signature`: the statement is shown VE
 whitespace removed, anything that cannot be shown as it is refused, at most 500 characters), the answer is a PNG and an
 SVG uploaded like `input.file`'s plus `statement_sha256`, which must be the SHA-256 of the exact UTF-8 bytes of the
 frame's `statement` (`statement:mismatch`); after the request settled, `verify_files(sniff=...)` also checks that the
-PNG begins with the PNG signature and the SVG is XML text starting with `<svg` with no script, event handler,
-`javascript:` URL, embedded document or image, stylesheet import or outside `<use>` (`bad_upload`). The agent gets
+PNG begins with the PNG signature and the SVG is XML text whose first element is `<svg` (no doctype) with no script, event handler,
+`javascript:` URL, embedded document, image or `<use>`, stylesheet import or entity (`bad_upload`; linear in the file, no
+backtracking pattern). The agent gets
 `signed`, `statement_sha256`, `signed_at` (the client's clock), `received_at` (the gateway's), `signer_name?` and the
 two files. `device.location`: the answer is JSON numbers in range, refused as `precision:too_precise` for a
 `precise` answer to an `approximate` request; the agent receives coordinates ROUNDED by the gateway whatever the

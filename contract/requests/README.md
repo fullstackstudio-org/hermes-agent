@@ -596,9 +596,9 @@ device, and answers
 Checks while the request is open: shape, `not_optional`, each file (`file:<n>:outside_dir`,
 `file:<n>:too_large`), the total (`files:too_large`), the two types, the hash. After it settled, the gateway
 checks the files on disk as for §5 and that the PNG begins with the PNG signature and the SVG is XML text
-starting with `<svg` that holds no script, event handler, `javascript:` URL, embedded document or image, or
-reference to anything outside the file; a file that is not what it says makes the request `unavailable
-(bad_upload)`.
+whose first element is `<svg` (after an XML declaration or comments; no doctype) that holds no script, event
+handler, `javascript:` URL, embedded document, image or `<use>`, stylesheet import or entity; a file that is not
+what it says makes the request `unavailable (bad_upload)`. A client draws plain paths: nothing it needs is refused.
 
 ## 9. `device.location`
 

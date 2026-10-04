@@ -37,14 +37,15 @@ from tui_gateway.mcp_bridge.transport import AgentTransport
 logger = logging.getLogger(__name__)
 
 #: Plan D6. ``request.answer`` is clarify-only (checked below and, authoritatively, by the gateway); history is
-#: read through the stored read the REST route uses, not over RPC. Never: ``session.close/delete/title/
-#: set_hidden``, ``config.*``, ``profiles.configure/create/set_asset``, ``slash.exec``, ``approval.respond``,
-#: ``clarify.lock``, ``fs.*``, console, ``prompt.background``.
+#: read through the stored read the REST route uses, not over RPC. ``profiles.describe`` is left out: its
+#: editor snapshot carries the profile's SOUL, skills and MCP servers, and the agent gets a bot's read fields
+#: from ``profiles.list`` (name, display name, description, model). Never: ``session.close/delete/title/
+#: set_hidden``, ``config.*``, ``profiles.describe/configure/create/set_asset``, ``slash.exec``,
+#: ``approval.respond``, ``clarify.lock``, ``fs.*``, console, ``prompt.background``.
 ALLOWED_METHODS = frozenset({
     "gateway.capabilities",
     "client.capabilities",
     "profiles.list",
-    "profiles.describe",
     "session.create",
     "session.resume",
     "session.active_list",

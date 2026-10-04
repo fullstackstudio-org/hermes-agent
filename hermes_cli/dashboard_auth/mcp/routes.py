@@ -34,10 +34,12 @@ What the route layer adds to the SDK's handlers:
   ``mcp_token_refreshed``, ``mcp_token_rejected``, ``mcp_grant_revoked``, ``mcp_rate_limited``) with ids,
   names, the address and an outcome; never a token, code, secret, state or nonce.
 
-``POST /mcp`` is a placeholder until the MCP server is mounted: a valid token gets 503
-``bridge_not_ready``; a missing or invalid one gets the SDK's 401 with
-``WWW-Authenticate: Bearer … resource_metadata="<primary>/.well-known/oauth-protected-resource/mcp"``.
-``GET`` and ``DELETE /mcp`` answer 405 (no server-initiated stream, no sessions).
+``POST /mcp`` is the MCP server (``tui_gateway.mcp_bridge.server``) behind the SDK's bearer check against this
+store: a missing or invalid token gets the SDK's 401 with
+``WWW-Authenticate: Bearer … resource_metadata="<primary>/.well-known/oauth-protected-resource/mcp"``; a valid
+one reaches the tools as its person and agent (503 ``bridge_not_ready`` until the dashboard's lifespan has
+started the server's session manager). ``GET`` and ``DELETE /mcp`` answer 405 (no server-initiated stream,
+no sessions).
 """
 
 from __future__ import annotations
@@ -504,6 +506,7 @@ class Runtime(mount.MCPRuntime):
     client_authenticator: Any = None
     as_metadata: dict = field(default_factory=dict)
     resource_metadata: dict = field(default_factory=dict)
+    session_manager: Any = None  # the MCP server's StreamableHTTPSessionManager; run by mount.lifespan
 
 
 def build_runtime(*, settings: MCPSettings, issuer_url: str, primary: Any, store: Optional[MCPStore] = None) -> Runtime:
@@ -521,6 +524,7 @@ def build_runtime(*, settings: MCPSettings, issuer_url: str, primary: Any, store
     as_metadata = authorization_server_metadata(issuer_url)
     resource_metadata = protected_resource_metadata(issuer_url)
     as_endpoint = cors_middleware(_metadata_endpoint(as_metadata), ["GET", "OPTIONS"])
+    mcp_app, session_manager = _mcp_server(store=store, settings=settings, issuer_url=issuer_url, origin=origin)
     routes = [
         *(Route(path, endpoint=as_endpoint, methods=["GET", "OPTIONS"]) for path in mount.AS_METADATA_PATHS),
         Route(mount.RESOURCE_METADATA_PATH, methods=["GET", "OPTIONS"],
@@ -532,7 +536,8 @@ def build_runtime(*, settings: MCPSettings, issuer_url: str, primary: Any, store
               methods=["POST", "OPTIONS"]),
         Route("/mcp/revoke", endpoint=cors_middleware(revoke_endpoint, ["POST", "OPTIONS"]),
               methods=["POST", "OPTIONS"]),
-        Route(mount.ENDPOINT_PATH, endpoint=endpoint_app(verifier, resource_metadata_url), methods=["POST"]),
+        Route(mount.ENDPOINT_PATH, endpoint=endpoint_app(verifier, resource_metadata_url, inner=mcp_app),
+              methods=["POST"]),
     ]
     return Runtime(
         settings=settings, store=store, provider=provider, verifier=verifier, issuer_url=issuer_url,
@@ -540,4 +545,19 @@ def build_runtime(*, settings: MCPSettings, issuer_url: str, primary: Any, store
         authorize_handler=AuthorizationHandler(provider), token_handler=TokenHandler(provider, authenticator),
         register_handler=RegistrationHandler(provider, options=ClientRegistrationOptions(
             enabled=True, valid_scopes=list(SCOPES), default_scopes=list(SCOPES))),
-        client_authenticator=authenticator, as_metadata=as_metadata, resource_metadata=resource_metadata)
+        client_authenticator=authenticator, as_metadata=as_metadata, resource_metadata=resource_metadata,
+        session_manager=session_manager)
+
+
+def _audit_event(event: str, **fields: Any) -> None:
+    audit_log(AuditEvent(event), **fields)
+
+
+def _mcp_server(*, store: MCPStore, settings: MCPSettings, issuer_url: str, origin: str) -> tuple[ASGIApp, Any]:
+    """The MCP server's ASGI app and its session manager (``tui_gateway.mcp_bridge.server``)."""
+    from tui_gateway.mcp_bridge.server import build_endpoint
+    from tui_gateway.mcp_bridge.tools import Bridge
+
+    bridge = Bridge(store=store, settings=settings, endpoint_url=issuer_url, label=settings.label,
+                    audit=_audit_event)
+    return build_endpoint(bridge, primary_origin=origin)

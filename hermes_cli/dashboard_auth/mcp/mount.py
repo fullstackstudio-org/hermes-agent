@@ -153,9 +153,15 @@ def configure(app: Any, *, cfg: Any = None, store: Any = None) -> Optional[MCPRu
 
 @contextlib.asynccontextmanager
 async def lifespan(app: Any) -> AsyncIterator[None]:
-    """Entered by the dashboard's lifespan. Nothing to run while ``/mcp`` is a placeholder; the MCP
-    server's session manager runs here once it is mounted."""
-    yield
+    """Entered by the dashboard's lifespan: runs the MCP server's session manager (its task group serves every
+    ``POST /mcp``) while the feature is on; nothing otherwise."""
+    runtime = _runtime
+    manager = getattr(runtime, "session_manager", None) if runtime is not None else None
+    if manager is None:
+        yield
+        return
+    async with manager.run():
+        yield
 
 
 # ── the route ─────────────────────────────────────────────────────────────────────────────────────

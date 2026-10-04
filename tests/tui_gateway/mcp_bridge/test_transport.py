@@ -105,7 +105,7 @@ def test_close_fails_every_pending_call():
 
 @pytest.mark.parametrize("method", [
     "session.close", "session.delete", "session.title", "session.set_hidden", "config.set", "profiles.configure",
-    "profiles.create", "profiles.set_asset", "slash.exec", "approval.respond", "clarify.lock", "fs.read",
+    "profiles.describe", "profiles.create", "profiles.set_asset", "slash.exec", "approval.respond", "clarify.lock", "fs.read",
     "prompt.background", "session.history", "unknown.method"])
 def test_a_method_outside_the_allowlist_is_refused_before_dispatch(method, dispatched):
     transport = AgentTransport(identity())

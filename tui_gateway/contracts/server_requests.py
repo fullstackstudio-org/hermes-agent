@@ -1216,7 +1216,7 @@ CALENDAR_WHEN = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T" + _CLOCK + _OFFSET + ")?$"
 #: the first ``/``, ``?`` or ``#`` holds no ``@``): shown to the person, never opened by the sheet. The gateway also
 #: refuses hidden characters (format, private-use, unassigned, default-ignorable and invisible code points: a bidi
 #: override can reorder what the person reads), which no portable pattern can say (``CalendarItem``).
-CALENDAR_URL = (r"^https?://[^\s@/?#\x00-\x1f\x7f\u0085\u2028\u2029]+"
+CALENDAR_URL = (r"^https?://[^\s@/?#\\\x00-\x1f\x7f\u0085\u2028\u2029]+"
                 r"([/?#][^\s\x00-\x1f\x7f\u0085\u2028\u2029]*)?$")
 
 

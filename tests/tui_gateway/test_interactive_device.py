@@ -227,7 +227,9 @@ def _svg(inner=b"", attrs=b""):
     # what a pad draws
     ("image/svg+xml", SVG_BYTES, True), ("image/svg+xml", b"<svg " + NS + b"/>", True),
     ("image/svg+xml", b"\xef\xbb\xbf" + SVG_BYTES, True),
-    ("image/svg+xml", b"<!-- c -->" + _svg(b'<title>Sign</title><desc>a &amp; b</desc>').replace(b"&amp;", b"and"), True),
+    ("image/svg+xml", b"<!-- c -->" + _svg(b"<title/><desc></desc>"), True),
+    ("image/svg+xml", _svg(b"<title>Sign</title>"), False), ("image/svg+xml", _svg(b"<desc>x</desc>"), False),
+    ("image/svg+xml", b"\xef\xbb\xbf\xef\xbb\xbf" + SVG_BYTES, False),
     ("image/svg+xml", _svg(b'<g transform="scale(2)"><path d="M0 0L1 1" fill="none" stroke="#000" stroke-width="2" '
                            b'stroke-linecap="round"/><polyline points="0,0 1,1"/><polygon points="0,0 1,1 2,0"/>'
                            b'<line x1="0" y1="0" x2="1" y2="1"/><circle cx="1" cy="1" r="1"/>'
@@ -291,12 +293,87 @@ def _svg(inner=b"", attrs=b""):
     ("image/svg+xml", _svg(b"<![CDATA[x]]>"), False), ("image/svg+xml", _svg(b"<title><![CDATA[x]]></title>"), False),
     # text outside a title or a description
     ("image/svg+xml", _svg(b"hello"), False), ("image/svg+xml", _svg(b"<g>hello</g>"), False),
-    ("image/svg+xml", _svg(b"<title>fine</title>\n  <desc>fine</desc>\n"), True),
+    ("image/svg+xml", _svg(b"<title></title>\n  <desc/>\n"), True),
     # depth
     ("image/svg+xml", _svg(b"<g>" * 30 + b"</g>" * 30), True), ("image/svg+xml", _svg(b"<g>" * 40 + b"</g>" * 40), False),
+    # CSS escapes spell url( without writing it (the second review's vectors) and every value has a grammar
+    ("image/svg+xml", _svg(b'<path fill="\\75rl(https://example.invalid/x#a)"/>'), False),
+    ("image/svg+xml", _svg(b'<path fill="\\75 rl(https://example.invalid/x#a)"/>'), False),
+    ("image/svg+xml", _svg(b'<path stroke="u\\rl(https://example.invalid/x#a)"/>'), False),
+    ("image/svg+xml", _svg(b'<path fill="\\000075rl(x)"/>'), False), ("image/svg+xml", _svg(b'<path d="M0 0\\"/>'), False),
+    ("image/svg+xml", _svg(b'<path fill="src(https://example.invalid/x)"/>'), False),
+    ("image/svg+xml", _svg(b"<path fill=\"image-set('https://example.invalid/x' 1x)\"/>"), False),
+    ("image/svg+xml", _svg(b'<path fill="var(--x)"/>'), False), ("image/svg+xml", _svg(b'<path fill="attr(d)"/>'), False),
+    ("image/svg+xml", _svg(b'<path fill="calc(1 + 2)"/>'), False), ("image/svg+xml", _svg(b'<path fill="red blue"/>'), False),
+    ("image/svg+xml", _svg(b'<rect width="calc(1px + 2px)"/>'), False), ("image/svg+xml", _svg(b'<rect width="1e"/>'), False),
 ])
-def test_a_signature_file_is_what_its_declared_type_says(mime, head, ok):
+def test_a_signature_svg_refuses_what_the_reviewers_vectors_spell(mime, head, ok):
     assert (dev.png_or_svg_problem(mime, head) is None) is ok
+
+
+@pytest.mark.parametrize("attr, value, ok", [
+    # paints
+    ("fill", "none", True), ("fill", "currentColor", True), ("fill", "CURRENTCOLOR", True), ("fill", "red", True),
+    ("fill", "RebeccaPurple", True), ("stroke", "#000", True), ("stroke", "#0008", True), ("stroke", "#a1b2c3", True),
+    ("stroke", "#a1b2c3d4", True), ("stroke", "rgb(0,0,0)", True), ("stroke", "rgba(0, 0, 0, 0.5)", True),
+    ("stroke", "rgb(10%, 20%, 30%)", True),
+    ("fill", "#12", False), ("fill", "#12345", False), ("fill", "#1234567", False), ("fill", "#ggg", False),
+    ("fill", "notacolour", False), ("fill", "rgb(0,0)", False), ("fill", "rgb(0,0,0,0,0)", False),
+    ("fill", "rgb(var(--a),0,0)", False), ("fill", "rgb(0 0 0)", False), ("fill", "", False), ("fill", " red", False),
+    # numbers and lengths
+    ("stroke-width", "2", True), ("stroke-width", "2.5px", True), ("stroke-width", ".5", True),
+    ("stroke-width", "-1e-3", True), ("opacity", "0.5", True), ("opacity", "50%", True), ("width", "10", True),
+    ("width", " 10 ", True), ("x", "1.", True), ("cx", "+3", True), ("stroke-dashoffset", "4", True),
+    ("stroke-width", "two", False), ("stroke-width", "1 2", False), ("stroke-width", "1px2", False),
+    ("opacity", "var(--o)", False), ("width", "auto", False), ("r", "1e", False), ("r", "--1", False),
+    ("r", "1;2", False), ("r", "1 \n", True),
+    # lists
+    ("stroke-dasharray", "none", True), ("stroke-dasharray", "4", True), ("stroke-dasharray", "4, 2 1", True),
+    ("stroke-dasharray", "4, x", False), ("points", "0,0 1,1", True), ("points", "0 0 1 1", True),
+    ("points", "", True), ("points", "0,0 a", False), ("points", "0,0;1,1", False),
+    ("viewBox", "0 0 10 10", True), ("viewBox", "0,0,10,10", True), ("viewBox", " 0 0 10.5 -10 ", True),
+    ("viewBox", "0 0 10", False), ("viewBox", "0 0 10 10 10", False), ("viewBox", "0 0 a b", False),
+    # paths
+    ("d", "M0 0L1 1", True), ("d", "M0,0 c1.5-2 3 4 5 6z", True), ("d", "M1e3 2E-3Z", True), ("d", "", True),
+    ("d", "M0 0 X", False), ("d", "M0 0 url", False), ("d", "M0 0;", False), ("d", "M0 0'", False),
+    # transforms
+    ("transform", "scale(2)", True), ("transform", "translate(1 1)", True), ("transform", "translate(1,1) rotate(45)", True),
+    ("transform", "matrix(1 0 0 1 0 0)", True), ("transform", "skewX(10) skewY(-5)", True),
+    ("transform", "scale(2),translate(1)", True), ("transform", "rotate(45 10 10)", True),
+    ("transform", "scale()", False), ("transform", "scale(a)", False), ("transform", "scale(1", False),
+    ("transform", "perspective(1)", False), ("transform", "scale(1) junk", False), ("transform", "", False),
+    ("transform", "url(#a)", False), ("transform", "scale(var(--a))", False),
+    # words
+    ("fill-rule", "evenodd", True), ("fill-rule", "inherit", False), ("stroke-linecap", "round", True),
+    ("stroke-linecap", "arrow", False), ("stroke-linejoin", "bevel", True), ("stroke-linejoin", "arcs", False),
+    ("preserveAspectRatio", "xMidYMid meet", True), ("preserveAspectRatio", "none", True),
+    ("preserveAspectRatio", "xMidYMid  slice", False), ("preserveAspectRatio", "xMidYMid url", False),
+    ("version", "1.1", True), ("version", "1.0", True), ("version", "2.0", False),
+])
+def test_every_svg_attribute_value_must_match_its_grammar(attr, value, ok):
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg"><path ' + attr.encode() + b'="' + value.encode() + b'"/></svg>'
+    assert (dev.png_or_svg_problem("image/svg+xml", svg) is None) is ok, (attr, value)
+
+
+@pytest.mark.parametrize("blob, ok", [
+    (SVG_BYTES.decode().encode("utf-16-be"), False), (SVG_BYTES.decode().encode("utf-16-le"), False),
+    (SVG_BYTES.decode().encode("utf-16"), False), (SVG_BYTES.decode().encode("utf-32"), False),
+    (_svg(b"<!-- \x00 -->"), False), (_svg(b"<!-- \x1b -->"), False), (_svg(b"<!-- \x08 -->"), False),
+    (_svg(b"<!-- \xe2\x80\xae -->"), False), (_svg(b"<!-- \xe2\x80\x8b -->"), False),
+    (_svg(b"<path d='M0 0'/>\t\r\n"), True),
+])
+def test_control_and_hidden_characters_in_an_svg_are_refused(blob, ok):
+    assert (dev.png_or_svg_problem("image/svg+xml", blob) is None) is ok
+
+
+def test_an_svg_value_check_is_linear():
+    for value in ("1" * 500_000 + "x", "1." * 250_000 + "x", "1 " * 250_000 + "x", "M0 0 " * 80_000 + "X",
+                  "scale(" + "1 " * 200_000 + "x)", "translate(1) " * 40_000 + "x", "rgb(" + "1," * 200_000 + ")"):
+        for attr in ("stroke-width", "d", "transform", "stroke", "viewBox", "points", "stroke-dasharray"):
+            svg = b'<svg xmlns="http://www.w3.org/2000/svg"><path ' + attr.encode() + b'="' + value.encode() + b'"/></svg>'
+            started = time.monotonic()
+            dev.png_or_svg_problem("image/svg+xml", svg)
+            assert time.monotonic() - started < 2.0, (attr, value[:12])
 
 
 # ── pure: the calendar item the agent passes ────────────────────────────────────────────────────
@@ -1127,6 +1204,8 @@ def test_checking_a_signature_file_is_linear_in_its_size(blob):
 @pytest.mark.parametrize("url, ok", [
     ("https://example.com/a", True), ("http://example.com/a@b", True), ("https://example.com?mail=a@b.nl", True),
     ("https://bank.nl@evil.example/login", False), ("https://user:pw@host/", False), ("https://@host/", False),
+    ("https://evil.example\\@bank.nl/", False), ("https://evil.example\\.bank.nl/", False),
+    ("https://example.com/a\\b", True),
     ("https://example.com/\u202etxt.exe", False), ("https://exa\u200bmple.com/", False),
     ("https://\u2066example.com/", False), ("https://example.com/\ue000", False), ("https://example.com/\u00ad", False),
     ("https://example.com/\ufeff", False), ("https://example.com/\u3164", False), ("https://example.com/\U000e0041", False),
@@ -1201,3 +1280,14 @@ def test_a_signature_file_that_was_not_read_whole_is_refused_not_judged_on_its_s
     assert interactive._signature_sniff({"mime": "image/svg+xml", "bytes": len(head)}, head) is None
     assert interactive._signature_sniff({"mime": "image/svg+xml", "bytes": len(head) + 1}, head) == "type"
     assert interactive._signature_sniff({"mime": "image/png", "bytes": len(PNG_BYTES)}, PNG_BYTES) is None
+
+
+
+def test_a_calendar_item_error_names_what_is_wrong_once_without_doubling_the_prefix():
+    for item, message in (({**ITEM, "end": "2026-10-12T09:00+02:00"}, "item: end is before start"),
+                          ({"title": "x", "alarm_minutes": 5}, "item: alarm_minutes needs start"),
+                          ({"title": "x", "url": "ftp://a"}, "item: url: ")):
+        with pytest.raises(_Refused) as raised:
+            dev.build_calendar_item(item, _Refused)
+        assert str(raised.value).startswith(message), str(raised.value)
+        assert "item: item" not in str(raised.value) and "calendar item:" not in str(raised.value)

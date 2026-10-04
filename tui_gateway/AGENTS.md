@@ -179,8 +179,10 @@ whitespace removed, anything that cannot be shown as it is refused, at most 500 
 SVG uploaded like `input.file`'s plus `statement_sha256`, which must be the SHA-256 of the exact UTF-8 bytes of the
 frame's `statement` (`statement:mismatch`); after the request settled, `verify_files(sniff=...)` also checks that the
 PNG begins with the PNG signature and the SVG passes `interactive_device._svg_problem` (`bad_upload`): strict UTF-8, no
-`&`, no `url(`, expat with handlers that refuse a doctype, entity, CDATA and processing instruction, and an ALLOWLIST
-of unprefixed elements and attributes (a denylist is bypassed by a prefix, a character reference or another encoding).
+`&`, no `url(` and no backslash, no control or hidden character, expat with handlers that refuse a doctype, entity, CDATA
+and processing instruction, and an ALLOWLIST of unprefixed elements and of attributes whose VALUES each match a grammar
+(number, colour, path, points, viewBox, transform: a denylist is bypassed by a prefix, a character reference, another
+encoding or a CSS escape), and no text at all.
 The files' names must end `.png` and `.svg` (`file:<n>:extension`), and the whole file is read (up to 1 MiB, however the
 reads were split). The agent gets
 `signed`, `statement_sha256`, `signed_at` (the client's clock), `received_at` (the gateway's), `signer_name?` and the

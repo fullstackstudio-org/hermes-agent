@@ -626,7 +626,7 @@ def test_a_calendar_item_is_bounded_and_consistent():
                 {"title": "T", "url": "https://example.com/" + "a" * 290}, {"title": "T", "url": "ftp://x"},
                 {"title": "T", "url": "https://x y"}, {"title": "T", "url": "https://x\ny"},
                 {"title": "T", "url": "https://bank.nl@evil.example/"}, {"title": "T", "url": "https://user:pw@host/"},
-                {"title": "T", "url": "https://@host/"}, {"title": "T", "url": "https://a.nl\u202e/x"},
+                {"title": "T", "url": "https://@host/"}, {"title": "T", "url": "https://a.nl\\@b.nl/"}, {"title": "T", "url": "https://a.nl\u202e/x"},
                 {"title": "T", "url": "https://a\u200b.nl/"}, {"title": "T", "url": "https://\u2066a.nl/"},
                 {"title": "T", "url": "https://a.nl/\ue000"}, {"title": "T", "url": "https://a.nl/\u00ad"},
                 {"title": "T", "url": "https://a.nl/\ufeff"}, {"title": "T", "url": "https:///path"},

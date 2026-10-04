@@ -610,17 +610,25 @@ settled, the gateway checks the files on disk as for §5 (the whole file is read
 (`file:<n>:type`, `unavailable (bad_upload)`). The PNG begins with the PNG signature. The SVG is judged by an
 ALLOWLIST, not by what is known to be dangerous, so draw only this:
 
-- UTF-8 text, strictly (a byte order mark is fine); an XML declaration naming another encoding is refused;
-- no `&` anywhere (no entity, no character reference), no `url(` anywhere, no doctype, no CDATA section, no
-  processing instruction, no external reference;
+- UTF-8 text, strictly (a byte order mark is fine); an XML declaration naming another encoding is refused; no
+  control, format, private-use or surrogate character other than tab, CR and LF (so no NUL, no UTF-16 without a
+  byte order mark, no hidden character even in a comment);
+- no `&` anywhere (no entity, no character reference), no `url(` and no `\` in any value, no doctype, no CDATA
+  section, no processing instruction, no external reference;
 - elements, written WITHOUT a namespace prefix: `svg` (the root, with `xmlns="http://www.w3.org/2000/svg"`, which
   only the root may carry), `g`, `path`, `polyline`, `polygon`, `line`, `circle`, `ellipse`, `rect`, `title`,
-  `desc`; text only inside `title` and `desc`; at most 32 levels deep;
-- attributes: `xmlns`, `version`, `viewBox`, `width`, `height`, `preserveAspectRatio`, `transform`, `d`, `points`,
-  `x`, `y`, `x1`, `y1`, `x2`, `y2`, `cx`, `cy`, `r`, `rx`, `ry`, `fill`, `fill-opacity`, `fill-rule`, `opacity`,
-  `stroke`, `stroke-width`, `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`, `stroke-opacity`,
-  `stroke-dasharray` and `stroke-dashoffset`. Nothing else: no `href`, no `style`, no `class`, no script, no event
-  handler, no other namespace.
+  `desc`; NO text at all, not even inside `title` or `desc` (they may be there, empty); at most 32 levels deep;
+- attributes, each value matching its grammar exactly (a CSS backslash escape can spell `url(` without writing it,
+  so a value is accepted by what it IS, never by what it lacks): `fill` and `stroke` a paint (`none`,
+  `currentColor`, `transparent`, a CSS colour keyword, `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, or `rgb()`/`rgba()`
+  of numbers and percentages); `width`, `height`, `x`, `y`, `x1`, `y1`, `x2`, `y2`, `cx`, `cy`, `r`, `rx`, `ry`,
+  `opacity`, `fill-opacity`, `stroke-opacity`, `stroke-width`, `stroke-miterlimit` and `stroke-dashoffset` a number
+  with an optional unit (`px`, `%`, `em`, `ex`, `pt`, `pc`, `mm`, `cm`, `in`); `stroke-dasharray` `none` or such
+  numbers separated by commas or spaces; `d` path command letters, numbers, commas and whitespace; `points` numbers,
+  commas and whitespace; `viewBox` four numbers; `transform` `matrix`, `translate`, `scale`, `rotate`, `skewX` or
+  `skewY` of numbers; `fill-rule` `nonzero` or `evenodd`; `stroke-linecap` `butt`, `round` or `square`;
+  `stroke-linejoin` `miter`, `round` or `bevel`; `preserveAspectRatio` as the SVG grammar; `version` `1.0` or `1.1`;
+  `xmlns`. Nothing else: no `href`, no `style`, no `class`, no script, no event handler, no other namespace.
 
 A plain pad drawing (paths with a stroke) needs nothing more.
 
@@ -694,7 +702,7 @@ Params: the envelope plus
 | `start`, `end` | optional; dates `2026-10-12` when `all_day` (`end` inclusive), else instants with an offset `2026-10-12T09:30+02:00` (seconds optional, no `Z`, no fractions) |
 | `all_day` | boolean, default false |
 | `location` | string 1–200, one line, optional |
-| `url` | `http` or `https`, no whitespace or control character, at most 300, no user information (`https://user@host/` is refused: the text before the first `/`, `?` or `#` has no `@`) and no hidden character (the gateway refuses format characters such as a bidi override or a zero-width one, private-use, unassigned and invisible code points, as it does for §6 text): SHOWN to the person, never opened by the sheet |
+| `url` | `http` or `https`, no whitespace or control character, at most 300, no user information (`https://user@host/` is refused: the text before the first `/`, `?` or `#` has no `@`) and no backslash there (a browser reads `\` as `/`) and no hidden character (the gateway refuses format characters such as a bidi override or a zero-width one, private-use, unassigned and invisible code points, as it does for §6 text): SHOWN to the person, never opened by the sheet |
 | `alarm_minutes` | integer 0–40,320: an alert this long before `start`; needs `start` |
 
 `end` needs `start` and is not before it. A reminder has one time, `start` (when it is due), and no `end`. A

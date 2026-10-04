@@ -52,13 +52,88 @@ SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 #: it maps to): the root, a group, the shapes, and a title and description.
 SVG_ELEMENTS = frozenset({"svg", "g", "path", "polyline", "polygon", "line", "circle", "ellipse", "rect", "title",
                           "desc"})
-#: The only attributes on them. No ``href`` or ``xlink:href``, no ``style``, no ``class``, no event handler, no
-#: ``xml:*`` and no other namespace declaration: ``xmlns`` itself is allowed only on the root with the SVG namespace.
-SVG_ATTRIBUTES = frozenset({
-    "xmlns", "version", "viewBox", "width", "height", "preserveAspectRatio", "transform", "d", "points", "x", "y", "x1",
-    "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry", "fill", "fill-opacity", "fill-rule", "opacity", "stroke",
-    "stroke-width", "stroke-linecap", "stroke-linejoin", "stroke-miterlimit", "stroke-opacity", "stroke-dasharray",
-    "stroke-dashoffset"})
+#: The only attributes on them, each with the GRAMMAR its value must match (:data:`SVG_VALUES`, ``re.fullmatch``): a
+#: value that is not exactly a number, a colour or a list of those is refused whatever it spells, because CSS reads a
+#: backslash escape (``\75rl(``) as the character it names and a literal check for ``url(`` never sees it. No ``href``
+#: or ``xlink:href``, no ``style``, no ``class``, no event handler, no ``xml:*`` and no other namespace: ``xmlns``
+#: itself is allowed only on the root with the SVG namespace.
+_NUM = r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+_LENGTH = _NUM + r"(?:px|%|em|ex|pt|pc|mm|cm|in)?"
+_SEP = r"[\s,]+"
+_COLOR_KEYWORDS = frozenset("""none currentcolor transparent aliceblue antiquewhite aqua aquamarine azure beige bisque
+black blanchedalmond blue blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson
+cyan darkblue darkcyan darkgoldenrod darkgray darkgreen darkgrey darkkhaki darkmagenta darkolivegreen darkorange
+darkorchid darkred darksalmon darkseagreen darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink
+deepskyblue dimgray dimgrey dodgerblue firebrick floralwhite forestgreen fuchsia gainsboro ghostwhite gold goldenrod
+gray green greenyellow grey honeydew hotpink indianred indigo ivory khaki lavender lavenderblush lawngreen lemonchiffon
+lightblue lightcoral lightcyan lightgoldenrodyellow lightgray lightgreen lightgrey lightpink lightsalmon lightseagreen
+lightskyblue lightslategray lightslategrey lightsteelblue lightyellow lime limegreen linen magenta maroon
+mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen mediumslateblue mediumspringgreen mediumturquoise
+mediumvioletred midnightblue mintcream mistyrose moccasin navajowhite navy oldlace olive olivedrab orange orangered
+orchid palegoldenrod palegreen paleturquoise palevioletred papayawhip peachpuff peru pink plum powderblue purple
+rebeccapurple red rosybrown royalblue saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue slateblue
+slategray slategrey snow springgreen steelblue tan teal thistle tomato turquoise violet wheat white whitesmoke yellow
+yellowgreen""".split())
+_HEX = re.compile(r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})")
+_RGB = re.compile(r"rgba?\(\s*" + _NUM + r"%?\s*(?:,\s*" + _NUM + r"%?\s*){2,3}\)", re.IGNORECASE)
+_WORD = re.compile(r"[A-Za-z]+")
+_TRANSFORM = re.compile(r"(?:matrix|translate|scale|rotate|skewX|skewY)\s*\(\s*" + _NUM + r"(?:" + _SEP + _NUM
+                        + r")*\s*\)")
+
+
+def _color(value: str) -> bool:
+    """A paint: a keyword (``none``, ``currentColor``, a CSS colour name), ``#rgb``/``#rgba``/``#rrggbb``/
+    ``#rrggbbaa`` or ``rgb()``/``rgba()`` of numbers. Never ``url()``, a function or a variable."""
+    return (_WORD.fullmatch(value) is not None and value.lower() in _COLOR_KEYWORDS) or \
+        _HEX.fullmatch(value) is not None or _RGB.fullmatch(value) is not None
+
+
+def _transform(value: str) -> bool:
+    """One or more of ``matrix``, ``translate``, ``scale``, ``rotate``, ``skewX``, ``skewY`` with numbers, separated by
+    whitespace or commas. A walk, not one nested pattern."""
+    pos, size = 0, len(value)
+    seen = False
+    while True:
+        while pos < size and value[pos] in " \t\r\n,":
+            pos += 1
+        if pos == size:
+            return seen
+        match = _TRANSFORM.match(value, pos)
+        if match is None:
+            return False
+        seen, pos = True, match.end()
+
+
+def _pattern(regex: str):
+    compiled = re.compile(regex)
+    return lambda value: compiled.fullmatch(value) is not None
+
+
+_NUMBER_LIST = _pattern(r"\s*" + _NUM + r"(?:" + _SEP + _NUM + r")*\s*")
+_LENGTH_VALUE = _pattern(r"\s*" + _LENGTH + r"\s*")
+#: attribute → does the value match its grammar.
+SVG_VALUES = {
+    "xmlns": lambda value: value == SVG_NAMESPACE,
+    "version": _pattern(r"1\.[01]"),
+    "viewBox": _pattern(r"\s*" + _NUM + r"(?:" + _SEP + _NUM + r"){3}\s*"),
+    "width": _LENGTH_VALUE, "height": _LENGTH_VALUE,
+    "preserveAspectRatio": _pattern(r"(?:none|x(?:Min|Mid|Max)Y(?:Min|Mid|Max))(?: (?:meet|slice))?"),
+    "transform": _transform,
+    "d": _pattern(r"[MmZzLlHhVvCcSsQqTtAa0-9eE+.,\s-]*"),
+    "points": _pattern(r"[0-9eE+.,\s-]*"),
+    "x": _LENGTH_VALUE, "y": _LENGTH_VALUE, "x1": _LENGTH_VALUE, "y1": _LENGTH_VALUE, "x2": _LENGTH_VALUE,
+    "y2": _LENGTH_VALUE, "cx": _LENGTH_VALUE, "cy": _LENGTH_VALUE, "r": _LENGTH_VALUE, "rx": _LENGTH_VALUE,
+    "ry": _LENGTH_VALUE,
+    "fill": _color, "stroke": _color,
+    "fill-opacity": _LENGTH_VALUE, "opacity": _LENGTH_VALUE, "stroke-opacity": _LENGTH_VALUE,
+    "stroke-width": _LENGTH_VALUE, "stroke-miterlimit": _LENGTH_VALUE, "stroke-dashoffset": _LENGTH_VALUE,
+    "fill-rule": _pattern(r"nonzero|evenodd"),
+    "stroke-linecap": _pattern(r"butt|round|square"),
+    "stroke-linejoin": _pattern(r"miter|round|bevel"),
+    "stroke-dasharray": lambda value: value == "none" or _pattern(
+        r"\s*" + _LENGTH + r"(?:" + _SEP + _LENGTH + r")*\s*")(value),
+}
+SVG_ATTRIBUTES = frozenset(SVG_VALUES)
 SVG_MAX_DEPTH = 32
 
 
@@ -194,8 +269,10 @@ def _svg_problem(head: bytes) -> str | None:
     refused, and so is any XML declaration of another encoding), no ``&`` anywhere (no entity, no character
     reference, so nothing is spelt out of pieces), no ``url(``, then ``xml.parsers.expat`` (linear; a doctype, an
     entity declaration, a processing instruction and an external reference are refused by its handlers) and an
-    ALLOWLIST: unprefixed elements of :data:`SVG_ELEMENTS`, attributes of :data:`SVG_ATTRIBUTES` only, ``xmlns`` on the
-    root and equal to :data:`SVG_NAMESPACE`, text only inside ``title`` and ``desc``, at most :data:`SVG_MAX_DEPTH` deep.
+    ALLOWLIST: unprefixed elements of :data:`SVG_ELEMENTS`, attributes of :data:`SVG_VALUES` only, each value matching its
+    grammar (a number, a colour, a path, a list of points, ...; never a backslash or a function), ``xmlns`` on the root
+    and equal to :data:`SVG_NAMESPACE`, no text at all (not even in ``title``), at most :data:`SVG_MAX_DEPTH` deep. No
+    control, format, private-use or surrogate character other than tab, CR and LF.
     A denylist of what is dangerous is never enough: a prefix, a character reference or another encoding spells the
     same thing differently."""
     from xml.parsers import expat
@@ -205,6 +282,8 @@ def _svg_problem(head: bytes) -> str | None:
         return "encoding"
     if "&" in text or "url(" in text.lower():
         return "reference"
+    if any(unicodedata.category(ch) in ("Cc", "Cf", "Co", "Cs") and ch not in "\t\r\n" for ch in text):
+        return "control"      # a NUL, an ESC, a second BOM: no BOM-less UTF-16, no hidden character
     depth = 0
     stack: list[str] = []
 
@@ -221,10 +300,13 @@ def _svg_problem(head: bytes) -> str | None:
         if depth > SVG_MAX_DEPTH or name not in SVG_ELEMENTS or (depth == 1) != (name == "svg"):
             refuse("element")
         for key, value in attrs.items():
-            if key not in SVG_ATTRIBUTES or "url(" in value.lower():
+            check = SVG_VALUES.get(key)
+            if check is None or "\\" in value or "url(" in value.lower():
                 refuse("attribute")
-            if key == "xmlns" and (depth != 1 or value != SVG_NAMESPACE):
+            if key == "xmlns" and depth != 1:
                 refuse("namespace")
+            if not check(value):
+                refuse("value")
         if depth == 1 and attrs.get("xmlns") != SVG_NAMESPACE:
             refuse("namespace")
         stack.append(name)
@@ -235,8 +317,8 @@ def _svg_problem(head: bytes) -> str | None:
         stack.pop()
 
     def chars(data):
-        if data.strip() and (not stack or stack[-1] not in ("title", "desc")):
-            refuse("text")
+        if data.strip():
+            refuse("text")  # a drawn signature has no text: ``title`` and ``desc`` may be there, empty
 
     parser = expat.ParserCreate()
     parser.buffer_text = True
@@ -328,7 +410,8 @@ def build_calendar_item(raw: Any, error: Callable[[str], Exception]) -> dict:
         CalendarItem.model_validate(out)
     except ValidationError as exc:
         # Location and message only: never the input.
-        problems = "; ".join(f"{'.'.join(str(p) for p in e['loc']) or 'item'}: {e['msg'].removeprefix('Value error, ')}"
-                             for e in exc.errors()[:3])
+        problems = "; ".join(
+            (f"{'.'.join(str(p) for p in e['loc'])}: " if e["loc"] else "")
+            + e["msg"].removeprefix("Value error, ").removeprefix("calendar item: ") for e in exc.errors()[:3])
         raise error(f"item: {problems}") from None
     return out

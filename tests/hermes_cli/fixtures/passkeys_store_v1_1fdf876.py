@@ -1,3 +1,6 @@
+# Frozen copy of hermes_cli/dashboard_auth/passkeys/store.py at fork 1fdf876d68: the store as a build
+# before re-authentication grants shipped. tests/hermes_cli/test_passkeys_store.py opens files written by
+# the current store with it, so a rolled-back build is proven to still read them. Never edit it.
 """The passkey store: one SQLite file the gateway and the operator CLI share.
 
 ``$HERMES_HOME/dashboard_auth/passkeys.db`` (directory 0700, file 0600, WAL). It holds this gateway's
@@ -18,20 +21,6 @@ mints and revokes while the gateway redeems and commits):
   value is written with compare-and-set, and the receipt is written in the same transaction. A second
   commit of one request or nonce is refused (unique receipts).
 
-A re-authentication grant (self-enrolment without a code) is a third enrolment authority next to the two
-kinds of code. A session opens it (``open``), a sign-in of the same person that the provider reports as
-fresh completes it once (``fresh`` or ``failed``), and the enrolment it authorises spends it in the
-credential insert's own transaction (``spent``): one grant, at most one credential, never after
-:data:`GRANT_TTL`. A web grant is bound to the browser that opened it by a secret only its cookie holds
-(stored as SHA-256); a native grant is bound by the gateway's PKCE round trip and has no secret.
-
-A credential enrolled with a cooling-off period (``usable_from`` in the future) is listed by
-:meth:`PasskeyStore.credentials` and can be revoked, but it is in no :meth:`PasskeyStore.snapshot` and an
-assertion with it is never committed until ``usable_from`` has passed.
-
-The grants table and the ``usable_from`` column are added to an existing file in place, without a schema
-version bump: a build from before them reads named columns, ignores the extra table and still opens the file.
-
 The store never returns a revoked credential as active and never deletes one (a revoked credential id
 stays taken). Time comes from the ``clock`` given to the store, in whole Unix seconds. Every failure is a
 :class:`StoreError` (database and file errors included).
@@ -44,7 +33,6 @@ treat any other :class:`StoreError` as ``unavailable``, never as consent.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import hmac
 import json
 import os
@@ -75,15 +63,6 @@ COMMIT_PURPOSES = ("confirm",) + STEPUP_PURPOSES
 PENDING_KINDS = ("register",) + STEPUP_PURPOSES
 INVITE_KEEP_AFTER_EXPIRY = 24 * 60 * 60
 BUSY_TIMEOUT_S = 5.0
-
-SELF = "self"  # ``credentials.created_via`` for an enrolment authorised by a re-authentication grant
-CREATED_VIA = (OPERATOR, "passkey", SELF)
-GRANT_TTL = 600  # the PKCE cookie's own lifetime
-GRANT_KEEP_AFTER_EXPIRY = 24 * 60 * 60
-REAUTH_SKEW = 120  # a sign-in counts as fresh when ``auth_time >= grant.created_at - REAUTH_SKEW``
-GRANT_CLIENTS = ("web", "native")
-GRANT_STATES = ("open", "fresh", "failed", "spent")
-GRANT_FAILURES = ("client_mismatch", "provider_mismatch", "user_mismatch", "auth_time_missing", "auth_not_fresh")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);
@@ -144,27 +123,7 @@ CREATE TABLE IF NOT EXISTS receipts (
 CREATE INDEX IF NOT EXISTS receipts_at ON receipts (at);
 CREATE UNIQUE INDEX IF NOT EXISTS receipts_nonce ON receipts (nonce);
 CREATE UNIQUE INDEX IF NOT EXISTS receipts_request ON receipts (purpose, request_id);
-CREATE TABLE IF NOT EXISTS reauth_grants (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    client TEXT NOT NULL,
-    secret_hash BLOB,
-    state TEXT NOT NULL,
-    failure TEXT NOT NULL DEFAULT '',
-    auth_time INTEGER,
-    auth_time_assumed INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    completed_at INTEGER,
-    spent_at INTEGER,
-    credential_row INTEGER);
-CREATE INDEX IF NOT EXISTS reauth_grants_expires ON reauth_grants (expires_at);
 """
-
-# Columns added to a table that schema 1 created, without a version bump: each is nullable, so a build that
-# does not know it inserts by named columns and leaves it NULL. Added once, guarded by ``PRAGMA table_info``.
-_ADDED_COLUMNS = (("credentials", "usable_from", "INTEGER"),)
 
 
 class StoreError(Exception):
@@ -183,25 +142,9 @@ class CredentialExists(StoreError):
     """The credential id is already stored (active or revoked)."""
 
 
-class GrantInvalid(StoreError):
-    """A re-authentication grant cannot be used or completed; nothing changed.
-
-    Using one (:meth:`PasskeyStore.fresh_grant`, :meth:`PasskeyStore.add_credential`): ``reason`` is
-    ``unknown`` (no such grant for this user, or expired), ``not_fresh`` (still open), ``spent`` or
-    ``failed`` (then ``failure`` is one of :data:`GRANT_FAILURES`).
-    Completing one (:meth:`PasskeyStore.complete_grant`): ``unknown`` (no such grant, expired, or a web
-    grant without its secret) or ``not_open`` (completed before; ``state`` says how)."""
-
-    def __init__(self, reason: str, *, failure: str = "", state: str = ""):
-        super().__init__(reason)
-        self.reason = reason
-        self.failure = failure
-        self.state = state
-
-
 class CommitRefused(StoreError):
     """An assertion that verified cannot be committed. ``reason``: ``revoked`` (also unknown, another
-    user, another key, or a credential still in its cooling-off period), ``counter_regression`` (against the value stored now), ``stepup_invalid`` (a
+    user, another key), ``counter_regression`` (against the value stored now), ``stepup_invalid`` (a
     step-up purpose without its own open step-up, a step-up for another request, or text other than the
     step-up's subject), ``purpose_invalid`` (not ``confirm``, ``invite`` or ``revoke``) or ``replayed``
     (this request or nonce was committed before)."""
@@ -232,15 +175,10 @@ class CredentialRecord:
     last_used_at: Optional[int]
     revoked_at: Optional[int]
     revoked_by: Optional[str]
-    usable_from: Optional[int] = None  # a self-enrolled credential's cooling-off end; None: usable at once
 
     @property
     def active(self) -> bool:
         return self.revoked_at is None
-
-    def usable(self, now: int) -> bool:
-        """Active and past any cooling-off period: may answer a ``confirm`` or sign a step-up."""
-        return self.active and (self.usable_from is None or self.usable_from <= now)
 
     @property
     def id_b64u(self) -> str:
@@ -281,34 +219,6 @@ class Pending:
 
 
 @dataclass(frozen=True)
-class Grant:
-    """A re-authentication grant. The web secret's hash stays in the store."""
-    id: str
-    user_id: str  # "<provider>:<user id>" of the session that opened it
-    provider: str
-    client: str  # "web" | "native"
-    state: str  # "open" | "fresh" | "failed" | "spent"
-    failure: str  # with "failed": one of GRANT_FAILURES; "" otherwise
-    auth_time: Optional[int]  # what the provider reported at completion (0: it did not say)
-    auth_time_assumed: bool  # fresh only because the operator accepts a missing auth_time
-    created_at: int
-    expires_at: int
-    completed_at: Optional[int]
-    spent_at: Optional[int]
-    credential_row: Optional[int]  # the credential it enrolled
-
-
-def reauth_secret_hash(secret: str) -> bytes:
-    """What the store keeps of a web grant's cookie secret."""
-    return hashlib.sha256(secret.encode("utf-8")).digest()
-
-
-def new_reauth_secret() -> str:
-    """A web grant's cookie secret (32 random bytes, base64url)."""
-    return b64u(secrets.token_bytes(32))
-
-
-@dataclass(frozen=True)
 class Receipt:
     id: int
     at: int
@@ -346,29 +256,7 @@ def _credential(row: sqlite3.Row) -> CredentialRecord:
         backup_eligible=bool(row["backup_eligible"]), backed_up=bool(row["backed_up"]),
         aaguid=bytes(row["aaguid"]), transports=tuple(json.loads(row["transports"])), name=row["name"],
         created_at=row["created_at"], created_via=row["created_via"], created_ip=row["created_ip"],
-        last_used_at=row["last_used_at"], revoked_at=row["revoked_at"], revoked_by=row["revoked_by"],
-        usable_from=row["usable_from"])
-
-
-def _grant(row: sqlite3.Row) -> Grant:
-    return Grant(id=row["id"], user_id=row["user_id"], provider=row["provider"], client=row["client"],
-                 state=row["state"], failure=row["failure"], auth_time=row["auth_time"],
-                 auth_time_assumed=bool(row["auth_time_assumed"]), created_at=row["created_at"],
-                 expires_at=row["expires_at"], completed_at=row["completed_at"], spent_at=row["spent_at"],
-                 credential_row=row["credential_row"])
-
-
-def _grant_unusable(row: Optional[sqlite3.Row], *, user_id: str, now: int) -> Optional[GrantInvalid]:
-    """Why *row* cannot authorise an enrolment for *user_id* now (None when it can)."""
-    if row is None or row["user_id"] != user_id or row["expires_at"] <= now:
-        return GrantInvalid("unknown")  # one answer: nobody learns whether another user's grant exists
-    if row["state"] == "open":
-        return GrantInvalid("not_fresh")
-    if row["state"] == "spent":
-        return GrantInvalid("spent")
-    if row["state"] != "fresh":
-        return GrantInvalid("failed", failure=row["failure"])
-    return None
+        last_used_at=row["last_used_at"], revoked_at=row["revoked_at"], revoked_by=row["revoked_by"])
 
 
 def _pending(row: sqlite3.Row) -> Pending:
@@ -457,9 +345,6 @@ class PasskeyStore:
                 db.execute("INSERT INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
             elif int(row["value"]) > SCHEMA_VERSION:
                 raise StoreError(f"{self.path} has schema {int(row['value'])}; this build reads {SCHEMA_VERSION}")
-            for table, column, declaration in _ADDED_COLUMNS:
-                if column not in {c["name"] for c in db.execute(f"PRAGMA table_info({table})").fetchall()}:
-                    db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
             db.execute("COMMIT")
         except BaseException:
             db.execute("ROLLBACK")
@@ -532,28 +417,21 @@ class PasskeyStore:
 
     # ── credentials ──────────────────────────────────────────────────────────────────────────────
 
-    def credentials(self, user_id: Optional[str] = None, *, include_revoked: bool = False,
-                    usable_only: bool = False) -> list[CredentialRecord]:
-        """Active credentials (with *include_revoked*, revoked ones too), cooling-off ones included with
-        their ``usable_from``. *usable_only*: only those that may answer or sign a step-up now (active and
-        past any cooling-off; it overrides *include_revoked*)."""
+    def credentials(self, user_id: Optional[str] = None, *, include_revoked: bool = False
+                    ) -> list[CredentialRecord]:
         sql = "SELECT * FROM credentials WHERE 1 = 1"
         args: list = []
         if user_id is not None:
             sql += " AND user_id = ?"
             args.append(user_id)
-        if usable_only:
-            sql += " AND revoked_at IS NULL AND (usable_from IS NULL OR usable_from <= ?)"
-            args.append(self.now())
-        elif not include_revoked:
+        if not include_revoked:
             sql += " AND revoked_at IS NULL"
         with self._read() as db:
             return [_credential(r) for r in db.execute(sql + " ORDER BY id", args).fetchall()]
 
     def snapshot(self, user_id: str) -> tuple[StoredCredential, ...]:
-        """*user_id*'s usable credentials as the verifier takes them when a request opens (a credential in
-        its cooling-off period is not one: it is no ``confirm`` target and cannot sign a step-up)."""
-        return tuple(c.stored() for c in self.credentials(user_id, usable_only=True))
+        """*user_id*'s active credentials as the verifier takes them when a request opens."""
+        return tuple(c.stored() for c in self.credentials(user_id))
 
     def credential(self, credential_id: bytes) -> Optional[CredentialRecord]:
         """The stored record (active or revoked), or None."""
@@ -567,22 +445,14 @@ class PasskeyStore:
             return []
         return [c for c in self.credentials(include_revoked=include_revoked) if c.id_b64u.startswith(prefix)]
 
-    def add_credential(self, *, user_id: str, registration: RegistrationOk, code: Optional[str] = None,
-                       grant_id: Optional[str] = None, usable_from: Optional[int] = None, created_ip: str = ""
+    def add_credential(self, *, user_id: str, code: str, registration: RegistrationOk, created_ip: str = ""
                        ) -> CredentialRecord:
         """Enrol: take the open registration *registration* was verified against (its id, user and nonce),
-        redeem the authority, and store the credential, all or nothing. *user_id* is the signed-in caller.
+        redeem the code and store the credential, all or nothing. *user_id* is the signed-in caller.
 
-        The authority is exactly one of *code* (an enrolment code; ``created_via`` is ``operator`` or
-        ``passkey`` by who minted it) or *grant_id* (a ``fresh`` re-authentication grant of *user_id*, spent
-        here; ``created_via`` is ``self``). *usable_from* (Unix seconds, ignored unless in the future) starts
-        a cooling-off period: the credential is listed but not usable until then.
-
-        Raises :class:`PendingInvalid`, :class:`CodeInvalid` / :class:`GrantInvalid` or
-        :class:`CredentialExists` (checked in that order); on any of them nothing changes, so the person can
-        try again while the registration is open (and a refused grant is not spent)."""
-        if (code is None) == (grant_id is None):
-            raise ValueError("exactly one of code or grant_id")
+        Raises :class:`PendingInvalid`, :class:`CodeInvalid` or :class:`CredentialExists` (checked in that
+        order); on any of them nothing changes, so the person can try again with the right code while the
+        registration is open."""
         now = self.now()
         with self._write() as db:
             if registration.user_id != user_id:
@@ -591,53 +461,29 @@ class PasskeyStore:
                                          now=now, nonce=registration.nonce)
             if pending.rp_id != registration.rp_id:
                 raise PendingInvalid("the registration was opened for another RP")
-            if grant_id is not None:
-                self._spend_grant(db, str(grant_id), user_id=user_id, now=now)
-                created_via = SELF
-            else:
-                created_via = self._redeem_code(db, str(code), user_id=user_id, now=now)
+            code_hash = enrolment_code_hash(code)
+            invite = db.execute("SELECT * FROM invites WHERE code_hash = ?", (code_hash,)).fetchone() \
+                if code_hash else None
+            if invite is None or invite["used_at"] is not None or invite["expires_at"] <= now \
+                    or invite["user_id"] not in (None, user_id):
+                raise CodeInvalid("code_invalid")
+            if db.execute("UPDATE invites SET used_at = ?, used_by = ? WHERE id = ? AND used_at IS NULL",
+                          (now, user_id, invite["id"])).rowcount != 1:
+                raise CodeInvalid("code_invalid")
             if db.execute("SELECT 1 FROM credentials WHERE credential_id = ?",
                           (registration.credential_id,)).fetchone():
                 raise CredentialExists("credential_exists")
-            cooling = int(usable_from) if usable_from is not None and int(usable_from) > now else None
+            created_via = OPERATOR if invite["minted_by"] == OPERATOR else "passkey"
             cursor = db.execute(
                 "INSERT INTO credentials (user_id, credential_id, rp_id, alg, public_key, sign_count,"
-                " backup_eligible, backed_up, aaguid, transports, name, created_at, created_via, created_ip,"
-                " usable_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " backup_eligible, backed_up, aaguid, transports, name, created_at, created_via, created_ip)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (user_id, registration.credential_id, registration.rp_id, registration.alg,
                  registration.public_x + registration.public_y, registration.sign_count,
                  int(registration.backup_eligible), int(registration.backed_up), registration.aaguid,
-                 json.dumps(list(registration.transports)), pending.subject, now, created_via, created_ip,
-                 cooling))
-            if grant_id is not None:
-                db.execute("UPDATE reauth_grants SET credential_row = ? WHERE id = ?", (cursor.lastrowid, grant_id))
+                 json.dumps(list(registration.transports)), pending.subject, now, created_via, created_ip))
             return _credential(db.execute("SELECT * FROM credentials WHERE id = ?",
                                           (cursor.lastrowid,)).fetchone())
-
-    @staticmethod
-    def _redeem_code(db: sqlite3.Connection, code: str, *, user_id: str, now: int) -> str:
-        """Mark the code used by *user_id*; returns the ``created_via`` it gives. Raises :class:`CodeInvalid`."""
-        code_hash = enrolment_code_hash(code)
-        invite = db.execute("SELECT * FROM invites WHERE code_hash = ?", (code_hash,)).fetchone() \
-            if code_hash else None
-        if invite is None or invite["used_at"] is not None or invite["expires_at"] <= now \
-                or invite["user_id"] not in (None, user_id):
-            raise CodeInvalid("code_invalid")
-        if db.execute("UPDATE invites SET used_at = ?, used_by = ? WHERE id = ? AND used_at IS NULL",
-                      (now, user_id, invite["id"])).rowcount != 1:
-            raise CodeInvalid("code_invalid")
-        return OPERATOR if invite["minted_by"] == OPERATOR else "passkey"
-
-    @staticmethod
-    def _spend_grant(db: sqlite3.Connection, grant_id: str, *, user_id: str, now: int) -> None:
-        """Spend *user_id*'s fresh grant (compare-and-set on its state). Raises :class:`GrantInvalid`."""
-        row = db.execute("SELECT * FROM reauth_grants WHERE id = ?", (grant_id,)).fetchone()
-        refusal = _grant_unusable(row, user_id=user_id, now=now)
-        if refusal is not None:
-            raise refusal
-        if db.execute("UPDATE reauth_grants SET state = 'spent', spent_at = ? WHERE id = ? AND state = 'fresh'",
-                      (now, grant_id)).rowcount != 1:
-            raise GrantInvalid("spent")
 
     def revoke(self, credential_id: bytes, *, by: str, user_id: Optional[str] = None
                ) -> Optional[CredentialRecord]:
@@ -744,115 +590,6 @@ class PasskeyStore:
         with self._write() as db:
             return self._take_pending(db, pending_id, kind=kind, user_id=user_id, now=now)
 
-    # ── re-authentication grants ─────────────────────────────────────────────────────────────────
-
-    def open_grant(self, user_id: str, provider: str, client: str, secret_hash: Optional[bytes] = None
-                   ) -> Grant:
-        """Open a grant for the signed-in *user_id* (``<provider>:<user id>``) of *provider*, lifetime
-        :data:`GRANT_TTL`. A ``web`` grant needs *secret_hash* (:func:`reauth_secret_hash` of the cookie
-        secret); a ``native`` grant has none."""
-        if client not in GRANT_CLIENTS:
-            raise ValueError(f"unknown client {client!r}")
-        if not str(user_id).strip() or not str(provider).strip():
-            raise ValueError("empty user id or provider")
-        if client == "web" and not (isinstance(secret_hash, bytes) and len(secret_hash) == 32):
-            raise ValueError("a web grant needs the 32-byte hash of its secret")
-        if client == "native" and secret_hash is not None:
-            raise ValueError("a native grant has no secret")
-        now = self.now()
-        grant = Grant(id=b64u(secrets.token_bytes(16)), user_id=user_id, provider=provider, client=client,
-                      state="open", failure="", auth_time=None, auth_time_assumed=False, created_at=now,
-                      expires_at=now + GRANT_TTL, completed_at=None, spent_at=None, credential_row=None)
-        with self._write() as db:
-            db.execute("INSERT INTO reauth_grants (id, user_id, provider, client, secret_hash, state, created_at,"
-                       " expires_at) VALUES (?, ?, ?, ?, ?, 'open', ?, ?)",
-                       (grant.id, user_id, provider, client, secret_hash, now, grant.expires_at))
-        return grant
-
-    def grant(self, grant_id: str, *, user_id: str) -> Optional[Grant]:
-        """*user_id*'s grant in whatever state, or None (unknown, another user's, or expired)."""
-        now = self.now()
-        with self._read() as db:
-            row = db.execute("SELECT * FROM reauth_grants WHERE id = ?", (str(grant_id),)).fetchone()
-        if row is None or row["user_id"] != user_id or row["expires_at"] <= now:
-            return None
-        return _grant(row)
-
-    def fresh_grant(self, grant_id: str, *, user_id: str) -> Grant:
-        """The grant when it can authorise an enrolment for *user_id* now (``fresh``, unexpired, unspent);
-        nothing is taken. Raises :class:`GrantInvalid` with the reason otherwise."""
-        now = self.now()
-        with self._read() as db:
-            row = db.execute("SELECT * FROM reauth_grants WHERE id = ?", (str(grant_id),)).fetchone()
-        refusal = _grant_unusable(row, user_id=user_id, now=now)
-        if refusal is not None:
-            raise refusal
-        return _grant(row)
-
-    def grant_for_login(self, grant_id: str, provider: str, secret: Optional[str]) -> Optional[Grant]:
-        """The open, unexpired grant for a sign-in with *provider*, or None. The binding must hold: a ``web``
-        grant needs its *secret* (the cookie), a ``native`` grant takes none (its binding is the PKCE round
-        trip). Nothing changes."""
-        now = self.now()
-        with self._read() as db:
-            row = db.execute("SELECT * FROM reauth_grants WHERE id = ?", (str(grant_id),)).fetchone()
-        if row is None or row["state"] != "open" or row["expires_at"] <= now or row["provider"] != provider \
-                or not self._binding_holds(row, secret):
-            return None
-        return _grant(row)
-
-    @staticmethod
-    def _binding_holds(row: sqlite3.Row, secret: Optional[str]) -> bool:
-        if row["client"] == "native":
-            return secret is None
-        stored = row["secret_hash"]
-        return secret is not None and stored is not None \
-            and hmac.compare_digest(bytes(stored), reauth_secret_hash(secret))
-
-    def complete_grant(self, grant_id: str, *, session_user: str, session_provider: str, auth_time: Optional[int],
-                       client: str, secret: Optional[str] = None, now: Optional[int] = None,
-                       accept_missing: bool = False) -> Grant:
-        """The one transition out of ``open``: the sign-in the grant asked for came back as *session_user*
-        (``<provider>:<user id>``) of *session_provider*, who authenticated at *auth_time* (0 or None: the
-        provider did not say). *client* is how it came back (``web``: the callback, with the cookie *secret*;
-        ``native``: the token route). Returns the grant, now ``fresh`` or ``failed`` with its ``failure``:
-
-        ``client_mismatch``, ``provider_mismatch``, ``user_mismatch`` (checked in that order), then
-        ``auth_time_missing`` (unless *accept_missing*: then fresh with ``auth_time_assumed``) or
-        ``auth_not_fresh`` (``auth_time < created_at - REAUTH_SKEW``).
-
-        Raises :class:`GrantInvalid` and changes nothing when there is no such unexpired grant, when a web
-        grant's *secret* does not match (whoever lacks the binding cannot fail the grant either), or when it
-        was completed before (``not_open``)."""
-        now = self.now() if now is None else int(now)
-        with self._write() as db:
-            row = db.execute("SELECT * FROM reauth_grants WHERE id = ?", (str(grant_id),)).fetchone()
-            if row is None or row["expires_at"] <= now \
-                    or (row["client"] == "web" and not self._binding_holds(row, secret)):
-                raise GrantInvalid("unknown")
-            if row["state"] != "open":
-                raise GrantInvalid("not_open", state=row["state"])
-            assumed = False
-            if client != row["client"]:
-                failure = "client_mismatch"
-            elif session_provider != row["provider"]:
-                failure = "provider_mismatch"
-            elif session_user != row["user_id"]:
-                failure = "user_mismatch"
-            elif not auth_time or int(auth_time) <= 0:
-                failure, assumed = ("", True) if accept_missing else ("auth_time_missing", False)
-            elif int(auth_time) < row["created_at"] - REAUTH_SKEW:
-                failure = "auth_not_fresh"
-            else:
-                failure = ""
-            state = "failed" if failure else "fresh"
-            reported = int(auth_time) if auth_time else 0
-            if db.execute("UPDATE reauth_grants SET state = ?, failure = ?, auth_time = ?, auth_time_assumed = ?,"
-                          " completed_at = ? WHERE id = ? AND state = 'open'",
-                          (state, failure, reported, int(assumed), now, row["id"])).rowcount != 1:
-                raise GrantInvalid("not_open")
-            return _grant(db.execute("SELECT * FROM reauth_grants WHERE id = ?", (row["id"],)).fetchone())
-
     # ── assertions ───────────────────────────────────────────────────────────────────────────────
 
     def commit_assertion(self, ok: AssertionOk, *, user_id: str, snapshot: StoredCredential,
@@ -882,7 +619,7 @@ class PasskeyStore:
         with self._write() as db:
             row = db.execute("SELECT * FROM credentials WHERE credential_id = ?", (ok.credential_id,)).fetchone()
             current = _credential(row) if row else None
-            if current is None or not current.usable(now) or current.user_id != user_id \
+            if current is None or not current.active or current.user_id != user_id \
                     or snapshot.credential_id != ok.credential_id or current.rp_id != ok.rp_id \
                     or (current.public_x, current.public_y) != (snapshot.public_x, snapshot.public_y):
                 raise CommitRefused("revoked")
@@ -934,8 +671,7 @@ class PasskeyStore:
             return [_receipt(r) for r in db.execute(sql, args).fetchall()]
 
     def prune(self, *, receipts_days: int) -> dict[str, int]:
-        """Drop receipts older than *receipts_days*, codes and grants a day after they expired, closed
-        pendings."""
+        """Drop receipts older than *receipts_days*, codes a day after they expired, closed pendings."""
         now = self.now()
         with self._write() as db:
             return {
@@ -944,8 +680,6 @@ class PasskeyStore:
                 "invites": db.execute("DELETE FROM invites WHERE expires_at < ?",
                                       (now - INVITE_KEEP_AFTER_EXPIRY,)).rowcount,
                 "pending": db.execute("DELETE FROM pending WHERE expires_at <= ?", (now,)).rowcount,
-                "grants": db.execute("DELETE FROM reauth_grants WHERE expires_at < ?",
-                                     (now - GRANT_KEEP_AFTER_EXPIRY,)).rowcount,
             }
 
     def counts(self) -> dict[str, int]:
@@ -955,12 +689,8 @@ class PasskeyStore:
                 return int(db.execute(sql, args).fetchone()[0])
             return {
                 "credentials": one("SELECT COUNT(*) FROM credentials WHERE revoked_at IS NULL"),
-                "cooling_off": one("SELECT COUNT(*) FROM credentials WHERE revoked_at IS NULL AND usable_from > ?",
-                                   now),
                 "revoked": one("SELECT COUNT(*) FROM credentials WHERE revoked_at IS NOT NULL"),
                 "users": one("SELECT COUNT(DISTINCT user_id) FROM credentials WHERE revoked_at IS NULL"),
                 "open_codes": one("SELECT COUNT(*) FROM invites WHERE used_at IS NULL AND expires_at > ?", now),
                 "receipts": one("SELECT COUNT(*) FROM receipts"),
-                "open_grants": one("SELECT COUNT(*) FROM reauth_grants WHERE state IN ('open', 'fresh')"
-                                   " AND expires_at > ?", now),
             }

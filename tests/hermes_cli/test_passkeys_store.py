@@ -4,6 +4,7 @@ receipts, and the properties that must hold across connections and processes."""
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 import itertools
 import json
 import os
@@ -18,8 +19,9 @@ import pytest
 
 from hermes_cli.dashboard_auth.passkeys.challenge import GatewayContext, b64u, enrolment_code_hash, text_digest
 from hermes_cli.dashboard_auth.passkeys.store import (
-    CODE_TTL, OPERATOR, REGISTRATION_TTL, STEPUP_TTL, CodeInvalid, CommitRefused, CredentialExists,
-    PasskeyStore, PendingInvalid, StoreError)
+    CODE_TTL, GRANT_TTL, OPERATOR, REAUTH_SKEW, REGISTRATION_TTL, SELF, STEPUP_TTL, CodeInvalid, CommitRefused,
+    CredentialExists, GrantInvalid, PasskeyStore, PendingInvalid, StoreError, new_reauth_secret,
+    reauth_secret_hash)
 from hermes_cli.dashboard_auth.passkeys.webauthn import (
     AssertionOk, AssertionRequest, RegistrationOk, verify_assertion, verify_registration)
 from tests.hermes_cli.passkey_soft_authenticator import SoftAuthenticator, web_authenticator
@@ -602,7 +604,7 @@ def test_pruning_drops_old_receipts_expired_codes_and_closed_pendings(store, clo
     store.open_pending("invite", user_id=U, subject="invite")
     clock.t += 89 * 86400
     _commit(store, cred, _ok(cred.credential_id))
-    assert store.prune(receipts_days=90) == {"receipts": 0, "invites": 2, "pending": 1}
+    assert store.prune(receipts_days=90) == {"receipts": 0, "invites": 2, "pending": 1, "grants": 0}
     clock.t += 2 * 86400
     assert store.prune(receipts_days=90)["receipts"] == 1
     assert len(store.receipts()) == 1
@@ -654,6 +656,447 @@ def test_status_counts(store):
     store.mint_code()
     gone = _enrol(store, user=V, credential_id=b"\x12" * 32)
     store.revoke(gone.credential_id, by=OPERATOR)
-    assert store.counts() == {"credentials": 1, "revoked": 1, "users": 1, "open_codes": 1, "receipts": 0}
+    assert store.counts() == {"credentials": 1, "cooling_off": 0, "revoked": 1, "users": 1, "open_codes": 1,
+                              "receipts": 0, "open_grants": 0}
     assert json.dumps(store.counts())  # plain ints
     assert b64u(store.gateway_id)
+
+
+# ── re-authentication grants (self-enrolment without a code) ─────────────────────────────────────
+
+
+def _web_grant(store: PasskeyStore, user: str = U, provider: str = "self_hosted"):
+    secret = new_reauth_secret()
+    return store.open_grant(user, provider, "web", reauth_secret_hash(secret)), secret
+
+
+def _fresh_grant(store: PasskeyStore, user: str = U, provider: str = "self_hosted"):
+    grant, secret = _web_grant(store, user, provider)
+    done = store.complete_grant(grant.id, session_user=user, session_provider=provider, auth_time=store.now(),
+                                client="web", secret=secret)
+    assert done.state == "fresh", done
+    return done
+
+
+def _self_enrol(store: PasskeyStore, grant_id: str, user: str = U, credential_id: bytes = b"\x01" * 32, **kw):
+    pending = store.open_pending("register", user_id=user, rp_id=NATIVE_RP, base_url=BASE, subject="Laptop")
+    return store.add_credential(user_id=user, grant_id=grant_id, registration=_reg(credential_id, pending=pending),
+                                **kw)
+
+
+def _grant_row(store: PasskeyStore, grant_id: str) -> sqlite3.Row:
+    db = sqlite3.connect(store.path)
+    db.row_factory = sqlite3.Row
+    try:
+        return db.execute("SELECT * FROM reauth_grants WHERE id = ?", (grant_id,)).fetchone()
+    finally:
+        db.close()
+
+
+def test_a_grant_goes_open_fresh_spent_and_enrols_one_self_credential(store, clock):
+    grant, secret = _web_grant(store)
+    assert (grant.state, grant.client, grant.provider, grant.user_id) == ("open", "web", "self_hosted", U)
+    assert grant.expires_at - grant.created_at == GRANT_TTL == 600
+    assert len(grant.id) == 22  # 16 random bytes, base64url
+    assert store.grant_for_login(grant.id, "self_hosted", secret) == grant
+    with pytest.raises(GrantInvalid) as exc:
+        store.fresh_grant(grant.id, user_id=U)
+    assert exc.value.reason == "not_fresh"
+    clock.t += 30
+    fresh = store.complete_grant(grant.id, session_user=U, session_provider="self_hosted", auth_time=int(clock()),
+                                 client="web", secret=secret)
+    assert (fresh.state, fresh.failure, fresh.auth_time, fresh.auth_time_assumed) == ("fresh", "", int(clock()),
+                                                                                       False)
+    assert store.grant_for_login(grant.id, "self_hosted", secret) is None  # a completed grant starts no sign-in
+    assert store.fresh_grant(grant.id, user_id=U) == fresh
+    cred = _self_enrol(store, grant.id)
+    assert cred.created_via == SELF == "self" and cred.usable_from is None and cred.usable(store.now())
+    spent = store.grant(grant.id, user_id=U)
+    assert (spent.state, spent.spent_at, spent.credential_row) == ("spent", int(clock()), cred.row)
+    with pytest.raises(GrantInvalid) as exc:  # single use
+        _self_enrol(store, grant.id, credential_id=b"\x02" * 32)
+    assert exc.value.reason == "spent"
+    with pytest.raises(GrantInvalid) as exc:
+        store.fresh_grant(grant.id, user_id=U)
+    assert exc.value.reason == "spent"
+    assert [c.credential_id for c in store.credentials(U)] == [cred.credential_id]
+
+
+def test_the_web_secret_is_stored_as_a_hash_only(store):
+    grant, secret = _web_grant(store)
+    raw = store.path.read_bytes() + b"".join(
+        p.read_bytes() for p in store.path.parent.iterdir() if p.name != store.path.name)
+    assert secret.encode() not in raw
+    assert bytes(_grant_row(store, grant.id)["secret_hash"]) == reauth_secret_hash(secret)
+    assert "secret" not in repr(grant)
+
+
+def test_a_grant_is_opened_only_with_its_binding(store):
+    with pytest.raises(ValueError):
+        store.open_grant(U, "self_hosted", "web")  # a web grant needs its secret's hash
+    with pytest.raises(ValueError):
+        store.open_grant(U, "self_hosted", "web", b"short")
+    with pytest.raises(ValueError):
+        store.open_grant(U, "self_hosted", "native", reauth_secret_hash("x"))
+    with pytest.raises(ValueError):
+        store.open_grant(U, "self_hosted", "cli")
+    for user, provider in (("", "self_hosted"), (U, " ")):
+        with pytest.raises(ValueError):
+            store.open_grant(user, provider, "native")
+    assert store.counts()["open_grants"] == 0
+
+
+def test_a_login_finds_a_grant_only_through_its_binding(store, clock):
+    web, secret = _web_grant(store)
+    native = store.open_grant(U, "self_hosted", "native")
+    assert native.client == "native" and store.grant_for_login(native.id, "self_hosted", None) == native
+    for grant_id, provider, given in ((web.id, "self_hosted", None),            # web without the cookie
+                                      (web.id, "self_hosted", "not-the-secret"),
+                                      (web.id, "basic", secret),                # another provider
+                                      (native.id, "self_hosted", secret),       # a cookie on a native grant
+                                      ("no-such-grant", "self_hosted", None)):
+        assert store.grant_for_login(grant_id, provider, given) is None, (grant_id, provider, given)
+    clock.t += GRANT_TTL
+    assert store.grant_for_login(web.id, "self_hosted", secret) is None
+    assert store.grant_for_login(native.id, "self_hosted", None) is None
+
+
+@pytest.mark.parametrize("given, expected", [
+    # (session user, provider, client, auth_time offset from created_at (None: not reported), accept_missing)
+    ((U, "self_hosted", "web", 0, False), ("fresh", "", False)),
+    ((U, "self_hosted", "web", 400, False), ("fresh", "", False)),
+    ((U, "self_hosted", "web", -REAUTH_SKEW, False), ("fresh", "", False)),        # inside the skew
+    ((U, "self_hosted", "web", -REAUTH_SKEW - 1, False), ("failed", "auth_not_fresh", False)),
+    ((U, "self_hosted", "web", -86400, False), ("failed", "auth_not_fresh", False)),  # an SSO session reused
+    ((U, "self_hosted", "web", None, False), ("failed", "auth_time_missing", False)),
+    ((U, "self_hosted", "web", None, True), ("fresh", "", True)),                  # the operator assumes it
+    ((U, "self_hosted", "web", -86400, True), ("failed", "auth_not_fresh", False)),  # a stated old time stays old
+    ((V, "self_hosted", "web", 0, False), ("failed", "user_mismatch", False)),     # signed in as somebody else
+    ((U, "basic", "web", 0, False), ("failed", "provider_mismatch", False)),
+    ((U, "self_hosted", "native", 0, False), ("failed", "client_mismatch", False)),
+])
+def test_completion_rule_table(store, clock, given, expected):
+    user, provider, client, offset, accept_missing = given
+    grant, secret = _web_grant(store)
+    clock.t += 500
+    auth_time = None if offset is None else grant.created_at + offset
+    done = store.complete_grant(grant.id, session_user=user, session_provider=provider, auth_time=auth_time,
+                                client=client, secret=secret, accept_missing=accept_missing)
+    assert (done.state, done.failure, done.auth_time_assumed) == expected
+    assert done.completed_at == int(clock())
+    if done.state == "failed":
+        with pytest.raises(GrantInvalid) as exc:
+            store.fresh_grant(grant.id, user_id=U)
+        assert (exc.value.reason, exc.value.failure) == ("failed", expected[1])
+        with pytest.raises(GrantInvalid) as exc:
+            _self_enrol(store, grant.id)
+        assert (exc.value.reason, exc.value.failure) == ("failed", expected[1])
+        assert store.credentials(U) == []
+
+
+def test_a_zero_auth_time_is_a_missing_one(store):
+    grant, secret = _web_grant(store)
+    done = store.complete_grant(grant.id, session_user=U, session_provider="self_hosted", auth_time=0,
+                                client="web", secret=secret)
+    assert (done.state, done.failure, done.auth_time) == ("failed", "auth_time_missing", 0)
+
+
+def test_a_grant_is_completed_once(store):
+    grant, secret = _web_grant(store)
+    args = dict(session_user=U, session_provider="self_hosted", client="web", secret=secret)
+    first = store.complete_grant(grant.id, auth_time=store.now(), **args)
+    assert first.state == "fresh"
+    with pytest.raises(GrantInvalid) as exc:  # a second sign-in cannot fail (or refresh) a fresh grant
+        store.complete_grant(grant.id, auth_time=0, **{**args, "session_user": V})
+    assert (exc.value.reason, exc.value.state) == ("not_open", "fresh")
+    assert store.grant(grant.id, user_id=U) == first
+    failed, secret2 = _web_grant(store)
+    store.complete_grant(failed.id, auth_time=0, **{**args, "secret": secret2})
+    with pytest.raises(GrantInvalid) as exc:  # nor turn a failed one fresh
+        store.complete_grant(failed.id, auth_time=store.now(), **{**args, "secret": secret2})
+    assert (exc.value.reason, exc.value.state) == ("not_open", "failed")
+
+
+def test_without_the_web_secret_a_grant_is_neither_completed_nor_failed(store):
+    grant, secret = _web_grant(store)
+    for given in (None, "", "not-the-secret", new_reauth_secret()):
+        for user in (U, V):
+            with pytest.raises(GrantInvalid) as exc:
+                store.complete_grant(grant.id, session_user=user, session_provider="self_hosted",
+                                     auth_time=store.now(), client="web", secret=given)
+            assert exc.value.reason == "unknown"
+    assert store.grant(grant.id, user_id=U).state == "open"
+    assert store.complete_grant(grant.id, session_user=U, session_provider="self_hosted", auth_time=store.now(),
+                                client="web", secret=secret).state == "fresh"
+
+
+def test_a_native_grant_completes_without_a_secret(store):
+    grant = store.open_grant(U, "basic", "native")
+    done = store.complete_grant(grant.id, session_user=U, session_provider="basic", auth_time=store.now(),
+                                client="native")
+    assert done.state == "fresh"
+    assert _self_enrol(store, grant.id).created_via == SELF
+
+
+def test_an_expired_grant_is_unknown_everywhere_and_nothing_changes(store, clock):
+    grant, secret = _web_grant(store)
+    clock.t += GRANT_TTL
+    with pytest.raises(GrantInvalid) as exc:
+        store.complete_grant(grant.id, session_user=U, session_provider="self_hosted", auth_time=int(clock()),
+                             client="web", secret=secret)
+    assert exc.value.reason == "unknown"
+    assert store.grant(grant.id, user_id=U) is None
+    # Completed in time, but expired before the enrolment finished: refused, and the registration stays open.
+    fresh = _fresh_grant(store)
+    clock.t += GRANT_TTL - 200
+    pending = store.open_pending("register", user_id=U, rp_id=NATIVE_RP, base_url=BASE, subject="Laptop")
+    clock.t += 200
+    with pytest.raises(GrantInvalid) as exc:
+        store.fresh_grant(fresh.id, user_id=U)
+    assert exc.value.reason == "unknown"
+    with pytest.raises(GrantInvalid) as exc:
+        store.add_credential(user_id=U, grant_id=fresh.id, registration=_reg(pending=pending))
+    assert exc.value.reason == "unknown"
+    assert store.credentials(U) == [] and store.pending(pending.id, kind="register", user_id=U)
+    assert _grant_row(store, fresh.id)["state"] == "fresh"
+
+
+def test_a_grant_is_only_its_users(store):
+    fresh = _fresh_grant(store, user=U)
+    assert store.grant(fresh.id, user_id=V) is None
+    with pytest.raises(GrantInvalid) as exc:
+        store.fresh_grant(fresh.id, user_id=V)
+    assert exc.value.reason == "unknown"  # the same answer as for no grant at all
+    with pytest.raises(GrantInvalid) as exc:
+        _self_enrol(store, fresh.id, user=V)
+    assert exc.value.reason == "unknown"
+    assert store.credentials(V) == []
+    assert _self_enrol(store, fresh.id, user=U).user_id == U  # untouched by the attempt
+
+
+def test_an_enrolment_takes_exactly_one_authority(store):
+    fresh = _fresh_grant(store)
+    pending = store.open_pending("register", user_id=U, rp_id=NATIVE_RP, base_url=BASE, subject="x")
+    code = store.mint_code(user_id=U).code
+    for kw in ({}, {"code": code, "grant_id": fresh.id}):
+        with pytest.raises(ValueError):
+            store.add_credential(user_id=U, registration=_reg(pending=pending), **kw)
+    assert store.open_codes() == 1 and store.fresh_grant(fresh.id, user_id=U)
+    assert store.pending(pending.id, kind="register", user_id=U)
+
+
+def test_a_refused_enrolment_does_not_spend_the_grant(store):
+    _enrol(store, credential_id=b"\x01" * 32)
+    fresh = _fresh_grant(store)
+    with pytest.raises(CredentialExists):
+        _self_enrol(store, fresh.id, credential_id=b"\x01" * 32)
+    pending = store.open_pending("register", user_id=U, rp_id=NATIVE_RP, base_url=BASE, subject="x")
+    with pytest.raises(PendingInvalid):  # verified for another ceremony
+        store.add_credential(user_id=U, grant_id=fresh.id,
+                             registration=dataclasses.replace(_reg(b"\x02" * 32, pending=pending), nonce=b"x" * 32))
+    assert store.fresh_grant(fresh.id, user_id=U).state == "fresh"
+    assert _self_enrol(store, fresh.id, credential_id=b"\x02" * 32).created_via == SELF
+
+
+def test_two_finishes_racing_for_one_grant_have_one_winner(store, clock):
+    fresh = _fresh_grant(store)
+    pendings = [store.open_pending("register", user_id=U, rp_id=NATIVE_RP, base_url=BASE, subject=f"d{i}")
+                for i in range(12)]
+    results, barrier = [], threading.Barrier(len(pendings))
+
+    def finish(i, pending):
+        own = PasskeyStore(store.path, clock=clock)  # its own connections, like another process
+        barrier.wait()
+        try:
+            own.add_credential(user_id=U, grant_id=fresh.id, registration=_reg(bytes([i + 1]) * 32, pending=pending))
+            results.append("won")
+        except GrantInvalid as exc:
+            results.append(exc.reason)
+
+    threads = [threading.Thread(target=finish, args=(i, p)) for i, p in enumerate(pendings)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert sorted(results) == ["spent"] * 11 + ["won"]
+    creds = store.credentials(U)
+    assert len(creds) == 1 and store.grant(fresh.id, user_id=U).credential_row == creds[0].row
+
+
+_GRANT_SCRIPT = r"""
+import sys
+from hermes_cli.dashboard_auth.passkeys.store import GrantInvalid, PasskeyStore
+from hermes_cli.dashboard_auth.passkeys.webauthn import RegistrationOk
+path, grant_id, registration_id, nonce, marker = sys.argv[1:6]
+store = PasskeyStore(path)
+reg = RegistrationOk(credential_id=bytes([int(marker)]) * 32, rp_id="confirm.hermie.dev", alg=-7,
+                     public_x=b"\x02" * 32, public_y=b"\x03" * 32, sign_count=0, backup_eligible=True,
+                     backed_up=True, aaguid=b"\x00" * 16, transports=(), registration_id=registration_id,
+                     user_id="self_hosted:alice", nonce=bytes.fromhex(nonce))
+try:
+    store.add_credential(user_id="self_hosted:alice", grant_id=grant_id, registration=reg)
+    print("won")
+except GrantInvalid as exc:
+    print(exc.reason)
+"""
+
+
+def test_two_finishes_racing_for_one_grant_have_one_winner_across_processes(tmp_path):
+    store = PasskeyStore(tmp_path / "dashboard_auth" / "passkeys.db")  # real clock: the children use it too
+    fresh = _fresh_grant(store)
+    pendings = [store.open_pending("register", user_id=U, rp_id=NATIVE_RP, base_url=BASE, subject=f"d{i}")
+                for i in range(6)]
+    root = Path(__file__).resolve().parents[2]
+    procs = [subprocess.Popen([sys.executable, "-c", _GRANT_SCRIPT, str(store.path), fresh.id, p.id, p.nonce.hex(),
+                               str(i + 1)],
+                              cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              env={**os.environ, "PYTHONPATH": str(root)})
+             for i, p in enumerate(pendings)]
+    outputs = []
+    for proc in procs:
+        out, errs = proc.communicate(timeout=120)
+        assert proc.returncode == 0, errs
+        outputs.append(out.strip())
+    assert sorted(outputs) == ["spent"] * 5 + ["won"]
+    assert len(store.credentials(U)) == 1
+
+
+def test_grants_are_pruned_a_day_after_they_expire(store, clock):
+    _fresh_grant(store)
+    _web_grant(store)
+    assert store.counts()["open_grants"] == 2
+    clock.t += GRANT_TTL
+    assert store.counts()["open_grants"] == 0
+    assert store.prune(receipts_days=90)["grants"] == 0
+    clock.t += 24 * 3600
+    assert store.prune(receipts_days=90)["grants"] == 0  # kept a full day after expiry
+    clock.t += 1
+    assert store.prune(receipts_days=90)["grants"] == 2
+    assert sqlite3.connect(store.path).execute("SELECT COUNT(*) FROM reauth_grants").fetchone()[0] == 0
+
+
+# ── cooling-off (usable_from) ────────────────────────────────────────────────────────────────────
+
+
+def test_a_cooling_off_credential_is_listed_but_never_usable(store, clock):
+    old = _enrol(store, credential_id=b"\x0a" * 32)
+    fresh = _fresh_grant(store)
+    cooling = _self_enrol(store, fresh.id, credential_id=b"\x0b" * 32, usable_from=int(clock()) + 3600)
+    assert cooling.usable_from == int(clock()) + 3600 and cooling.active and not cooling.usable(store.now())
+    assert [c.credential_id for c in store.credentials(U)] == [old.credential_id, cooling.credential_id]
+    assert store.credentials(U)[1].usable_from == cooling.usable_from
+    assert [c.credential_id for c in store.credentials(U, usable_only=True)] == [old.credential_id]
+    assert [c.credential_id for c in store.snapshot(U)] == [old.credential_id]  # no confirm target, no step-up
+    assert store.counts()["cooling_off"] == 1 and store.counts()["credentials"] == 2
+    with pytest.raises(CommitRefused) as exc:  # even with a snapshot taken some other way
+        _commit(store, cooling, _ok(cooling.credential_id, sign_count=1))
+    assert exc.value.reason == "revoked"
+    with pytest.raises(CommitRefused):
+        _commit(store, cooling, _ok(cooling.credential_id, sign_count=1, purpose="invite",
+                                    request_id=store.open_pending("invite", user_id=U, subject="invite").id),
+                stepup_id="x")
+    assert store.receipts() == []
+    clock.t += 3600
+    assert [c.credential_id for c in store.snapshot(U)] == [old.credential_id, cooling.credential_id]
+    assert _commit(store, cooling, _ok(cooling.credential_id, sign_count=1)).credential.sign_count == 1
+    assert store.counts()["cooling_off"] == 0
+
+
+def test_a_cooling_off_credential_can_be_revoked(store, clock):
+    fresh = _fresh_grant(store)
+    cooling = _self_enrol(store, fresh.id, usable_from=int(clock()) + 3600)
+    assert store.find(cooling.id_b64u[:8]) == [store.credential(cooling.credential_id)]  # the operator's revoke
+    revoked = store.revoke(cooling.credential_id, by=OPERATOR, user_id=U)
+    assert revoked is not None and not revoked.active
+    clock.t += 3600
+    assert store.snapshot(U) == () and store.credentials(U) == []
+
+
+def test_usable_from_now_or_in_the_past_means_usable_at_once(store, clock):
+    for i, usable_from in enumerate((None, int(clock()), int(clock()) - 5)):
+        cred = _self_enrol(store, _fresh_grant(store).id, credential_id=bytes([0x20 + i]) * 32,
+                           usable_from=usable_from)
+        assert cred.usable_from is None and cred.usable(store.now())
+    code_enrolled = store.add_credential(
+        user_id=U, code=store.mint_code(user_id=U).code, usable_from=int(clock()) + 60,
+        registration=_reg(b"\x30" * 32, pending=store.open_pending("register", user_id=U, rp_id=NATIVE_RP,
+                                                                  base_url=BASE, subject="x")))
+    assert code_enrolled.created_via == "operator" and code_enrolled.usable_from == int(clock()) + 60
+
+
+# ── additive schema: no version bump, a rolled-back build still reads the file ───────────────────
+
+_V1_STORE = Path(__file__).parent / "fixtures" / "passkeys_store_v1_1fdf876.py"
+
+
+def _v1_module():
+    """The store as the build before grants shipped (a frozen copy)."""
+    name = "passkeys_store_v1_1fdf876"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, _V1_STORE)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module  # its dataclasses resolve their annotations through it
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+def _columns(path: Path, table: str) -> list[str]:
+    db = sqlite3.connect(path)
+    try:
+        return [r[1] for r in db.execute(f"PRAGMA table_info({table})")]
+    finally:
+        db.close()
+
+
+def test_a_v1_file_gains_the_grants_table_and_usable_from_and_keeps_its_rows(tmp_path, clock):
+    v1 = _v1_module()
+    path = tmp_path / "dashboard_auth" / "passkeys.db"
+    old = v1.PasskeyStore(path, clock=clock)
+    identity = old.identity()
+    pending = old.open_pending("register", user_id=U, rp_id=NATIVE_RP, base_url=BASE, subject="Phone")
+    enrolled = old.add_credential(user_id=U, code=old.mint_code(user_id=U).code,
+                                  registration=_reg(b"\x0a" * 32, pending=pending))
+    old.mint_code()
+    assert "usable_from" not in _columns(path, "credentials") and _columns(path, "reauth_grants") == []
+
+    new = PasskeyStore(path, clock=clock)
+    assert new.identity() == identity
+    [cred] = new.credentials(U)
+    assert (cred.credential_id, cred.name, cred.created_via, cred.usable_from) == (
+        enrolled.credential_id, "Phone", OPERATOR, None)
+    assert [c.credential_id for c in new.snapshot(U)] == [enrolled.credential_id]
+    assert new.open_codes() == 1
+    assert "usable_from" in _columns(path, "credentials") and "state" in _columns(path, "reauth_grants")
+    db = sqlite3.connect(path)
+    assert db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "1"
+    db.close()
+    assert PasskeyStore(path, clock=clock).credentials(U) == [cred]  # a second open adds nothing twice
+    assert _self_enrol(new, _fresh_grant(new).id, credential_id=b"\x0b" * 32).created_via == SELF
+
+
+def test_a_rolled_back_build_still_reads_a_file_this_build_wrote(tmp_path, clock):
+    path = tmp_path / "dashboard_auth" / "passkeys.db"
+    new = PasskeyStore(path, clock=clock)
+    identity = new.identity()
+    by_code = _enrol(new, credential_id=b"\x0a" * 32)
+    by_grant = _self_enrol(new, _fresh_grant(new).id, credential_id=b"\x0b" * 32, usable_from=int(clock()) + 60)
+    _web_grant(new)  # an open grant in the extra table
+    _commit(new, by_code, _ok(by_code.credential_id, sign_count=1))
+
+    v1 = _v1_module()
+    old = v1.PasskeyStore(path, clock=clock)
+    assert old.identity() == identity
+    assert [(c.credential_id, c.name, c.created_via) for c in old.credentials(U)] == [
+        (by_code.credential_id, "Phone", OPERATOR), (by_grant.credential_id, "Laptop", SELF)]
+    assert old.counts()["credentials"] == 2 and len(old.receipts()) == 1
+    # It still writes: an enrolment (usable_from left NULL), a commit, a revoke and a prune.
+    pending = old.open_pending("register", user_id=U, rp_id=NATIVE_RP, base_url=BASE, subject="Tablet")
+    third = old.add_credential(user_id=U, code=old.mint_code(user_id=U).code,
+                               registration=_reg(b"\x0c" * 32, pending=pending))
+    old.revoke(by_code.credential_id, by=OPERATOR)
+    old.prune(receipts_days=90)
+    # And this build reads what the old one wrote.
+    again = PasskeyStore(path, clock=clock)
+    assert [(c.credential_id, c.usable_from) for c in again.credentials(U)] == [
+        (by_grant.credential_id, int(clock()) + 60), (third.credential_id, None)]
+    assert again.counts()["open_grants"] == 1

@@ -13,12 +13,12 @@ from __future__ import annotations
 import ast
 import importlib.machinery as _machinery
 import os
-import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
+from tools.plugin_guard_code import PYTHON_SOURCE_EXTENSIONS, python_code_findings
 from tools.plugin_guard_context import (
     STEP_DOWN, is_agent_facing, is_base64_media, is_ci_workflow, is_data_decode, is_doc_prose,
     JsSinkInventory, is_inert_fixture_line, is_loopback_only, is_pip_install_in_prose_literal,
@@ -27,7 +27,7 @@ from tools.skills_guard import (
     Finding, ScanResult, SUSPICIOUS_BINARY_EXTENSIONS, _determine_verdict, format_scan_report,
     scan_file)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-fork-3"
+PLUGIN_SCANNER_VERSION = "plugin-guard-fork-4"
 
 # Caches and vendored environments a checkout makes for itself. Skipped only when nothing in
 # them is tracked by git: a TRACKED ``venv/evil.py`` or ``__pycache__/x.pyc`` ships with the
@@ -52,7 +52,6 @@ NATIVE_EXTENSION_SUFFIXES = tuple(sorted(set(_machinery.EXTENSION_SUFFIXES) | {"
 # a text scan, so at least a binary finding.
 ARCHIVE_EXTENSIONS = {".zip", ".whl", ".egg", ".pyz"}
 EXTRA_BINARY_EXTENSIONS = {".pyd"} | ARCHIVE_EXTENSIONS
-PYTHON_SOURCE_EXTENSIONS = {".py", ".pyw"}
 
 # Test trees ARE scanned (``plugins_loader`` sets ``submodule_search_locations`` to the
 # plugin root, so ``from .tests import evil`` runs whatever lives there), but findings under
@@ -407,42 +406,13 @@ def _check_plugin_structure(plugin_dir: Path, tracked: Optional[set] = None) -> 
     return findings
 
 
-# Python that imports code from somewhere a text scan does not read: an archive on sys.path, the
-# zipimport machinery, a loader aimed at a file that is not ``.py``.
-_IMPORT_PATH_CALL = re.compile(r"\bsys\.path\s*\.\s*(?:insert|append|extend)\s*\(|\bsys\.path\s*(?:\+=|\[)|\bsite\.addsitedir\s*\(")
-_ARCHIVE_MENTION = re.compile(r"\.(?:zip|whl|egg|pyz)\b", re.IGNORECASE)
-_ZIPIMPORT = re.compile(r"\bzipimport\b|\bzipimporter\s*\(")
-_RAW_LOADERS = re.compile(r"\b(?:SourcelessFileLoader|ExtensionFileLoader)\b")
-_FILE_LOADER_CALL = re.compile(r"\b(?:SourceFileLoader|spec_from_file_location|load_source|load_compiled|run_path)\s*\(")
-_QUOTED_PATH = re.compile(r"""["']([^"'\n]*\.[A-Za-z0-9]{1,8})["']""")
-
-
 def _import_path_findings(file_path: Path, rel: str) -> List[Finding]:
-    """High findings for Python lines that import code a text scan cannot read (HERM-196b)."""
+    """Findings for Python that imports code a text scan cannot read (``plugin_guard_code``)."""
     try:
-        lines = file_path.read_text(encoding="utf-8-sig").split("\n")
+        text = file_path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return []
-    out: List[Finding] = []
-    for number, line in enumerate(lines, start=1):
-        text = line.strip()
-        if not text or text.startswith("#"):
-            continue
-        hits = []
-        if _IMPORT_PATH_CALL.search(line) and _ARCHIVE_MENTION.search(line):
-            hits.append(("archive_on_sys_path", "puts an archive on sys.path (imports code no scan reads)"))
-        if _ZIPIMPORT.search(line):
-            hits.append(("zipimport_use", "uses zipimport (imports code from an archive no scan reads)"))
-        if _RAW_LOADERS.search(line):
-            hits.append(("bytecode_or_native_loader", "loads bytecode or a native module directly"))
-        if _FILE_LOADER_CALL.search(line):
-            targets = [m.group(1) for m in _QUOTED_PATH.finditer(line)]
-            if any(Path(t).suffix.lower() not in PYTHON_SOURCE_EXTENSIONS for t in targets):
-                hits.append(("non_source_loader", "loads a file that is not .py source as a module"))
-        for pattern_id, description in hits:
-            out.append(Finding(pattern_id, "high", "execution", rel, number,
-                               text if len(text) <= 120 else text[:117] + "...", description))
-    return out
+    return python_code_findings(text, rel)
 
 
 def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:

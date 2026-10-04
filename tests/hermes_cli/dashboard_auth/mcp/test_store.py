@@ -291,6 +291,21 @@ def test_code_is_single_use_and_reuse_revokes_its_grant(store):
     assert store.verify_access(issued.access_token) is None
 
 
+def test_a_code_presented_again_before_its_exchange_is_never_exchanged(store):
+    # The taker's exchange is still running (between take_code and exchange_code) when the code shows up
+    # again: there is no grant to revoke yet, so the exchange itself must refuse, and no grant is minted.
+    _client(store)
+    code = _code(store)
+    taken = store.take_code(code, client_id="client-1")
+    assert store.take_code(code, client_id="client-1") is None
+    with pytest.raises(CodeInvalid):
+        store.exchange_code(code=code, grant_id=taken.grant_id, client_id="client-1", grant_max_age=86400,
+                            max_grants=5, **TTL)
+    assert store.grants(include_inactive=True) == []
+    db = sqlite3.connect(store.path)
+    assert db.execute("SELECT COUNT(*) FROM tokens").fetchone()[0] == 0
+
+
 def test_code_taken_then_failed_check_is_burnt(store):
     _client(store)
     code = _code(store)
@@ -597,11 +612,12 @@ def test_a_rotated_token_outside_the_grace_still_revokes(store, clock, how):
     assert store.grant(issued.grant.id).revoked_by == BY_REFRESH_REUSE
 
 
-def test_a_file_without_the_successor_link_gains_it(tmp_path, clock):
+def test_a_file_without_the_added_columns_gains_them(tmp_path, clock):
     path = tmp_path / "dashboard_auth" / "mcp.db"
     MCPStore(path, clock=clock).counts()
     db = sqlite3.connect(path)
     db.execute("ALTER TABLE tokens DROP COLUMN parent_hash")
+    db.execute("ALTER TABLE codes DROP COLUMN reused_at")
     db.commit()
     db.close()
     store = MCPStore(path, clock=clock)
@@ -611,6 +627,7 @@ def test_a_file_without_the_successor_link_gains_it(tmp_path, clock):
     db = sqlite3.connect(path)
     assert db.execute("SELECT COUNT(*) FROM tokens WHERE parent_hash = ?",
                       (hash_secret(issued.refresh_token),)).fetchone()[0] == 1
+    assert "reused_at" in {r[1] for r in db.execute("PRAGMA table_info(codes)")}
     assert db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "1"
 
 

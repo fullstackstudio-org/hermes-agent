@@ -379,7 +379,9 @@ def test_code_single_use_and_reuse_revokes(provider, store):
     assert store.grant(loaded.grant_id).revoked_by == BY_CODE_REUSE
 
 
-def test_two_concurrent_exchanges_of_one_code_one_wins(provider):
+def test_concurrent_exchanges_of_one_code_get_nothing(provider, store):
+    # One presentation takes the code; the others arrive before its exchange and mark it reused, so the
+    # taker's exchange is refused too: a code seen twice yields no grant (RFC 6749 4.1.2).
     client = run(registered(provider))
     code, _ = run(consented(provider, client))
 
@@ -388,7 +390,17 @@ def test_two_concurrent_exchanges_of_one_code_one_wins(provider):
 
     loaded = [x for x in run(both()) if x is not None]
     assert len(loaded) == 1
-    assert run(provider.exchange_authorization_code(client, loaded[0])).access_token
+    with pytest.raises(TokenError) as refused:
+        run(provider.exchange_authorization_code(client, loaded[0]))
+    assert refused.value.error == "invalid_grant"
+    assert store.grants(include_inactive=True) == []
+
+
+def test_one_exchange_of_one_code_wins(provider):
+    client = run(registered(provider))
+    code, _ = run(consented(provider, client))
+    loaded = run(provider.load_authorization_code(client, code))
+    assert run(provider.exchange_authorization_code(client, loaded)).access_token
 
 
 def test_refresh_rotation_and_reuse_revokes_the_grant(provider, store, clock):

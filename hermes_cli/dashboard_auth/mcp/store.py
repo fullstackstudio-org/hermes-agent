@@ -12,7 +12,8 @@ processes (the CLI revokes while the gateway mints):
 - a consent transaction is taken at most once, with its nonce, before it expires; a refusal leaves it
   open (the person can revoke a grant and press Allow again);
 - a code is taken at most once (:meth:`MCPStore.take_code` marks it used before the caller checks the
-  PKCE verifier, so a failed check burns it); a code presented again revokes the grant it minted; the
+  PKCE verifier, so a failed check burns it); a code presented again revokes the grant it minted, and is
+  marked reused so that a grant not minted yet (the taker's exchange still running) never will be; the
   grant and its token family are minted together, once, by :meth:`MCPStore.exchange_code`;
 - a person holds at most ``max_grants`` live grants, checked inside the transaction that would add one;
 - a refresh token is rotated at most once; a rotated token presented again revokes its grant (reuse
@@ -104,7 +105,8 @@ CREATE TABLE IF NOT EXISTS codes (
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
     used_at INTEGER,
-    grant_id TEXT);
+    grant_id TEXT,
+    reused_at INTEGER);
 CREATE INDEX IF NOT EXISTS codes_expires ON codes (expires_at);
 CREATE TABLE IF NOT EXISTS grants (
     id TEXT PRIMARY KEY,
@@ -154,8 +156,9 @@ _LIVE = ("(g.revoked_at IS NULL AND g.expires_at > :now AND EXISTS (SELECT 1 FRO
 
 # Columns added after a file may have been created; ``_create`` adds any that are missing (additive only, so
 # the schema version stays and an older build still reads the file). ``tokens.parent_hash``: the refresh
-# token a rotation replaced (its successor's link back, for :data:`REFRESH_RACE_GRACE`).
-_ADDED_COLUMNS = (("tokens", "parent_hash", "BLOB"),)
+# token a rotation replaced (its successor's link back, for :data:`REFRESH_RACE_GRACE`); ``codes.reused_at``:
+# when a taken code was presented again (its exchange is then refused).
+_ADDED_COLUMNS = (("tokens", "parent_hash", "BLOB"), ("codes", "reused_at", "INTEGER"))
 
 
 class StoreError(Exception):
@@ -178,7 +181,8 @@ class ConsentInvalid(StoreError):
 
 
 class CodeInvalid(StoreError):
-    """The taken code cannot be exchanged (not taken by this caller, already exchanged, client gone)."""
+    """The taken code cannot be exchanged (not taken by this caller, already exchanged, presented again
+    since it was taken, client gone)."""
 
 
 class TokenInvalid(StoreError):
@@ -630,7 +634,9 @@ class MCPStore:
     def take_code(self, code: str, *, client_id: str) -> Optional[TakenCode]:
         """Mark the code used and return it for the exchange, or None. Any presentation consumes it (a
         code presented by another client, or after it expired, is burnt as well). A code presented again
-        after it was taken revokes the grant it minted (``code_reuse``) and returns None."""
+        after it was taken is marked reused (:meth:`exchange_code` then refuses it, so a grant its taker
+        has not minted yet never is), revokes the grant it minted if there is one (``code_reuse``), and
+        returns None."""
         if not code:
             return None
         code_hash = hash_secret(code)
@@ -640,6 +646,7 @@ class MCPStore:
             if row is None or not hmac.compare_digest(bytes(row["code_hash"]), code_hash):
                 return None
             if row["used_at"] is not None:
+                db.execute("UPDATE codes SET reused_at = ? WHERE code_hash = ? AND reused_at IS NULL", (now, code_hash))
                 if row["grant_id"]:
                     self._revoke(db, row["grant_id"], BY_CODE_REUSE, now)
                 return None
@@ -661,14 +668,14 @@ class MCPStore:
         it reserved), in one transaction. Everything the grant holds is read from the stored code, not
         from the caller.
 
-        Raises :class:`CodeInvalid` (not taken, taken by another call, exchanged before, another client's,
-        the client gone) or :class:`LimitReached` ``grants_per_user`` (re-checked here: two consents may
+        Raises :class:`CodeInvalid` (not taken, taken by another call, exchanged before, presented again
+        since it was taken, another client's, the client gone) or :class:`LimitReached` ``grants_per_user`` (re-checked here: two consents may
         have raced)."""
         now = self.now()
         with self._write() as db:
             row = db.execute("SELECT * FROM codes WHERE code_hash = ?", (hash_secret(code or ""),)).fetchone()
             if row is None or row["used_at"] is None or not grant_id or row["grant_id"] != grant_id \
-                    or row["client_id"] != client_id:
+                    or row["client_id"] != client_id or row["reused_at"] is not None:
                 raise CodeInvalid("code_invalid")
             if db.execute("SELECT 1 FROM grants WHERE id = ?", (grant_id,)).fetchone() is not None:
                 raise CodeInvalid("code_invalid")

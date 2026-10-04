@@ -132,13 +132,16 @@ route (the dashboard's own profile when absent).
 ## 5. Retention
 
 `files.outbox_retention_days` (30): older shared files are removed. `files.outbox_max_total_mb` (2048) and
-10,000 files per profile, and one conversation holds at most half of that size (a larger file is refused as
-too large). A conversation is a session and the sessions compaction continued it in (its compression
-lineage): it keeps owning what it shared before. A new share:
+10,000 files per profile, and one conversation holds at most half of that size and half of that count (a
+larger file is refused as too large). A conversation is a session and the sessions compaction continued
+it in (its compression lineage): it keeps owning what it shared before. A new share:
 
 1. lets expired files go;
-2. within the conversation's half: its own oldest go until the new file fits;
-3. within the profile's cap: the oldest go among the conversation's own files and other conversations' files
+2. checks, before anything else is removed, that the file can fit at all (a file of the reply being shared and
+   another conversation's file within 24 hours always stay): when it cannot, it is refused and no other
+   file is removed for it;
+3. within the conversation's half (size and count): its own oldest go until the new file fits;
+4. within the profile's cap: the oldest go among the conversation's own files and other conversations' files
    shared more than 24 hours ago.
 
 A file of the reply being shared never goes, and another conversation's file is never pushed out within 24

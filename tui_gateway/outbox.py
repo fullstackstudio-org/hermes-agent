@@ -985,9 +985,12 @@ def _prune_locked(outbox_fd: int | None, root: Path, settings: OutboxSettings, *
                   staging_keep: str = "") -> int:
     """Prune the locked outbox. Always: abandoned staging copies, and every entry past the retention. Then:
 
-    - making room for a share (*room_for* bytes, one more entry) of the conversation *conversation*: first
-      within the conversation's own share of the outbox (``max_conversation_bytes``, half the total): its own
-      oldest go until the new file fits. Then within the profile's cap (and :data:`MAX_ENTRIES`), oldest first
+    - making room for a share (*room_for* bytes, one more entry) of the conversation *conversation*: first,
+      before anything is removed, whether it can fit at all (what must stay is this reply's own files and other
+      conversations' files within the grace period): if not, ``ShareRefused("no_room")`` and nobody loses a file.
+      Then within the conversation's own share of the outbox (``max_conversation_bytes``, half the total, and
+      half of :data:`MAX_ENTRIES`): its own oldest go until the new file fits. Then within the profile's cap
+      (and :data:`MAX_ENTRIES`), oldest first
       among the conversation's own files and OTHER conversations' files shared more than
       ``evict_grace_seconds`` (24 h) ago. Never a token in *protect* (this reply's own), never another
       conversation's file within the grace period: still over a cap means ``ShareRefused("no_room")``;
@@ -1016,45 +1019,60 @@ def _prune_locked(outbox_fd: int | None, root: Path, settings: OutboxSettings, *
         total -= entry.size
         removed += 1
 
+    entry_cap = max(1, MAX_ENTRIES // 2)  # a conversation's share of the entry count, as of the bytes
     if room_for is None:
         held: dict[str, int] = {}
+        held_count: dict[str, int] = {}
         for entry in keep:
             if entry.conversation:
                 held[entry.conversation] = held.get(entry.conversation, 0) + entry.size
+                held_count[entry.conversation] = held_count.get(entry.conversation, 0) + 1
         for entry in list(keep):
-            if entry.conversation and held[entry.conversation] > conversation_cap:
-                held[entry.conversation] -= entry.size
+            conv = entry.conversation
+            if conv and (held[conv] > conversation_cap or held_count[conv] > entry_cap):
+                held[conv] -= entry.size
+                held_count[conv] -= 1
                 evict(entry)
         for entry in list(keep):
             if total <= settings.max_total_bytes and len(keep) <= MAX_ENTRIES:
                 break
             evict(entry)
     else:
-        own = [entry for entry in keep if conversation and entry.conversation == conversation]
+        grace_cutoff = now - settings.evict_grace_seconds
+
+        def mine(entry: _Entry) -> bool:
+            return bool(conversation) and entry.conversation == conversation
+
+        def pinned(entry: _Entry) -> bool:
+            """Never pushed out for this share: this reply's own, and another conversation's within the grace."""
+            return entry.token in protect or (not mine(entry) and entry.mtime > grace_cutoff)
+
+        # Decide whether the share can fit AT ALL before anything is evicted: a refused share must not cost
+        # other conversations their files. What stays after every evictable file went is the pinned set.
+        pinned_all = [entry for entry in keep if pinned(entry)]
+        pinned_own = [entry for entry in pinned_all if mine(entry)]
+        if (sum(entry.size for entry in pinned_own) + room_for > conversation_cap
+                or len(pinned_own) + 1 > entry_cap
+                or sum(entry.size for entry in pinned_all) + room_for > settings.max_total_bytes
+                or len(pinned_all) + 1 > MAX_ENTRIES):
+            _log_removed(removed, root)
+            raise ShareRefused("no_room")
+        own = [entry for entry in keep if mine(entry)]
         own_total = sum(entry.size for entry in own)
+        own_count = len(own)
         for entry in own:
-            if own_total + room_for <= conversation_cap:
+            if own_total + room_for <= conversation_cap and own_count + 1 <= entry_cap:
                 break
             if entry.token not in protect:
                 own_total -= entry.size
+                own_count -= 1
                 evict(entry)
-        if own_total + room_for > conversation_cap:
-            _log_removed(removed, root)
-            raise ShareRefused("no_room")
         budget, max_entries = settings.max_total_bytes - room_for, MAX_ENTRIES - 1
-        grace_cutoff = now - settings.evict_grace_seconds
         for entry in list(keep):
             if total <= budget and len(keep) <= max_entries:
                 break
-            if entry.token in protect:
-                continue
-            mine = bool(conversation) and entry.conversation == conversation
-            if not mine and entry.mtime > grace_cutoff:
-                continue  # another conversation's file within the grace period: never pushed out
-            evict(entry)
-        if total > budget or len(keep) > max_entries:
-            _log_removed(removed, root)
-            raise ShareRefused("no_room")
+            if not pinned(entry):
+                evict(entry)
     _log_removed(removed, root)
     return removed
 

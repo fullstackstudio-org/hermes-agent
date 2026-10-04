@@ -717,6 +717,47 @@ def test_another_conversations_files_go_only_after_the_grace_period(home):
     assert _entries(home) == sorted([held["A1"], held["B2"], held["B3"], c["id"]])
 
 
+def test_a_conversation_holds_at_most_half_the_entry_count(home, monkeypatch):
+    """Tiny files cannot exhaust the entry count for the others: a conversation keeps half of it, its own
+    oldest go first, and a reply that has already shared that many is refused."""
+    monkeypatch.setattr(outbox, "MAX_ENTRIES", 6)
+    start = time.time()
+    a = [outbox.share_file(str(_big(home, f"a{i}.bin", 1)), home=home, session_id="A", now=start + i)["id"]
+         for i in range(5)]
+    assert _entries(home) == sorted(a[2:])  # three of six
+    b = [outbox.share_file(str(_big(home, f"b{i}.bin", 1)), home=home, session_id="B", now=start + 10 + i)["id"]
+         for i in range(3)]
+    assert _entries(home) == sorted(a[2:] + b)
+    with pytest.raises(outbox.ShareRefused) as refused:  # A's reply already shares three: nothing may go
+        outbox.share_file(str(_big(home, "a9.bin", 1)), home=home, session_id="A", now=start + 20,
+                          protect=set(a[2:]))
+    assert refused.value.reason == "no_room"
+    assert _entries(home) == sorted(a[2:] + b)
+
+
+def test_a_share_that_cannot_fit_evicts_nobody(home):
+    """Refused anyway (the outbox is full of this reply's files and files within the grace period): other
+    conversations' old files stay, they are not deleted for nothing."""
+    settings = outbox.OutboxSettings(max_total_bytes=1000, max_file_bytes=500, evict_grace_seconds=3600)
+    start = time.time()
+
+    def share(sid, size, name, at, **kwargs):
+        return outbox.share_file(str(_big(home, name, size)), home=home, session_id=sid, settings=settings,
+                                 now=at, **kwargs)["id"]
+
+    old = share("B", 100, "b.bin", start - 7200)  # evictable: shared more than the grace period ago
+    c = share("C", 400, "c.bin", start)
+    d = share("D", 300, "d.bin", start)
+    mine = share("A", 200, "a0.bin", start)
+    with pytest.raises(outbox.ShareRefused) as refused:  # 400 + 300 + 200 stay, 150 more does not fit
+        share("A", 150, "a1.bin", start + 10, protect={mine})
+    assert refused.value.reason == "no_room"
+    assert _entries(home) == sorted([old, c, d, mine])
+    # A share that fits once the old file goes still takes it.
+    fits = share("A", 100, "a2.bin", start + 20, protect={mine})
+    assert old not in _entries(home) and fits in _entries(home)
+
+
 def test_the_periodic_pass_holds_each_conversation_to_its_share(home):
     """A cap lowered under what a conversation holds: its oldest go until it is within half the new cap."""
     ids = [outbox.share_file(str(_big(home, f"a{index}.bin", 100)), home=home, session_id="A",

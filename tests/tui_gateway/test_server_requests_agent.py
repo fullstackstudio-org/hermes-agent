@@ -115,6 +115,13 @@ def _rpc(server, peer, method, params):
     return _as(peer, server.handle_request, {"id": 1, "method": method, "params": params})
 
 
+def _handler(server, peer, method, params):
+    """The handler itself on *peer*'s connection, past the dispatch gate: ``clarify.lock`` is not a method the
+    MCP bridge calls, so an agent's connection is refused it at dispatch (``agent_guard.dispatch_refusal``);
+    these tests pin what the handler does for an agent behind that first line."""
+    return _as(peer, server._methods[method], 1, params)
+
+
 def _open(sid, method, params=None, **kwargs):
     from tui_gateway import server_requests
     req = server_requests.ServerRequest(sid, method, params or {}, **kwargs)
@@ -223,6 +230,18 @@ def test_an_empty_answer_stays_a_skip(server, clarify_setting):
     assert req.result == {"answer": ""}
 
 
+def test_an_agents_clarify_lock_is_refused_at_dispatch(server, clarify_setting):
+    """Default deny: an agent's connection reaches only the methods the MCP bridge calls; ``clarify.lock`` is not
+    one, so dispatch answers 4033 before the handler runs and nothing is locked."""
+    agent, phone = _WS("agent", ROBIN, AGENT), _WS("phone", ROBIN)
+    _session(server, "s1", phone, agent)
+    req = _open("s1", "clarify", {"questions": []}, qids=["q1", "q2"])
+    refused = _rpc(server, agent, "clarify.lock", {"request_id": req.id, "question_id": "q1", "answer": "agent"})
+    assert refused["error"]["code"] == 4033 and "agent connected through MCP" in refused["error"]["message"]
+    assert _rpc(server, phone, "clarify.lock", {"request_id": req.id, "question_id": "q1", "answer": "mine"})[
+        "result"]["status"] == "ok"
+
+
 def test_a_batch_clarify_marks_every_answer_the_agent_gives_and_none_the_person_gave(server, clarify_setting):
     from tui_gateway import server_requests
     agent, phone = _WS("agent", ROBIN, AGENT), _WS("phone", ROBIN)
@@ -231,7 +250,7 @@ def test_a_batch_clarify_marks_every_answer_the_agent_gives_and_none_the_person_
 
     assert _rpc(server, phone, "clarify.lock", {"request_id": req.id, "question_id": "q1", "answer": "mine"})[
         "result"]["status"] == "ok"
-    assert _rpc(server, agent, "clarify.lock", {"request_id": req.id, "question_id": "q2", "answer": "agent"})[
+    assert _handler(server, agent, "clarify.lock", {"request_id": req.id, "question_id": "q2", "answer": "agent"})[
         "result"]["status"] == "ok"
     _frame(server, agent, req.id, result={"answers": {"q3": "last"}})
 
@@ -247,7 +266,7 @@ def test_the_operator_can_turn_clarify_through_mcp_off(server, clarify_setting):
     req = _open("s1", "clarify", {"questions": []}, qids=["q1"])
     refused = _rpc(server, agent, "request.answer", {"id": req.id, "result": {"answers": {"q1": "a"}}})
     assert refused["error"]["code"] == 4033 and "turned off" in refused["error"]["message"]
-    assert _rpc(server, agent, "clarify.lock", {"request_id": req.id, "question_id": "q1", "answer": "a"})[
+    assert _handler(server, agent, "clarify.lock", {"request_id": req.id, "question_id": "q1", "answer": "a"})[
         "error"]["code"] == 4033
     assert req.id in server_requests._open and req.locked == {}
 
@@ -282,7 +301,7 @@ def test_an_agent_cannot_answer_the_clarify_of_a_turn_it_did_not_send(server, au
     assert refused["error"]["code"] == 4033 and "turn it sent" in refused["error"]["message"]
     _frame(server, agent, req.id, result={"answers": {"q1": "agent", "q2": "agent"}})
     _frame(server, agent, req.id, error={"code": -32000, "message": "marker"})
-    assert _rpc(server, agent, "clarify.lock", {"request_id": req.id, "question_id": "q1", "answer": "agent"})[
+    assert _handler(server, agent, "clarify.lock", {"request_id": req.id, "question_id": "q1", "answer": "agent"})[
         "error"]["code"] == 4033
     assert req.id in server_requests._open and not req.answered and not req.errored and req.locked == {}
     assert {f["reason"] for e, f in audits if e == "mcp_request_answer_refused"} == {"not_agents_turn"}
@@ -305,7 +324,7 @@ def test_an_agents_closing_answers_never_overwrite_a_question_the_person_locked(
     assert refused["error"]["code"] == 4034
     _frame(server, agent, req.id, result={"answers": {"q1": "agent-marker", "q2": "agent-marker-2"}})
     assert req.id in server_requests._open and req.locked == {"q1": "person-marker"}
-    assert _rpc(server, agent, "clarify.lock", {"request_id": req.id, "question_id": "q1", "answer": "agent"})[
+    assert _handler(server, agent, "clarify.lock", {"request_id": req.id, "question_id": "q1", "answer": "agent"})[
         "error"]["code"] == 4034
     assert {f["reason"] for e, f in audits if e == "mcp_request_answer_refused"} == {"locked"}
 
@@ -362,7 +381,7 @@ def test_the_relay_to_a_child_refuses_an_agent_for_a_turn_it_did_not_send(server
     assert _rpc(server, agent, "request.answer", {"id": "srq-child", "result": {"answer": "x"}})["error"][
         "code"] == 4033
     _frame(server, agent, "srq-child", result={"answer": "x"})
-    assert _rpc(server, agent, "clarify.lock", {"request_id": "srq-child", "question_id": "q1", "answer": "x"})[
+    assert _handler(server, agent, "clarify.lock", {"request_id": "srq-child", "question_id": "q1", "answer": "x"})[
         "error"]["code"] == 4033
     assert relayed == []
 
@@ -373,7 +392,7 @@ def test_the_relay_to_a_child_never_overwrites_a_locked_answer(server, child_req
     make("clarify", [agent])["_compute_host_open_request"]["params"]["answers"] = {"q1": "person-marker"}
     assert _rpc(server, agent, "request.answer", {"id": "srq-child", "result": {"answers": {"q1": "x"}}})[
         "error"]["code"] == 4034
-    assert _rpc(server, agent, "clarify.lock", {"request_id": "srq-child", "question_id": "q1", "answer": "x"})[
+    assert _handler(server, agent, "clarify.lock", {"request_id": "srq-child", "question_id": "q1", "answer": "x"})[
         "error"]["code"] == 4034
     assert relayed == []
 
@@ -388,6 +407,6 @@ def test_the_relay_to_a_child_marks_an_agents_clarify_answer(server, child_reque
 
     relayed.clear()
     make("clarify", [agent])
-    _rpc(server, agent, "clarify.lock", {"request_id": "srq-child", "question_id": "q1", "answer": "green"})
+    _handler(server, agent, "clarify.lock", {"request_id": "srq-child", "question_id": "q1", "answer": "green"})
     [(_sid, params)] = relayed
     assert params["lock"]["answer"] == PREFIX + "green"

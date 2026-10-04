@@ -17,11 +17,17 @@ What is refused here, before anything is dispatched (:class:`DisallowedCall`, al
   neither may the bridge -- params are also round-tripped through JSON for that reason);
 * ``client.capabilities`` advertising anything but ``server_requests`` (an agent never performs a
   ``confirm`` level);
-* any parameter key outside what the bridge itself sends for that method (``agent_guard.AGENT_PARAMS``,
-  which the gateway enforces too): ``prompt.submit`` beside :data:`PROMPT_SUBMIT_PARAMS`, ``session.create``
-  beside ``{profile, title}``, ``session.resume`` beside ``{session_id, profile, omit_messages}``, ...;
-* ``request.answer`` with a result that is not a clarify answer (``{answer}`` or ``{answers}``). The
-  gateway refuses every other method from an agent anyway (4033); this keeps the bridge from even trying.
+* any parameter key outside what the bridge itself sends for that method (``agent_guard.AGENT_PARAMS``):
+  ``prompt.submit`` beside :data:`PROMPT_SUBMIT_PARAMS`, ``session.create`` beside ``{profile, title}``,
+  ``session.resume`` beside ``{session_id, profile, omit_messages}``, ...;
+* ``request.answer`` with a result that is not a clarify answer (``{answer}`` or ``{answers}``).
+
+The gateway holds an agent's connection to the same table without the bridge: ``server.dispatch`` answers 4033
+for any method outside ``AGENT_PARAMS`` or key outside its set (``agent_guard.dispatch_refusal``, in
+``rpc_dispatch._handle_admitted_request``), and the handlers whose other keys would act as the person check
+them again themselves (``agent_guard.param_refusal`` in ``session.create``, ``session.resume`` and
+``client.capabilities``; ``methods_prompt`` for ``prompt.submit``). ``request.answer`` refuses an agent
+anything but a clarify answer in ``server_requests``. These checks here keep the bridge from even trying.
 
 Blocking: :func:`call` waits on the calling thread (a pooled handler answers from an RPC worker). Run it
 from a worker thread, never on an event loop.

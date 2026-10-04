@@ -192,6 +192,10 @@ def _room_method(
 
     def dec(fn):
         def handler(rid, params: dict) -> dict:
+            from tui_gateway.agent_guard import refusal as _agent_refusal
+            # A group chat (invite, send, approve, retry, ...) is the person's to run, never an agent's.
+            if (refused := _agent_refusal(rid, f"use {name}")) is not None:
+                return refused
             args = (rid, params)
             if service_code is not None:
                 service = get_hosted_room_service()

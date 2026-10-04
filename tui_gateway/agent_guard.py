@@ -7,6 +7,10 @@ grant, never from a request) is held to them in the handlers, whatever reaches t
 * :func:`refusal`: the handlers that approve, unlock, provide a secret, run a command or change a setting
   answer an agent 4033 (Security 1 of the MCP plan: a token acts as the person for prompts and reading,
   nothing more).
+* :func:`dispatch_refusal`: default deny at the one entry point of wire and bridge requests
+  (``rpc_dispatch._handle_admitted_request``): an agent's connection calling a method outside
+  :data:`AGENT_PARAMS`, or one of them with a key outside its set, is answered 4033 before any handler runs, so
+  every handler refusal here is a second line and a method added later is refused until it is listed.
 * :data:`AGENT_PARAMS` / :func:`param_refusal`: the methods an agent may call and, for each, the only keys it
   may send (an allowlist). The bridge sends nothing else (``mcp_bridge.rpc``); the handlers whose other
   parameters would act as the person refuse them from an agent's connection (``session.create``: seeded
@@ -95,6 +99,21 @@ def param_refusal(rid: Any, method: str, params: dict) -> dict | None:
     if not extra:
         return None
     return refusal(rid, f"send {', '.join(sorted(extra))} with {method}")
+
+
+def dispatch_refusal(rid: Any, method: str, params: Any) -> dict | None:
+    """Default deny for an agent's connection at the dispatch entry point: 4033 for a method outside
+    :data:`AGENT_PARAMS` or a key outside its set; None for every other connection and for the gateway's own
+    dispatch. The gateway's in-process callers (the relay, a hosted room, Retry's carrier) call a handler through
+    ``_methods`` directly and never reach it; they are held by the handlers' own checks."""
+    from tui_gateway.session_transports import _INTERNAL_DISPATCH
+    from tui_gateway.transport import current_transport
+
+    if agent_identity(current_transport()) is None or _INTERNAL_DISPATCH.get():
+        return None
+    if method not in AGENT_PARAMS:
+        return refusal(rid, f"call {method}")
+    return param_refusal(rid, method, params if isinstance(params, dict) else {})
 
 
 def turn_start_fence(session: dict) -> threading.Lock:

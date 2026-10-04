@@ -78,8 +78,26 @@ def _dispatch(transport, method, params):
     return response
 
 
+def _handler(transport, method, params):
+    """The handler itself on *transport*'s connection, past dispatch (and its default-deny gate): what holds when
+    the gateway reaches a handler in process, and the second line behind the gate."""
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    token = bind_transport(transport)
+    try:
+        return server._methods[method](f"guard-{method}", params)
+    finally:
+        reset_transport(token)
+
+
+#: An agent's call through ``server.dispatch`` (answered by the default-deny gate first) and straight to the
+#: handler (its own refusal).
+VIA = {"dispatch": _dispatch, "handler": _handler}
+
+
+@pytest.mark.parametrize("via", sorted(VIA))
 @pytest.mark.parametrize("method", sorted(GUARDED))
-def test_an_agent_is_refused_by_the_handler_itself(gateway, monkeypatch, method):
+def test_an_agent_is_refused_by_the_handler_itself(gateway, monkeypatch, method, via):
     import tools.connectors as connectors
     from tui_gateway import server_requests
 
@@ -88,7 +106,7 @@ def test_an_agent_is_refused_by_the_handler_itself(gateway, monkeypatch, method)
         "jsonrpc": "2.0", "id": rid, "result": {"reached": "the billing call"}})
     transport = gateway.connect()
     server_requests.advertise(transport, True)
-    response = _dispatch(transport, method, GUARDED[method])
+    response = VIA[via](transport, method, GUARDED[method])
     assert "error" in response, response
     assert response["error"]["code"] == 4033, response
     assert "agent connected through MCP" in response["error"]["message"]
@@ -100,14 +118,52 @@ def test_the_person_is_not_refused(gateway, method):
     assert "agent connected through MCP" not in str(response)
 
 
-def test_an_agent_may_still_read_a_chats_title(gateway):
-    """Only the rename is refused: reading the title acts on nothing."""
+def test_the_title_handler_refuses_an_agent_only_the_rename(gateway):
+    """The handler refuses only the rename (reading acts on nothing); dispatch refuses an agent the method
+    altogether, since the bridge never calls it."""
     from tui_gateway import server_requests
 
     transport = gateway.connect()
     server_requests.advertise(transport, True)
-    response = _dispatch(transport, "session.title", {"session_id": SID})
-    assert "result" in response, response
+    assert "result" in _handler(transport, "session.title", {"session_id": SID})
+    assert _dispatch(transport, "session.title", {"session_id": SID})["error"]["code"] == 4033
+
+
+@pytest.mark.parametrize("method", ["session.title", "session.history", "clarify.lock", "approval.respond",
+                                    "groups.capabilities", "groups.send", "config.get", "marker.unknown_method"])
+def test_dispatch_refuses_an_agent_every_method_the_bridge_does_not_call(gateway, monkeypatch, method):
+    """Default deny (``agent_guard.dispatch_refusal``): a method outside ``AGENT_PARAMS`` is 4033 at dispatch
+    before its handler runs, guarded there or not, known or not."""
+    reached: list = []
+    monkeypatch.setitem(server._methods, method, lambda rid, params: reached.append(params) or {
+        "jsonrpc": "2.0", "id": rid, "result": {}})
+    response = _dispatch(_agent(gateway), method, {"session_id": SID})
+    assert response.get("error", {}).get("code") == 4033, response
+    assert "agent connected through MCP" in response["error"]["message"] and reached == []
+
+
+def test_dispatch_lets_the_person_and_the_bridges_own_methods_through(gateway):
+    assert "result" in gateway.app.call("session.title", {"session_id": SID})
+    assert "result" in _dispatch(_agent(gateway), "session.active_list", {})
+
+
+def _room_methods():
+    import tui_gateway.methods_groups  # noqa: F401 - registers the groups.* handlers
+
+    return sorted(name for name in server._methods if name.startswith("groups.") and name != "groups.capabilities")
+
+
+@pytest.mark.parametrize("method", _room_methods())
+def test_every_group_handler_refuses_an_agent(gateway, method):
+    """``methods_groups._room_method`` (also behind ``_passthrough``): inviting, sending, approving, retrying ... in
+    a group chat is the person's, refused before the room service or its database is touched."""
+    response = _handler(_agent(gateway), method, {"room_id": "marker"})
+    assert response.get("error", {}).get("code") == 4033, response
+    assert "agent connected through MCP" in response["error"]["message"]
+
+
+def test_the_group_capabilities_stay_readable_by_an_agents_handler_call(gateway):
+    assert "agent connected through MCP" not in str(_handler(_agent(gateway), "groups.capabilities", {}))
 
 
 # ── an agent's prompt.submit (plan: "Agent prompts") ───────────────────────────────────────────────
@@ -158,10 +214,11 @@ def test_an_agents_submit_without_queued_never_stops_or_steers_the_persons_turn(
     {"confirm_empty_truncate": True},
     {"rebind_survivor_row_ids": [1]},
 ], ids=["row_id", "ordinal", "message_id", "confirm_truncate", "confirm_empty_truncate", "rebind"])
-def test_an_agents_submit_may_not_rewind_the_chat(gateway, extra):
+@pytest.mark.parametrize("via", sorted(VIA))
+def test_an_agents_submit_may_not_rewind_the_chat(gateway, extra, via):
     gateway.db.append_message(KEY, "user", "marker person row")
     before = len(gateway.db.get_messages(KEY, include_inactive=True))
-    response = _dispatch(_agent(gateway), "prompt.submit", {"session_id": SID, "text": "marker reply", **extra})
+    response = VIA[via](_agent(gateway), "prompt.submit", {"session_id": SID, "text": "marker reply", **extra})
     assert response.get("error", {}).get("code") == 4033, response
     assert "agent connected through MCP" in response["error"]["message"]
     assert gateway.session.get("running") is False and gateway.agent.texts == []
@@ -179,11 +236,12 @@ def test_an_agents_submit_may_not_rewind_the_chat(gateway, extra):
     {"truncate_before_row_id": None},
 ], ids=["display_kind", "surface", "voice_context", "title_preview", "interrupted", "turn_author", "replayed_turn",
         "null_rewind"])
-def test_an_agents_submit_carries_nothing_but_its_text(gateway, extra):
+@pytest.mark.parametrize("via", sorted(VIA))
+def test_an_agents_submit_carries_nothing_but_its_text(gateway, extra, via):
     """An allowlist (``agent_guard.AGENT_SUBMIT_PARAMS``), not a list of what is refused: any other key is 4033,
     whatever its value, and nothing runs."""
     before = len(gateway.db.get_messages(KEY, include_inactive=True))
-    response = _dispatch(_agent(gateway), "prompt.submit", {"session_id": SID, "text": "marker reply", **extra})
+    response = VIA[via](_agent(gateway), "prompt.submit", {"session_id": SID, "text": "marker reply", **extra})
     assert response.get("error", {}).get("code") == 4033, response
     assert "agent connected through MCP" in response["error"]["message"]
     assert gateway.session.get("running") is False and gateway.agent.texts == []
@@ -208,8 +266,8 @@ def test_the_gateways_own_dispatch_on_an_agents_connection_is_not_the_agents_sub
     assert _until(lambda: "marker internal" in gateway.agent.texts)
 
 
-def test_a_relay_into_a_live_bot_chat_on_an_agents_connection_queues_unattributed(gateway):
-    """The relay's own submit into a live Bot Chat (``methods_bot_relay``: ``queued``, a ``DeliveryAuthor``, under
+def test_the_internal_dispatch_exemption_holds_for_the_relays_submit_on_an_agents_connection(gateway):
+    """``_INTERNAL_DISPATCH`` semantics: the relay's own submit into a live Bot Chat (``methods_bot_relay``: ``queued``, a ``DeliveryAuthor``, under
     ``_internal_dispatch``) with an agent's connection current: still the gateway's, so it queues behind the running
     turn as the relayed bot's, names neither the agent nor its person, and pins no connection."""
     from tools.bot_relay import DeliveryAuthor
@@ -294,7 +352,8 @@ def test_what_an_agent_may_send_to_each_method_is_pinned():
     ("client.capabilities", {"server_requests": True, "confirm": ["plain"]}),
 ], ids=["messages", "hidden", "parent", "room_plumbing", "model", "create_close_on_disconnect",
         "follow_profile_config", "resume_close_on_disconnect", "eager_build", "source", "confirm"])
-def test_an_agent_may_send_only_what_the_bridge_sends(gateway, monkeypatch, method, params):
+@pytest.mark.parametrize("via", sorted(VIA))
+def test_an_agent_may_send_only_what_the_bridge_sends(gateway, monkeypatch, method, params, via):
     """Past the bridge: the handler itself refuses an agent any key outside ``AGENT_PARAMS`` (4033), before it
     creates, resumes or records anything."""
     from tui_gateway import server_requests
@@ -306,7 +365,7 @@ def test_an_agent_may_send_only_what_the_bridge_sends(gateway, monkeypatch, meth
     real_advertise = server_requests.advertise
     monkeypatch.setattr(server_requests, "advertise",
                         lambda *a, **k: advertised.append(a) or real_advertise(*a, **k))
-    response = _dispatch(gateway.connect(), method, params)
+    response = VIA[via](gateway.connect(), method, params)
     assert response.get("error", {}).get("code") == 4033, response
     assert "agent connected through MCP" in response["error"]["message"]
     assert created == [] and advertised == [] and server._sessions == sessions_before

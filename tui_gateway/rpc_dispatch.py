@@ -19,6 +19,11 @@ def _handle_admitted_request(req: dict) -> dict | None:
     if isinstance(normalized, dict):
         return normalized
     rid, method, params = normalized
+    # An agent acting through MCP reaches only the methods and keys the bridge uses (``agent_guard``); the
+    # gateway's own in-process calls go through ``_methods`` directly and never pass here.
+    from tui_gateway.agent_guard import dispatch_refusal
+    if (refused := dispatch_refusal(rid, method, params)) is not None:
+        return refused
     if not (fn := _methods.get(method)):
         return _err(rid, -32601, f"unknown method: {method} — the client and the Hermes backend are out of sync "
                     "(different versions); run `hermes update` and restart both")

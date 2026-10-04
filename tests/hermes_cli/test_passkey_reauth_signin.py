@@ -389,7 +389,7 @@ def _spray_id(n: int) -> str:
     return base64.urlsafe_b64encode(n.to_bytes(16, "big")).decode().rstrip("=")
 
 
-@pytest.mark.parametrize("route", ["web", "native"])
+@pytest.mark.parametrize("route", ["web", "native", "native_no_provider"])
 def test_spraying_well_formed_ids_hits_the_per_address_ceiling(gw, monkeypatch, route):
     """Every refused id costs a config read, a store read and an audit line; random well-formed ids each have
     a fresh per-grant budget, so the per-address ceiling (checked first) is what stops a spray."""
@@ -403,15 +403,63 @@ def test_spraying_well_formed_ids_hits_the_per_address_ceiling(gw, monkeypatch, 
         if route == "web":
             return gw.web_login(_spray_id(n))
         _verifier, challenge = make_pkce()
-        return authorize(gw.client, challenge, reauth=_spray_id(n), provider="idp")
+        if route == "native":
+            return authorize(gw.client, challenge, reauth=_spray_id(n), provider="idp")
+        return authorize(gw.client, challenge, reauth=_spray_id(n))  # the grant names the provider
 
     assert [attempt(n).status_code for n in range(ceiling)] == [400] * ceiling
     refused = len(audit_lines("passkey_reauth_refused"))
-    statuses = [attempt(ceiling + n).status_code for n in range(5)]
-    assert statuses == [429] * 5
+    reads_before = len(reads)
+    answers = [attempt(ceiling + n) for n in range(5)]
+    assert [a.status_code for a in answers] == [429] * 5
+    assert all(0 < int(a.headers["retry-after"]) <= 600 for a in answers)
     assert len(audit_lines("passkey_reauth_refused")) == refused  # no more log lines, no more reads
-    assert len(reads) == ceiling
+    assert len(reads) == reads_before and reads_before >= ceiling
     assert gw.idp.starts == []
+    # Past the ceiling even a valid grant from the same address waits for the window (codes still work).
+    if route == "web":
+        grant_id = gw.open_web()
+        r = gw.web_login(grant_id)
+    else:
+        grant_id = gw.open_native()
+        _verifier, challenge = make_pkce()
+        r = authorize(gw.client, challenge, reauth=grant_id, **({"provider": "idp"} if route == "native" else {}))
+    assert r.status_code == 429 and int(r.headers["retry-after"]) > 0
+    assert gw.state(grant_id) == ("open", "")
+
+
+def test_a_found_grant_gives_its_slots_back(gw):
+    """Only refusals count: a sign-in start that finds its grant gives back the slots it reserved."""
+    for _ in range(reauth.REFUSALS_PER_GRANT.max_events + 5):
+        grant_id = gw.open_web()
+        assert gw.web_login(grant_id).status_code == 302
+    buckets = list(reauth.REFUSALS_PER_ADDRESS._buckets.values())
+    assert buckets and all(not b.events for b in buckets)  # reserved each time, all given back
+
+
+def test_concurrent_attempts_never_overshoot_the_ceiling(monkeypatch):
+    """Check and count are one step: a burst of concurrent attempts from one address is allowed exactly as
+    often as the ceiling has room."""
+    import threading
+
+    from hermes_cli.dashboard_auth.rate_limit import SlidingWindowLimiter
+
+    monkeypatch.setattr(reauth, "REFUSALS_PER_ADDRESS", SlidingWindowLimiter(10, 600))
+    monkeypatch.setattr(reauth, "REFUSALS_PER_GRANT", SlidingWindowLimiter(1000, 600))
+    barrier, results = threading.Barrier(40), []
+
+    def go(n: int):
+        barrier.wait()
+        results.append(reauth.begin_attempt("198.51.100.7", _spray_id(n)).allowed)
+
+    threads = [threading.Thread(target=go, args=(n,)) for n in range(40)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert sorted(results) == [False] * 30 + [True] * 10
+    attempt = reauth.begin_attempt("198.51.100.7", _spray_id(99))
+    assert not attempt.allowed and 0 < attempt.retry_after <= 600
 
 
 def test_malformed_ids_count_only_against_the_ceiling(gw):

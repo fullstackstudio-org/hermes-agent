@@ -44,3 +44,18 @@ def test_a_key_is_told_it_was_refused_once_per_window(monkeypatch):
 
     assert verdicts == [Verdict.REFUSED, Verdict.REFUSED_AGAIN, Verdict.REFUSED_AGAIN]
     assert later == [Verdict.ALLOWED, Verdict.REFUSED]
+
+
+def test_reserve_counts_in_one_step_and_release_gives_the_slot_back(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(rate_limit.time, "monotonic", lambda: now[0])
+    limiter = SlidingWindowLimiter(2, 60.0)
+    first = limiter.reserve("k")
+    now[0] += 10
+    second = limiter.reserve("k")
+    assert first is not None and second is not None and limiter.reserve("k") is None
+    assert limiter.retry_after("k") == 50  # the first event leaves the window in 50 s
+    limiter.release("k", second)
+    assert limiter.retry_after("k") == 0 and limiter.reserve("k") is not None
+    limiter.release("k", 12345.0)  # unknown stamp: no-op
+    assert limiter.retry_after("other") == 0

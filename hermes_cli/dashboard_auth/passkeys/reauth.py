@@ -46,14 +46,17 @@ _log = logging.getLogger(__name__)
 _GRANT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{22}$")
 
 #: Refusals of a ``reauth`` parameter on the public sign-in routes. A refused check costs a config read, a
-#: store read and an audit line (also while the level is off), so two budgets apply, both checked before
-#: anything is read:
+#: store read and an audit line (also while the level is off), so two budgets apply, both reserved before
+#: anything is read (:func:`begin_attempt`: check and count in one step, the slot given back when the grant
+#: is found, so concurrent requests cannot overshoot either budget):
 #:
 #: - per address (:data:`REFUSALS_PER_ADDRESS`), checked FIRST: a wide ceiling on every refusal from one
 #:   address, so spraying random well-formed ids ends in 429 instead of costing reads and log lines forever;
 #: - per address AND grant id (:data:`REFUSALS_PER_GRANT`): the narrow budget, so one client behind a shared
 #:   address (a proxy, a NAT) retrying a dead grant does not use up the ceiling's room for anybody else's
-#:   grant long before the ceiling is reached. A malformed id is not counted here (it costs no store read).
+#:   grant long before the ceiling is reached. That protection holds only below the ceiling: once the
+#:   address has used it up, every grant from that address gets 429 until the window frees a slot. A
+#:   malformed id is not counted here (it costs no store read).
 #:
 #: Grant ids are 128-bit random, so trying other ids learns nothing either way.
 REFUSALS_PER_ADDRESS = SlidingWindowLimiter(200, 600)
@@ -175,18 +178,37 @@ def _refusal_key(ip: str, grant_id: str) -> str:
     return f"{ip}|{grant_id}"
 
 
-def refusals_exhausted(ip: str, grant_id: str) -> bool:
-    """Whether this address must get 429 for *grant_id* before anything is read: its ceiling for all
-    refusals is used up (checked first), or its budget for this well-formed id is."""
-    if REFUSALS_PER_ADDRESS.exhausted(ip):
-        return True
-    return is_grant_id(grant_id) and REFUSALS_PER_GRANT.exhausted(_refusal_key(ip, grant_id))
+@dataclass
+class Attempt:
+    """One ``reauth`` check on a public sign-in route, holding a reserved slot in each refusal budget that
+    applies. ``allowed`` False: answer 429 with ``retry_after`` seconds, nothing was reserved. A check that
+    found the grant gives its slots back with :meth:`succeeded`; a refusal keeps them (it was counted)."""
+
+    allowed: bool
+    retry_after: int = 0
+    _slots: list = field(default_factory=list, repr=False)
+
+    def succeeded(self) -> None:
+        for limiter, key, stamp in self._slots:
+            limiter.release(key, stamp)
+        self._slots.clear()
 
 
-def _count_refusal(ip: str, grant_id: str) -> None:
-    REFUSALS_PER_ADDRESS.check(ip)
+def begin_attempt(ip: str, grant_id: str) -> Attempt:
+    """Reserve this attempt in the per-address ceiling (first) and, for a well-formed id, in the per-grant
+    budget, before anything is read. Each reservation checks and counts atomically."""
+    stamp = REFUSALS_PER_ADDRESS.reserve(ip)
+    if stamp is None:
+        return Attempt(allowed=False, retry_after=REFUSALS_PER_ADDRESS.retry_after(ip))
+    slots = [(REFUSALS_PER_ADDRESS, ip, stamp)]
     if is_grant_id(grant_id):
-        REFUSALS_PER_GRANT.check(_refusal_key(ip, grant_id))
+        key = _refusal_key(ip, grant_id)
+        grant_stamp = REFUSALS_PER_GRANT.reserve(key)
+        if grant_stamp is None:
+            REFUSALS_PER_ADDRESS.release(ip, stamp)
+            return Attempt(allowed=False, retry_after=REFUSALS_PER_GRANT.retry_after(key))
+        slots.append((REFUSALS_PER_GRANT, key, grant_stamp))
+    return Attempt(allowed=True, _slots=slots)
 
 
 def _refused(*, grant_id: str, provider: str, client: str, reason: str, ip: str, where: str,
@@ -198,7 +220,7 @@ def _refused(*, grant_id: str, provider: str, client: str, reason: str, ip: str,
 def grant_for_login(grant_id: str, *, provider: Any, client: str, secret: Optional[str], ip: str = "",
                     store: Optional[PasskeyStore] = None, cfg: Any = None) -> Optional[Grant]:
     """The open, unexpired *client* grant a sign-in with *provider* (a provider object) may start for, or None
-    (audited and counted against the refusal budgets). A ``web`` grant needs this browser's cookie
+    (audited; the caller counts it with the :class:`Attempt` it reserved). A ``web`` grant needs this browser's cookie
     *secret*; a ``native`` one is looked up without a secret and must be a native grant. Never raises."""
     name = str(getattr(provider, "name", "") or "")
     reason = ""
@@ -223,7 +245,6 @@ def grant_for_login(grant_id: str, *, provider: Any, client: str, secret: Option
         elif grant is not None and grant.client != client:
             grant, reason = None, "client_mismatch"
     if grant is None:
-        _count_refusal(ip, grant_id)
         _refused(grant_id=grant_id if is_grant_id(grant_id) else "", provider=name, client=client, reason=reason,
                  ip=ip, where="start")
     return grant
@@ -244,7 +265,6 @@ def native_grant_for_login(grant_id: str, *, providers: list, ip: str = "",
                     return provider, grant
         except StoreError:
             _log.warning("passkey self-enrolment: the passkey store is unavailable", exc_info=False)
-    _count_refusal(ip, grant_id)
     _refused(grant_id=grant_id if is_grant_id(grant_id) else "", provider="", client="native",
              reason="unknown" if is_grant_id(grant_id) else "malformed", ip=ip, where="start")
     return None, None
@@ -309,7 +329,7 @@ def reset_for_tests() -> None:
     REFUSALS_PER_GRANT.reset()
 
 
-__all__ = ["EXPIRED_TEXT", "Opened", "Outcome", "Policy", "REFUSALS_PER_ADDRESS", "REFUSALS_PER_GRANT",
+__all__ = ["Attempt", "EXPIRED_TEXT", "Opened", "Outcome", "Policy", "REFUSALS_PER_ADDRESS", "REFUSALS_PER_GRANT",
            "complete",
-           "grant_for_login", "is_grant_id", "native_grant_for_login", "open_grant", "policy",
-           "provider_reauth_reason", "refusals_exhausted", "reset_for_tests", "session_user"]
+           "grant_for_login", "is_grant_id", "native_grant_for_login", "open_grant", "policy", "begin_attempt",
+           "provider_reauth_reason", "reset_for_tests", "session_user"]

@@ -73,6 +73,53 @@ class SlidingWindowLimiter:
             bucket = self._buckets.get(key)
             return bucket is not None and sum(1 for t in bucket.events if t >= cutoff) >= self.max_events
 
+    def reserve(self, key: str) -> "float | None":
+        """Check and record in one step: the stamp of the event recorded for ``key``, or None when its
+        budget is used up (nothing recorded). A caller that turns out not to need the slot gives it back
+        with :meth:`release`, so a burst of concurrent callers can never overshoot the budget."""
+        key = key or "_unknown_"
+        now = time.monotonic()
+        cutoff = now - self.window_sec
+        with self._lock:
+            self._sweep(cutoff, now)
+            bucket = self._buckets.get(key)
+            if bucket is None:
+                bucket = self._buckets[key] = _Bucket()
+            while bucket.events and bucket.events[0] < cutoff:
+                bucket.events.popleft()
+            if len(bucket.events) >= self.max_events:
+                return None
+            bucket.events.append(now)
+            self._buckets.move_to_end(key)
+            while len(self._buckets) > self.max_keys:
+                self._buckets.popitem(last=False)
+            return now
+
+    def release(self, key: str, stamp: float) -> None:
+        """Give back the slot :meth:`reserve` recorded as *stamp* for ``key`` (no-op when it is gone)."""
+        key = key or "_unknown_"
+        with self._lock:
+            bucket = self._buckets.get(key)
+            if bucket is not None:
+                try:
+                    bucket.events.remove(stamp)
+                except ValueError:
+                    pass
+
+    def retry_after(self, key: str) -> int:
+        """Whole seconds until ``key`` has budget again (0 when it has some now)."""
+        key = key or "_unknown_"
+        now = time.monotonic()
+        cutoff = now - self.window_sec
+        with self._lock:
+            bucket = self._buckets.get(key)
+            live = sorted(t for t in bucket.events if t >= cutoff) if bucket is not None else []
+            if len(live) < self.max_events:
+                return 0
+            # The slot frees when the event that leaves the window first does.
+            oldest = live[len(live) - self.max_events]
+            return max(1, int(oldest + self.window_sec - now + 0.999))
+
     def _sweep(self, cutoff: float, now: float) -> None:
         """Drop buckets from the front whose last event left the window and that hold no note."""
         while self._buckets:

@@ -211,13 +211,19 @@ def _start_upstream_login(request: Request, p, *, audit_failure: bool, extra_pkc
 # --- Re-authentication grants (passkey self-enrolment) -----------------------
 # One helper per route; each imports the passkey package only when a ``reauth`` value is present.
 
-def _reauth_page(status_code: int, text: str) -> HTMLResponse:
-    """A person-facing refusal: never a redirect, no cookie (the route is public)."""
+def _reauth_page(status_code: int, text: str, *, retry_after: int = 0) -> HTMLResponse:
+    """A person-facing refusal: never a redirect, no cookie (the route is public). A 429 says when to
+    retry (``Retry-After``, the seconds until the refusal budget frees a slot)."""
     body = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
             "<title>Passkey set-up</title></head><body><main><p>"
             f"{html.escape(text)}</p></main></body></html>")
-    return HTMLResponse(body, status_code=status_code, headers=_NO_STORE)
+    headers = {**_NO_STORE, **({"Retry-After": str(retry_after)} if retry_after else {})}
+    return HTMLResponse(body, status_code=status_code, headers=headers)
+
+
+def _reauth_too_many(attempt) -> HTMLResponse:
+    return _reauth_page(429, "Too many attempts. Try again shortly.", retry_after=attempt.retry_after)
 
 
 async def _reauth_start_refusal(request: Request, p, grant_id: str, *, client: str):
@@ -226,12 +232,16 @@ async def _reauth_start_refusal(request: Request, p, grant_id: str, *, client: s
     browser's ``hermes_reauth`` cookie; a link to someone else's grant completes nothing."""
     from hermes_cli.dashboard_auth.passkeys import reauth
     ip = _client_ip(request)
-    if reauth.refusals_exhausted(ip, grant_id):
-        return _reauth_page(429, "Too many attempts. Try again shortly.")
+    attempt = reauth.begin_attempt(ip, grant_id)  # reserved before anything is read
+    if not attempt.allowed:
+        return _reauth_too_many(attempt)
     secret = read_reauth_cookie(request) if client == "web" else None
     grant = await run_in_threadpool(
         reauth.grant_for_login, grant_id, provider=p, client=client, secret=secret, ip=ip)
-    return None if grant is not None else _reauth_page(400, reauth.EXPIRED_TEXT)
+    if grant is None:
+        return _reauth_page(400, reauth.EXPIRED_TEXT)
+    attempt.succeeded()
+    return None
 
 
 class _ReauthRefused(Exception):
@@ -253,12 +263,17 @@ async def _native_reauth_provider(request: Request, provider: str, grant_id: str
         refusal = await _reauth_start_refusal(request, p, grant_id, client="native")
     else:
         ip = _client_ip(request)
-        if reauth.refusals_exhausted(ip, grant_id):
-            refusal = _reauth_page(429, "Too many attempts. Try again shortly.")
+        attempt = reauth.begin_attempt(ip, grant_id)  # reserved before anything is read
+        if not attempt.allowed:
+            refusal = _reauth_too_many(attempt)
         else:
             p, _grant = await run_in_threadpool(
                 reauth.native_grant_for_login, grant_id, providers=list_session_providers(), ip=ip)
-            refusal = None if p is not None else _reauth_page(400, reauth.EXPIRED_TEXT)
+            if p is None:
+                refusal = _reauth_page(400, reauth.EXPIRED_TEXT)
+            else:
+                attempt.succeeded()
+                refusal = None
     if refusal is not None:
         raise _ReauthRefused(refusal)
     return p

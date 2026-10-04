@@ -165,7 +165,9 @@ Chrome and Firefox keep that cookie, Safari does not: there adding a passkey thi
 still work). Behind a reverse-proxy path prefix the cookie is still set for the whole host (`Path=/`, which
 the `__Host-` prefix requires), so other applications served on the same host under other paths receive it
 too; it is HttpOnly and only binds a 10-minute grant, but serve the gateway on a host of its own if those
-applications are not trusted. It needs a provider that
+applications are not trusted. The sign-in that starts self-enrolment limits failed attempts per network
+address: a "Too many attempts" answer (429) can come from other people behind the same address (an office
+network or a shared proxy) and clears within ten minutes; enrolment codes keep working meanwhile. It needs a provider that
 can force a fresh sign-in: the password provider (`basic`) and OIDC (`self_hosted`, which asks the
 identity provider for `prompt=login` and `max_age=0` and checks the returned `auth_time`). Nous cannot,
 so people signed in with Nous need a code.

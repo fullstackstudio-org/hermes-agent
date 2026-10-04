@@ -43,10 +43,13 @@ def _session_client_answers_requests(sid: str) -> bool:
     client attached to the session is a build that never sent ``client.capabilities`` (Desktop / dashboard
     update separately from this backend; the stdio TUI ships with it). No attached client is still True — the
     question waits in ``open_requests`` for the reconnect replay. Compute-host relays and other non-client
-    transports never count."""
+    transports never count. An MCP agent's connection (``mcp_bridge.AgentTransport``) is a client: it always
+    advertises, so a session it alone is attached to waits for the person's app (the agent may answer clarify)."""
     from tui_gateway import server_requests
+    from tui_gateway.mcp_bridge.transport import AgentTransport
     from tui_gateway.ws import WSTransport
-    clients = [peer for peer in _session_live_transports(_sessions.get(sid)) if isinstance(peer, WSTransport)]
+    clients = [peer for peer in _session_live_transports(_sessions.get(sid))
+               if isinstance(peer, (WSTransport, AgentTransport))]
     return not clients or any(server_requests.answers_requests(peer) for peer in clients)
 
 

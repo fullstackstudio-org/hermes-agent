@@ -120,7 +120,7 @@ withdrawn (`request.cancel {reason: too_many_attempts}`) and the agent is told i
 | `field:<id>:<problem>` | `input.form` | §4. |
 | `files:too_many` | `input.file` | More files than `upload.max_files`, or more than one without `multiple`. |
 | `files:too_large` | `input.file` | The files' `bytes` together exceed `upload.max_total_bytes`. |
-| `file:<n>:outside_dir` | `input.file` | File `n` (0-based) is not under `upload.dir` (§5). |
+| `file:<n>:outside_dir` | `input.file` | File `n` (0-based) is not directly in `upload.dir` (§5). |
 | `file:<n>:too_large` | `input.file` | File `n` declares more `bytes` than `upload.max_bytes`. |
 | `text:not_verbatim` | `review.draft` | The approved text contains something that cannot be shown as it is (§6). |
 | `text:edited` | `review.draft` | The text differs from the draft while `editable` is false. |
@@ -230,9 +230,10 @@ gateway's existing HTTP upload route, with the credentials it already uses for a
 {"status": "answered", "files": [{"path": "<upload.dir>/3f9c2a7b1d4e8f60-receipt.jpg", "name": "receipt.jpg", "mime": "image/jpeg", "bytes": 482113, "sha256": "<64 lowercase hex>"}], "text": "optional transcript"}
 ```
 
-- `path` is absolute, at most 4,096 characters, and under `upload.dir`: after resolving `.` and `..`
-  segments lexically it starts with `upload.dir` followed by `/` (a sibling directory sharing a prefix
-  is not under it).
+- `path` is absolute, at most 4,096 characters, and DIRECTLY in `upload.dir`: after resolving `.`, `..`
+  and empty segments lexically (in both), its parent is `upload.dir` and its last segment is a name (not
+  empty, `.` or `..`). A sibling directory sharing a prefix, `upload.dir` itself and a file in a
+  subdirectory of it are all `outside_dir`: the layout is flat.
 - `bytes` (a JSON integer) and `sha256` describe the bytes as uploaded (after metadata stripping).
 - `upload.max_bytes` bounds EACH file; `upload.max_total_bytes` bounds all files of the answer
   together. A client checks both before uploading.

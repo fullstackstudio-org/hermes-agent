@@ -337,13 +337,16 @@ def lexical_path(path: str) -> str | None:
     return "/" + "/".join(parts)
 
 
-def under_dir(path: str, directory: str) -> bool:
-    """Whether *path* is lexically under *directory* (``<directory>/`` is a prefix of it once both have had their
-    ``.`` and ``..`` segments resolved): a sibling that merely shares a prefix is not."""
+def directly_in_dir(path: str, directory: str) -> bool:
+    """Whether *path* names an entry DIRECTLY in *directory* once both have had their ``.``, ``..`` and empty
+    segments resolved lexically: its parent is the directory and its last segment is a name (the upload layout is
+    flat, ``<upload.dir>/<16 hex>-<name>``). A sibling that merely shares a prefix, the directory itself and a file
+    in a subdirectory are not. ``interactive.verify_files`` applies the same rule on disk."""
     norm, base = lexical_path(path), lexical_path(directory)
     if norm is None or base is None or norm == base:
         return False
-    return norm.startswith(base.rstrip("/") + "/")
+    parent, name = posixpath.split(norm)
+    return parent == base and name not in ("", ".", "..")
 
 
 def _file_problem(params: dict, files: list[dict]) -> str | None:
@@ -352,7 +355,7 @@ def _file_problem(params: dict, files: list[dict]) -> str | None:
     if len(files) > limit:
         return "files:too_many"
     for number, file in enumerate(files):
-        if not under_dir(str(file.get("path")), str(upload.get("dir"))):
+        if not directly_in_dir(str(file.get("path")), str(upload.get("dir"))):
             return f"file:{number}:outside_dir"
         if int(file.get("bytes")) > int(upload.get("max_bytes")):
             return f"file:{number}:too_large"

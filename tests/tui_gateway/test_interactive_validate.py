@@ -280,6 +280,8 @@ def test_paths_under_the_dir_pass_after_lexical_resolution(path):
     DIR, DIR + "/", DIR + "/..", DIR + "/../x.txt", DIR + "/../../etc/passwd",
     DIR + "-evil/x.txt", "/home/ada/work/uploads/hermie/x.txt", "/x", "/..", "//",
     "/home/ada/work/uploads/hermie/2026-10-04x/x.txt",
+    # not DIRECTLY in the dir: the layout is flat, so a subdirectory is refused while the request is open
+    DIR + "/sub/0123456789abcdef-a.txt", DIR + "/./sub/./x.txt", DIR + "/a/b/../x.txt",
 ])
 def test_paths_outside_the_dir_are_refused(path):
     assert v.validate_answer("input.file", _file_params(), _files((path, 10))) == "file:0:outside_dir"

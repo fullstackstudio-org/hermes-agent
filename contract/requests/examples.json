@@ -1403,6 +1403,25 @@
           "note": "A shared string prefix is not \"under\"."
         },
         {
+          "name": "path_in_subdir",
+          "request": "req_file_receipt",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/scans/3f9c2a7b1d4e8f60-receipt.jpg",
+                "name": "receipt.jpg",
+                "mime": "image/jpeg",
+                "bytes": 482113,
+                "sha256": "fd16e784e91ab960e4fb349d8cc179c9e5891ef6d767c7620e2560a59ba0bc2f"
+              }
+            ]
+          },
+          "reason": "file:0:outside_dir",
+          "note": "A file must sit directly in upload.dir (the layout is flat); a subdirectory is not."
+        },
+        {
           "name": "two_files_not_multiple",
           "request": "req_file_receipt",
           "layer": "validator",

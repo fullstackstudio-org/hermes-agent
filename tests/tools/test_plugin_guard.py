@@ -957,6 +957,122 @@ class TestJsLexerKeepsWhatItCanDecide:
                 pass
 
 
+class TestNumericComputedKeys:
+    """HERM-262: a call result indexed by a key that is always a number (``vt(n)[Number(e.slice(9))]``,
+    the web client's copied link) names an index and can never reach ``constructor`` or ``exec``,
+    any more than ``f()[0]`` can. One such shape in one file made the whole plugin "able to run
+    code", so every ``sudo`` key of the wire protocol in every other file was ``high`` and the
+    verdict ``caution``. A key from string data, a numeric builtin the plugin rebinds, or a
+    reflective receiver keeps the old rule."""
+
+    BUNDLE = TestMinifiedBundleSudoData.BUNDLE
+    NOISE = TestMinifiedBundleSudoData.NOISE
+    _scan = TestMinifiedBundleSudoData._scan
+    SUDO = 'const dm=Object.freeze({secret:"secret",sudo:"sudo"});function a(t){switch(t){case"sudo":return 1}}'
+    CHUNK = "dashboard/app/assets/ChatItem-BzDDSlSy.js"
+    # The copied-link action before the `.at()` workaround, and the minifier's other spelling of it.
+    COPY_LINK = 'default:{if(!e.startsWith("copyLink:"))return null;const r=vt(n)[Number(e.slice(9))];return r}'
+    COPY_LINK_CONST = ('default:{if(!e.startsWith("copyLink:"))return null;const s=Number(e.slice(9)),'
+                       'r=Number.isSafeInteger(s)&&s>=0?vt(n)[s]:void 0;return r?{kind:"copyLink",href:r}:null}')
+
+    def _chunk(self, body: str) -> str:
+        return f"function Ce(e,n){{switch(e){{case\"copy\":return null;{body}}}}}export{{Ce as m}};\n"
+
+    @pytest.mark.parametrize("body", [COPY_LINK, COPY_LINK_CONST])
+    def test_a_numeric_key_in_another_file_leaves_sudo_data_low(self, tmp_path, body):
+        sev, result = self._scan(tmp_path, [self.SUDO], extra={self.CHUNK: self._chunk(body)})
+        assert sev == {1: "low"}
+        assert result.verdict == "safe"
+        assert should_allow_plugin_install(result)[0] is True
+
+    @pytest.mark.parametrize("shape", [
+        "const r=vt(n)[Number(e.slice(9))];",
+        "const r=vt(n)[parseInt(e,10)],q=g(a)[parseFloat(b)];",
+        "const r=t.split(\"/\")[e.length-1],q=g()[i|0],w=h()[-1],z=f(a)[(i+1)%n],y=k()[~~x];",
+        "const s=Number(e.slice(9)),r=vt(n)[s];",
+        "const s=e.length-1;const r=vt(n)[s];",
+        "const q=[1,2].map(Number),r=vt(n)[Number(e)],m=Number.isSafeInteger(r)&&Number.parseInt(\"1\");",
+        "class Vd{with(e,n){this.p.set(e,n)}}const r=vt(n)[Number(e)];",    # a method named with
+        'const gn=["Object","Function","Number","parseInt","parseFloat"],r=vt(n)[Number(e)];',
+    ])
+    def test_numeric_keys_on_call_results_are_not_doubts(self, tmp_path, shape):
+        sev, result = self._scan(tmp_path, [self.SUDO + shape])
+        assert sev == {1: "low"}, shape
+        assert result.verdict == "safe"
+
+    @pytest.mark.parametrize("shape", [
+        # the key is string data: it can spell "constructor"
+        "vt(n)[e.slice(9)](c)();",
+        "const s=e.slice(9);vt(n)[s](c)();",
+        "let s=Number(e);s=e;vt(n)[s](c)();",
+        "vt(n)[a+1](c)();",
+        "vt(n)[a?b:1](c)();",
+        "vt(n)[a||1](c)();",
+        "vt(n)[(0,e)](c)();",
+        "vt(n)[typeof e](c)();",
+        "vt(n)[Number(e)+e](c)();",
+        "vt(n)[n=e](c)();",
+        "function*g(){vt(n)[yield-1](c)()}",
+        # the name the key reads may be bound again for it
+        "const s=Number(e);with(o)vt(n)[s](c)();",
+        "const s=Number(e),f=s=>vt(n)[s](c)();",
+        "const s=Number(e);for(const s of a)vt(n)[s](c)();",
+        "const s=Number(e);{vt(n)[s](c)()}",
+        # a numeric builtin the plugin rebinds
+        'function Number(){return f}vt(n)[Number(e)](c)();',
+        'window.Number=()=>f;vt(n)[Number(e)](c)();',
+        'Object.defineProperty(globalThis,"Number",{value:f});vt(n)[Number(e)](c)();',
+        'Object.assign(globalThis,{Number(){return f}});vt(n)[Number(e)](c)();',
+        "Object.assign(globalThis,{parseInt:f});vt(n)[parseInt(e)](c)();",
+        "(function(Number){vt(n)[Number(e)](c)()})(f);",
+        "with(o)Number(e);vt(n)[Number(e)](c)();",
+        # a reflective receiver: an index into a list of property names
+        "Object.getOwnPropertyNames(p)[Number(e)];",
+        "Reflect.ownKeys(f)[n-1];",
+        "x[\"getOwnPropertyNames\"](p)[n-1];",
+        "globalThis.f(p)[n-1];",
+    ])
+    def test_string_keys_rebound_builtins_and_reflective_receivers_keep_high(self, tmp_path, shape):
+        sev, result = self._scan(tmp_path, [self.SUDO + shape])
+        assert sev == {1: "high"}, shape
+        assert result.verdict != "safe"
+
+    def test_a_const_split_over_lines_is_not_followed(self, tmp_path):
+        """No line break between ``const`` and the end of its value: an automatic semicolon could
+        cut it short (``const s=a`` / ``b-1``)."""
+        sev, _ = self._scan(tmp_path, raw=f"{self.SUDO}const s=a\nb-1;vt(n)[s](c)();\n")
+        assert sev == {1: "high"}
+
+    @pytest.mark.parametrize("path, content", [
+        ("dashboard/app/assets/num.js", 'globalThis.Number=()=>f;\n'),
+        ("dashboard/app/assets/num.js", 'Reflect.set(globalThis,"parseInt",f);\n'),
+        ("dashboard/app/assets/num.js", 'const g=globalThis;g["Number"]=f;\n'),
+        ("dashboard/src/num.ts", "window.Number = (s: string) => s\n"),
+        ("dashboard/app/num.html", '<script>window.Number=f</script>\n'),
+    ])
+    def test_a_numeric_builtin_rebound_in_another_file_keeps_high(self, tmp_path, path, content):
+        extra = {self.CHUNK: self._chunk(self.COPY_LINK), path: content}
+        sev, result = self._scan(tmp_path, [self.SUDO], extra=extra)
+        assert sev == {1: "high"}, path
+        assert result.verdict != "safe"
+
+    def test_many_numeric_keys_are_judged_in_linear_time(self, tmp_path):
+        """Each key is read by its top-level tokens and a ``const`` is found through an index: a
+        bundle of thousands of them must not walk the file once per key."""
+        import time
+
+        body = "".join(f"{{const s=Number(e),r=vt(n)[s]}}const s{i}=e.length-1;vt(n)[s{i}];g(n)[q{i}];"
+                       for i in range(20_000))
+        plugin = tmp_path / "big"
+        plugin.mkdir()
+        (plugin / "big.js").write_text(body + "\n", encoding="utf-8")
+        start = time.monotonic()
+        runs = JsSinkInventory(plugin).anything_runs()
+        elapsed = time.monotonic() - start
+        assert runs is True    # g(n)[q…]: a key nothing declares
+        assert elapsed < 15.0, elapsed    # about 2 s on a laptop; a walk back per key takes hours
+
+
 class TestMinifiedBundleRegexExec:
     """``exec_string`` (``exec("``, HIGH) reads a script run from a string. A highlighter calls
     ``RegExp.prototype.exec`` with one (``re.exec("")``). A member ``.exec("…")`` on a regex

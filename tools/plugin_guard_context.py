@@ -276,7 +276,14 @@ def is_regex_alternation_token(finding: Finding, line: str) -> bool:
 # Reaching ``constructor`` or replacing ``exec`` indirectly is a doubt too: a ``"constructor"``
 # string anywhere, ``{constructor: F}``, ``.constructor`` on a call result, and a computed member
 # whose key is not a literal when it is indexed again, sits on a call result, a function or an
-# array, is called with a string, or is assigned on a ``prototype`` (``_computed_key_doubt``).
+# array, is called with a string, or is assigned on a ``prototype`` (``_computed_key_doubt``). A key
+# that is provably a number (``Number(…)``, ``i - 1``, a ``const`` bound to one) names an index and
+# is no doubt, as a literal ``0`` never was (``_NumericKeys``).
+#
+# The inventory answers for the whole plugin on purpose, not per file or per module graph: the
+# chunks of a web bundle share one realm, so a ``RegExp.prototype.exec`` replaced in one makes
+# every ``/re/.exec("…")`` in another a call of it, and a sink in one chunk runs data another chunk
+# hands it (a bundle's chunks usually reach each other through its entry).
 #
 # The inventory is a DENYLIST with known gaps, not a proof that nothing can run. It only ever
 # decides whether ``sudo_usage`` and a member ``exec_string`` may drop to ``low``; every other
@@ -293,6 +300,11 @@ def is_regex_alternation_token(finding: Finding, line: str) -> bool:
 #   - A sink built without any of the names above, and a value that reaches such a disguised
 #     call through a variable, cannot be seen. So "can run it" means "can run it by a route the
 #     inventory names".
+#   - A numeric key trusts ``Number``/``parseInt``/``parseFloat`` unless the plugin rebinds them by
+#     a route the checks name (a declaration or parameter, a function or method of that name,
+#     ``x.Number =``, a quoted name in an argument list, a computed member or an object key, a
+#     ``with`` statement). A global object reached through an alias and a built name
+#     (``g[k] = f``) is not seen, as ``g["Fun"+"ction"]`` is not.
 #   - This rule is not the only demotion: the per-line rule (5) already lowers a whole-literal
 #     ``"sudo"`` on a line that executes nothing to ``medium``, with no inventory at all.
 JS_DATA_PATTERN_IDS = {"sudo_usage", "exec_string"}
@@ -779,12 +791,194 @@ def _literal_value(tok: _Tok) -> Optional[str]:
     return None
 
 
-def _computed_key_doubt(toks: list, k: int, closer_of: dict) -> bool:
+# A key that is always a number (or a BigInt) names an index, never ``constructor`` or ``exec``:
+# ``f()[Number(s)]`` can reach no more than ``f()[0]``, which was never a doubt. Proven by token:
+# ``Number(…)``/``parseInt(…)``/``parseFloat(…)`` as the whole key while no JavaScript in the plugin
+# rebinds those names (``JsSinkInventory._numeric_builtins_untouched``); an expression whose top
+# level holds only operands, ``.``/``?.``, groups, the prefixes ``-``/``~``/``!``/``typeof``/
+# ``void``/``new``/``await``/``delete``, and at least one numeric binary operator (``-``, ``*``,
+# ``/``, ``%``, ``**``, ``|``, ``&``, ``^``, ``<<``, ``>>``, ``>>>``) or a leading ``-``/``+``/
+# ``~``/``++``/``--`` (``n.length - 1``, ``i | 0``, ``-1``); or a name bound by ``const name = <one
+# of those>`` earlier in the same block, on one line, with nothing between that can bind the name
+# again for the key (``for``, ``with``, ``catch``, ``function``, ``class``, ``=>``). ``+``, ``,``,
+# ``?:``, ``||``/``&&``/``??``, assignments, comparisons, ``yield`` and every other keyword are not
+# numeric. The receiver must not name a reflective or global route (``Object.keys(o)[i - 1]``,
+# ``Reflect.ownKeys(f)[n]``, ``window``…): those keep the old rule.
+_JS_NUMERIC_BUILTINS = frozenset({"Number", "parseInt", "parseFloat"})
+_JS_NUMERIC_BINARY = frozenset({"-", "*", "/", "%", "**", "|", "&", "^", "<<", ">>", ">>>"})
+_JS_NUMERIC_PREFIX = frozenset({"-", "+", "~", "++", "--"})
+_JS_KEY_PREFIX_WORDS = frozenset({"typeof", "void", "new", "await", "delete"})
+_JS_REFLECTIVE = frozenset({
+    "Object", "Reflect", "Function", "getPrototypeOf", "getOwnPropertyNames", "getOwnPropertyDescriptor",
+    "getOwnPropertyDescriptors", "getOwnPropertySymbols", "keys", "values", "entries", "ownKeys", "fromEntries",
+    "constructor", "prototype", "__proto__", "__lookupGetter__", "__lookupSetter__", "arguments"}) | _JS_GLOBALS
+_JS_SCOPE_WORDS = frozenset({"for", "with", "catch", "function", "class"})
+
+
+_MAX_RECEIVER_TOKENS = 512    # a longer receiver (or ancestor chain) is not read: it keeps the old rule
+
+
+class _NumericKeys:
+    """Per lexed file: which computed keys are provably numbers (see above). Every walk is bounded:
+    an expression is read by its top-level tokens only, a ``const`` is found through an index
+    built once, and a receiver longer than ``_MAX_RECEIVER_TOKENS`` is not read."""
+
+    def __init__(self, toks: list, closer_of: dict, builtins_ok: bool, text: str) -> None:
+        self.toks, self.closer_of, self.builtins_ok, self.text = toks, closer_of, builtins_ok, text
+        self._next_same: Optional[list] = None
+        self._decls: dict = {}       # (depth, name) -> indices of ``const name =``, ascending
+        self._barriers: dict = {}    # depth -> indices of for/with/catch/function/class/=> there
+        self._terms: dict = {}       # declaration index -> its ``,``/``;`` at the same depth
+        self._const_memo: dict = {}
+
+    def _index(self) -> None:
+        toks = self.toks
+        n = len(toks)
+        nxt = [n] * n
+        last: dict = {}
+        for i in range(n - 1, -1, -1):
+            t = toks[i]
+            nxt[i] = last.get(t.parent, n)
+            last[t.parent] = i
+        self._next_same = nxt
+        for i, t in enumerate(toks):
+            if t.kind == "p" and t.text == "=>":
+                self._barriers.setdefault(t.parent, []).append(i)
+            elif t.kind == "id" and not _is_member_name(toks, i):
+                if t.text in _JS_SCOPE_WORDS:
+                    self._barriers.setdefault(t.parent, []).append(i)
+                elif (i >= 1 and toks[i - 1].kind == "id" and toks[i - 1].text == "const"
+                      and not _is_member_name(toks, i - 1) and i + 1 < n and _is_p(toks[i + 1], "=")):
+                    self._decls.setdefault((t.parent, t.text), []).append(i)
+                    e = nxt[i + 1]
+                    while e < n and not _is_p(toks[e], ",", ";"):
+                        e = nxt[e]
+                    self._terms[i] = e
+
+    def expression(self, lo: int, hi: int, depth: int) -> bool:
+        """``toks[lo:hi]``, one expression whose top-level tokens have parent ``depth``, always
+        evaluates to a number or a BigInt (see above). Anything it does not know answers False."""
+        toks = self.toks
+        if lo >= hi:
+            return False
+        if self._next_same is None:
+            self._index()
+        first = toks[lo]
+        if (self.builtins_ok and first.kind == "id" and first.text in _JS_NUMERIC_BUILTINS and hi - lo >= 3
+                and _is_p(toks[lo + 1], "(") and self.closer_of.get(lo + 1) == hi - 1):
+            return True
+        binary = False
+        after_operand = False    # the previous top-level token ends an operand
+        i = lo
+        while i < hi:
+            t = toks[i]
+            if t.kind == "p":
+                x = t.text
+                if x in ("(", "["):
+                    pass    # a group, or a call/index of the operand before; its closer ends an operand
+                elif x == "{":
+                    if after_operand:
+                        return False
+                elif x in (")", "]", "}"):
+                    after_operand = True
+                elif x in (".", "?."):
+                    after_operand = False
+                elif after_operand and x in _JS_NUMERIC_BINARY:
+                    binary, after_operand = True, False
+                elif i == lo and x in _JS_NUMERIC_PREFIX:
+                    pass
+                elif not after_operand and x in ("-", "~", "!"):
+                    pass
+                else:
+                    return False
+            elif t.kind == "id":
+                member = _is_member_name(toks, i)
+                if not member and t.text in _JS_KEY_PREFIX_WORDS:
+                    if after_operand:
+                        return False
+                elif after_operand and not member:
+                    return False    # two operands in a row: not one expression
+                elif not member and (t.text in _JS_KEYWORDS or t.text == "yield"):
+                    return False
+                else:
+                    after_operand = True
+            elif t.kind == "tpl":
+                after_operand = True    # a template, or a tag's call
+            else:    # num, str, re
+                if after_operand:
+                    return False
+                after_operand = True
+            i = self._next_same[i]    # the next token at this level: groups and substitutions are skipped
+        return binary or (first.kind == "p" and first.text in _JS_NUMERIC_PREFIX)
+
+    def const(self, k: int, name: str) -> bool:
+        """The key ``[name]`` at *k* reads ``const name = <numeric>`` declared earlier in the same
+        block, on one line (no automatic semicolon can cut it short), and nothing between can bind
+        ``name`` again for the key: a ``for``/``with``/``catch``/``function``/``class`` or an arrow
+        at that level. A second ``const``/``let``/``var`` of the name in the block is an early error."""
+        if self._next_same is None:
+            self._index()
+        depth = self.toks[k].parent
+        decls = self._decls.get((depth, name), [])
+        at = bisect.bisect_left(decls, k) - 1
+        if at < 0:
+            return False
+        d = decls[at]
+        barriers = self._barriers.get(depth, [])
+        b = bisect.bisect_right(barriers, d)
+        if b < len(barriers) and barriers[b] < k:
+            return False
+        e = self._terms[d]
+        if e >= k:
+            return False    # the key is inside the declaration's own value
+        if d not in self._const_memo:
+            toks = self.toks
+            self._const_memo[d] = (not any(c in self.text[toks[d - 1].start:toks[e].end] for c in "\n\r")
+                                   and self.expression(d + 2, e, depth))
+        return self._const_memo[d]
+
+    def reflective_receiver(self, k: int) -> bool:
+        """The receiver of the computed member at *k* (its member chain, calls and their
+        arguments) names ``Object``, ``Reflect``, a ``getOwnProperty…``/``keys``/``entries`` route,
+        ``prototype``, ``constructor`` or a global object, holds a string with such a name or one
+        this lexer will not decode, or is too long to read."""
+        toks = self.toks
+        depth = toks[k].parent
+        i = k - 1
+        while i > depth:
+            if k - i > _MAX_RECEIVER_TOKENS:
+                return True
+            t = toks[i]
+            if t.kind == "id" and t.text in _JS_REFLECTIVE:
+                return True
+            if t.kind == "str":
+                value = _decode_js_string(t.text)
+                if value is None or value in _JS_REFLECTIVE:
+                    return True
+            if t.parent == depth:
+                if t.kind == "id" and t.text in _JS_KEYWORDS and not _is_member_name(toks, i):
+                    return False
+                if t.kind == "p" and t.text not in (".", "?.", "(", ")", "[", "]", "{", "}"):
+                    return False
+            i -= 1
+        return False
+
+    def key(self, k: int, j: int) -> bool:
+        """The key of the computed member ``[`` at *k* (closed at *j*) is always a number and the
+        receiver names no reflective route (see above)."""
+        if self.reflective_receiver(k):
+            return False
+        if self.expression(k + 1, j, k):
+            return True
+        return j == k + 2 and self.toks[k + 1].kind == "id" and self.const(k, self.toks[k + 1].text)
+
+
+def _computed_key_doubt(toks: list, k: int, closer_of: dict, numeric: Optional[_NumericKeys] = None) -> bool:
     """The computed member ``[`` at *k* could reach ``constructor`` or replace ``exec``: its key is
-    ``"constructor"``/``"exec"`` (a string or a plain template), or its key is not a literal
-    (``"constr"+"uctor"``, ``k``, a template with substitutions) and the member is indexed again
-    (``x[a][b]``), sits on a call result, a function or an array (``f()[k]``, ``(()=>{})[k]``,
-    ``[][k]``; a plain parenthesised value ``(a ?? b)[k]`` does not count), is called with a string
+    ``"constructor"``/``"exec"`` (a string or a plain template), or its key is neither a literal
+    (``"constr"+"uctor"``, ``k``, a template with substitutions) nor provably a number
+    (``_NumericKeys``) and the member is indexed again (``x[a][b]``), sits on a call result, a
+    function or an array (``f()[k]``, ``(()=>{})[k]``, ``[][k]``; a plain parenthesised value ``(a ?? b)[k]`` does not count), is called with a string
     (``x[k]("code")``), or is assigned on a ``prototype`` (``RegExp.prototype[k] = …``)."""
     j = closer_of.get(k, -1)
     if j < 0:
@@ -793,6 +987,8 @@ def _computed_key_doubt(toks: list, k: int, closer_of: dict) -> bool:
     value = _literal_value(inner[0]) if len(inner) == 1 else None
     if value is not None:
         return value in ("constructor", "exec")
+    if numeric is not None and numeric.key(k, j):
+        return False
     after = toks[j + 1] if j + 1 < len(toks) else None
     receiver = toks[k - 1]
     if _is_p(after, "[") or _is_p(receiver, "]"):
@@ -810,13 +1006,104 @@ def _computed_key_doubt(toks: list, k: int, closer_of: dict) -> bool:
     return receiver.kind == "id" and receiver.text == "prototype" and _is_p(after, *_JS_BINDING)
 
 
-def _js_token_sink(toks: list) -> bool:
-    """A lexed file names or reaches something that runs code (see the inventory above)."""
+def _name_string_inert(toks: list, k: int, closer_of: dict) -> bool:
+    """A string at *k* that may spell ``Number``/``parseInt``/``parseFloat`` sits where it cannot
+    name what is rebound: not an object key, and between it and its block no argument list, no
+    computed member and no computed object key (``defineProperty(g, "Number", …)``,
+    ``g["Number"] = f``, ``{["Number"]: f}``, ``Reflect.set(g, …["Number"], f)`` are not inert)."""
+    prev = toks[k - 1] if k else None
+    nxt = toks[k + 1] if k + 1 < len(toks) else None
+    if _is_p(prev, "{", ",") and _is_p(nxt, ":"):
+        return False
+    p = toks[k].parent
+    for _ in range(_MAX_RECEIVER_TOKENS):
+        if p < 0:
+            return True
+        o = toks[p]
+        if o.kind == "p":
+            if o.text == "(":
+                return False
+            if o.text == "[":
+                close = closer_of.get(p, -1)
+                if _computed_member(toks, p) or (close >= 0 and _is_p(toks[close + 1] if close + 1 < len(toks)
+                                                                       else None, ":")):
+                    return False
+            if o.text == "{" and o.block:
+                return True
+        p = o.parent
+    return False    # nested deeper than this walk reads: not inert
+
+
+def _numeric_builtins_untouched(toks: list, closer_of: dict) -> bool:
+    """No token of this lexed file can rebind ``Number``, ``parseInt`` or ``parseFloat``: each such
+    name is called (and is not a function or method being defined), read as ``Number.x``, or passed
+    as a call argument (``.map(Number)``); a ``.Number`` member is only called or read on; a string
+    spelling one of them (or one this lexer will not decode) is inert (``_name_string_inert``);
+    no ``with`` statement can put another binding in front of them."""
+    n = len(toks)
+    for k, t in enumerate(toks):
+        prev = toks[k - 1] if k else None
+        nxt = toks[k + 1] if k + 1 < n else None
+        if (t.kind == "id" and t.text == "with" and _is_p(nxt, "(") and not _is_p(prev, ".", "?.")
+                and not _is_method_definition(toks, k, closer_of)):
+            return False    # with (o) Number(x): the name resolves on o first
+        if t.kind == "id" and t.text in _JS_NUMERIC_BUILTINS:
+            if _is_p(prev, ".", "?."):
+                if not _is_p(nxt, "(", ".", "?."):
+                    return False
+                continue
+            if _is_p(nxt, "("):
+                close = closer_of.get(k + 1, -1)
+                after = toks[close + 1] if 0 <= close < n - 1 else None
+                if close < 0 or _is_p(after, "{", "=>"):
+                    return False    # function Number(){}, {Number(){…}}
+                continue
+            if _is_p(nxt, ".", "?."):
+                continue
+            if _is_p(prev, "(", ",") and _is_p(nxt, ")", ",") and t.parent >= 0 and _is_p(toks[t.parent], "("):
+                o = t.parent
+                close = closer_of.get(o, -1)
+                after = toks[close + 1] if 0 <= close < n - 1 else None
+                callee = toks[o - 1] if o >= 1 else None
+                if (close >= 0 and not _is_p(after, "{", "=>") and callee is not None
+                        and ((callee.kind == "id" and (callee.text not in _JS_KEYWORDS or _is_member_name(toks, o - 1)))
+                             or _is_p(callee, ")", "]"))):
+                    continue    # .map(Number): passed as a value
+            return False
+        if t.kind == "str" or (t.kind == "tpl" and t.text.startswith("`") and t.text.endswith("`") and len(t.text) >= 2):
+            value = _decode_js_string(t.text)
+            if (value is None or value in _JS_NUMERIC_BUILTINS) and not _name_string_inert(toks, k, closer_of):
+                return False
+    return True
+
+
+# Raw-text files (TS, JSX, HTML): every ``Number``/``parseInt``/``parseFloat`` must be called or
+# read on (``Number(``, ``Number.isNaN``), never quoted, and no ``Number(…){`` method is defined.
+_JS_NUMERIC_NAME_TEXT = re.compile(r"(?<![\w$])(?:Number|parseInt|parseFloat)(?![\w$])")
+_JS_NUMERIC_NAME_USE = re.compile(r"\s*(?:\(|\??\.)")
+_JS_NUMERIC_NAME_DEFINED = re.compile(r"(?<![\w$])(?:Number|parseInt|parseFloat)\s*\([^()]*\)\s*(?:\{|=>)")
+
+
+def _numeric_builtins_untouched_text(text: str) -> bool:
+    if _JS_NUMERIC_NAME_DEFINED.search(text):
+        return False
+    for m in _JS_NUMERIC_NAME_TEXT.finditer(text):
+        before = text[m.start() - 1] if m.start() else ""
+        if (before and before in "\"'`") or not _JS_NUMERIC_NAME_USE.match(text, m.end()):
+            return False
+    return True
+
+
+def _js_token_sink(toks: list, builtins_ok: bool = False, text: Optional[str] = None) -> bool:
+    """A lexed file names or reaches something that runs code (see the inventory above).
+    ``builtins_ok``: no JavaScript in the plugin rebinds ``Number``/``parseInt``/``parseFloat``;
+    ``text``: the file's source, to see that a ``const`` a key reads is on one line."""
     closer_of = {t.match: j for j, t in enumerate(toks) if t.match >= 0}
+    numeric = _NumericKeys(toks, closer_of, builtins_ok, text) if text is not None else None
     for k, t in enumerate(toks):
         prev = toks[k - 1] if k else None
         nxt = toks[k + 1] if k + 1 < len(toks) else None
-        if _is_p(t, "[") and _computed_member(toks, k) and _computed_key_doubt(toks, k, closer_of):
+        if _is_p(t, "[") and _computed_member(toks, k) and _computed_key_doubt(toks, k, closer_of, numeric):
             return True
         if t.kind == "id":
             if t.text in _JS_SINK_IDS:
@@ -928,13 +1215,38 @@ class JsSinkInventory:
                 self._unsafe = True
         return self._unsafe
 
+    def _numeric_builtins_untouched(self, files: list) -> bool:
+        """No JavaScript in the plugin rebinds ``Number``, ``parseInt`` or ``parseFloat`` by a
+        route these checks name (a global reached through an alias and a computed name is not
+        seen, like every such route in the inventory). Anything unreadable answers False."""
+        for f, rel in files:
+            if f.is_symlink():
+                return False
+            if f.suffix.lower() in JS_LEXED_SUFFIXES:
+                lexed = self.tokens(rel)
+                if lexed is None:
+                    return False
+                toks = lexed[0]
+                if not _numeric_builtins_untouched(toks, {t.match: j for j, t in enumerate(toks) if t.match >= 0}):
+                    return False
+                continue
+            try:
+                text = f.read_text(encoding="utf-8-sig")
+            except (OSError, UnicodeDecodeError):
+                return False
+            if not _numeric_builtins_untouched_text(text):
+                return False
+        return True
+
     def _scan(self) -> bool:
-        for f, rel in self._files():
+        files = list(self._files())
+        builtins_ok = self._numeric_builtins_untouched(files)
+        for f, rel in files:
             if f.is_symlink():
                 return True
             if f.suffix.lower() in JS_LEXED_SUFFIXES:
                 lexed = self.tokens(rel)
-                if lexed is None or _js_token_sink(lexed[0]):
+                if lexed is None or _js_token_sink(lexed[0], builtins_ok, "\n".join(lexed[2])):
                     return True
                 continue
             try:

@@ -338,7 +338,11 @@ def _new_secret() -> str:
 
 
 def _new_id() -> str:
-    return secrets.token_urlsafe(18)
+    """A URL-safe random id that never starts with ``-``, so an operator can pass it on a command line as a
+    plain argument (``hermes dashboard mcp revoke <id>``) without argparse reading it as an option."""
+    while (value := secrets.token_urlsafe(18)).startswith("-"):
+        continue
+    return value
 
 
 def _scopes(text: str) -> tuple[str, ...]:

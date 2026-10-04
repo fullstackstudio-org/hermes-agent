@@ -37,7 +37,8 @@ def add_mcp_parser(dashboard_subparsers) -> None:
     p_revoke = sub.add_parser("revoke", help="Revoke a grant, or every grant of one person")
     p_revoke.add_argument("grant", nargs="?", default=None, help=f"Grant id (or a unique prefix of {PREFIX_MIN}+)")
     p_revoke.add_argument("--id", dest="grant_id", default=None,
-                          help="The same, for an id that starts with '-' (ids are URL-safe base64)")
+                          help="The same, for an id that starts with '-' (made by an older build; ids are URL-safe "
+                               "base64): write it as --id=<id>")
     p_revoke.add_argument("--user", default=None, help="Revoke every grant of this person (<provider>:<user id>)")
     sub.add_parser("prune", help="Drop expired consents, codes, tokens, old grants and unused registrations")
 

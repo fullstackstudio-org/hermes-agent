@@ -73,7 +73,7 @@ def test_list_and_revoke_one_grant_by_prefix(store):
     code, out, _ = run(store, "list")
     assert code == 0 and alice in out and bob in out and "Claude Code" in out
 
-    code, out, _ = run(store, "revoke", "--id", alice[:8])  # an id may start with "-"
+    code, out, _ = run(store, "revoke", f"--id={alice[:8]}")  # "--id -x..." is an option to argparse
     assert code == 0 and f"Revoked grant {alice}" in out
     assert store.verify_access(alice_token) is None
     code, out, _ = run(store, "list")
@@ -85,6 +85,31 @@ def test_list_and_revoke_one_grant_by_prefix(store):
 
     code, out, _ = run(store, "revoke", f"--id={alice}")
     assert code == 0 and "already revoked" in out
+
+
+def test_an_id_that_starts_with_a_dash_is_revoked_with_id_equals(store):
+    """An id an older build made may start with "-": ``--id=<id>`` takes it (``--id <id>`` would not)."""
+    import sqlite3
+
+    alice, alice_token = _grant(store, "stub:alice")
+    dashed = "-" + alice[1:]
+    db = sqlite3.connect(store.path)
+    db.execute("PRAGMA foreign_keys = OFF")
+    db.execute("UPDATE grants SET id = ? WHERE id = ?", (dashed, alice))
+    db.execute("UPDATE tokens SET grant_id = ? WHERE grant_id = ?", (dashed, alice))
+    db.commit()
+    db.close()
+    code, out, _ = run(store, "revoke", f"--id={dashed}")
+    assert code == 0 and f"Revoked grant {dashed}" in out
+    assert store.verify_access(alice_token) is None
+
+
+def test_a_new_id_never_starts_with_a_dash(monkeypatch):
+    from hermes_cli.dashboard_auth.mcp import store as store_mod
+
+    drawn = iter(["-marker-dash", "marker-plain"])
+    monkeypatch.setattr(store_mod.secrets, "token_urlsafe", lambda _n: next(drawn))
+    assert store_mod._new_id() == "marker-plain"
 
 
 def test_revoke_every_grant_of_one_person(store):

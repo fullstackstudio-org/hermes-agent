@@ -160,7 +160,12 @@ the app's or the web client's settings without a code: they sign in again, the s
 it happened just now, and that one fresh sign-in authorises one passkey for that person, from the app or
 browser that asked (it expires after 10 minutes and is used up by the passkey). The browser stays bound by
 an https-only cookie and the app by a one-time secret only its own sign-in receives, from the start until
-the passkey is added; so the web client needs the page on https. It needs a provider that
+the passkey is added; so the web client needs the page on https. On a local `http://localhost` gateway,
+Chrome and Firefox keep that cookie, Safari does not: there adding a passkey this way fails (safely; codes
+still work). Behind a reverse-proxy path prefix the cookie is still set for the whole host (`Path=/`, which
+the `__Host-` prefix requires), so other applications served on the same host under other paths receive it
+too; it is HttpOnly and only binds a 10-minute grant, but serve the gateway on a host of its own if those
+applications are not trusted. It needs a provider that
 can force a fresh sign-in: the password provider (`basic`) and OIDC (`self_hosted`, which asks the
 identity provider for `prompt=login` and `max_age=0` and checks the returned `auth_time`). Nous cannot,
 so people signed in with Nous need a code.

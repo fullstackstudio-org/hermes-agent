@@ -372,3 +372,52 @@ def test_the_cli_keeps_a_profile_that_runs_its_own_dashboard(host, monkeypatch):
     monkeypatch.setattr("hermes_cli.main_dashboard._find_stale_dashboard_pids",
                         lambda *, exclude_pids=None, scope_home=None: [7] if scope_home == str(profile) else [])
     assert cli.serving_gateway_home() is None
+
+
+# ── file identity, not path strings ───────────────────────────────────────────────────────────
+
+NFC_CAFE, NFD_CAFE = "Café", "Café"
+
+
+def _linked_dotfiles(root, tmp_path):
+    dotfiles = tmp_path / "dotfiles" / NFC_CAFE
+    dotfiles.mkdir(parents=True)
+    (root / "config.yaml").rename(dotfiles / "hermes.yaml")
+    (root / "config.yaml").symlink_to(dotfiles / "hermes.yaml")
+    (root / "dashboard_auth").rename(dotfiles / "auth")
+    (root / "dashboard_auth").symlink_to(dotfiles / "auth")
+    return dotfiles
+
+
+def test_case_and_unicode_variants_of_a_linked_target_are_refused(host, tmp_path):
+    import os
+    root, profile, _store = host
+    dotfiles = _linked_dotfiles(root, tmp_path)
+    variant = tmp_path / "DOTFILES" / NFD_CAFE
+    if not os.path.exists(variant / "HERMES.yaml"):
+        pytest.skip("this file system tells case and Unicode-normalisation variants apart")
+    for target in (variant / "HERMES.yaml", variant / "hermes.YAML", variant / "AUTH" / "passkeys.db",
+                   variant / "Auth" / "brand-new.db", variant / "auth" / "sub" / "new.db"):
+        assert _in_home(profile, _write_refused, target), target
+        assert _write_refused(target), target
+    assert _in_home(profile, _write_refused, variant / "zshrc") is None
+    assert (dotfiles / "hermes.yaml").exists()
+
+
+def test_a_hard_link_to_the_gateways_config_is_refused(host, tmp_path):
+    import os
+    root, profile, _store = host
+    link = tmp_path / "elsewhere.yaml"
+    os.link(root / "config.yaml", link)
+    assert _in_home(profile, _write_refused, link)
+
+
+def test_a_profile_that_does_not_exist_yet_is_guarded_by_name(host):
+    root, profile, _store = host
+    newbie = root / "profiles" / "newbie"
+    assert not newbie.exists()
+    for target in (newbie / "config.yaml", newbie / "gateway.pid", newbie / "gateway_state.json",
+                   newbie / "dashboard_auth" / "passkeys.db", newbie / "Dashboard_Auth" / "sub" / "x.db"):
+        assert _in_home(profile, _write_refused, target), target
+    assert _in_home(profile, _write_refused, newbie / "notes.md") is None
+    assert _in_home(profile, _write_refused, root / "profiles" / ".trash" / "config.yaml") is None

@@ -175,20 +175,6 @@ _HOME_GUARDED_FILES = ("config.yaml", "gateway_state.json", "gateway.pid", "gate
 _HOME_STORE_DIR = "dashboard_auth"
 
 
-def _same_dir(a: str, b: str) -> bool:
-    if os.path.normcase(a) == os.path.normcase(b):
-        return True
-    try:
-        return os.path.samefile(a, b)
-    except OSError:
-        return False
-
-
-def _within(path: str, directory: str) -> bool:
-    path, directory = os.path.normcase(path), os.path.normcase(directory)
-    return path == directory or path.startswith(directory.rstrip(os.sep) + os.sep)
-
-
 def _guarded_homes() -> list[str]:
     """Every Hermes home whose config, runtime records and store a turn must not write: this process's
     gateway home (``passkeys.paths.gateway_home``), the gateway the runtime records name for it, the active
@@ -241,10 +227,11 @@ def _gateway_owned_path_error(filepath: str, candidates: tuple[str, ...]) -> str
     multiplexes is scoped to that profile, so without this the gateway's own config.yaml (its
     ``confirm.passkey`` operator rules and base URLs, which bind every profile it serves) and its passkey
     store were writable from it, and so were the runtime records that say which gateway serves a profile.
-    Nothing here depends on those records. Compared by resolved path in both directions (a home's
-    ``config.yaml`` or ``dashboard_auth`` may itself be a link to elsewhere, e.g. a dotfiles checkout),
-    and by name with the file and directory name case-folded (APFS / NTFS ignore case). When no home can
-    be named at all, every file by one of those names and every ``dashboard_auth`` directory is refused."""
+    Nothing here depends on those records. Compared by file identity (``st_dev``, ``st_ino``), not by path
+    strings: a home's ``config.yaml`` or ``dashboard_auth`` may link to a dotfiles checkout, and APFS / NTFS
+    reach one file through case and Unicode-normalisation variants of its path (:class:`_GuardedTargets`).
+    ``<root>/profiles/<name>/`` is guarded by name before that profile exists. When no home can be named at
+    all, every file by one of those names and every ``dashboard_auth`` directory is refused."""
     homes = _guarded_homes()
     refusals = {
         "config.yaml": ("the Hermes config file of another profile or of the gateway",
@@ -264,30 +251,106 @@ def _gateway_owned_path_error(filepath: str, candidates: tuple[str, ...]) -> str
     def kind_of(name: str) -> str:
         return "config.yaml" if name == "config.yaml" else "runtime"
 
+    if not homes:  # fail closed on the names alone
+        for candidate in candidates:
+            path = Path(os.path.realpath(candidate))
+            if _name_key(path.name) in _HOME_GUARDED_FILES:
+                return refuse(kind_of(_name_key(path.name)))
+            if any(_name_key(part) == _HOME_STORE_DIR for part in path.parts):
+                return refuse("store")
+        return None
+    guarded = _GuardedTargets(homes)
     for candidate in candidates:
-        real = os.path.realpath(candidate)
-        path = Path(real)
-        if not homes:  # fail closed on the names alone
-            if path.name.casefold() in _HOME_GUARDED_FILES:
-                return refuse(kind_of(path.name.casefold()))
-            if any(part.casefold() == _HOME_STORE_DIR for part in path.parts):
-                return refuse("store")
-            continue
-        for home in homes:
-            real_home = os.path.realpath(home)
-            for name in _HOME_GUARDED_FILES:
-                if os.path.normcase(real) == os.path.normcase(os.path.realpath(os.path.join(home, name))):
-                    return refuse(kind_of(name))
-            if path.name.casefold() in _HOME_GUARDED_FILES and (
-                    _same_dir(str(path.parent), home) or _same_dir(str(path.parent), real_home)):
-                return refuse(kind_of(path.name.casefold()))
-            if _within(real, os.path.realpath(os.path.join(home, _HOME_STORE_DIR))):
-                return refuse("store")
-            for ancestor in (path, *path.parents):
-                if ancestor.name.casefold() == _HOME_STORE_DIR and (
-                        _same_dir(str(ancestor.parent), home) or _same_dir(str(ancestor.parent), real_home)):
-                    return refuse("store")
+        kind = guarded.match(candidate)
+        if kind:
+            return refuse(kind if kind == "store" else kind_of(kind))
     return None
+
+
+def _name_key(name: str) -> str:
+    """A file name as APFS / NTFS compare it: Unicode-normalised (NFC) and case-folded."""
+    import unicodedata
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _identity(path) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of what *path* names (links followed), None when nothing is there."""
+    try:
+        st = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return st.st_dev, st.st_ino
+
+
+def _slot(path: Path) -> tuple[tuple[int, int], str] | None:
+    """Where *path* (resolved) sits: its parent directory by identity and its name by :func:`_name_key`.
+    Two spellings of one entry (case, NFC / NFD, links in the parent chain) give the same slot, also for an
+    entry that does not exist yet; None when the parent does not exist."""
+    parent = _identity(path.parent)
+    return None if parent is None else (parent, _name_key(path.name))
+
+
+class _GuardedTargets:
+    """What :func:`_gateway_owned_path_error` refuses, by file identity: each home's guarded files and
+    ``dashboard_auth`` directory as they resolve (a home's ``config.yaml`` may link into a dotfiles
+    checkout), their slots (for an entry not there yet, or a dangling link), and the default root, under
+    which ``profiles/<name>/`` is guarded by name even before that profile exists."""
+
+    def __init__(self, homes: list[str]) -> None:
+        self.file_ids: dict[tuple[int, int], str] = {}
+        self.file_slots: dict[tuple, str] = {}
+        self.store_ids: set[tuple[int, int]] = set()
+        self.store_slots: set[tuple] = set()
+        for home in homes:
+            for name in _HOME_GUARDED_FILES:
+                path = os.path.join(home, name)
+                ident = _identity(path)
+                if ident is not None:
+                    self.file_ids[ident] = name
+                for spelling in (Path(path), Path(os.path.realpath(path))):
+                    slot = _slot(spelling)
+                    if slot is not None:
+                        self.file_slots[slot] = name
+            store = os.path.join(home, _HOME_STORE_DIR)
+            ident = _identity(store)
+            if ident is not None:
+                self.store_ids.add(ident)
+            for spelling in (Path(store), Path(os.path.realpath(store))):
+                slot = _slot(spelling)
+                if slot is not None:
+                    self.store_slots.add(slot)
+        try:
+            from hermes_constants import get_default_hermes_root
+            self.root_id = _identity(get_default_hermes_root())
+        except Exception:
+            self.root_id = None
+
+    def _under_profiles(self, directory: Path) -> bool:
+        """*directory* is ``<root>/profiles/<name>`` (name not starting with ``.``), existing or not."""
+        return (self.root_id is not None and not directory.name.startswith(".")
+                and _name_key(directory.parent.name) == "profiles"
+                and _identity(directory.parent.parent) == self.root_id)
+
+    def match(self, candidate: str) -> str | None:
+        """The guarded file name, ``"store"``, or None for a write to *candidate*."""
+        spellings = [Path(os.path.abspath(candidate)), Path(os.path.realpath(candidate))]
+        for path in spellings:
+            ident = _identity(path)
+            if ident is not None and ident in self.file_ids:
+                return self.file_ids[ident]
+            slot = _slot(path)
+            if slot is not None and slot in self.file_slots:
+                return self.file_slots[slot]
+            if _name_key(path.name) in _HOME_GUARDED_FILES and self._under_profiles(path.parent):
+                return _name_key(path.name)
+            for ancestor in (path, *path.parents):
+                ident = _identity(ancestor)
+                if ident is not None and ident in self.store_ids:
+                    return "store"
+                if _name_key(ancestor.name) == _HOME_STORE_DIR and (
+                        _slot(ancestor) in self.store_slots or self._under_profiles(ancestor.parent)):
+                    return "store"
+        return None
 
 
 # ── Protected agent-instruction files (always-ask approval gate) ─────────

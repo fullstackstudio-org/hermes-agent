@@ -228,6 +228,22 @@ def test_a_queued_prompt_behind_the_persons_queued_prompt_gets_its_own_turn(gate
     assert gateway.agent.texts[-2:] == ["marker person", "marker reply"]
 
 
+def test_two_grants_under_one_client_name_each_get_their_own_queued_turn(gateway):
+    """"This agent" is the grant (review X1b): two grants of one person under the same client name sending the
+    same text are two turns, each matched to the connection that queued it, never one merged turn."""
+    assert gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker gated"})["result"]["status"] \
+        == "streaming"
+    first, second = gateway.connect(grant="grant-g1"), gateway.connect(grant="grant-g2")
+    one = turns.start_turn(first, chat_id=KEY, session_id=SID, text="marker reply", params={"queued": True})
+    two = turns.start_turn(second, chat_id=KEY, session_id=SID, text="marker reply", params={"queued": True})
+    assert (one.snapshot()["queue_position"], two.snapshot()["queue_position"]) == (1, 2)
+    gateway.agent.gate.set()
+    done_one, done_two = one.wait(_deadline()), two.wait(_deadline())
+    assert done_one["status"] == done_two["status"] == "done"
+    assert done_one["gateway_turn_id"] != done_two["gateway_turn_id"]
+    assert gateway.agent.texts[-2:] == ["marker reply", "marker reply"]
+
+
 def test_a_queued_prompt_a_stop_dropped_ends_interrupted(gateway, monkeypatch):
     monkeypatch.setattr(turns, "_DROPPED_CONFIRM_S", 0.2)
     monkeypatch.setattr(turns, "RECONCILE_INTERVAL_S", 0.2)

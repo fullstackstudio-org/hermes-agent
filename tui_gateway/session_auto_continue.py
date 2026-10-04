@@ -271,7 +271,8 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
     ``replayed_by``): the row then says who WROTE the words while ``turn_auth_user`` is who the turn acts
     as, and such an envelope never merges with another. ``turn_agent`` is the marker of an agent that sent
     it for ``turn_auth_user`` through MCP: it rides in the envelope as ``turn_agent`` (and in the restart
-    journal), and an agent's message never merges with the person's own."""
+    journal), and an agent's message never merges with another message, the person's own or another agent
+    prompt's: each prompt an agent sends is one turn the agent can match to its own connection exactly."""
     from tui_gateway.row_author import agent_marker
     turn_agent = agent_marker(turn_agent) if turn_auth_user else None
     image_paths = list(image_paths or [])
@@ -291,7 +292,8 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
               **({"origin": origin} if origin else {}),
               **({"contributors": list(contributors)} if contributors else {})}
     existing = session.get("queued_prompt")
-    if (existing and text_only and not turn_author and row_metadata is None and "row_metadata" not in existing
+    if (existing and text_only and not turn_author and not turn_agent and row_metadata is None
+            and "row_metadata" not in existing
             and isinstance(existing.get("text"), str)
             and not existing.get("image_paths") and not existing.get("turn_author")
             and existing.get("turn_auth_user") == turn_auth_user

@@ -15,8 +15,15 @@ Two kinds of readers:
   of the turn being started is set before its ``message.start`` (``_admit_prompt_turn``).
 * everything else runs on the waiter's thread and may take the session's ``history_lock`` or open its store.
 
-A verdict is ``True`` (the agent's own turn: this person, through a client of this name, with this text in
-it), ``False`` (somebody else's) or ``None`` (cannot tell from here).
+A verdict is ``True`` (the agent's own turn), ``False`` (somebody else's) or ``None`` (cannot tell from here).
+
+"This agent" is the GRANT, not the person and a client name: two grants of one person may carry the same client
+name. The gateway's records name only the person and the client (``author`` with ``via``: the grant id is a
+registry key and never part of a row), so the grant is bound through what only this connection has: its own
+envelope in the queue, matched by identity (an agent's envelope never merges with another,
+``_enqueue_prompt``), and a turn counts as the agent's only once that envelope has left the queue -- a turn
+whose author, client and text match while this connection's envelope still waits is another connection's.
+``bot_interrupt`` and ``clarify_answer`` bind to the grant through the bridge's own watches (``tools.py``).
 """
 
 from __future__ import annotations
@@ -62,6 +69,13 @@ def _author_is(author: Any, login: str | None, agent: dict | None) -> bool:
     return author.get("id") == login and agent_from_row_author(author) == agent
 
 
+def _still_queued(session: dict, transport: Any) -> bool:
+    """Whether an envelope *transport* queued is still in *session*'s queue. Lock-free (the emitting thread may
+    hold ``history_lock``): a read of the slot and a copy of the list."""
+    envelopes = [session.get("queued_prompt"), *list(session.get("queued_prompts") or [])]
+    return any(isinstance(envelope, dict) and envelope.get("transport") is transport for envelope in envelopes)
+
+
 def _contains(haystack: Any, text: str) -> bool:
     needle = (text or "").strip()
     return isinstance(haystack, str) and bool(needle) and needle in haystack
@@ -83,8 +97,9 @@ def turn_verdict_from_inflight(transport: Any, session_id: str, tid: str, text: 
         inflight = session.get("inflight_turn") if session is not None else None
         if not isinstance(inflight, dict):
             return None
-        return turn_verdict(inflight.get("display_metadata"), inflight.get("user"), tid=tid, transport=transport,
-                            text=text)
+        verdict = turn_verdict(inflight.get("display_metadata"), inflight.get("user"), tid=tid, transport=transport,
+                               text=text)
+        return False if verdict and _still_queued(session, transport) else verdict
     except Exception:  # noqa: BLE001 - a verdict that cannot be read is "cannot tell"
         logger.debug("mcp bridge: in-flight verdict failed", exc_info=True)
         return None
@@ -118,18 +133,19 @@ def turn_verdict_from_store(transport: Any, session_id: str, tid: str, text: str
         verdict = turn_verdict(row.get("display_metadata"), row.get("content"), tid=tid, transport=transport,
                                text=text)
         if verdict is not None:
-            return verdict
+            return False if verdict and _still_queued(session, transport) else verdict
     return None
 
 
 def queue_position(transport: Any, session_id: str, text: str) -> tuple[bool, int | None]:
     """``(running, position)`` of the agent's queued prompt in *session_id*: whether a turn runs now, and the
-    1-based place of the envelope that holds the agent's text (its own, or the one of the same person and
-    client it merged into), None when no envelope holds it (it ran, or a Stop dropped it). Waiter thread."""
+    1-based place of the envelope THIS connection queued (matched by identity: an agent's envelope never merges
+    with another), None when there is none (it ran, or a Stop dropped it). Waiter or monitor thread. *text* is
+    kept for the callers' symmetry with the verdicts; the envelope is the match."""
+    del text
     session = session_record(transport, session_id)
     if session is None:
         return False, None
-    login, agent = _agent_of(transport)
     lock = session.get("history_lock")
     try:
         if lock is not None:
@@ -148,12 +164,7 @@ def queue_position(transport: Any, session_id: str, text: str) -> tuple[bool, in
         if not isinstance(envelope, dict):
             continue
         position += 1
-        user = envelope.get("turn_auth_user")
-        sender = f"{user[0]}" if isinstance(user, (tuple, list)) and user else None
-        from tui_gateway.row_author import agent_marker
-        if (envelope.get("transport") is transport
-                or (sender == login and agent_marker(envelope.get("turn_agent")) == agent
-                    and _contains(envelope.get("text"), text))):
+        if envelope.get("transport") is transport:
             return running, position
     return running, None
 

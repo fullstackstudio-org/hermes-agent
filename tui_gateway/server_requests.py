@@ -57,8 +57,8 @@ prompts are the person's own, and a gated request never reaches it at all. It ma
 turn it sent itself -- the request remembers, when it opens, who sent the turn it belongs to (the in-flight
 record's ``author`` with ``via``) -- and never a question somebody already locked (:func:`agent_request_refusal`,
 checked again under the lock that settles). A clarify answer it gives has every non-empty answer prefixed
-(:func:`mark_agent_answer`) before it reaches the tool, so the model reads it as the agent's and not the
-person's; ``dashboard.mcp.answer_clarify: false`` refuses
+(:func:`mark_agent_answer`), and text shaped like the gateway note relabelled, before it reaches the tool, so
+the model reads it as the agent's and not the person's; ``dashboard.mcp.answer_clarify: false`` refuses
 clarify too. Each answer and each refusal is an audit line naming the grant.
 """
 
@@ -404,16 +404,20 @@ def _agent_answer_prefix(transport: Any) -> str:
 
 def mark_agent_answer(method: str, result: Any, transport: Any) -> Any:
     """``result`` with every non-empty clarify answer prefixed as the agent's (:func:`_agent_answer_prefix`)
-    when ``transport`` is an agent; unchanged otherwise. An empty answer stays a skip."""
+    when ``transport`` is an agent; unchanged otherwise. An empty answer stays a skip. After the prefix, text
+    shaped like the gateway note is relabelled (``relabel_note_lookalikes``, HERM-239), as any user text is:
+    an agent's answer must not pass for a note the gateway wrote."""
     if method not in AGENT_ANSWERABLE or _agent_identity(transport) is None or not isinstance(result, dict):
         return result
+    from agent.turn_sender import relabel_note_lookalikes
+
     prefix = _agent_answer_prefix(transport)
     out = dict(result)
     if isinstance(out.get("answer"), str) and out["answer"]:
-        out["answer"] = prefix + out["answer"]
+        out["answer"] = prefix + relabel_note_lookalikes(out["answer"])
     if isinstance(out.get("answers"), dict):
-        out["answers"] = {qid: prefix + answer if isinstance(answer, str) and answer else answer
-                          for qid, answer in out["answers"].items()}
+        out["answers"] = {qid: prefix + relabel_note_lookalikes(answer) if isinstance(answer, str) and answer
+                          else answer for qid, answer in out["answers"].items()}
     return out
 
 

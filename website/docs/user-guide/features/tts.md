@@ -118,6 +118,26 @@ MiniMax TTS selects its region, endpoint, and credential together:
 
 **Speed control**: The global `tts.speed` value applies to all providers by default. Each provider can override it with its own `speed` setting (e.g., `tts.openai.speed: 1.5`). Provider-specific speed takes precedence over the global value. Default is `1.0` (normal speed).
 
+### Choosing the voice per request (dashboard API)
+
+The dashboard's audio routes let a client pick the voice for one request instead of the profile's `tts.<provider>.voice`. The agent's own `text_to_speech` tool does not take a voice: voice stays user-configured, not model-selected.
+
+`POST /api/audio/speak` takes optional fields next to `text`:
+
+| Field | Meaning |
+|-------|---------|
+| `voice` | A string of at most 128 characters: letters, digits and `. _ : -`, starting with a letter or digit. ElevenLabs `voice_id`, Edge `ShortName` (`nl-NL-FennaNeural`), OpenAI voice name, and the same key the provider reads for Gemini, xAI, Mistral, MiniMax and DeepInfra. |
+| `rate` | Edge only: speaking rate in percent, `-50` to `100`, added to `tts.speed`. |
+| `pitch` | Edge only: pitch in hertz, `-50` to `50`. |
+
+Without these fields nothing changes. A voice is checked against the provider's own list where listing is cheap (Edge's list; the ElevenLabs account's voices, cached five minutes) and passed through otherwise (OpenAI-compatible servers have voices of their own); if a list cannot be fetched the voice is passed through too. A bad request is a `400` with `detail: {"code", "message"}`: `invalid_voice` (too long, wrong characters, not a string), `unknown_voice` (the provider has no such voice), `voice_unsupported` (the configured provider, such as a command or plugin provider or a local engine, has no per-request voice) and `invalid_prosody` (not a number, or outside the bounds). `rate` and `pitch` are checked for every provider and ignored where the provider has no prosody.
+
+The speak-stream WebSocket takes `voice` in a text frame: `{"text": "...", "voice": "<id>"}`. It is checked the same way and applies to the sentences synthesized after it, so send it on the first frame. A voice that cannot be used ends the session with `{"type": "error", "code": "...", "message": "..."}` (the same codes) and nothing is spoken. For a provider without a chunked API (Edge) the socket answers `fallback` on connect, and the client sends `voice` to `POST /api/audio/speak` instead. `rate` and `pitch` are not read on the socket.
+
+`GET /api/audio/voice-config` says what works for the configured provider, in `tts`: `provider`, `voice` (spoken when a request names none), `voice_selection` (a per-request `voice` works), `prosody` (`rate`/`pitch` work), and `voice_preview`: `"sample"` for ElevenLabs (free samples, below), `"speak"` for Edge (free, so a client may call `/api/audio/speak` with a short sentence), absent for paid providers. For Edge it also returns `voices` as `[{id, name, language}]` (cached six hours), narrowed by `?language=nl` or `?language=nl-NL`; if the list cannot be fetched, `voices` is empty and `voices_error` is `"unavailable"`. The response never contains an API key or any other credential (see [Client-direct voice](voice-mode.md#desktop-remote-client-direct-voice-lowest-hop-path)).
+
+`GET /api/audio/elevenlabs/voices` lists the account's voices (`voice_id`, `name`, `label`) with `preview: true` when ElevenLabs has a sample. `GET /api/audio/elevenlabs/voices/{voice_id}/preview` streams that sample: the gateway finds the sample with the profile's key and fetches it itself, so neither the key nor the sample URL reaches the client. ElevenLabs serves these samples without using characters. The fetch is https only, to `storage.googleapis.com` or `*.elevenlabs.io`, follows no redirects, takes at most 10 seconds and 5 MB, and the bytes are cached for an hour (50 voices, per account). `404`: no key, unknown voice or a voice without a sample; `502`: ElevenLabs or the sample host failed or the sample was refused.
+
 ### Gemini Persona Prompts
 
 Gemini TTS can follow natural-language performance direction. Set `tts.gemini.persona_prompt_file` to a local Markdown or text file that describes the voice persona. The file can include Gemini-style sections such as `AUDIO PROFILE`, `SCENE`, `DIRECTOR'S NOTES`, `SAMPLE CONTEXT`, and `TRANSCRIPT`.

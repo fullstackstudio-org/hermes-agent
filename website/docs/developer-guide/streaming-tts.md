@@ -70,6 +70,16 @@ All credential lookups go through `resolve_provider_secret()`
 are capped at 16 MiB per sentence, mirroring the sync providers' bounded
 upstream-body invariant.
 
+## Voice per session
+
+The speak-stream WebSocket takes an optional `voice` on a text frame
+(`{"text": "...", "voice": "<id>"}`). The route validates it with
+`tools.tts_voice.resolve_voice_selection` for the streamer's provider, applies it to a
+copy of the `tts` config and asks `resolve_streaming_provider` for a streamer on that copy,
+so a streamer needs no code of its own as long as it reads its voice from its config section
+(`tts_voice.VOICE_CONFIG_KEYS` lists the key per provider). A voice that cannot be used ends the
+session with `{"type": "error", "code": "invalid_voice" | "unknown_voice" | "voice_unsupported", "message": "..."}`.
+
 ## Adding a new streaming provider
 
 1. Subclass `StreamingTTSProvider` in `tools/tts_streaming.py`

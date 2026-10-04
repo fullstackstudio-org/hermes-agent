@@ -186,21 +186,16 @@ The same pipeline runs in the classic CLI, the TUI, and the desktop app. In a de
 
 ### Desktop remote: client-direct voice (lowest-hop path)
 
-When Hermes Desktop is connected to a **remote gateway**, audio does not need to be relayed through the gateway at all. At voice-session start the desktop fetches the active profile's resolved STT/TTS settings (provider, model, language/voice, and credential) from the gateway over the authenticated REST channel (`GET /api/audio/voice-config`) and then calls the providers **directly**:
+`GET /api/audio/voice-config` returns the active profile's resolved STT/TTS settings (provider, model, language and voice, and for providers with an HTTP wire the wire shape and base URL) so a client knows what the profile uses. **It never returns provider API keys or any other credential**, to any caller: any authenticated client can call the route, and a key in the response would be a key handed to every one of them. Earlier versions returned the keys so the desktop could call the providers itself; a `direct` entry now arrives without its `api_key`, and a client that has no key to call with uses the relay (`/api/audio/transcribe`, `/api/audio/speak` and the speak-stream WebSocket), where the gateway holds the keys. The desktop does this: its direct path is dormant until credentials come to it some other way. URLs in the response have userinfo and query removed.
 
-- **Dictation / voice input:** the mic recording goes straight from your desktop to the profile's STT provider; only the resulting *text* is sent to the gateway as the prompt.
-- **Spoken replies:** the reply text is already streaming to the desktop over the chat socket, so the desktop synthesizes it locally with the profile's TTS provider and plays it — the gateway link never carries audio.
+`tts` in the same response also tells a client how to choose a voice (`voice_selection`, `voice`, `voices`, `voice_preview`, `prosody`); see [Choosing the voice per request](tts.md#choosing-the-voice-per-request-dashboard-api).
 
-There is nothing to configure on the client: the profile you're talking to is the single source of truth for providers and keys, exactly as if the gateway had done the work itself. Keys are held in the desktop's memory for the session only — never written to disk on the client.
-
-Providers that can only run on the gateway host (local whisper, `edge` TTS, command providers, plugins) automatically fall back to the relay path (`/api/audio/transcribe` and the speech WebSocket), as does any older backend without the endpoint. To force the relay for every provider, set:
+Providers that can only run on the gateway host (local whisper, `edge` TTS, command providers, plugins) resolve to `{"mode": "relay"}` with a `reason`, as does any profile with:
 
 ```yaml
 voice:
   client_direct: false
 ```
-
-Client-direct wire support: OpenAI (incl. Nous-managed audio), Groq, Mistral, and DeepInfra via the OpenAI-compatible shapes, xAI Grok STT, and ElevenLabs STT + TTS. xAI configured through OAuth stays on the relay (the OAuth bearer refreshes server-side).
 
 ### Desktop: GPT-Live voice chat mode (full duplex, delegates to Hermes)
 

@@ -229,7 +229,13 @@ class DebugShareRequest(BaseModel):
     lines: int = 200  # recent log lines in the summary tail (full logs are separate)
 
 class TTSSpeakRequest(BaseModel):
+    """POST /api/audio/speak. ``voice`` picks the configured provider's voice for this request
+    (ElevenLabs voice_id, Edge ShortName, OpenAI voice name); ``rate`` (percent) and ``pitch`` (Hz)
+    are Edge-only prosody hints. All three are optional and validated in ``tools.tts_voice``."""
     text: str
+    voice: Optional[str] = None
+    rate: Optional[float] = None
+    pitch: Optional[float] = None
 
 class VoiceLiveSessionRequest(BaseModel):
     """POST /api/audio/voice-live/session: the renderer's WebRTC SDP offer plus optional prior

@@ -82,6 +82,12 @@ export function clearVoiceClientConfigCache(): void {
   inflight = null
 }
 
+function usableDirect<T extends DirectSttConfig | DirectTtsConfig | RelayConfig>(config: T): T | RelayConfig {
+  return config.mode === 'direct' && !config.api_key
+    ? { mode: 'relay', reason: 'no client credentials' }
+    : config
+}
+
 export async function fetchVoiceClientConfig(owner?: OwnerScope): Promise<null | VoiceClientConfig> {
   const key = scopeKey(owner)
 
@@ -107,7 +113,12 @@ export async function fetchVoiceClientConfig(owner?: OwnerScope): Promise<null |
         return null
       }
 
-      const config: VoiceClientConfig = { stt: response.stt, tts: response.tts }
+      // The gateway no longer sends provider keys; a `direct` config without its `api_key` cannot
+      // be used, so it counts as a relay (the gateway makes the call).
+      const config: VoiceClientConfig = {
+        stt: usableDirect(response.stt),
+        tts: usableDirect(response.tts)
+      }
       cached = { key, at: Date.now(), config }
 
       return config

@@ -9,6 +9,7 @@ import binascii
 import contextlib
 import logging
 import queue
+import re
 import tempfile
 import threading
 import asyncio
@@ -16,7 +17,7 @@ import json
 import os
 import urllib.parse
 import urllib.request
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 from hermes_cli.web_routers._common import http_failure
 from hermes_cli.web_deps import late
 from hermes_cli.web_server_chat import _ws_auth_ok, _ws_refusal_close_reason
@@ -137,29 +138,37 @@ async def transcribe_audio_upload(
     }
 
 
+_LANGUAGE_FILTER_RE = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*")
+
+
 @router.get("/api/audio/voice-config")
-async def get_client_voice_config(profile: Optional[str] = None):
-    """The active profile's STT/TTS config for CLIENT-DIRECT voice.
+async def get_client_voice_config(profile: Optional[str] = None, language: Optional[str] = None):
+    """The active profile's STT/TTS settings as a client may see them: no credentials, ever.
 
-    Lets the desktop cut the audio relay hop: mic audio goes straight to the
-    profile's STT provider and reply text is synthesized on the client with
-    the profile's TTS provider — the desktop↔gateway link carries only text.
-    Providers that can only run on this host (local whisper, edge-tts,
-    command/plugin providers) resolve to ``{"mode": "relay"}`` and the
-    desktop keeps using the /api/audio/* relay endpoints.
+    ``stt`` and ``tts`` keep the shape they always had (``mode``, ``provider``, ``model``, ``voice``,
+    the relay ``reason``, ...) minus every credential: a ``direct`` config arrives without its
+    ``api_key`` and so cannot be used directly; clients relay through ``/api/audio/transcribe``,
+    ``/api/audio/speak`` and the speak-stream socket, where the gateway holds the keys. ``tts`` also carries what a
+    client needs to choose a voice: ``voice_selection`` (a per-request ``voice`` works for the
+    configured provider), ``prosody`` (``rate``/``pitch`` work, Edge only), ``voice`` (spoken when a
+    request names none) and, for Edge, ``voices`` as ``[{id, name, language}]``, narrowed by an
+    optional ``?language=`` (``nl`` or ``nl-NL``).
 
-    Same trust boundary as every profile-scoped route: the caller is an
-    authenticated client that can already drive the agent. Keys in the
-    response are held in client memory only, never persisted client-side.
-    Gate: ``voice.client_direct`` in config.yaml (default true).
+    Earlier versions returned the profile's STT/TTS API keys here so the desktop could call the
+    providers directly; any authenticated client could read them. They are not served any more.
     """
-    from tools.voice_client_config import resolve_client_voice_config
+    language = (language or "").strip() or None
+    if language is not None and not _LANGUAGE_FILTER_RE.fullmatch(language):
+        raise HTTPException(status_code=400, detail="language must look like 'nl' or 'nl-NL'")
+    from tools.voice_client_config import resolve_public_voice_config
     try:
-        result = await _run_config_scoped(profile, resolve_client_voice_config)
+        result = await _run_config_scoped(profile, lambda: resolve_public_voice_config(language))
+    except HTTPException:
+        raise
     except Exception:
         _log.exception("Client voice-config resolution failed")
         fallback = {"mode": "relay", "reason": "resolution error"}
-        return {"ok": True, "stt": fallback, "tts": dict(fallback)}
+        return {"ok": True, "stt": fallback, "tts": {**fallback, "voice_selection": False, "prosody": False}}
 
     return {"ok": True, **result}
 
@@ -204,13 +213,8 @@ def _elevenlabs_voice_label(voice: Dict[str, Any]) -> str:
     return f"{name} ({category})" if category else name
 
 
-@router.get("/api/audio/elevenlabs/voices")
-async def get_elevenlabs_voices(profile: Optional[str] = None):
-    """Return ElevenLabs voices when an API key is configured.
-
-    The desktop UI uses this for the ``tts.elevenlabs.voice_id`` dropdown.
-    Only non-secret voice metadata is returned; the API key stays server-side.
-    """
+def _elevenlabs_api_key(profile: Optional[str]) -> str:
+    """The requested profile's ElevenLabs key ("" without one). Server-side only: no route returns it."""
     # Config-only scope (await-safe): the key lookup reads the requested
     # profile's .env, matching the profile the settings UI writes to.
     with _config_profile_scope(profile):
@@ -229,9 +233,12 @@ async def get_elevenlabs_voices(profile: Optional[str] = None):
                 api_key = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
         except Exception:
             pass
-    if not api_key:
-        return {"available": False, "voices": []}
+    return api_key
 
+
+async def _fetch_elevenlabs_voices(api_key: str) -> Dict[str, Any]:
+    """ElevenLabs' ``GET /v1/voices`` body. Auth failures come back as the sentinel
+    ``{"_unauthorized": True}``; anything else that goes wrong is a 502."""
     request = urllib.request.Request(
         "https://api.elevenlabs.io/v1/voices",
         headers={"Accept": "application/json", "xi-api-key": api_key},
@@ -253,7 +260,7 @@ async def get_elevenlabs_voices(profile: Optional[str] = None):
         if exc.code in (401, 403):
             if _voice_list_error_logged_once(f"http-{exc.code}"):
                 _log.info("ElevenLabs voices unavailable: %s — check ELEVENLABS_API_KEY", exc)
-            return {"available": False, "voices": [], "error": "unauthorized"}
+            return {"_unauthorized": True}
         if _voice_list_error_logged_once(f"http-{exc.code}"):
             _log.warning("ElevenLabs voice list failed: %s", exc)
         raise HTTPException(status_code=502, detail="Could not load ElevenLabs voices")
@@ -262,6 +269,25 @@ async def get_elevenlabs_voices(profile: Optional[str] = None):
             _log.warning("ElevenLabs voice list failed: %s", exc)
         raise HTTPException(status_code=502, detail="Could not load ElevenLabs voices")
     _voice_list_error_logged_once(None)  # success — re-arm logging for next failure
+    return payload
+
+
+@router.get("/api/audio/elevenlabs/voices")
+async def get_elevenlabs_voices(profile: Optional[str] = None):
+    """Return ElevenLabs voices when an API key is configured.
+
+    The desktop UI uses this for the ``tts.elevenlabs.voice_id`` dropdown.
+    Only non-secret voice metadata is returned; the API key stays server-side.
+    ``preview`` is true when ElevenLabs has a free sample for the voice; fetch it from
+    ``/api/audio/elevenlabs/voices/{voice_id}/preview`` (the sample URL itself is never returned).
+    """
+    api_key = _elevenlabs_api_key(profile)
+    if not api_key:
+        return {"available": False, "voices": []}
+
+    payload = await _fetch_elevenlabs_voices(api_key)
+    if payload.get("_unauthorized"):
+        return {"available": False, "voices": [], "error": "unauthorized"}
 
     voices = []
     for voice in payload.get("voices") or []:
@@ -274,11 +300,55 @@ async def get_elevenlabs_voices(profile: Optional[str] = None):
 
         voices.append({
             "voice_id": voice_id, "name": str(voice.get("name") or voice_id),
-            "label": _elevenlabs_voice_label(voice),
+            "label": _elevenlabs_voice_label(voice), "preview": bool(voice.get("preview_url")),
         })
 
     voices.sort(key=lambda item: str(item.get("label") or "").lower())
     return {"available": True, "voices": voices}
+
+
+@router.get("/api/audio/elevenlabs/voices/{voice_id}/preview")
+async def get_elevenlabs_voice_preview(voice_id: str, profile: Optional[str] = None):
+    """The free sample ElevenLabs keeps for a voice, streamed through the gateway.
+
+    The gateway finds ``preview_url`` with the profile's key and fetches the audio itself, so
+    neither the key nor the URL reaches the client. ElevenLabs serves these samples without using
+    characters. 400 for a malformed id, 404 for no key / an unknown voice / a voice without a sample,
+    502 when ElevenLabs or the sample host fails (or answers with something that is not a small
+    audio file); see ``tools.tts_voice`` for the host allowlist, redirect, size and time limits.
+    """
+    from tools import tts_voice
+
+    try:
+        voice_id = tts_voice.clean_voice_id(voice_id)
+    except tts_voice.VoiceSelectionError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message})
+    api_key = _elevenlabs_api_key(profile)
+    if not api_key:
+        raise HTTPException(status_code=404, detail="ElevenLabs is not configured")
+
+    cached = tts_voice.preview_cache_get(api_key, voice_id)
+    if cached is None:
+        payload = await _fetch_elevenlabs_voices(api_key)
+        if payload.get("_unauthorized"):
+            raise HTTPException(status_code=404, detail="ElevenLabs is not configured")
+        preview_url = next(
+            (str(v.get("preview_url") or "") for v in payload.get("voices") or []
+             if isinstance(v, dict) and str(v.get("voice_id") or "").strip() == voice_id), None)
+        if preview_url is None:
+            raise HTTPException(status_code=404, detail="Unknown voice")
+        if not preview_url:
+            raise HTTPException(status_code=404, detail="This voice has no preview")
+        try:
+            cached = await asyncio.get_running_loop().run_in_executor(
+                None, tts_voice.fetch_preview, preview_url)
+        except tts_voice.PreviewError as exc:
+            _log.warning("ElevenLabs preview for %s refused: %s", voice_id, exc)
+            raise HTTPException(status_code=502, detail="Could not load the voice preview")
+        tts_voice.preview_cache_put(api_key, voice_id, cached)
+
+    body, content_type = cached
+    return Response(content=body, media_type=content_type, headers={"Cache-Control": "private, max-age=3600"})
 
 
 @router.post("/api/audio/speak")
@@ -293,12 +363,24 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
     if not text:
         raise HTTPException(status_code=400, detail="Text is required")
 
+    def _synthesize():
+        from tools.tts_tool import _get_provider, _load_tts_config, text_to_speech_tool
+        from tools.tts_voice import VoiceSelectionError, resolve_voice_selection
+
+        selection = None
+        if payload.voice is not None or payload.rate is not None or payload.pitch is not None:
+            tts_config = _load_tts_config()
+            try:
+                selection = resolve_voice_selection(
+                    tts_config, _get_provider(tts_config), payload.voice, payload.rate, payload.pitch)
+            except VoiceSelectionError as exc:
+                raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message})
+        return text_to_speech_tool(text, voice_selection=selection)
+
     # _config_profile_scope raises 400/404 for a bad profile — pass it
     # through instead of masking it as a 500 synthesis failure.
     with http_failure("Desktop voice TTS failed", 500, "Speech synthesis failed"):
-        from tools.tts_tool import text_to_speech_tool
-
-        result_json = await _run_config_scoped(profile, lambda: text_to_speech_tool(text))
+        result_json = await _run_config_scoped(profile, _synthesize)
 
     try:
         result = json.loads(result_json) if isinstance(result_json, str) else result_json
@@ -386,14 +468,21 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
     streams each one's PCM the moment it's ready, so speech overlaps generation.
 
     Protocol:
-      client → ``{"text": "..."}`` frames (incremental; may combine with done),
+      client → ``{"text": "...", "voice": "..."}`` frames (incremental; may combine with done;
+               ``voice`` is optional and may ride any text frame: it is validated like the
+               ``voice`` of POST /api/audio/speak and applies to the sentences synthesized after
+               it, so send it on the first frame),
                ``{"done": true}`` when the reply is complete,
                ``{"stop": true}`` or disconnect = barge-in
       server → ``{"type": "start", "sample_rate": N, "channels": 1}`` (sent
                with the first PCM frame, once the provider's rate is final),
                binary PCM frames, then ``{"type": "end"}``
       server → ``{"type": "fallback"}`` when the configured provider has no
-               chunked API — the client uses the POST endpoint instead.
+               chunked API — the client uses the POST endpoint instead (with its ``voice``;
+               nothing is read from this socket after a fallback).
+      server → ``{"type": "error", "code": "...", "message": "..."}`` when a frame's ``voice``
+               cannot be honoured (``invalid_voice``, ``unknown_voice``, ``voice_unsupported``);
+               the session ends there, nothing more is synthesized.
     """
     if not _ws_auth_ok(ws):
         await ws.close(code=4401)
@@ -443,8 +532,26 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
             return
         start_sent = True
         await ws.send_json(
-            {"type": "start", "sample_rate": streamer.sample_rate, "channels": streamer.channels}
+            {"type": "start", "sample_rate": current[0].sample_rate, "channels": current[0].channels}
         )
+
+    # The streamer a ``voice`` frame swaps in (same provider, config with that voice). A one-slot
+    # list so the producer thread and the start frame read whichever is current.
+    current = [streamer]
+    session_voice: list = [None]
+
+    def _switch_voice(voice: str):
+        """Validate *voice* for the streamer's provider and return a streamer that speaks it."""
+        from tools import tts_streaming, tts_voice
+        from tools.tts_tool import _get_provider
+        with _config_profile_scope(profile):
+            name = tts_voice.streamer_provider_name(current[0], cfg, _get_provider(cfg))
+            selection = tts_voice.resolve_voice_selection(cfg, name, voice)
+            switched = tts_streaming.resolve_streaming_provider(selection.apply(cfg, name)) if selection else None
+        if switched is None:
+            raise tts_voice.VoiceSelectionError(
+                "voice_unsupported", f"the configured streaming provider ({name}) cannot speak voice {voice!r}")
+        return switched
 
     stop = threading.Event()
     text_q: queue.Queue = queue.Queue()  # str deltas; None = end-of-text
@@ -497,7 +604,7 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
                 if not cleaned:
                     continue
                 for piece in _split_text_for_speak_stream(cleaned, cap):
-                    for chunk in streamer.stream(piece):
+                    for chunk in current[0].stream(piece):
                         if stop.is_set():
                             return
                         loop.call_soon_threadsafe(chunks.put_nowait, chunk)
@@ -514,6 +621,24 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
         try:
             while True:
                 frame = json.loads(await ws.receive_text())
+                voice = frame.get("voice")
+                if isinstance(voice, str) and not voice.strip():
+                    voice = None  # blank = no voice named
+                if voice is not None and voice != session_voice[0]:
+                    try:
+                        current[0] = await loop.run_in_executor(None, _switch_voice, voice)
+                        session_voice[0] = voice
+                    except Exception as exc:
+                        from tools.tts_voice import VoiceSelectionError
+                        if isinstance(exc, VoiceSelectionError):
+                            error = {"type": "error", "code": exc.code, "message": exc.message}
+                        else:
+                            _log.warning("speak-stream voice switch failed: %s", exc)
+                            error = {"type": "error", "code": "voice_failed", "message": "Could not use that voice"}
+                        stop.set()
+                        text_q.put(None)
+                        chunks.put_nowait(error)
+                        return
                 if frame.get("text"):
                     text_q.put(str(frame["text"]))
                 if frame.get("stop"):
@@ -530,6 +655,9 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
         while True:
             chunk = await chunks.get()
             if chunk is None:
+                break
+            if isinstance(chunk, dict):  # a voice the session cannot speak: report it and end
+                await ws.send_json(chunk)
                 break
             await _send_start()
             await ws.send_bytes(chunk)

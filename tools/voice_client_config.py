@@ -8,12 +8,18 @@ Rules: same trust boundary as every REST route (keys never logged, never hit
 client disk); relay is the floor, not an error (server-host-only providers and
 resolution failures return ``{"mode": "relay"}``); no new key stores.
 Config gate: ``voice.client_direct`` (default ``true``).
+
+⚠️ ``resolve_client_voice_config`` returns provider API KEYS. It is an internal resolver and its
+result must never reach an HTTP response: the route serves :func:`resolve_public_voice_config`,
+which drops every secret field and adds what a client needs to choose a voice.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -228,4 +234,69 @@ def resolve_client_voice_config() -> Dict[str, Any]:
         except Exception:
             logger.exception("client voice-config %s resolution failed", key.upper())
             out[key] = _relay("resolution error")
+    return out
+
+
+# A resolved config keeps every field it had (the shipped apps parse ``mode``, ``wire``, ``provider``,
+# ``model``, ``voice`` and the relay ``reason`` as they are) minus anything secret. Secret is judged
+# by NAME, at any depth, so a credential-bearing field a resolver adds later is dropped too.
+_SECRET_NAME_RE = re.compile(r"key|token|secret|password|passwd|authorization|credential|bearer", re.IGNORECASE)
+
+
+def _strip_url_secrets(url: str) -> str:
+    """A base URL without userinfo, query and fragment (``https://user:pw@host/v1?key=...``)."""
+    parts = urlsplit(url)
+    if not (parts.username or parts.password or parts.query or parts.fragment):
+        return url
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def _without_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: (_strip_url_secrets(v) if k == "base_url" and isinstance(v, str) else _without_secrets(v))
+                for k, v in value.items() if not _SECRET_NAME_RE.search(str(k))}
+    if isinstance(value, list):
+        return [_without_secrets(v) for v in value]
+    return value
+
+
+def _public_section(resolved: Any) -> Dict[str, Any]:
+    """A resolved STT/TTS config as a client may see it: the same shape, without credentials.
+
+    A ``direct`` config comes back without its ``api_key``, so it cannot be used as is; a client that
+    wants to call the provider has nothing to call with and uses the relay (the desktop does).
+    """
+    return _without_secrets(resolved) if isinstance(resolved, dict) else _relay("resolution error")
+
+
+def resolve_public_voice_config(language: Optional[str] = None) -> Dict[str, Any]:
+    """``GET /api/audio/voice-config``: both directions without credentials, plus the TTS voice fields.
+
+    Same shape as the resolver's, secrets removed (see ``_without_secrets``). ``tts`` also says
+    whether a per-request ``voice`` works (``voice_selection``), whether ``rate``/``pitch`` do
+    (``prosody``), the voice used without one (``voice``), and for Edge the voice list (``voices``,
+    optionally narrowed to one ``language``). Same profile-scope requirement as the resolver.
+    """
+    try:
+        resolved = resolve_client_voice_config()
+    except Exception:
+        logger.exception("client voice-config resolution failed")
+        resolved = {"stt": _relay("resolution error"), "tts": _relay("resolution error")}
+    out = {key: _public_section(resolved.get(key)) for key in ("stt", "tts")}
+    try:
+        from tools import tts_tool, tts_voice
+        tts_config = tts_tool._load_tts_config()
+        for field, value in tts_voice.voice_capabilities(
+                tts_config, tts_tool._get_provider(tts_config), language).items():
+            # What the resolver already said (``provider``, ``voice``) stays exactly as it was.
+            if field in ("provider", "voice"):
+                out["tts"].setdefault(field, value)
+            else:
+                out["tts"][field] = value
+    except Exception:
+        logger.exception("TTS voice capabilities failed")
+        out["tts"].update(voice_selection=False, prosody=False)
     return out

@@ -66,6 +66,17 @@ describe('fetchVoiceClientConfig', () => {
     expect(request.connectionId).toBe('gw-remote')
   })
 
+  it('treats a direct config without its api_key as a relay (the gateway no longer sends keys)', async () => {
+    const { api_key: _omitted, ...keyless } = directStt
+
+    mockDesktopApi({ ok: true, stt: keyless, tts: { ...keyless, wire: 'openai-speech', voice: 'alloy', speed: 1 } })
+
+    const config = await fetchVoiceClientConfig()
+
+    expect(config?.stt).toEqual({ mode: 'relay', reason: 'no client credentials' })
+    expect(config?.tts).toEqual({ mode: 'relay', reason: 'no client credentials' })
+  })
+
   it("a scope switch never reuses another scope's credentials", async () => {
     const api = mockDesktopApi({ ok: true, stt: directStt, tts: relay })
     setApiRequestProfile('alpha')

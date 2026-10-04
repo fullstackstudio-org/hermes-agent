@@ -198,8 +198,12 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, 
     edge_config = tts_config.get("edge") or {}
     speed = float(edge_config.get("speed", tts_config.get("speed", 1.0)))
     kwargs = {"voice": edge_config.get("voice", DEFAULT_EDGE_VOICE)}
-    if speed != 1.0:
-        kwargs["rate"] = f"{round((speed - 1.0) * 100):+d}%"
+    # ``_rate_percent`` / ``_pitch_hz`` are per-request hints (tools.tts_voice), added to the speed.
+    rate = (round((speed - 1.0) * 100) if speed != 1.0 else 0) + int(edge_config.get("_rate_percent") or 0)
+    if rate:
+        kwargs["rate"] = f"{rate:+d}%"
+    if pitch := int(edge_config.get("_pitch_hz") or 0):
+        kwargs["pitch"] = f"{pitch:+d}Hz"
     await edge_tts.Communicate(text, **kwargs).save(output_path)
     return output_path
 

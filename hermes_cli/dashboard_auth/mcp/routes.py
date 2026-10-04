@@ -3,7 +3,8 @@
     GET  /.well-known/oauth-authorization-server/mcp   RFC 8414 metadata for the issuer <primary>/mcp
     GET  /.well-known/oauth-authorization-server       the same body (the root form some clients try)
     GET  /.well-known/oauth-protected-resource/mcp     RFC 9728 metadata for the resource <primary>/mcp
-    GET|POST /mcp/authorize                            SDK handler; 302 to the consent page
+    GET|POST /mcp/authorize                            SDK handler; 302 to the consent page, or a refusal the
+                                                       gateway answers itself (never a redirect to the client)
     GET|POST /mcp/consent                              the person decides (cookie sign-in; see consent.py)
     POST /mcp/token                                    SDK handler; code and refresh grants
     POST /mcp/register                                 SDK handler; RFC 7591 dynamic client registration
@@ -21,6 +22,11 @@ What the route layer adds to the SDK's handlers:
   store keeps only a secret's hash, so the SDK's own authenticator would refuse every secret client;
 - ``resource`` on ``/mcp/token`` is checked (the SDK ignores it): a different resource is
   ``invalid_target``;
+- ``/mcp/authorize`` redirects only to the consent page. Every refusal the SDK would send back to the
+  client's redirect URI (a bad scope, a non-S256 challenge, a foreign ``resource``) is a page or JSON from
+  the gateway instead (400; 503 for ``temporarily_unavailable``): anyone may register a redirect URI, so
+  redirecting before the person saw the client on the consent page would make the gateway an open
+  redirector. The client hears an error only through the person's Deny on that page;
 - the revocation endpoint is this module's, because the SDK's requires a ``client_secret`` field even
   from a public client;
 - a store that cannot be used answers 503 ``temporarily_unavailable`` on every route, never a 400 or 401
@@ -346,19 +352,46 @@ async def authorize_endpoint(request: Request) -> Response:
         params: Any = await request.form()
     else:
         params = request.query_params
-    response, _ = await provider_call(request, partial(rt.authorize_handler.handle, request))
+    response, notes = await provider_call(request, partial(rt.authorize_handler.handle, request))
     location = response.headers.get("location", "")
     consent = response.status_code == 302 and location.startswith(rt.provider.consent_url + "?")
     fields: dict[str, Any] = {"client_id": _clip(params.get("client_id")), "ip": client_ip(request),
                               "outcome": "consent" if consent else "refused"}
-    if not consent:
+    if not consent and not notes.store_down:
         if location:
-            fields["reason"] = _clip((parse_qs(urlsplit(location).query).get("error") or [""])[0], 40)
+            answer = {k: (v or [""])[0] for k, v in parse_qs(urlsplit(location).query).items()}
         else:
-            fields["reason"] = _clip(_body_json(response).get("error"), 40)
+            answer = _body_json(response)
+        code = _clip(answer.get("error"), 40) or "invalid_request"
+        fields["reason"] = code
+        # Never back to the client from here: a registration is open to anyone, so a redirect URI is not a
+        # host the person chose until they see it on the consent page. The client hears of a refusal only
+        # through the person's Deny there.
+        response = authorize_refusal(request, code, answer.get("error_description"))
+    if not consent:
         fields["status"] = response.status_code
     audit_log(AuditEvent.MCP_AUTHORIZE_START, **fields)
     return response
+
+
+_AUTHORIZE_STATUS = {"server_error": 500, "temporarily_unavailable": 503}
+
+
+def authorize_refusal(request: Request, code: str, description: Any) -> Response:
+    """A refused authorization request, answered by the gateway itself: a short HTML page for a browser
+    (``Accept`` with ``text/html``), else ``{error, error_description}``. 400, or 503 / 500 for
+    ``temporarily_unavailable`` / ``server_error``. Never a redirect."""
+    from hermes_cli.dashboard_auth.mcp import consent
+
+    status = _AUTHORIZE_STATUS.get(code, 400)
+    detail = description if isinstance(description, str) and description.strip() else "The request is not valid."
+    detail = detail[:300]
+    headers = {"Retry-After": "60"} if status == 503 else {}
+    if "text/html" in request.headers.get("accept", ""):
+        return consent.refusal_page("This MCP client's sign-in request was refused",
+                                    f"{detail} ({code}). Start the connection again from your MCP client.",
+                                    status, headers)
+    return error(status, code, detail, headers=headers)
 
 
 def announce_granted(store: MCPStore, grant_id: str) -> None:

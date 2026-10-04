@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import html
-from typing import Any
+from typing import Any, Optional
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -128,10 +128,15 @@ def render_consent(view: Any, *, person: str) -> str:
     return _page("Allow an MCP client?", body)
 
 
+def refusal_page(title: str, detail: str, status: int, headers: Optional[dict] = None) -> HTMLResponse:
+    """A short page that says why a request was refused (escaped), with the consent page's headers."""
+    body = f"<h1>{_e(title)}</h1><p>{_e(detail)}</p>"
+    return HTMLResponse(_page("MCP sign-in", body), status_code=status, headers={**_PAGE_HEADERS, **(headers or {})})
+
+
 def _refusal(request: Request, status: int, error: str, detail: str) -> Response:
     if "text/html" in request.headers.get("accept", ""):
-        body = f"<h1>{_e(_TITLES.get(error, 'This request was refused'))}</h1><p>{_e(detail)}</p>"
-        return HTMLResponse(_page("MCP sign-in", body), status_code=status, headers=_PAGE_HEADERS)
+        return refusal_page(_TITLES.get(error, "This request was refused"), detail, status)
     return JSONResponse({"error": error, "detail": detail}, status_code=status, headers={"Cache-Control": "no-store"})
 
 

@@ -639,6 +639,8 @@ def test_flow_through_the_sdk_handlers(provider, store, method):
 
 
 def test_authorize_handler_redirects_invalid_target_to_the_client(provider):
+    # The SDK's own handler, as the provider drives it. The gateway's route (``routes.authorize_endpoint``)
+    # never passes such a redirect on: it answers the refusal itself (test_routes.py).
     http = TestClient(_app(provider))
     client_id = http.post("/mcp/register", json={"redirect_uris": [REDIRECT], "token_endpoint_auth_method": "none"}
                           ).json()["client_id"]

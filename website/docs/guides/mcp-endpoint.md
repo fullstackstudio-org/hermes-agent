@@ -70,7 +70,10 @@ claude mcp add --transport http hermes https://hermes.example.invalid/mcp
 Then, inside Claude Code, run `/mcp` and choose the server to sign in. Your browser opens the gateway's
 consent page (after the gateway's normal sign-in when you are not signed in yet). It shows the client's name
 **and the address it will send you back to**: the name is whatever the client registered, so check the
-address too. Allow it, and Claude Code receives its tokens.
+address too. Allow it, and Claude Code receives its tokens. A request the gateway refuses before that page
+(an unknown scope, a challenge that is not S256, another server's `resource`) is answered by the gateway
+itself, never by sending your browser to the client's address: until you have seen it on the consent page,
+that address is just something a client registered.
 
 Another MCP client that does OAuth 2.1 with dynamic client registration connects the same way. A project
 `.mcp.json` entry:

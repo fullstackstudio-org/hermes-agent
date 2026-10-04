@@ -426,6 +426,39 @@ def test_registration_refuses_redirects_outside_https_and_loopback(gw):
         assert r.status_code == 400, uri
 
 
+PHISH = "https://phish.example.invalid/x"
+
+
+@pytest.mark.parametrize("extra, error", [({"scope": "nope"}, "invalid_scope"),
+                                          ({"code_challenge_method": "plain"}, "invalid_request"),
+                                          ({"resource": "https://other.example.invalid/mcp"}, "invalid_target")])
+def test_authorize_never_redirects_a_refusal_to_the_client(gw, extra, error):
+    # Anyone may register any https redirect URI; a refusal sent there before the person saw the client on
+    # the consent page would make the gateway an open redirector (no sign-in needed to trigger it).
+    flow = gw.register(redirect_uris=[PHISH])
+    _, challenge = pkce()
+    params = {"response_type": "code", "client_id": flow.client_id, "redirect_uri": PHISH,
+              "code_challenge": challenge, "code_challenge_method": "S256", "state": "state-marker",
+              "resource": ISSUER} | extra
+    r = gw.client.get("/mcp/authorize", params=params)
+    assert r.status_code == 400 and "location" not in r.headers, (r.status_code, r.headers)
+    assert r.json()["error"] == error and r.headers["cache-control"].startswith("no-store")
+    page = gw.client.get("/mcp/authorize", params=params, headers={"Accept": "text/html"})
+    assert page.status_code == 400 and "location" not in page.headers
+    assert page.headers["content-type"].startswith("text/html") and "phish.example.invalid" not in page.text
+    assert "<script" not in page.text and page.headers["x-frame-options"] == "DENY"
+    r = gw.client.post("/mcp/authorize", data=params)
+    assert r.status_code == 400 and "location" not in r.headers
+    lines = [line for line in audit_lines() if line["event"] == "mcp_authorize_start"]
+    assert lines and all((line["outcome"], line["reason"], line["status"]) == ("refused", error, 400)
+                         for line in lines)
+    # The same client with a valid request still reaches the consent page, and only that.
+    params.pop("scope", None)
+    params |= {"code_challenge_method": "S256", "resource": ISSUER}
+    r = gw.client.get("/mcp/authorize", params=params)
+    assert r.status_code == 302 and r.headers["location"].startswith(f"{BASE}/mcp/consent?txn=")
+
+
 def test_loopback_any_port_is_a_one_line_switch(gw, monkeypatch):
     flow = gw.register()
     other_port = "http://127.0.0.1:40001/callback"

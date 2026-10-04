@@ -570,6 +570,13 @@ def _without_wire_copy(message: dict, *, display: bool = True) -> dict:
     the stored form (named ones dropped, an unnamed one kept: it is the only copy), so export then import
     loses nothing (agent/inline_images.py)."""
     copy = {key: value for key, value in message.items() if key != "api_content"}
+    if display and copy.get("role") == "assistant":
+        # Files a bot shared (tui_gateway/outbox_share.py): shown as ``attachments``, never by their paths.
+        from tui_gateway.outbox_share import project_row
+
+        content, attachments, meta = project_row("assistant", copy.get("content"), copy.get("display_metadata"))
+        if attachments is not None:
+            copy.update(content=content, attachments=attachments, display_metadata=meta)
     if copy.get("role") == "user":
         from agent.inline_images import inline_images_for_display, strip_inline_images
 

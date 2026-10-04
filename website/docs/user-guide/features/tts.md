@@ -38,6 +38,7 @@ Convert text to speech with eleven providers:
 | Discord | Voice bubble (Opus/OGG), falls back to file attachment | Opus/MP3 |
 | WhatsApp | Audio file attachment | MP3 |
 | CLI | Saved to `~/.hermes/audio_cache/` | MP3 |
+| Hermie apps | Audio attachment that plays inline, whatever `voice_compatible` says (see [`files:`](../configuration.md#files-a-bot-shares-top-level-files)) | MP3, M4A, OGG/Opus, WAV, FLAC |
 
 ### Configuration
 

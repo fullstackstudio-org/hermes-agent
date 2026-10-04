@@ -18,7 +18,9 @@ from __future__ import annotations
 from pydantic import Field
 
 from .base import JsonValue, Payload, WireEnum
-from .common import MessageReaction, SessionLiveInfo, SubagentStatus, ToolLabel, ToolLabelKind, Usage
+from .common import (
+    MessageReaction, OutboxAttachment, SessionLiveInfo, SubagentStatus, ToolLabel, ToolLabelKind, Usage,
+)
 from .config_free_tier_control import SessionControlSnapshot
 from .registry import event
 
@@ -218,6 +220,10 @@ class MessageCompletePayload(Payload):
     # ``"shutdown"``: the gateway interrupted this turn on its way out; it continues after the restart
     # (``session.resume`` reports ``auto_continue``). Absent for every other outcome, a user stop included.
     interrupt_reason: str | None = None
+    # The files the reply shared with the person (``tui_gateway/outbox_share.py``), only on a session whose
+    # source ``files.outbox_sources`` lists; ``text`` then carries no ``MEDIA:`` directive. ``[]`` when the
+    # reply named files and none could be shared. Absent otherwise.
+    attachments: list[OutboxAttachment] | None = None
 
 
 event("message.complete", MessageCompletePayload, doc="The turn ended: final text, usage and outcome.")

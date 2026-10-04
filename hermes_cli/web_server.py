@@ -263,6 +263,12 @@ async def _lifespan(app: "FastAPI"):
 
     start_background_bootstrap()
 
+    # Fork: shared files past their retention or over a profile's outbox size go, now and every few hours
+    # (tui_gateway/outbox.py). A daemon: it only removes folders it created, and holds no connection.
+    from tui_gateway.outbox import start_pruner
+
+    outbox_pruner_stop = start_pruner()
+
     # Fork: what the MCP endpoint runs for the server's lifetime (dashboard_auth/mcp/mount.py).
     mcp_lifespan = AsyncExitStack()
     await mcp_lifespan.enter_async_context(_mcp_mount.lifespan(app))
@@ -270,6 +276,7 @@ async def _lifespan(app: "FastAPI"):
     try:
         yield
     finally:
+        outbox_pruner_stop.set()
         await mcp_lifespan.aclose()
         hosted_room_start_cancel.set()
         _hosted_groups.stop_hosted_room_service(timeout=5.0)

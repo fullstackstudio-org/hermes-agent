@@ -1581,6 +1581,8 @@ class SessionDB(
     _CONTENT_JSON_PREFIX = "\x00json:"
     #: Reactions live inside ``display_metadata`` so they survive row rewrites.
     REACTIONS_METADATA_KEY = "reactions"
+    #: Files a bot shared in this message (``tui_gateway/outbox.py``): the client shape, never a path.
+    ATTACHMENTS_METADATA_KEY = "attachments"
     # Columns every conversation projection decodes; ``active`` rides along so a display read
     # can split compaction-archived rows without a second query.
     _CONVERSATION_ROW_COLUMNS = (

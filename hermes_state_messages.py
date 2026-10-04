@@ -442,6 +442,24 @@ class SessionMessagesMixin:
             return reactions
         return self._execute_write(_do)
 
+    def set_message_attachments(self, session_id: str, message_row_id: int,
+                                attachments: List[Dict[str, Any]]) -> bool:
+        """Record on one assistant row the files a bot shared in it (``tui_gateway/outbox.py``), under
+        ``ATTACHMENTS_METADATA_KEY`` in its ``display_metadata``: what clients see, never what the model is
+        sent. ``False`` for a row outside the session's visible lineage (see ``_reaction_row_query``)."""
+        if not session_id or message_row_id is None:
+            return False
+        sql, params = self._reaction_row_query(session_id, message_row_id)
+        def _do(conn):
+            row = conn.execute(sql, params).fetchone()
+            if row is None:
+                return False
+            meta = self._decode_display_metadata(row[0]) or {}
+            meta[self.ATTACHMENTS_METADATA_KEY] = list(attachments)
+            conn.execute(_SET_DISPLAY_META_SQL, (self._encode_display_metadata(meta), message_row_id))
+            return True
+        return bool(self._execute_write(_do))
+
     def get_message_reactions(self, session_id: str, message_row_id: int) -> List[Dict[str, Any]]:
         """Reaction list persisted on one message row (never ``None``)."""
         if not session_id or message_row_id is None:

@@ -270,7 +270,10 @@ def _history_to_messages(history: list[dict], *, profile_home=None) -> list[dict
             continue
         # Assistant detail sidecars can carry the only visible reply or reasoning after resume/reload.
         has_assistant_detail = role == "assistant" and any(m.get(key) for key in _HISTORY_ASSISTANT_DETAIL_KEYS)
-        if not content_text.strip() and not has_assistant_detail:
+        # Files a bot shared (tui_gateway/outbox_share.py): the row shows them, never their MEDIA: paths.
+        from tui_gateway.outbox_share import project_row
+        content_text, attachments, display_metadata = project_row(role, content_text, m.get("display_metadata"))
+        if not content_text.strip() and not has_assistant_detail and not attachments:
             continue
         msg = {"role": role, "text": content_text}
         # Authoring time (Unix seconds) for display.timestamps; display-only.
@@ -291,8 +294,10 @@ def _history_to_messages(history: list[dict], *, profile_home=None) -> list[dict
         display_kind = m.get("display_kind") or _legacy_display_kind(role, content_text)
         if display_kind:
             msg["display_kind"] = display_kind
-        if m.get("display_metadata"):
-            msg["display_metadata"] = m["display_metadata"]
+        if display_metadata:
+            msg["display_metadata"] = display_metadata
+        if attachments is not None:
+            msg["attachments"] = attachments
         messages.append(msg)
     return project_history_commentary(messages, home=profile_home)
 

@@ -540,6 +540,8 @@ class _TurnRun:
     prompt_text: str = ""
     marker_key: str = ""
     receipt_attempted: bool = False
+    # The outbox settings when this session's files are shared with the person (tui_gateway/outbox_share.py).
+    outbox: Any = None
 
 
 def _adopt_out_of_band_turns(session: dict) -> None:
@@ -677,6 +679,12 @@ def _invoke_agent(
     # could still resolve to a silence marker ("NO"->"NO_REPLY"), so a bare marker is never
     # shown and then retracted (the client keeps streamed text when message.complete is "").
     hold = {"buf": "", "held": ""} if _is_bot_mode_session(session) else None
+    # A session whose files are shared never streams a MEDIA: path (outbox_share.MediaDeltaFilter).
+    st.outbox = _outbox_settings_if_shared(session, agent)
+    media_filter = None
+    if st.outbox is not None:
+        from tui_gateway.outbox_share import MediaDeltaFilter
+        media_filter = MediaDeltaFilter()
 
     def _stream(delta):
         if getattr(agent, "_mute_notification_reply", False):
@@ -688,6 +696,10 @@ def _invoke_agent(
                 hold["held"] += delta
                 return
             delta, hold["held"] = hold["held"] + delta, ""
+        if media_filter is not None and isinstance(delta, str):
+            delta = media_filter.feed(delta)
+            if not delta:
+                return
         with session["history_lock"]:
             _append_inflight_delta(session, delta)
         payload = {"text": delta}
@@ -906,11 +918,15 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     payload = {"text": raw, "usage": _get_usage(agent), "status": status}
     if shutdown_interrupted:
         payload["interrupt_reason"] = "shutdown"
+    final_row_id = None
     if receipt := _persisted_turn_receipt(st, raw, status):
         payload["persisted_turn"] = receipt
         # Taken from the receipt, never recomputed: the frame and its receipt cannot disagree on the row.
         if (final_row_id := receipt.get("final_assistant_row_id")) is not None:
             payload["row_id"] = final_row_id
+    shown = raw
+    if st.outbox is not None and status == "complete" and isinstance(raw, str):
+        shown = _share_turn_outbox(session, st, raw, final_row_id, payload)
     if last_reasoning:
         payload["reasoning"] = last_reasoning
     if status_note:
@@ -921,7 +937,7 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     if _billing_block := result.get("billing_block"):
         payload["billing"] = _billing_block
         payload["failure_reason"] = result.get("failure_reason")
-    if rendered := render_message(raw, cols):
+    if rendered := render_message(shown, cols):
         payload["rendered"] = rendered
     error_value = result.get("error")
     final_text = result.get("final_response")
@@ -959,6 +975,75 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     if st.receipt_committed and not shutdown_interrupted:
         _retire_turn_marker(session, st.marker_key)
     return payload, raw, status
+
+
+def _outbox_settings_if_shared(session: dict, agent: Any):
+    """The outbox settings when this session's files are shared with the person, else None
+    (``tui_gateway/outbox_share.session_shares_files``). Read under the turn's profile scope."""
+    try:
+        from tui_gateway import outbox, outbox_share
+        settings = outbox.load_settings()
+
+        def _stored_source():
+            db, key = getattr(agent, "_session_db", None), session.get("session_key")
+            row = db.get_session(key) if db is not None and key else None
+            return (row or {}).get("source")
+
+        return settings if outbox_share.session_shares_files(session, settings, _stored_source) else None
+    except Exception:
+        logger.debug("outbox: could not decide whether this session shares files", exc_info=True)
+        return None
+
+
+def _outbox_logins(session: dict) -> set[str]:
+    """Every signed-in login this conversation belongs to right now: the one it was created under, its stored
+    owner, everyone who attached, and the person this turn works for (``outbox.may_fetch``)."""
+    logins = {_session_auth_user_id(session), session.get("stored_owner"), *(session.get("attached_logins") or ())}
+    acting = _turn_auth_user.get()
+    if isinstance(acting, tuple) and acting and isinstance(acting[0], str):
+        logins.add(acting[0])
+    return {login for login in logins if isinstance(login, str) and login}
+
+
+def _share_turn_outbox(session: dict, st: _TurnRun, raw: str, final_row_id: int | None, payload: dict) -> str:
+    """Share the files the reply names (tui_gateway/outbox_share.py): ``payload`` gets the text without their
+    directives and ``attachments``, the final row and the live history get ``display_metadata.attachments``.
+    Returns the text clients are shown. A failure leaves the reply as the agent wrote it, minus directives."""
+    from tui_gateway import outbox, outbox_share
+    agent = st.agent
+    messages = (st.result or {}).get("messages") if isinstance(st.result, dict) else None
+    turn_messages = outbox_share._turn_tool_messages(
+        messages or [], getattr(agent, "_persist_user_message_idx", None))
+    session_id = str(getattr(agent, "session_id", "") or session.get("session_key") or "")
+    home = session.get("profile_home") or get_hermes_home()
+    try:
+        shared = outbox_share.share_turn_files(
+            raw, turn_messages, home=home, session_id=session_id, logins=_outbox_logins(session),
+            settings=st.outbox, session_key=str(session.get("session_key") or ""))
+    except Exception:
+        logger.exception("outbox: sharing the files of session %s failed", session_id)
+        shown = outbox_share.strip_directives(raw)
+        payload["text"] = shown
+        return shown
+    payload["text"] = shared.text
+    if not shared.named:
+        return shared.text
+    payload["attachments"] = shared.attachments
+    with session["history_lock"]:
+        for message in reversed(session.get("history") or []):
+            if isinstance(message, dict) and message.get("role") == "assistant" and message.get("content") == raw:
+                meta = dict(message.get("display_metadata") or {})
+                meta[outbox.METADATA_KEY] = shared.attachments
+                message["display_metadata"] = meta
+                break
+    db = getattr(agent, "_session_db", None)
+    if db is not None and final_row_id is not None:
+        try:
+            if not db.set_message_attachments(session_id, final_row_id, shared.attachments):
+                logger.warning("outbox: row %s of session %s not found for its attachments", final_row_id, session_id)
+        except Exception:
+            logger.exception("outbox: could not record the attachments of row %s", final_row_id)
+    return shared.text
 
 
 def _recover_turn_exception(sid: str, session: dict, st: _TurnRun, e: BaseException) -> None:

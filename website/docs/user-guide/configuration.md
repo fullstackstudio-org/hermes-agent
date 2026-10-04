@@ -1653,6 +1653,20 @@ Separate from `auxiliary.vision` (which picks the describer model): when the *ma
 
 An image a person attaches is kept as a file on the gateway (client uploads under `<profile home>/images/`); stored history, later turns and client history carry its `[Image attached at: <path>]` handle, never the base64 bytes. `images.inline_current_turn` (default `true`) also sends the pixels inline on the turn the image arrives in; `false` sends the handle only there too, and the model opens the file with `vision_analyze`. See [Vision → Attached images stay files](./features/vision.md#attached-images-stay-files-imagesinline_current_turn).
 
+### Files a bot shares (top-level `files:`)
+
+A bot sends a file with a `MEDIA:<path>` line in its reply, and `text_to_speech` / `image_generate` name theirs in their result. On a messaging platform the gateway uploads it. In the Hermie apps (sessions whose source is listed in `files.outbox_sources`, default `["hermie"]`) the gateway copies it into `<profile home>/outbox/<token>/` and the reply shows it as an attachment the app fetches from `GET /api/files/outbox/<token>/<name>`; the agent's own file stays where it is. Only a regular file that native delivery would send (the credential and system denylist applies, links are resolved first) is copied.
+
+```yaml
+files:
+  outbox_sources: ["hermie"]   # session sources whose files are shared ([] = none)
+  outbox_max_file_mb: 200      # a larger file is not shared
+  outbox_max_total_mb: 2048    # per profile; the oldest shared files are removed first
+  outbox_retention_days: 30    # shared files older than this are removed
+```
+
+The written contract (the attachment shape, the route's headers and ranges) is `contract/outbox/` in the repository.
+
 ### Limiting auxiliary concurrency
 
 `max_concurrency` caps in-flight LLM calls for auxiliary tasks such as `compression` and `title_generation` across the whole process. `auxiliary.vision.max_concurrency` is excluded: it already controls only vision's CPU-bound image encode/resize workers, not LLM requests. This is most useful when:

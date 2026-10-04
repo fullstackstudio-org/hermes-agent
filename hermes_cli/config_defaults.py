@@ -1275,6 +1275,15 @@ DEFAULT_CONFIG = {
         # call. false = that turn carries the handle only too; the model opens the file with vision_analyze.
         "inline_current_turn": True,
     },
+    # Files a bot shares with the person in the Hermie apps (tui_gateway/outbox.py): a MEDIA:<path> in a reply,
+    # or a text_to_speech / image_generate result, is copied to <profile home>/outbox/<token>/ and shown as an
+    # attachment, fetched from GET /api/files/outbox/<token>/<name>. The agent's own file is left alone.
+    "files": {
+        "outbox_sources": ["hermie"],  # session sources whose files are shared ([] = none)
+        "outbox_max_file_mb": 200,  # a larger file is not shared
+        "outbox_max_total_mb": 2048,  # per profile; the oldest shared files go first
+        "outbox_retention_days": 30,  # shared files older than this are removed
+    },
     # "Hey Hermes" hands-free wake word: always-on, on-device hotword detection that starts a fresh
     # voice session. Off by default; toggle with /wake.
     "wake_word": {

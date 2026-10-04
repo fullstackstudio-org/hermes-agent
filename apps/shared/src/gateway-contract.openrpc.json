@@ -5097,6 +5097,18 @@
         "title": "AttachedImageResult",
         "type": "object"
       },
+      "AttachmentKind": {
+        "description": "How a client shows a shared file (``tui_gateway/outbox.classify``): the first four are served inline and\ntheir bytes were checked against the type; ``file`` is a download.",
+        "enum": [
+          "image",
+          "video",
+          "audio",
+          "pdf",
+          "file"
+        ],
+        "title": "AttachmentKind",
+        "type": "string"
+      },
       "AutoContinue": {
         "additionalProperties": false,
         "description": "A crash-interrupted turn was scheduled to continue right after this resume.",
@@ -20739,6 +20751,21 @@
             ],
             "default": null,
             "title": "Interrupt Reason"
+          },
+          "attachments": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/OutboxAttachment"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Attachments"
           }
         },
         "title": "MessageCompletePayload",
@@ -21964,6 +21991,60 @@
           }
         },
         "title": "OptionalProjectResult",
+        "type": "object"
+      },
+      "OutboxAttachment": {
+        "additionalProperties": false,
+        "description": "A file a bot shared with the person (``tui_gateway/outbox.attachment_of``; ``contract/outbox``). Fetch it\nfrom ``url`` (``GET /api/files/outbox/{id}/{name}``, add ``?profile=`` like every per-profile route) with the\nsession header or cookie. No path on the server, ever.",
+        "properties": {
+          "id": {
+            "pattern": "^[A-Za-z0-9_-]{32}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 180,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AttachmentKind"
+          },
+          "size": {
+            "minimum": 0,
+            "title": "Size",
+            "type": "integer"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "number"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "mime",
+          "kind",
+          "size",
+          "sha256",
+          "created_at",
+          "url"
+        ],
+        "title": "OutboxAttachment",
         "type": "object"
       },
       "PaneRevealPayload": {
@@ -38625,6 +38706,21 @@
             ],
             "default": null,
             "title": "Call Index"
+          },
+          "attachments": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/OutboxAttachment"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Attachments"
           }
         },
         "required": [

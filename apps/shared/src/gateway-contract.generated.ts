@@ -2838,6 +2838,7 @@ export interface TranscriptMessage {
   reasoning?: string | null
   call_row_id?: number | null
   call_index?: number | null
+  attachments?: OutboxAttachment[] | null
   [key: string]: unknown
 }
 /** ``tools.tool_labels.ToolLabel`` — what one call executed through the tool_search bridge is, in words. Clients render ``text`` (or ``app``/``action`` in their own columns) and never parse the tool name themselves. */
@@ -2852,6 +2853,19 @@ export interface ToolLabel {
 }
 /** Which surface one inner call of a bridged ``tool_call`` runs on. */
 export type ToolLabelKind = 'connector' | 'mcp' | 'tool'
+/** A file a bot shared with the person (``tui_gateway/outbox.attachment_of``; ``contract/outbox``). Fetch it from ``url`` (``GET /api/files/outbox/{id}/{name}``, add ``?profile=`` like every per-profile route) with the session header or cookie. No path on the server, ever. */
+export interface OutboxAttachment {
+  id: string
+  name: string
+  mime: string
+  kind: AttachmentKind
+  size: number
+  sha256: string
+  created_at: number
+  url: string
+}
+/** How a client shows a shared file (``tui_gateway/outbox.classify``): the first four are served inline and their bytes were checked against the type; ``file`` is a download. */
+export type AttachmentKind = 'image' | 'video' | 'audio' | 'pdf' | 'file'
 export interface SessionBranchStoredParams {
   profile?: string | null
   parent_session_id: string
@@ -4868,6 +4882,7 @@ export interface MessageCompletePayload {
   persisted_turn?: PersistedTurn | null
   row_id?: number | null
   interrupt_reason?: string | null
+  attachments?: OutboxAttachment[] | null
 }
 /** ``prompt_turn._result_status``. */
 export type TurnStatus = 'complete' | 'error' | 'interrupted'

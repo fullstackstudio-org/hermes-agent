@@ -152,6 +152,38 @@ class ToolLabel(Payload):
     preview: str = ""
 
 
+class AttachmentKind(WireEnum):
+    """How a client shows a shared file (``tui_gateway/outbox.classify``): the first four are served inline and
+    their bytes were checked against the type; ``file`` is a download."""
+
+    image = "image"
+    video = "video"
+    audio = "audio"
+    pdf = "pdf"
+    file = "file"
+
+
+class OutboxAttachment(Result):
+    """A file a bot shared with the person (``tui_gateway/outbox.attachment_of``; ``contract/outbox``). Fetch it
+    from ``url`` (``GET /api/files/outbox/{id}/{name}``, add ``?profile=`` like every per-profile route) with the
+    session header or cookie. No path on the server, ever."""
+
+    #: 32 URL-safe characters: the unguessable token of this copy.
+    id: Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{32}$")]
+    #: The file's base name as the bot named it (control characters and separators replaced, <= 180 chars).
+    name: Annotated[str, Field(min_length=1, max_length=180)]
+    #: The type recorded for it (``application/octet-stream`` when the bytes contradict the name).
+    mime: str
+    kind: AttachmentKind
+    size: Annotated[int, Field(ge=0)]
+    #: Lower-case hex SHA-256 of the bytes.
+    sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    #: Unix seconds.
+    created_at: float
+    #: ``/api/files/outbox/<id>/<name, percent-encoded>`` relative to the gateway's origin.
+    url: str
+
+
 class TranscriptMessage(OpenModel):
     """One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``):
     ``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id``
@@ -176,6 +208,9 @@ class TranscriptMessage(OpenModel):
     # tool.start / tool.complete frames of that call carried. Absent when the row cannot be tied to one.
     call_row_id: int | None = None
     call_index: int | None = None
+    # Assistant rows: the files a bot shared in this reply (``tui_gateway/outbox_share.project_row``); the
+    # row's ``text`` no longer carries their ``MEDIA:`` directives. Absent on every other row.
+    attachments: list[OutboxAttachment] | None = None
 
 
 class SubagentStatus(WireEnum):

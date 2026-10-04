@@ -520,6 +520,9 @@ def _(rid, params: dict) -> dict:
 @method("cli.exec")
 def _(rid, params: dict) -> dict:
     """Run `python -m hermes_cli.main` with argv; capture stdout/stderr (non-interactive only)."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "run CLI commands")) is not None:
+        return refused
     argv = params.get("argv", [])
     if not isinstance(argv, list) or not all(isinstance(x, str) for x in argv):
         return _err(rid, 4003, "argv must be list[str]")
@@ -946,6 +949,9 @@ _SLASH_BUILTINS = {
 
 @method("command.dispatch")
 def _(rid, params: dict) -> dict:
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "run slash commands")) is not None:
+        return refused
     name, arg = _resolve_name(params.get("name", "").lstrip("/")), params.get("arg", "")
     session = _caller_live_session(params.get("session_id", ""))
 
@@ -966,6 +972,9 @@ def _(rid, params: dict) -> dict:
 
 @method("slash.exec")
 def _(rid, params: dict) -> dict:
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "run slash commands")) is not None:
+        return refused
     session, err = _sess_nowait(params, rid)
     if err:
         return err
@@ -1764,6 +1773,9 @@ def _(rid, params: dict) -> dict:
 
 @method("shell.exec")
 def _(rid, params: dict) -> dict:
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "run shell commands")) is not None:
+        return refused
     cmd = params.get("command", "")
     if not cmd:
         return _err(rid, 4004, "empty command")

@@ -416,10 +416,18 @@ def _stored_exchange(agent, question, author):
 
 
 def test_a_retry_an_agent_presses_marks_replayed_by_with_via(room):
-    agent, call, _peers = room
+    agent, call, peers = room
     _stored_exchange(agent, "marker question", AUTHOR_ROBIN)
 
-    assert call("agent", "command.dispatch", name="retry", arg="")["result"]["type"] == "exec"
+    # command.dispatch refuses an agent's connection (``agent_guard``); the carrier is still pinned, for a
+    # retry reached on an agent's connection by any other path.
+    assert call("agent", "command.dispatch", name="retry", arg="")["error"]["code"] == 4033
+    token = bind_transport(peers["agent"])
+    try:
+        pressed = server._SLASH_BUILTINS["retry"]("rid", {"session_id": "sid"}, agent.session, "retry", "")
+    finally:
+        reset_transport(token)
+    assert pressed["result"]["type"] == "exec"
 
     turn = _turn(agent, "marker question")
     assert (turn["author"], turn["replayed_by"], turn["agent"]) == (AUTHOR_ROBIN, AUTHOR_ROBIN_VIA, VIA)

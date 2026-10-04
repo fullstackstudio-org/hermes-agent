@@ -481,6 +481,9 @@ _SESSION_SCOPED_KEYS = frozenset({"model", "fast", "yolo", "reasoning"})
 @method("config.set")
 @_profile_scoped
 def _(rid, params: dict) -> dict:
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "change settings")) is not None:
+        return refused
     key, value = params.get("key", ""), params.get("value", "")
     from hermes_cli.dashboard_auth.passkeys import settings as passkey_settings
     if passkey_settings.is_protected_key(str(key)):  # operator-only, on the gateway host

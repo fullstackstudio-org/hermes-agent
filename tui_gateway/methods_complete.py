@@ -349,6 +349,9 @@ def _(rid, params: dict) -> dict:
 @_catch(5034)
 def _(rid, params: dict) -> dict:
     """Save an API key for ``slug``; return its refreshed provider row (model.options shape + ``authenticated``)."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "provide an API key")) is not None:
+        return refused
     from hermes_cli.auth import PROVIDER_REGISTRY
     from hermes_cli.config import is_managed
     slug, api_key = (params.get("slug") or "").strip(), (params.get("api_key") or "").strip()
@@ -389,6 +392,9 @@ def _(rid, params: dict) -> dict:
 @_catch(5035)
 def _(rid, params: dict) -> dict:
     """Remove all credentials (env keys AND OAuth/pool state) for provider ``slug``."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "remove provider credentials")) is not None:
+        return refused
     from hermes_cli.auth import PROVIDER_REGISTRY, clear_provider_auth
     from hermes_cli.credential_lifecycle import remove_provider_env_credential
     if not (slug := (params.get("slug") or "").strip()):

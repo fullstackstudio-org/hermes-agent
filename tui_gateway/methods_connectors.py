@@ -284,6 +284,9 @@ def _(rid, params):
 @method("connectors.connect")
 @_connector_guard
 def _(rid, params):
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "connect an account")) is not None:
+        return refused
     return _connector_rpc(rid, params, "connect")
 
 
@@ -346,6 +349,9 @@ def _(rid, params):
 @method("connection.respond")
 @_connector_guard
 def _(rid, params):
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "answer a connection request")) is not None:
+        return refused
     from pydantic import ValidationError
 
     from tui_gateway.contracts.connectors import ConnectorErrorReason

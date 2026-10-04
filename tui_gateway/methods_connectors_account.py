@@ -123,6 +123,9 @@ def _(rid, request):
     unavailable_message="Connector accounts are unavailable.",
 )
 def _(rid, request):
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "remove a connected account")) is not None:
+        return refused
     from tools.connectors.gateway.errors import GatewayAuthError, GatewayUnavailable, ToolGatewayError
     from tools.connectors.portal.client import PortalConnectorClient
     from tui_gateway.contracts.connectors import ConnectorAccountsRemoveResult, ConnectorErrorReason
@@ -185,6 +188,9 @@ def _(rid, _params):
     unavailable_message="Connector policy is unavailable.",
 )
 def _(rid, request):
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "change connector permissions")) is not None:
+        return refused
     from tools.connectors.gateway.errors import GatewayAuthError, ToolGatewayError
     from tools.connectors.portal.client import PortalConnectorClient
     from tools.connectors.portal.policy import InvalidMemberPolicy, compose_connector_write, compose_tools_write

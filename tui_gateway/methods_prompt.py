@@ -1416,6 +1416,9 @@ def _approval_respond_session_fallback(params: dict):
 
 @method("approval.respond")
 def _(rid, params: dict) -> dict:
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "approve or deny a command")) is not None:
+        return refused
     session, err = _sess(params, rid)
     if err:
         # Session-not-found (4001) only: resolve by durable identity before failing.

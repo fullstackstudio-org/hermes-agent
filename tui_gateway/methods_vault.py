@@ -79,6 +79,9 @@ def _(rid, params: dict) -> dict:
 @_profile_scoped
 def _(rid, params: dict) -> dict:
     """Enable/disable an external manager: writes ``vault.<name>.enabled`` and locks it when disabling."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "change the password manager settings")) is not None:
+        return refused
     from agent.vault_backends.base import external_backend_classes
     from agent.vault_backends.unlock import lock
     from hermes_cli.config import _ensure_dict, load_config, save_config
@@ -103,6 +106,9 @@ def _(rid, params: dict) -> dict:
 @_profile_scoped
 def _(rid, params: dict) -> dict:
     """Unlock a manager with the master password typed in the Settings dialog (consumed by the CLI on stdin)."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "unlock a password manager")) is not None:
+        return refused
     from agent.vault_backends import enabled_backends
 
     name = str(params.get("name") or "")
@@ -125,6 +131,9 @@ def _(rid, params: dict) -> dict:
 @_profile_scoped
 def _(rid, params: dict) -> dict:
     """Forget a manager's session token (or every one when ``name`` is omitted)."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "lock a password manager")) is not None:
+        return refused
     from agent.vault_backends.unlock import lock
 
     name = params.get("name")
@@ -141,6 +150,9 @@ def _(rid, params: dict) -> dict:
     ``secret`` (dict). Result: ``{id}`` — metadata only. Exception text is
     scrubbed of secret values before it can reach a response or a log line.
     """
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "store a secret")) is not None:
+        return refused
     from agent.vault_store import (
         VaultError,
         get_vault_store,
@@ -169,6 +181,9 @@ def _(rid, params: dict) -> dict:
 @_profile_scoped
 def _(rid, params: dict) -> dict:
     """Remove a vault item by id. Result: ``{removed: bool}``."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "remove a secret")) is not None:
+        return refused
     try:
         from agent.vault_store import get_vault_store
 

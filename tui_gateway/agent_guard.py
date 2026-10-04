@@ -4,6 +4,9 @@ The MCP bridge only ever dispatches an allowlist of methods, but these rules do 
 agent's connection (a transport whose ``auth_identity`` carries ``agent``, minted by the bridge from a verified
 grant, never from a request) is held to them in the handlers, whatever reaches them.
 
+* :func:`refusal`: the handlers that approve, unlock, provide a secret, run a command or change a setting
+  answer an agent 4033 (Security 1 of the MCP plan: a token acts as the person for prompts and reading,
+  nothing more).
 * :data:`INTERRUPT_TURN`: an agent's ``session.interrupt`` stops only the turn it names. The id is not a
   request parameter (a client could send one); the bridge binds it in the fresh ``contextvars.Context`` it
   dispatches the call in, and ``session.interrupt`` reads it only when the calling connection IS an agent.
@@ -39,6 +42,17 @@ def grant_of(transport: Any) -> str:
     agent = identity.get("agent") if identity is not None else None
     grant = agent.get("grant") if isinstance(agent, dict) else None
     return grant.strip() if isinstance(grant, str) else ""
+
+
+def refusal(rid: Any, action: str) -> dict | None:
+    """The 4033 answer for an agent's connection calling a handler that *action*s (approves, unlocks, ...); None
+    for every other connection. Reads the connection the request arrived on (``current_transport``)."""
+    from tui_gateway.transport import current_transport
+
+    if agent_identity(current_transport()) is None:
+        return None
+    return {"jsonrpc": "2.0", "id": rid, "error": {
+        "code": 4033, "message": f"an agent connected through MCP cannot {action}; the person does that in their own app"}}
 
 
 def turn_start_fence(session: dict) -> threading.Lock:

@@ -1765,6 +1765,9 @@ def _billing_route(name: str, call, *, invalid=None, message: str = "", error: s
     mints ``idempotency_key`` if absent and echoes it (also on error) so the TUI retries the SAME operation."""
     @method(name)
     def _(rid, params: dict) -> dict:
+        from tui_gateway.agent_guard import refusal as _agent_refusal
+        if (refused := _agent_refusal(rid, "change billing or a subscription")) is not None:
+            return refused
         import hermes_cli.nous_billing as nb
         if invalid is not None and invalid(params):
             return _billing_invalid(rid, message, error=error)
@@ -1817,6 +1820,9 @@ def _(rid, params: dict) -> dict:
     """billing:manage step-up device flow → {ok, granted} (false when the server downscopes). Pooled (blocks
     for minutes); URL/code reach the TUI via ``billing.step_up.verification`` (stdout is the RPC pipe) and the
     browser opens TUI-side, never via the gateway's headless webbrowser.open."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "grant billing access")) is not None:
+        return refused
     sid = params.get("session_id") or ""
     if not _caller_may_access_session_id(sid):
         sid = ""  # route the verification code to the caller only, never into a session it may not act on

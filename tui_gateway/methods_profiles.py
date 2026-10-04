@@ -387,6 +387,9 @@ def _(rid, params: dict) -> dict:
     source's bot tokens/allowlists — default strips them so two profiles never hold one bot), ``no_skills``, ``soul``,
     ``model`` + ``provider``, ``share_auth``, ``no_alias``, ``mirror_credentials`` (default true: a bare
     ``create_profile()`` seeds a comment-only .env and no auth.json = NO provider headless)."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "create a bot")) is not None:
+        return refused
     name = str(params.get("name") or "").strip()
     if not name:
         return _err(rid, 4061, "name required")

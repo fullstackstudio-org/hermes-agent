@@ -385,12 +385,28 @@ class _Audit:
         except Exception:
             logger.debug("confirm audit: acting user unresolved", exc_info=True)
 
+    def _sink(self, event: str, **fields) -> None:
+        """A ``passkey`` request's records go to the GATEWAY's dashboard-auth log (``passkeys.paths.
+        gateway_scope``), beside its verification records and the sign-ins the passkeys belong to, whatever
+        profile the turn runs in; every other level's stay with the turn's profile."""
+        if self.level != "passkey":
+            _audit_sink(event, **fields)
+            return
+        try:
+            from hermes_cli.dashboard_auth.passkeys.paths import gateway_scope
+            with gateway_scope():
+                _audit_sink(event, **fields)  # never raises
+            return
+        except Exception:  # noqa: BLE001 - the gateway's home is unresolved: still written, in the turn's log
+            logger.debug("confirm audit: the gateway's home is unresolved", exc_info=True)
+        _audit_sink(event, **fields)
+
     def opened(self, request_id: str, reached: int) -> None:
         self.request_id, self.reached = request_id, reached
         audit.info("confirm request session=%s request=%s level=%s acting_user=%s reached=%d forced=%s fields=%d "
                    "draft=%s", self.sid, request_id, self.level, self.acting, reached, bool(self.extra.get("forced")),
                    int(self.extra.get("fields", 0)), bool(self.extra.get("draft")))
-        _audit_sink("confirm_request", session_id=self.sid, request_id=request_id, level=self.level,
+        self._sink("confirm_request", session_id=self.sid, request_id=request_id, level=self.level,
                     acting_user=self.acting, reached=reached, **self.extra)
 
     def outcome(self, outcome: ConfirmOutcome, *, request_id: str = "", answered_by=None) -> ConfirmOutcome:
@@ -399,7 +415,7 @@ class _Audit:
         audit.info("confirm outcome session=%s request=%s level=%s acting_user=%s outcome=%s method=%s reason=%s "
                    "answered_by=%s peer=%s", self.sid, request_id, self.level, self.acting, outcome.outcome,
                    outcome.method or "-", outcome.reason or "-", user, peer)
-        _audit_sink("confirm_outcome", session_id=self.sid, request_id=request_id, level=self.level,
+        self._sink("confirm_outcome", session_id=self.sid, request_id=request_id, level=self.level,
                     acting_user=self.acting, outcome=outcome.outcome, method=outcome.method or "",
                     reason=outcome.reason, verified=outcome.verified, answered_by=user, answered_from=peer,
                     **self.extra)

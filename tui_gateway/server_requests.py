@@ -549,12 +549,16 @@ def _agent_identity(transport: Any) -> dict | None:
 
 
 def _agent_clarify_allowed() -> bool:
-    """``dashboard.mcp.answer_clarify`` (default true). An unreadable config refuses: the operator may have
-    turned it off, and a refused clarify only waits for the person's own app."""
+    """``dashboard.mcp.answer_clarify`` (default true) in the GATEWAY's config (``passkeys.paths.gateway_scope``):
+    the MCP grants are the dashboard's, so a session scoped to a profile this gateway serves must not read the
+    profile's file, where the operator's ``false`` is absent. An unreadable config refuses: the operator may
+    have turned it off, and a refused clarify only waits for the person's own app."""
     try:
         from hermes_cli.config import load_config
         from hermes_cli.dashboard_auth.mcp.settings import from_config
-        return bool(from_config(load_config()).answer_clarify)
+        from hermes_cli.dashboard_auth.passkeys.paths import gateway_scope
+        with gateway_scope():
+            return bool(from_config(load_config()).answer_clarify)
     except Exception:  # noqa: BLE001 - refuse rather than guess
         logger.warning("dashboard.mcp.answer_clarify unreadable; refusing clarify answers from agents", exc_info=True)
         return False

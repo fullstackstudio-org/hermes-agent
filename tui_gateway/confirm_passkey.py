@@ -131,9 +131,13 @@ def reset_for_tests() -> None:
 
 
 def _audit(event: str, **fields: Any) -> None:
-    # Through confirm's sink, so one test seam captures every confirm audit record.
+    # Through confirm's sink, so one test seam captures every confirm audit record. In the gateway's scope:
+    # the record belongs in the gateway's dashboard-auth log with its sign-in and passkey records, not in
+    # the log of the profile the turn runs in.
+    from hermes_cli.dashboard_auth.passkeys.paths import gateway_scope
     from tui_gateway import confirm
-    confirm._audit_sink(event, **fields)
+    with gateway_scope():
+        confirm._audit_sink(event, **fields)
 
 
 def _login(transport: Any) -> str | None:

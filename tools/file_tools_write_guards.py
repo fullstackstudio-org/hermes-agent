@@ -165,6 +165,71 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
             f"Refusing to write to Hermes config file: {filepath}\n"
             "Agent cannot modify security-sensitive configuration. "
             "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead.")
+    return _gateway_owned_path_error(filepath, candidates)
+
+
+def _same_dir(a: str, b: str) -> bool:
+    if os.path.normcase(a) == os.path.normcase(b):
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _gateway_owned_path_error(filepath: str, candidates: tuple[str, ...]) -> str | None:
+    """Refuse a write to the GATEWAY's config.yaml or into a ``dashboard_auth`` directory (passkey store,
+    MCP grants) of a Hermes home (the gateway's, the active profile's, the root or any profile under it),
+    from every turn. "The gateway" is this
+    process's own (``paths.gateway_home``) and, in a separate process of a served profile, the host gateway
+    that serves it (``serving.serving_gateway_home``).
+
+    The config hard-block above covers the ACTIVE profile's config only. A turn in a profile the gateway
+    multiplexes is scoped to that profile, so without this the gateway's own config.yaml (its
+    ``confirm.passkey`` operator rules and base URLs, which bind every profile it serves:
+    ``hermes_cli/dashboard_auth/passkeys/paths.gateway_home``) and its passkey store were writable from it.
+    Compared by realpath, the ``dashboard_auth`` component case-folded (APFS / NTFS ignore case)."""
+    try:
+        from hermes_cli.dashboard_auth.passkeys.paths import STORE_DIR, gateway_home
+        from hermes_cli.dashboard_auth.passkeys.serving import serving_gateway_home
+        gateways = [os.path.realpath(str(gateway_home()))]
+        served_by = serving_gateway_home()  # a separate process of a served profile (kanban worker, -p chat)
+        if served_by is not None and os.path.realpath(str(served_by)) not in gateways:
+            gateways.append(os.path.realpath(str(served_by)))
+    except Exception:
+        return None
+    homes = list(gateways)
+    active = _get_real_hermes_home()
+    if active and active not in homes:
+        homes.append(active)
+    try:
+        from hermes_constants import get_default_hermes_root
+        root = os.path.realpath(str(get_default_hermes_root()))
+    except Exception:
+        root = None
+    if root and root not in homes:
+        homes.append(root)
+
+    def is_hermes_home(directory: str) -> bool:
+        # The gateway's, the active profile's, the root, or any profile under the root.
+        return any(_same_dir(directory, h) for h in homes) or bool(
+            root and os.path.basename(os.path.dirname(directory)) == "profiles"
+            and _same_dir(os.path.dirname(os.path.dirname(directory)), root))
+    for candidate in candidates:
+        real = os.path.realpath(candidate)
+        if os.path.basename(real).casefold() == "config.yaml" and any(
+                _same_dir(os.path.dirname(real), g) for g in gateways):
+            return (
+                f"Refusing to write to the gateway's config file: {filepath}\n"
+                "Agent cannot modify the gateway's security-sensitive configuration (its confirm.passkey "
+                "rules bind every profile it serves); the operator edits it on the gateway host.")
+        path = Path(real)
+        for ancestor in (path, *path.parents):
+            if ancestor.name.casefold() == STORE_DIR and is_hermes_home(str(ancestor.parent)):
+                return (
+                    f"Refusing to write to the dashboard's sign-in and passkey store: {filepath}\n"
+                    "Agent cannot modify dashboard_auth (passkeys, MCP grants); the operator uses "
+                    "`hermes dashboard passkey` on the gateway host.")
     return None
 
 

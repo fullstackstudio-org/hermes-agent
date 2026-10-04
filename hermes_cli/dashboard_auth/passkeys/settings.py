@@ -272,12 +272,21 @@ def merge_require(*rules: Require) -> Require:
                    tools=tuple(dict.fromkeys(t for r in rules for t in r.tools)))
 
 
+def require_at(home: Any) -> Require:
+    """The operator rules (``confirm.passkey.require``) in *home*'s config.yaml."""
+    from hermes_cli.config import load_config_readonly
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(str(home))
+    try:
+        return require_from_config(load_config_readonly())
+    finally:
+        reset_hermes_home_override(token)
+
+
 def gateway_require() -> Require:
     """The gateway's operator rules (``confirm.passkey.require`` in the gateway's own config.yaml)."""
-    from hermes_cli.config import load_config_readonly
-    from hermes_cli.dashboard_auth.passkeys.paths import gateway_scope
-    with gateway_scope():
-        return require_from_config(load_config_readonly())
+    from hermes_cli.dashboard_auth.passkeys.paths import gateway_home
+    return require_at(gateway_home())
 
 
 def serialise_base_urls(urls: list) -> tuple[tuple[str, ...], tuple[str, ...]]:

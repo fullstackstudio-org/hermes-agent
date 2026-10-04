@@ -125,31 +125,12 @@ def cmd_dashboard_passkey(args) -> None:
 
 
 def serving_gateway_home() -> Optional[Path]:
-    """The home of the gateway that serves this command's profile, when that is not the profile itself.
-
-    Passkeys and ``confirm.passkey`` are the gateway's (the dashboard sign-in's), so ``hermes -p <name>
-    dashboard passkey ...`` in a profile the host gateway multiplexes acts on the gateway's settings and
-    store. None for the default home, a ``gateway.standalone`` profile, a profile whose own gateway is
-    running (a host gateway started from that profile), or a host whose default gateway does not serve
-    every profile: then the command's own home is the gateway's."""
-    from hermes_constants import get_default_hermes_root, get_routing_process_hermes_home, profile_name_for_home
-    home = get_routing_process_hermes_home()
-    if profile_name_for_home(home) in (None, "default"):
-        return None
-    try:
-        from hermes_cli.profiles import profile_is_standalone
-        if profile_is_standalone(home):
-            return None
-        from gateway.status import live_gateway_pid_for_home
-        if live_gateway_pid_for_home(home) is not None:
-            return None
-        from hermes_cli.gateway_multiplex_mode import default_gateway_multiplexes
-        root = get_default_hermes_root()
-        if Path(root).resolve() == Path(home).resolve() or not default_gateway_multiplexes(root):
-            return None
-    except Exception:  # noqa: BLE001 - undecidable: the command's own home, as before
-        return None
-    return Path(root)
+    """The home of the gateway that serves this command's profile, when that is not the profile itself
+    (``serving.serving_gateway_home``; a running dashboard of the default home counts too). Passkeys and
+    ``confirm.passkey`` are the gateway's (the dashboard sign-in's), so ``hermes -p <name> dashboard passkey
+    ...`` in a profile the host gateway serves acts on the gateway's settings and store."""
+    from hermes_cli.dashboard_auth.passkeys.serving import serving_gateway_home as serving
+    return serving(probe_dashboard=True)
 
 
 def run(args, *, out: TextIO | None = None, err: TextIO | None = None, store=None, settings=None,
@@ -303,11 +284,23 @@ def _status(args, *, out, err, store, settings, public_urls, isatty, sign_in_pro
     for problem in settings.problems:
         print(f"Config: {problem}", file=out)
     for reason in reasons:
-        print(f"Unavailable ({reason}): {REASONS.get(reason, reason)}", file=out)
+        print(f"Unavailable ({reason}): {_reason_text(reason)}", file=out)
     if not reasons:
         print("Available to signed-in users with an enrolled passkey. Session-token and loopback connections "
               "have no signed-in user and never get it.", file=out)
     return 0
+
+
+def _reason_text(reason: str) -> str:
+    """:data:`REASONS` text; inside a served profile, the ``disabled`` hint names the gateway's config:
+    ``hermes -p <name> config set`` would write the profile's file, which the level does not read."""
+    from hermes_cli.dashboard_auth.passkeys.paths import _GATEWAY_HOME
+    served_by = _GATEWAY_HOME.get()
+    if reason == "disabled" and served_by:
+        return (f"confirm.passkey.enabled is false in the gateway's config ({Path(served_by) / 'config.yaml'}). "
+                "Enable it there: `hermes config set confirm.passkey.enabled true` run WITHOUT -p (the "
+                "default profile); a profile's own setting is not read.")
+    return REASONS.get(reason, reason)
 
 
 def _rules(require) -> str:

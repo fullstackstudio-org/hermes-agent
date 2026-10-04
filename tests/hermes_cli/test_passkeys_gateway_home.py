@@ -6,7 +6,11 @@ here (``passkeys.paths.gateway_home``): ``load_settings`` and the store path ign
 operator rules a profile turn gets are the gateway's plus the profile's own; ``hermes dashboard passkey``
 inside a served profile reports and changes the gateway's settings and store and says so, and a
 standalone profile or the default home keeps its own; confirm_action's memoized definitions follow an edit
-of the gateway's config from inside a profile scope.
+of the gateway's config from inside a profile scope. A separate process of a served profile (``HERMES_HOME``
+on the profile, no override) still gets the gateway's rules; a host gateway started from a named profile
+(pinned home) is the gateway for a turn in another profile; the file tools cannot write the gateway's
+config.yaml or a ``dashboard_auth`` directory from any turn; the passkey routes and the re-sign-in policy
+read the gateway's settings and store under a dashboard request scoped to a profile.
 """
 
 from __future__ import annotations
@@ -17,10 +21,11 @@ import io
 import pytest
 import yaml
 
-from hermes_cli.dashboard_auth.passkeys import cli
+from hermes_cli.dashboard_auth.passkeys import cli, serving
 from hermes_cli.dashboard_auth.passkeys.challenge import b64u
 from hermes_cli.dashboard_auth.passkeys.store import PasskeyStore
 from hermes_cli.subcommands.dashboard import build_dashboard_parser
+from hermes_constants import pin_process_hermes_home
 
 BASE = "https://gw.example.com"
 
@@ -44,10 +49,13 @@ def host(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(root))
     monkeypatch.delenv("GATEWAY_MULTIPLEX_PROFILES", raising=False)
     reset_hermes_home_key_cache()
+    serving.reset_for_tests()
     store = PasskeyStore(root / "dashboard_auth" / "passkeys.db")
     store.identity()
     yield root, profile, store
     reset_hermes_home_key_cache()
+    serving.reset_for_tests()
+    pin_process_hermes_home(None)
 
 
 def _in_home(home, fn, *args, **kwargs):
@@ -156,3 +164,135 @@ def test_status_in_the_default_home_is_unchanged(host):
     assert code == 0 and "served by the gateway" not in out
     assert f"Store: {root / 'dashboard_auth' / 'passkeys.db'}" in out
     assert f"Gateway id: {b64u(store.gateway_id)}" in out
+
+
+# ── a separate process of a served profile ────────────────────────────────────────────────────
+
+
+def test_a_separate_profile_process_gets_the_gateways_rules(host, monkeypatch):
+    """``hermes -p techsupport chat`` or a kanban worker: HERMES_HOME is the profile, there is no override."""
+    from tools import passkey_policy
+    root, profile, _store = host
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    rules = passkey_policy.require()
+    assert rules.commands == ("deploy-prod*",) and rules.tools == ("publish_site",)
+    assert passkey_policy.match_command("deploy-prod --now") is not None
+
+
+def test_a_standalone_profile_process_keeps_only_its_own_rules(host, monkeypatch):
+    from tools import passkey_policy
+    _root, profile, _store = host
+    _write(profile / "config.yaml", {"gateway": {"standalone": True}, "confirm": {"passkey": {"require": {
+        "tools": ["publish_site"]}}}})
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    rules = passkey_policy.require()
+    assert rules.commands == () and rules.tools == ("publish_site",)
+
+
+# ── a host gateway started from a named profile ───────────────────────────────────────────────
+
+
+def test_a_pinned_launch_home_is_the_gateway_for_a_turn_in_another_profile(host, monkeypatch):
+    """The embedding host pins its launch profile and mirrors the turn's profile into HERMES_HOME."""
+    from hermes_cli.dashboard_auth.passkeys.settings import load_settings
+    from hermes_cli.dashboard_auth.passkeys.store import default_path
+    from tools import passkey_policy
+    root, profile, _store = host
+    launch = root / "profiles" / "ops"
+    launch.mkdir()
+    _write(launch / "config.yaml", {"confirm": {"passkey": {"enabled": True, "base_urls": ["https://ops.example.com"],
+                                                            "require": {"commands": ["rotate-keys*"]}}}})
+    pin_process_hermes_home(launch)
+    monkeypatch.setenv("HERMES_HOME", str(profile))  # the host's mirror of the turn's profile
+    for scoped in (lambda f: f(), lambda f: _in_home(profile, f)):
+        assert scoped(load_settings).base_urls == ("https://ops.example.com",)
+        assert scoped(default_path) == launch / "dashboard_auth" / "passkeys.db"
+    rules = _in_home(profile, passkey_policy.require)
+    assert "rotate-keys*" in rules.commands and rules.tools == ("publish_site",)
+
+
+# ── the file tools ────────────────────────────────────────────────────────────────────────────
+
+
+def _write_refused(path) -> str | None:
+    from tools.file_tools_write_guards import _check_sensitive_path
+    return _check_sensitive_path(str(path))
+
+
+def test_a_profile_turn_cannot_write_the_gateways_config_or_store(host, tmp_path):
+    root, profile, _store = host
+    for target in (root / "config.yaml", root / "dashboard_auth" / "passkeys.db",
+                   root / "dashboard_auth" / "passkeys.db-wal", root / "Dashboard_Auth" / "mcp.db",
+                   root / "dashboard_auth" / "new.txt", profile / "dashboard_auth" / "passkeys.db"):
+        assert _in_home(profile, _write_refused, target), target
+        assert _write_refused(target), target
+    # The profile's own config stays refused by the existing guard; other files are not this guard's.
+    assert "Hermes config file" in _in_home(profile, _write_refused, profile / "config.yaml")
+    project = tmp_path / "project" / "hermes_cli" / "dashboard_auth"
+    project.mkdir(parents=True)
+    for allowed in (root / "notes.md", profile / "notes.md", project / "routes.py", tmp_path / "config.yaml"):
+        assert _in_home(profile, _write_refused, allowed) is None, allowed
+
+
+def test_a_symlink_into_the_gateways_store_is_refused(host, tmp_path):
+    root, profile, _store = host
+    link = tmp_path / "innocent"
+    link.symlink_to(root / "dashboard_auth")
+    assert _in_home(profile, _write_refused, link / "passkeys.db")
+    config_link = tmp_path / "settings.yaml"
+    config_link.symlink_to(root / "config.yaml")
+    assert _in_home(profile, _write_refused, config_link)
+
+
+def test_a_separate_profile_process_cannot_write_the_gateways_config(host, monkeypatch):
+    root, profile, _store = host
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    assert _write_refused(root / "config.yaml")
+    assert _write_refused(root / "dashboard_auth" / "passkeys.db")
+
+
+# ── the dashboard under a request scoped to a profile ─────────────────────────────────────────
+
+
+def test_passkey_routes_and_reauth_policy_read_the_gateways_under_a_profile_scope(host):
+    from hermes_cli.dashboard_auth.passkeys import reauth, routes
+    root, profile, store = host
+    _write(profile / "config.yaml", {"confirm": {"passkey": {"enabled": False, "base_urls": ["https://evil.example"]}}})
+    routes._stores.clear()
+    try:
+        settings = _in_home(profile, routes._settings)
+        assert settings.enabled is True and settings.base_urls == (BASE,)
+        assert _in_home(profile, routes._store).path == store.path
+        assert _in_home(profile, reauth.policy).level_enabled is True
+    finally:
+        routes._stores.clear()
+
+
+# ── the CLI ───────────────────────────────────────────────────────────────────────────────────
+
+
+def test_status_in_a_served_profile_names_the_gateways_config_when_disabled(host, monkeypatch):
+    root, profile, _store = host
+    _write(root / "config.yaml", {"gateway": {"multiplex_profiles": True}, "confirm": {"passkey": {
+        "base_urls": [BASE]}}})
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    _code, out, _err = _cli("status")
+    assert f"in the gateway's config ({root / 'config.yaml'})" in out and "WITHOUT -p" in out
+
+
+def test_a_running_dashboard_of_the_default_home_serves_the_profile(host, monkeypatch):
+    root, profile, _store = host
+    _write(root / "config.yaml", {"confirm": {"passkey": {"enabled": True, "base_urls": [BASE]}}})
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    assert cli.serving_gateway_home() is None
+    seen = []
+
+    def dashboards(*, exclude_pids=None, scope_home=None):
+        seen.append(scope_home)
+        return [4242]
+
+    monkeypatch.setattr("hermes_cli.main_dashboard._find_stale_dashboard_pids", dashboards)
+    assert cli.serving_gateway_home() == root and seen == [str(root)]
+    # The per-call policy path never scans processes.
+    serving.reset_for_tests()
+    assert serving.serving_gateway_home() is None

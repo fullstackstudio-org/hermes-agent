@@ -8,7 +8,8 @@ store (another gateway id, no credentials), so every passkey confirmation there 
 (no_base_url)``. Pinned here: the request uses the gateway's settings and store from a profile turn, the
 challenge names the gateway's id and base URL, the bound user is still the turn's submitter (another
 signed-in person cannot answer it), a profile's own ``confirm.passkey`` section cannot widen the level,
-and nothing changes outside a profile.
+the request's audit records land in the gateway's dashboard-auth log, ``dashboard.mcp.answer_clarify`` is
+the gateway's, and nothing changes outside a profile.
 """
 
 from __future__ import annotations
@@ -168,3 +169,38 @@ def test_the_plain_level_in_a_profile_turn_is_unaffected(server, homes):
     _answer_rpc(server, phone, frame["id"], {"decision": "confirmed", "method": "tap"})
     thread.join(5)
     assert box["r"].outcome == "confirmed"
+
+
+def _log_events(home) -> list[str]:
+    import json
+    path = home / "logs" / "dashboard-auth.log"
+    if not path.exists():
+        return []
+    return [json.loads(line)["event"] for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_a_profile_turns_passkey_records_land_in_the_gateways_log(server, homes):
+    gateway, profile, passkeys = homes
+    phone, auth = _phone_in_session(server, passkeys)
+    thread, box = _ask(server, "s1", profile)
+    frame = _frame(server, phone)
+    _answer_rpc(server, phone, frame["id"], passkeys.answer(auth, frame))
+    thread.join(5)
+    assert box["r"].verified is True
+    events = _log_events(gateway)
+    for event in ("confirm_request", "confirm_passkey_verified", "confirm_outcome"):
+        assert event in events, events
+    assert not {"confirm_request", "confirm_passkey_verified", "confirm_outcome"} & set(_log_events(profile))
+
+
+def test_answer_clarify_is_the_gateways_setting_in_a_profile_scope(server, homes):
+    from tui_gateway import server_requests
+    gateway, profile, _passkeys = homes
+    (gateway / "config.yaml").write_text(yaml.safe_dump({**GATEWAY_CONFIG, "dashboard": {"mcp": {
+        "answer_clarify": False}}}), encoding="utf-8")
+    assert server_requests._agent_clarify_allowed() is False
+    assert _in_home(profile, server_requests._agent_clarify_allowed) is False
+    (gateway / "config.yaml").write_text(yaml.safe_dump(GATEWAY_CONFIG), encoding="utf-8")
+    (profile / "config.yaml").write_text(yaml.safe_dump({"dashboard": {"mcp": {"answer_clarify": False}}}),
+                                         encoding="utf-8")
+    assert _in_home(profile, server_requests._agent_clarify_allowed) is True

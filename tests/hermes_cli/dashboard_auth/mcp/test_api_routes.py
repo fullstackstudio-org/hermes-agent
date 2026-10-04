@@ -515,7 +515,7 @@ def test_the_event_has_a_contract():
     registry.check_payload("mcp.changed", {"change": "revoked", "grant": {"id": "g", "client_name": "n"}, "at": 1})
 
 
-# ── mcp.changed: revoked by the gateway ────────────────────────────────────────────────────────
+# ── mcp.changed: revoked by the gateway or by the client ────────────────────────────────────────────
 
 
 def _revocations() -> list[dict]:
@@ -568,6 +568,22 @@ def test_a_rotated_refresh_token_sent_to_revoke_is_a_reuse_too(gw, transports, c
     [line] = _revocations()
     assert line["by"] == "refresh_reuse"
     assert [c["change"] for c in mine.changes()] == ["revoked"]
+
+
+def test_a_clients_own_revoke_is_announced_once(gw, transports):
+    mine, bobs = transports(ALICE_ID), transports(BOB_ID)
+    flow = gw.connect(ALICE)
+    [grant] = grants_of(gw)
+    mine.frames.clear()
+    for _ in range(2):  # the second finds nothing live: a silent 200, no second line or event
+        r = gw.client.post("/mcp/revoke", data={"token": flow.tokens["access_token"], "client_id": flow.client_id})
+        assert r.status_code == 200
+    [line] = _revocations()
+    assert (line["by"], line["grant_id"], line["user_id"], line["client_name"]) == \
+        ("client", grant["id"], ALICE_ID, "Claude Code")
+    assert mine.changes() == [{"change": "revoked", "grant": {"id": grant["id"], "client_name": "Claude Code"},
+                               "at": gw.store.grant(grant["id"]).revoked_at}]
+    assert bobs.changes() == [] and grants_of(gw) == []
 
 
 def test_a_parallel_refresh_announces_nothing(gw, transports):

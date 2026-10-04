@@ -39,8 +39,8 @@ What the route layer adds to the SDK's handlers:
 - audit lines (``mcp_client_registered``, ``mcp_authorize_start``, ``mcp_token_issued``,
   ``mcp_token_refreshed``, ``mcp_token_rejected``, ``mcp_grant_revoked``, ``mcp_rate_limited``) with ids,
   names, the address and an outcome; never a token, code, secret, state or nonce;
-- ``mcp.changed`` to the person: ``granted`` when a code is exchanged, ``revoked`` when a code or refresh
-  token presented again made the store revoke a grant
+- ``mcp.changed`` to the person: ``granted`` when a code is exchanged, ``revoked`` when the client revokes
+  its own grant (RFC 7009) and when a code or refresh token presented again made the store revoke one
   (``mcp_grant_revoked`` with ``by`` ``code_reuse`` / ``refresh_reuse``; the client hears ``invalid_grant``).
 
 ``POST /mcp`` is the MCP server (``tui_gateway.mcp_bridge.server``) behind the SDK's bearer check against this
@@ -85,7 +85,7 @@ from hermes_cli.dashboard_auth.mcp.provider import (
     MCPAuthorizationCode, MCPClientAuthenticator, MCPProvider, MCPRefreshToken, MCPTokenVerifier)
 from hermes_cli.dashboard_auth.mcp.settings import SCOPES, MCPSettings, server_label
 from hermes_cli.dashboard_auth.mcp.store import (
-    CodeInvalid, ConsentInvalid, LimitReached, MCPStore, StoreError, TokenInvalid)
+    BY_CLIENT, CodeInvalid, ConsentInvalid, LimitReached, MCPStore, StoreError, TokenInvalid)
 from hermes_cli.dashboard_auth.rate_limit import SlidingWindowLimiter, Verdict
 from hermes_cli.dashboard_auth.request_utils import client_ip
 
@@ -509,10 +509,16 @@ async def revoke_endpoint(request: Request) -> Response:
             found = await loader(token)
             if found is not None:
                 break
-        if found is not None and found.client_id == client.client_id:
-            await rt.provider.revoke_token(found)
-            audit_log(AuditEvent.MCP_GRANT_REVOKED, grant_id=getattr(found, "grant_id", ""),
-                      user_id=found.subject or "", client_id=client.client_id, by="client", ip=client_ip(request))
+        grant_id = getattr(found, "grant_id", "") if found is not None else ""
+        if grant_id and found.client_id == client.client_id:
+            # Live only, in one transaction: of two parallel revokes one reports (and announces) it.
+            revoked = await rt.provider.revoke_grant(grant_id, by=BY_CLIENT, live_only=True)
+            if revoked is not None:
+                audit_log(AuditEvent.MCP_GRANT_REVOKED, grant_id=revoked.id, user_id=revoked.user_id,
+                          client_id=client.client_id, client_name=revoked.client_name, by=BY_CLIENT,
+                          ip=client_ip(request))
+                await anyio.to_thread.run_sync(api_routes.announce, revoked.user_id, "revoked", revoked,
+                                               revoked.revoked_at or rt.store.now())
         return Response(status_code=200, headers=_NO_STORE)
 
     response, notes = await provider_call(request, call)

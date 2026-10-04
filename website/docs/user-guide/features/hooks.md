@@ -1478,8 +1478,11 @@ level `passkey` a notification must not offer a Confirm action: only the app can
 Fires once a `clarify`, `secret`, `sudo`, `vault.*` (`vault.unlock_prompt`, `vault.code`, `vault.save_login`) or
 interactive (`input.form`, `input.file`, `review.draft`) server request has been written to the session's clients,
 before the gateway waits for the answer. It is the hook for a push that opens the question or the secure input in
-the app. An interactive request goes only to the person's devices that can show it; when none is attached it
-waits (up to two minutes) for one to connect, and the hook fires right away with `reached: 0`. `confirm` is not announced here: it
+the app. An interactive request goes only to the person's devices that can show it (see
+[Ask the person for a form, a file or a draft review](../../guides/interactive-requests.md)); when none is attached it
+is *parked*: it stays open and waits (up to two minutes) for one to connect, and the hook fires right away with `reached: 0`.
+A parked request that is never shown ends with `no_capable_client` and no cancel; one that was shown and whose last device then
+disconnected waits for a fresh two minutes (never past its own deadline). `confirm` is not announced here: it
 keeps `pre_confirm_request`, which also says the level and whom the request is bound to. Every other server
 request (desktop reads, MCP setup, the tour) has no hook. The hook runs on its own thread, so a slow plugin
 never shortens the wait.
@@ -1499,7 +1502,7 @@ def my_callback(session_id: str, session_key: str, request_id: str, method: str,
 | `method` | `str` | `"clarify"`, `"secret"`, `"sudo"`, `"vault.unlock_prompt"`, `"vault.code"`, `"vault.save_login"`, `"input.form"`, `"input.file"` or `"review.draft"` |
 | `user_id` | `str` | `"<provider>:<user id>"` of the login the turn works for, or `""` when the gateway cannot name one |
 | `expires_at` | `int \| None` | Unix seconds when the request times out; `None` when it has no deadline (`clarify` with an unlimited wait). For an interactive request that reached no device yet: when it stops waiting for one |
-| `reached` | `int` | How many clients were attached when the frame was written. `0` means none: the request stays open and the app gets it on reconnect, which is when a push is most useful |
+| `reached` | `int` | How many clients were attached when the frame was written. `0` means none: the request stays open and the app gets it on reconnect, which is when a push is most useful. For an interactive request `0` means *parked*: no device that can show it is attached yet, and the request ends `no_capable_client` when the waiting time runs out |
 
 Never the question, its choices, the secure-input prompt, the command a `sudo` request is for, the site a
 `vault.*` request names, a form, file request or draft, or the answer: the app shows the request itself once the notification opens it.
@@ -1530,7 +1533,7 @@ def my_callback(session_id: str, session_key: str, request_id: str, method: str,
 | `request_id` | `str` | The request's id, the same one `pre_server_request` or `pre_confirm_request` carried |
 | `method` | `str` | As in `pre_server_request`, or `"confirm"` |
 | `user_id` | `str` | As in the hook that announced it |
-| `reason` | `str` | `"answered"`, `"timeout"`, the reason it was withdrawn (`"interrupted"`, for example, when the turn is stopped or the session closes), or why it never got an answer (`"error_response"`: the client answered an error; `"too_many_attempts"`) |
+| `reason` | `str` | `"answered"`, `"timeout"`, the reason it was withdrawn (`"interrupted"`, for example, when the turn is stopped or the session closes), or why it never got an answer (`"error_response"`: the client answered an error; `"too_many_attempts"`; for an interactive request also `"no_capable_client"`: no device that can show it attached in time, or `"no_acting_user"`) |
 
 `"answered"` says a client answered, not what it answered: a `confirm` that was declined, and a clarify
 question that was skipped, are `"answered"` as well. It fires once per request, also when the wait ends with

@@ -130,16 +130,26 @@ def _sentence(result: dict, level: str = "plain") -> str:
     return _REASON_SENTENCES.get(reason, _UNAVAILABLE)
 
 
-# A request with ``fields`` that no attached app can show: the facts may go into the text instead (every app shows
-# that). Not at ``passkey`` after the window opened: that sentence is the passkey one and says no plain.
-_NO_FIELDS_CLIENT = ("No app attached to this conversation can show structured fields. Nothing was shown. You may "
-                     "ask again WITHOUT fields, with the same facts written out in summary or detail.")
+# A request with ``fields`` that no attached app could take. An app may well be attached (an older one, that cannot
+# show fields): never say there is none. The facts may go into the text instead, which every app shows. At
+# ``passkey`` the request opened the no-downgrade window (``no_capable_client`` is a post-send failure), so the
+# only way on is ``passkey`` again, without fields.
+_NO_FIELDS_CLIENT = {
+    "plain": ("None of the apps attached to this conversation can show these fields (an app may be attached, but "
+              f"one that cannot show them), so nothing was shown. {_NOT_CONSENT} You may ask again WITHOUT fields, "
+              "with the same facts written out in summary or detail."),
+    "passkey": ("None of the apps attached to this conversation can show these fields with a passkey "
+                "confirmation (an app may be attached, but one that cannot show them), so nothing was shown. "
+                f"{_NOT_CONSENT} Ask again at level passkey WITHOUT fields, with the same facts written out in "
+                f"summary or detail. {_NO_DOWNGRADE}"),
+}
 
 
 def _reply(result: dict, level: str = "plain", *, fields: bool = False) -> str:
-    message = _sentence(result, level)
     if fields and result.get("outcome") == "unavailable" and result.get("reason") == "no_capable_client":
-        message = f"{_NO_FIELDS_CLIENT} {message}"
+        message = _NO_FIELDS_CLIENT.get(level, _NO_FIELDS_CLIENT["plain"])
+    else:
+        message = _sentence(result, level)
     return json.dumps({**result, "message": message}, ensure_ascii=False)
 
 

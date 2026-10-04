@@ -12857,7 +12857,27 @@
         "passkey",
         "plain"
       ],
-      "confirm_fields": true
+      "confirm_passkey": {
+        "v": 1,
+        "enabled": true,
+        "reason": "",
+        "gateway_id": "2kvwXlBOqzLxDCPyRKi-lQ",
+        "rp": {
+          "native": [
+            "confirm.hermie.dev"
+          ],
+          "web": [
+            "gw.example.com",
+            "other.example.com"
+          ]
+        },
+        "versions": [
+          1,
+          2
+        ]
+      },
+      "confirm_fields": true,
+      "requests": []
     },
     "confirm_request_frame_v2": {
       "jsonrpc": "2.0",

@@ -72,8 +72,10 @@ class ClientCapabilitiesParams(Params):
     #: additive: absent or false means a ``confirm`` with fields is never sent to it. Only read together with
     #: ``server_requests: true`` and at least one accepted ``confirm`` level. Send it only after a result
     #: carried the key ``confirm_fields`` (a backend that knows it always sends it): an older one rejects
-    #: the unknown key (4000) and the whole call.
-    confirm_fields: bool | None = None
+    #: the unknown key (4000) and the whole call. Deliberately permissive here, like ``confirm_passkey``: any
+    #: value is taken, only exactly ``true`` counts (``server_requests.advertise``), and anything else only
+    #: leaves the fields off and never fails the call (and the levels with it).
+    confirm_fields: JsonValue = None
     #: The interactive request methods (``input.form``, ``input.file``, ``review.draft``, …) this connection
     #: can SHOW on this device; it lists nothing it cannot do. Optional and additive: absent means none, and
     #: the gateway never sends such a method to this connection. Only read together with

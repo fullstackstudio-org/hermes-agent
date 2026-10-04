@@ -7635,14 +7635,6 @@
             "default": null
           },
           "confirm_fields": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
             "default": null,
             "title": "Confirm Fields"
           },

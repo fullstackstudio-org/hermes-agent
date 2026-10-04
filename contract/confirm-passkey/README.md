@@ -127,7 +127,10 @@ removes U+0020 at either end of what the agent wrote and REFUSES everything else
 fix it); it rewrites nothing else, so what a client shows is exactly what was hashed.
 
 Rendering (both levels): every field is shown, in order, as its label and its value, as plain text; a client
-never parses, converts, rounds, localises or links a value. `amount`: the value large and bold with
+never parses, converts, rounds, localises or links a value, and never truncates or ellipsizes a label, value
+or currency: one that does not fit wraps onto more lines. A client MUST refuse (error 4040, as for a frame it
+cannot run) a frame whose `fields` break the rules above (count, keys, `id`, `kind`, lengths, `currency` off
+an `amount`, a refused character): it shows nothing of it rather than part of it. `amount`: the value large and bold with
 `currency` beside it; `recipient` and `domain`: monospaced, never a link; the other kinds plain. A client
 that cannot show a field shows none of the request: it does not advertise `confirm_fields`.
 

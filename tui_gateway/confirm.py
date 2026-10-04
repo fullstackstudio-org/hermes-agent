@@ -173,11 +173,12 @@ _FIELD_ID = re.compile(CONFIRM_FIELD_ID)
 
 def _field_text(index: int, key: str, raw: object, limit: int) -> str:
     """One string of a structured field: ONE line, shown exactly as given. Spaces at either end are the only
-    thing removed; anything :func:`verbatim_problem` refuses (an invisible, bidi or control character, a
-    character that renders as nothing, padding) and a line break raise, never rewritten."""
-    if isinstance(raw, bool) or not isinstance(raw, (str, int)):
-        raise ConfirmParamsError(f"fields[{index}].{key} must be a string")
-    text = str(raw).strip(" ")
+    thing removed; a value that is not a string (no number is converted: the agent writes it as it should be
+    shown), anything :func:`verbatim_problem` refuses (an invisible, bidi or control character, a character
+    that renders as nothing, padding) and a line break raise, never rewritten."""
+    if not isinstance(raw, str):
+        raise ConfirmParamsError(f"fields[{index}].{key} must be a string, written exactly as it should be shown")
+    text = raw.strip(" ")
     if not text:
         raise ConfirmParamsError(f"fields[{index}].{key} is empty")
     if len(text) > limit:

@@ -66,10 +66,10 @@ def test_the_budget_preset_builds_and_validates_against_the_contract():
     assert "fields" not in confirm.build_params(summary="x")
 
 
-def test_ids_spaces_and_numbers():
+def test_ids_and_spaces():
     from tui_gateway import confirm
     fields = confirm.build_fields([{"id": "to", "kind": "recipient", "label": "  To ", "value": " alex@example.com"},
-                                   {"kind": "count", "label": "Files", "value": 3}])
+                                   {"kind": "count", "label": "Files", "value": "3"}])
     assert fields == [{"id": "to", "kind": "recipient", "label": "To", "value": "alex@example.com"},
                       {"id": "field_2", "kind": "count", "label": "Files", "value": "3"}]
 
@@ -84,6 +84,9 @@ def test_ids_spaces_and_numbers():
     ([{"kind": "text", "label": "L"}], "value must be a string"),
     ([{"kind": "text", "label": "L", "value": True}], "value must be a string"),
     ([{"kind": "text", "label": "L", "value": 1.5}], "value must be a string"),
+    ([{"kind": "count", "label": "L", "value": 3}], "value must be a string"),
+    ([{"kind": "text", "label": 7, "value": "v"}], "label must be a string"),
+    ([{"kind": "amount", "label": "L", "value": "1", "currency": 978}], "currency must be a string"),
     ([{"kind": "text", "label": "", "value": "1"}], "label is empty"),
     ([{"kind": "text", "label": "L", "value": "   "}], "value is empty"),
     ([{"kind": "text", "label": "L" * 41, "value": "1"}], "the limit is 40"),
@@ -139,6 +142,11 @@ def test_confirm_fields_is_accepted_only_with_a_level_and_exactly_true(server):
     # Without a level, without server_requests, or not exactly true: not accepted.
     assert _advertise_fields(server, app, confirm=())["result"]["confirm_fields"] is False
     assert _advertise_fields(server, app, confirm_fields=1)["result"]["confirm_fields"] is False
+    # A value the gateway does not take never fails the call, and the levels stay.
+    for odd in ("maybe", "true", {"v": 1}, [True], None):
+        response = _advertise_fields(server, app, confirm_fields=odd)
+        assert "error" not in response, odd
+        assert response["result"]["confirm"] == ["plain"] and response["result"]["confirm_fields"] is False, odd
     assert _as(app, server.handle_request, {"id": 1, "method": "client.capabilities", "params": {
         "server_requests": False, "confirm": ["plain"], "confirm_fields": True}})["result"]["confirm_fields"] is False
     # Every call replaces the last one, and a disconnect forgets it.
@@ -195,6 +203,46 @@ def test_plain_with_fields_reaches_only_connections_that_show_them(server, audit
         assert field["value"] not in dumped and field["label"] not in dumped
 
 
+def test_reconnect_lists_a_fields_request_only_to_a_connection_that_shows_them(server):
+    from tui_gateway import server_requests
+    new = _Peer("new")
+    _session(server, "s1", new)
+    _advertise_fields(server, new)
+    thread, box = _ask_plain("s1", fields=BUDGET)
+    req = _wait_open()
+    later_new, later_old = _Peer("later-new"), _Peer("later-old")
+    _advertise_fields(server, later_new)
+    _advertise(server, later_old, confirm=["plain"])
+    server._attach_session_transport(server._sessions["s1"], later_new)
+    server._attach_session_transport(server._sessions["s1"], later_old)
+    listed = _as(later_new, server._open_requests, "s1")
+    assert [entry["id"] for entry in listed] == [req.id] and listed[0]["params"]["fields"][0]["currency"] == "€"
+    assert _as(later_old, server._open_requests, "s1") == []
+    assert _as(later_old, server.handle_request, {"id": 3, "method": "request.answer", "params": {
+        "id": req.id, "result": {"decision": "confirmed", "method": "tap"}}})["error"]["code"] == 4033
+    assert _as(later_new, server.handle_request, {"id": 4, "method": "request.answer", "params": {
+        "id": req.id, "result": {"decision": "declined", "method": "tap"}}})["result"] == {"status": "ok"}
+    thread.join(5)
+    assert box["r"].outcome == "declined" and server_requests.open_requests("s1") == []
+
+
+def test_a_connection_that_stops_showing_fields_cannot_answer(server):
+    new, other = _Peer("new"), _Peer("other")
+    _session(server, "s1", new, other)
+    _advertise_fields(server, new)
+    _advertise_fields(server, other)
+    thread, box = _ask_plain("s1", fields=BUDGET)
+    req = _wait_open()
+    assert _advertise(server, new, confirm=["plain"])["result"]["confirm_fields"] is False
+    assert _as(new, server.handle_request, {"id": 3, "method": "request.answer", "params": {
+        "id": req.id, "result": {"decision": "confirmed", "method": "tap"}}})["error"]["code"] == 4033
+    assert _as(new, server._open_requests, "s1") == []
+    _as(other, server.handle_request, {"id": 4, "method": "request.answer", "params": {
+        "id": req.id, "result": {"decision": "declined", "method": "tap"}}})
+    thread.join(5)
+    assert box["r"].outcome == "declined"
+
+
 # ── level passkey: version 2 ───────────────────────────────────────────────────────────────────
 
 
@@ -226,6 +274,24 @@ def test_a_version_2_client_takes_version_1_frames(server, passkeys):
     frame = _frame(server, phone)
     assert frame["params"]["passkey"]["v"] == 1 and "fields" not in frame["params"]
     _answer_rpc(server, phone, frame["id"], passkeys.answer(auth, frame))
+    thread.join(5)
+    assert box["r"].as_dict() == {"outcome": "confirmed", "method": "passkey", "verified": True}
+
+
+def test_a_connection_that_drops_v2_or_fields_while_a_passkey_request_is_open_cannot_answer(server, passkeys):
+    from tests.tui_gateway.test_confirm_passkey import NATIVE_RP
+    phone, auth = _alice_session(server, passkeys)
+    _v2(server, phone)
+    thread, box = _ask(server, "s1", **TEXT, fields=BUDGET)
+    frame = _frame(server, phone)
+    good = _v2_answer(passkeys, auth, frame)
+    for drop in ({"passkey": {"v": 1, "kind": "native", "rp_id": NATIVE_RP}, "confirm_fields": True},
+                 {"passkey": {"v": 2, "kind": "native", "rp_id": NATIVE_RP}, "confirm_fields": False}):
+        assert _advertise_fields(server, phone, confirm=("plain", "passkey"), **drop)["result"]["confirm"] == [
+            "passkey", "plain"]
+        assert _answer_rpc(server, phone, frame["id"], good)["error"]["code"] == 4033, drop
+    _v2(server, phone)
+    assert _answer_rpc(server, phone, frame["id"], good)["result"] == {"status": "ok"}
     thread.join(5)
     assert box["r"].as_dict() == {"outcome": "confirmed", "method": "passkey", "verified": True}
 
@@ -350,7 +416,11 @@ def test_tool_passes_fields_and_draft_id_and_answers_tool_error_for_an_unknown_d
     reply = json.loads(tool.confirm_action_tool("Run it.", fields=BUDGET))
     assert calls[-1]["fields"] == BUDGET and calls[-1]["draft_id"] is None
     assert reply["reason"] == "no_capable_client" and "WITHOUT fields" in reply["message"]
+    assert "can show these fields" in reply["message"] and "No app attached" not in reply["message"]
     assert "WITHOUT fields" not in json.loads(tool.confirm_action_tool("Run it."))["message"]
+    at_passkey = json.loads(tool.confirm_action_tool("Run it.", fields=BUDGET, level="passkey"))["message"]
+    assert "Ask again at level passkey WITHOUT fields" in at_passkey and "Do not ask again at level plain" in at_passkey
+    assert "None of the person's apps" not in at_passkey  # it never claims no passkey app is attached
     error = json.loads(tool.confirm_action_tool("Send it.", draft_id="drf-unknown"))
     assert "error" in error and "unknown or expired" in error["error"]
     assert "error" in json.loads(tool.confirm_action_tool("x", fields="amount 4"))

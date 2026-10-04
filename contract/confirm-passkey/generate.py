@@ -1406,8 +1406,11 @@ def wire_examples() -> dict:
         "capabilities_second_call_params_v2": {
             "server_requests": True, "confirm": ["plain", "passkey"], "confirm_fields": True,
             "confirm_passkey": {"v": 2, "kind": "native", "rp_id": NATIVE_RP}},
-        "capabilities_second_result_v2": {"server_requests": ["approval", "clarify", "confirm"],
-                                          "confirm": ["passkey", "plain"], "confirm_fields": True},
+        "capabilities_second_result_v2": {
+            "server_requests": ["approval", "clarify", "confirm"], "confirm": ["passkey", "plain"],
+            "confirm_passkey": {"v": 1, "enabled": True, "reason": "", "gateway_id": b64u(GATEWAY_ID),
+                                "rp": main["derived"]["accepted_rps"], "versions": [1, 2]},
+            "confirm_fields": True, "requests": []},
         "confirm_request_frame_v2": {
             "jsonrpc": "2.0", "id": REQUEST_V2["request_id"], "method": "confirm",
             "params": {"session_id": REQUEST_V2["session_id"], "title": REQUEST_V2["title"],

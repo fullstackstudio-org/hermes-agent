@@ -7,6 +7,8 @@ grant, never from a request) is held to them in the handlers, whatever reaches t
 * :func:`refusal`: the handlers that approve, unlock, provide a secret, run a command or change a setting
   answer an agent 4033 (Security 1 of the MCP plan: a token acts as the person for prompts and reading,
   nothing more).
+* :data:`AGENT_SUBMIT_PARAMS`: an agent's ``prompt.submit`` carries these keys and no other (an allowlist:
+  no rewind, display kind, surface, voice context or title preview).
 * :data:`INTERRUPT_TURN`: an agent's ``session.interrupt`` stops only the turn it names. The id is not a
   request parameter (a client could send one); the bridge binds it in the fresh ``contextvars.Context`` it
   dispatches the call in, and ``session.interrupt`` reads it only when the calling connection IS an agent.
@@ -23,6 +25,11 @@ from __future__ import annotations
 import contextvars
 import threading
 from typing import Any
+
+#: Every key an agent's ``prompt.submit`` may carry: its text, queued behind a running turn. ``methods_prompt``
+#: refuses an agent's submit with any other key (4033); the MCP bridge never sends one
+#: (``mcp_bridge.rpc.PROMPT_SUBMIT_PARAMS`` is this set).
+AGENT_SUBMIT_PARAMS: frozenset[str] = frozenset({"session_id", "text", "queued"})
 
 #: The gateway turn id an agent's ``session.interrupt`` may stop, bound by the MCP bridge around that one call
 #: (``mcp_bridge.rpc.interrupt_turn``). Never read for a connection that is not an agent's.

@@ -33,6 +33,7 @@ import logging
 import uuid
 from typing import Any
 
+from tui_gateway.agent_guard import AGENT_SUBMIT_PARAMS
 from tui_gateway.mcp_bridge.transport import AgentTransport
 
 logger = logging.getLogger(__name__)
@@ -57,9 +58,10 @@ ALLOWED_METHODS = frozenset({
 })
 
 #: An agent's ``prompt.submit``: its text, queued behind a running turn. Never a rewind (``truncate_before_*``,
-#: ``rebind_survivor_row_ids``), a voice barge-in, a surface or a hidden row; the gateway refuses the rewind
-#: parameters from an agent's connection itself and always queues its text (``methods_prompt``).
-PROMPT_SUBMIT_PARAMS = frozenset({"session_id", "text", "queued"})
+#: ``rebind_survivor_row_ids``), a voice barge-in, a surface or a hidden row; the gateway refuses every other
+#: parameter from an agent's connection itself (the same set, ``agent_guard.AGENT_SUBMIT_PARAMS``) and always
+#: queues its text (``methods_prompt``).
+PROMPT_SUBMIT_PARAMS = AGENT_SUBMIT_PARAMS
 
 DEFAULT_TIMEOUT_S = 30.0
 #: What a ``gateway_restarting`` error tells the agent to wait before trying again: the default drain

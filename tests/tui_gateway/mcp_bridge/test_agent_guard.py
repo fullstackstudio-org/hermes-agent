@@ -163,6 +163,46 @@ def test_an_agents_submit_may_not_rewind_the_chat(gateway, extra):
     assert len(gateway.db.get_messages(KEY, include_inactive=True)) == before
 
 
+@pytest.mark.parametrize("extra", [
+    {"display_kind": "hidden"},
+    {"surface": "hud"},
+    {"voice_context": "marker spoken"},
+    {"title_preview": "marker preview"},
+    {"interrupted": True},
+    {"_turn_author": {"user_id": "marker"}},
+    {"_replayed_turn": {"author": "marker"}},
+    {"truncate_before_row_id": None},
+], ids=["display_kind", "surface", "voice_context", "title_preview", "interrupted", "turn_author", "replayed_turn",
+        "null_rewind"])
+def test_an_agents_submit_carries_nothing_but_its_text(gateway, extra):
+    """An allowlist (``agent_guard.AGENT_SUBMIT_PARAMS``), not a list of what is refused: any other key is 4033,
+    whatever its value, and nothing runs."""
+    before = len(gateway.db.get_messages(KEY, include_inactive=True))
+    response = _dispatch(_agent(gateway), "prompt.submit", {"session_id": SID, "text": "marker reply", **extra})
+    assert response.get("error", {}).get("code") == 4033, response
+    assert "agent connected through MCP" in response["error"]["message"]
+    assert gateway.session.get("running") is False and gateway.agent.texts == []
+    assert len(gateway.db.get_messages(KEY, include_inactive=True)) == before
+
+
+def test_the_gateways_own_dispatch_on_an_agents_connection_is_not_the_agents_submit(gateway):
+    """``_INTERNAL_DISPATCH`` (a relayed bot DM, a hosted room) still carries its in-process keys on a thread whose
+    current connection is an agent's."""
+    from tui_gateway.session_transports import _internal_dispatch
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    token = bind_transport(_agent(gateway))
+    try:
+        with _internal_dispatch():
+            response = server._methods["prompt.submit"](
+                "internal", {"session_id": SID, "text": "marker internal", "title_preview": "marker"})
+    finally:
+        reset_transport(token)
+    assert response.get("result", {}).get("status") == "streaming", response
+    gateway.agent.gate.set()
+    assert _until(lambda: "marker internal" in gateway.agent.texts)
+
+
 def test_the_person_may_still_send_without_queued(gateway, monkeypatch):
     monkeypatch.setattr(server, "_load_busy_input_mode", lambda: "interrupt")
     assert gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker gated"})["result"]["status"] \

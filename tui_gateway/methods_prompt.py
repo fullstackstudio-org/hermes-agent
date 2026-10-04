@@ -573,7 +573,8 @@ def _run_after_agent_ready(
 
 _TRUNCATION_PARAMS = (
     "truncate_before_user_ordinal", "truncate_before_row_id", "truncate_before_message_id")
-#: What an agent's ``prompt.submit`` may never carry: every rewind / edit / regenerate parameter.
+#: The rewind / edit / regenerate parameters: an agent's ``prompt.submit`` carrying one is refused as a rewind
+#: (it may carry nothing beside ``agent_guard.AGENT_SUBMIT_PARAMS`` at all).
 _AGENT_REFUSED_SUBMIT_PARAMS = (
     *_TRUNCATION_PARAMS, "confirm_truncate", "confirm_empty_truncate", "rebind_survivor_row_ids")
 
@@ -636,11 +637,22 @@ def _(rid, params: dict) -> dict:
     # running turn -- never a hard stop of her turn (the default busy mode) nor a steer into it -- and it never
     # rewinds or cuts her chat. Held here, by the connection's marker, whatever the bridge sends. The gateway's
     # own dispatch on that connection (a relayed bot DM) is not the agent's submit.
-    from tui_gateway.agent_guard import agent_identity
+    # Every key beside its text is refused (an allowlist): a rewind, a display kind, a surface, a voice context, a
+    # title preview.
+    from tui_gateway.agent_guard import AGENT_SUBMIT_PARAMS, agent_identity
     agent_submit = agent_identity(current_transport()) is not None and not _INTERNAL_DISPATCH.get()
-    if agent_submit and any(params.get(k) is not None for k in _AGENT_REFUSED_SUBMIT_PARAMS):
+    extra = set(params) - AGENT_SUBMIT_PARAMS if agent_submit else set()
+    if extra:
+        # Retry's carrier (``methods_tools._submit_retried_turn``) runs on the presser's own connection with a
+        # ``ReplayedTurn``: an in-process object no wire client or bridge can send, so it is no agent's param.
+        from tui_gateway.row_author import ReplayedTurn
+        if isinstance(params.get("_replayed_turn"), ReplayedTurn):
+            extra.discard("_replayed_turn")
+    if extra:
         from tui_gateway.agent_guard import refusal as _agent_refusal
-        return _agent_refusal(rid, "rewind or cut a chat's history")
+        if extra & set(_AGENT_REFUSED_SUBMIT_PARAMS):
+            return _agent_refusal(rid, "rewind or cut a chat's history")
+        return _agent_refusal(rid, f"send {', '.join(sorted(extra))} with a prompt")
     # A typed stop phrase ends the person's voice chat, a barge-in marks her speech: neither is an agent's.
     if not agent_submit and (stopped := _typed_stop_phrase_response(rid, text)) is not None:
         return stopped

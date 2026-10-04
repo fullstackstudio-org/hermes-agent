@@ -14,7 +14,7 @@ import pytest
 
 import tui_gateway.server as server
 
-from .conftest import KEY, SID
+from .conftest import CLIENT, KEY, ROBIN, SID
 
 #: method -> params its contract accepts. Each would act if it reached its body as the person.
 GUARDED = {
@@ -246,6 +246,23 @@ def test_an_agents_submit_carries_nothing_but_its_text(gateway, extra, via):
     assert "agent connected through MCP" in response["error"]["message"]
     assert gateway.session.get("running") is False and gateway.agent.texts == []
     assert len(gateway.db.get_messages(KEY, include_inactive=True)) == before
+
+
+def test_retrys_in_process_carrier_on_an_agents_connection_passes_and_nothing_else_rides_with_it(gateway):
+    """The one in-process key an agent's ``prompt.submit`` may carry: a real ``ReplayedTurn`` (Retry's carrier,
+    ``methods_tools._submit_retried_turn``, an object no wire client or bridge can send), on the handler past
+    dispatch, as Retry calls it. Its turn runs; with any other extra key beside it the submit is still refused."""
+    from tui_gateway.row_author import ReplayedTurn
+
+    agent = _agent(gateway)
+    replayed = ReplayedTurn({"id": ROBIN[0], "name": ROBIN[1]}, ROBIN, {"kind": "mcp", "client": CLIENT})
+    refused = _handler(agent, "prompt.submit", {"session_id": SID, "text": "marker retried",
+                                                "_replayed_turn": replayed, "display_kind": "hidden"})
+    assert refused.get("error", {}).get("code") == 4033, refused
+    response = _handler(agent, "prompt.submit", {"session_id": SID, "text": "marker retried",
+                                                 "_replayed_turn": replayed})
+    assert response.get("result", {}).get("status") == "streaming", response
+    assert _until(lambda: "marker retried" in gateway.agent.texts)
 
 
 def test_the_gateways_own_dispatch_on_an_agents_connection_is_not_the_agents_submit(gateway):

@@ -295,6 +295,30 @@ def test_metadata_names_the_path_issuer_on_both_well_known_paths(gw):
     assert r.headers.get("access-control-allow-origin") == "*"
 
 
+@pytest.mark.parametrize("decision", ["allow", "deny"])
+def test_every_decision_carries_the_issuer_the_sdk_client_checks(gw, decision):
+    # RFC 9207, checked with the mcp SDK's own client code: the metadata advertises iss, and the
+    # consent page's answer carries exactly the metadata's issuer (compared as strings, no normalising).
+    from mcp.client.auth.exceptions import OAuthFlowError
+    from mcp.client.auth.utils import validate_authorization_response_iss
+    from mcp.shared.auth import OAuthMetadata
+
+    meta = gw.client.get("/.well-known/oauth-authorization-server/mcp").json()
+    assert meta["authorization_response_iss_parameter_supported"] is True
+    parsed = OAuthMetadata.model_validate(meta)
+    flow = gw.register()
+    gw.open_consent(flow)
+    r = gw.decide(flow, decision)
+    query = parse_qs(urlsplit(r.headers["location"]).query)
+    assert query["iss"] == [ISSUER] == [meta["issuer"]]
+    assert ("code" in query) == (decision == "allow") and query["state"] == ["state-marker"]
+    validate_authorization_response_iss(query["iss"][0], parsed)  # what the SDK's client runs: accepted
+    with pytest.raises(OAuthFlowError):  # and a response without it would now be refused: it must be there
+        validate_authorization_response_iss(None, parsed)
+    with pytest.raises(OAuthFlowError):
+        validate_authorization_response_iss("https://other.example.invalid/mcp", parsed)
+
+
 def test_the_sdk_accepts_an_issuer_with_a_path():
     from mcp.server.auth.routes import validate_issuer_url
     from pydantic import AnyHttpUrl

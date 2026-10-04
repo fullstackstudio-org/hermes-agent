@@ -206,14 +206,18 @@ class ConsentDecision:
 class MCPProvider(OAuthAuthorizationServerProvider[MCPAuthorizationCode, MCPRefreshToken, MCPAccessToken]):
     """*resource_url* is the endpoint tokens are for (``https://<primary>/mcp``); *consent_url* the page
     :meth:`authorize` redirects to; *admit_registration*, called with the client's address, refuses a
-    registration when it returns False (the route layer's per-address limit)."""
+    registration when it returns False (the route layer's per-address limit); *issuer*, when given, goes back
+    to the client as ``iss`` with every decision (RFC 9207), exactly as the metadata's ``issuer`` spells it
+    (a client compares the two as strings)."""
 
     def __init__(self, store: MCPStore, *, resource_url: str, settings: Optional[MCPSettings] = None,
-                 consent_url: str = "/mcp/consent", admit_registration: Optional[Callable[[str], bool]] = None):
+                 consent_url: str = "/mcp/consent", admit_registration: Optional[Callable[[str], bool]] = None,
+                 issuer: Optional[str] = None):
         self.store = store
         self.resource = canonical_resource(resource_url)
         self.settings = settings or MCPSettings()
         self.consent_url = consent_url
+        self.issuer = issuer or None
         self._admit_registration = admit_registration
 
     @staticmethod
@@ -346,7 +350,8 @@ class MCPProvider(OAuthAuthorizationServerProvider[MCPAuthorizationCode, MCPRefr
             user_name=clean_value(user_name, NAME_LIMIT), provider=str(provider).strip(),
             max_grants=self.settings.max_grants_per_user)
         record = await self._run(self.store.client, consent.client_id)
-        url = construct_redirect_uri(consent.params["redirect_uri"], code=code, state=consent.params.get("state"))
+        url = construct_redirect_uri(consent.params["redirect_uri"], code=code, state=consent.params.get("state"),
+                                     iss=self.issuer)
         return ConsentDecision(redirect_url=url, client_id=consent.client_id,
                                client_name=record.client_name if record else UNNAMED_CLIENT,
                                scopes=tuple(consent.params["scopes"]), granted=True)
@@ -357,7 +362,7 @@ class MCPProvider(OAuthAuthorizationServerProvider[MCPAuthorizationCode, MCPRefr
         record = await self._run(self.store.client, consent.client_id)
         url = construct_redirect_uri(consent.params["redirect_uri"], error="access_denied",
                                      error_description="The person did not allow access.",
-                                     state=consent.params.get("state"))
+                                     state=consent.params.get("state"), iss=self.issuer)
         return ConsentDecision(redirect_url=url, client_id=consent.client_id,
                                client_name=record.client_name if record else UNNAMED_CLIENT,
                                scopes=tuple(consent.params["scopes"]), granted=False)

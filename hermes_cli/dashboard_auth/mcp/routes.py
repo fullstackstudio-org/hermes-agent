@@ -35,7 +35,8 @@ What the route layer adds to the SDK's handlers:
   ``rate_limited`` with ``Retry-After``); ``/mcp/authorize`` holds at most 8 open consents per address
   (the store's cap);
 - bodies of at most 16 KiB; metadata with ``Cache-Control: no-store`` and ``none`` among the client
-  authentication methods (public clients use it);
+  authentication methods (public clients use it), and ``authorization_response_iss_parameter_supported``:
+  the consent page's answer to the client carries ``iss`` = the metadata's ``issuer`` (RFC 9207);
 - audit lines (``mcp_client_registered``, ``mcp_authorize_start``, ``mcp_token_issued``,
   ``mcp_token_refreshed``, ``mcp_token_rejected``, ``mcp_grant_revoked``, ``mcp_rate_limited``) with ids,
   names, the address and an outcome; never a token, code, secret, state or nonce;
@@ -339,6 +340,9 @@ def authorization_server_metadata(issuer_url: str) -> dict:
     methods = ["none", "client_secret_post", "client_secret_basic"]
     metadata.token_endpoint_auth_methods_supported = methods
     metadata.revocation_endpoint_auth_methods_supported = methods
+    # RFC 9207: every decision the consent page sends back carries ``iss`` (MCPProvider ``issuer``). A client
+    # that reads this compares ``iss`` with ``issuer`` and refuses a response without it (mix-up defence).
+    metadata.authorization_response_iss_parameter_supported = True
     return metadata.model_dump(mode="json", exclude_none=True)
 
 
@@ -592,12 +596,12 @@ def build_runtime(*, settings: MCPSettings, issuer_url: str, primary: Any, store
     validate_issuer_url(AnyHttpUrl(issuer_url))  # ValueError: not https (or loopback), or a query/fragment
     store = store if store is not None else MCPStore.default()
     origin = primary.serialize()
+    as_metadata = authorization_server_metadata(issuer_url)
     provider = RouteProvider(store, resource_url=issuer_url, settings=settings,
-                             consent_url=f"{origin}{mount.CONSENT_PATH}")
+                             consent_url=f"{origin}{mount.CONSENT_PATH}", issuer=as_metadata["issuer"])
     verifier = MCPTokenVerifier(provider)
     authenticator = MCPClientAuthenticator(provider)
     resource_metadata_url = f"{origin}{mount.RESOURCE_METADATA_PATH}"
-    as_metadata = authorization_server_metadata(issuer_url)
     resource_metadata = protected_resource_metadata(issuer_url)
     as_endpoint = cors_middleware(_metadata_endpoint(as_metadata), ["GET", "OPTIONS"])
     mcp_app, session_manager = _mcp_server(store=store, settings=settings, issuer_url=issuer_url, origin=origin,

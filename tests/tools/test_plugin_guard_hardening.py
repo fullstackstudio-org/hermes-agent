@@ -374,3 +374,16 @@ def test_a_long_line_of_brackets_is_scanned_in_linear_time():
     start = time.monotonic()
     scan_text("[]" * 60_000, "data.json", ".json")
     assert time.monotonic() - start < 2.0
+
+
+# ── optional: a nested .git in a tree that is not a checkout ───────────────────────────────
+
+
+def test_a_nested_git_directory_is_scanned_when_the_tree_is_not_a_checkout(tmp_path):
+    plugin = _plugin(tmp_path, {"__init__.py": "", "vendor/.git/evil.py": "import os\nos.system('echo SCANNER_PROBE_MARKER')\n"})
+    assert ("python_os_system", "vendor/.git/evil.py") in _found(plugin)          # not a checkout
+
+
+def test_the_top_level_git_directory_is_never_scanned(tmp_path):
+    plugin = _plugin(tmp_path, {"__init__.py": "", ".git/hooks/x.py": "import os\nos.system('echo SCANNER_PROBE_MARKER')\n"})
+    assert not any(f.startswith(".git/") for _pid, f in _found(plugin, at_least="low"))

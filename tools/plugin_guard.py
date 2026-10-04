@@ -29,7 +29,7 @@ from tools.skills_guard import (
     Finding, ScanResult, SCANNABLE_EXTENSIONS, SUSPICIOUS_BINARY_EXTENSIONS, SourceText, _determine_verdict,
     decode_python_source, format_scan_report, read_source_text, scan_text)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-fork-11"
+PLUGIN_SCANNER_VERSION = "plugin-guard-fork-12"
 
 # Caches and vendored environments a checkout makes for itself. Skipped only when nothing in
 # them is tracked by git: a TRACKED ``venv/evil.py`` or ``__pycache__/x.pyc`` ships with the
@@ -178,7 +178,8 @@ def _tracked_paths(plugin_dir: Path) -> Optional[set]:
 def _walk(plugin_dir: Path, tracked: Optional[set] = None, *, know_tracked: bool = False) -> Iterator[Tuple[Path, str]]:
     """Yield (path, "a/b/c" relative path) for every entry under plugin_dir the scan reads.
 
-    ``.git`` is never read. An entry inside another of ``EXCLUDED_DIRS`` is read when git tracks it
+    ``.git`` is not read (in a tree that is not a checkout, only the top-level one is skipped). An
+    entry inside another of ``EXCLUDED_DIRS`` is read when git tracks it
     (or it holds a tracked path), or when the tree is not a git checkout (*tracked* is None);
     *know_tracked* False asks git here."""
     if not know_tracked:
@@ -193,7 +194,9 @@ def _walk(plugin_dir: Path, tracked: Optional[set] = None, *, know_tracked: bool
             rel_parts = f.relative_to(plugin_dir).parts
         except ValueError:
             continue
-        if ".git" in rel_parts:
+        # A checkout cannot ship anything inside a .git directory (git refuses such paths), so there
+        # every .git is skipped; a tree that is not a checkout skips only its own top-level .git.
+        if (".git" in rel_parts) if tracked is not None else (rel_parts[:1] == (".git",)):
             continue
         rel = "/".join(rel_parts)
         if any(part in EXCLUDED_DIRS for part in rel_parts) and tracked is not None \

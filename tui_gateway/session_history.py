@@ -111,12 +111,29 @@ def _content_display_text(content: Any) -> str:
 def _coerce_message_text(content: Any) -> str:
     """Render ``message['content']`` (str, parts list, or one structured dict) as a plain string. Image parts
     keep their URL inline so the desktop's ``extractEmbeddedImages`` and the resume payload agree with the
-    cached message (else the inline image flashed, then vanished); other shapes become a placeholder."""
+    cached message (else the inline image flashed, then vanished); other shapes become a placeholder.
+
+    Inline (base64) images never reach this text: an uploaded image is named by its handle in the text
+    part, and a legacy data URL with no handle becomes ``[image]`` (agent/inline_images.py)."""
+    from agent.inline_images import INLINE_IMAGE_NOTE, is_inline_image_part, names_an_image, strip_inline_image_text
+
+    if isinstance(content, str):
+        return strip_inline_image_text(content)
+    if is_inline_image_part(content):
+        return INLINE_IMAGE_NOTE
     if isinstance(content, list):
         chunks: list[str] = []
+        named = None  # computed on the first inline image only
         for part in content:
             if isinstance(part, str) or (isinstance(part, dict) and isinstance(part.get("text"), str)):
                 chunks.append(part if isinstance(part, str) else part["text"])
+            elif is_inline_image_part(part):
+                if named is None:
+                    named = names_an_image("\n".join(
+                        p if isinstance(p, str) else str(p.get("text") or "") for p in content
+                        if isinstance(p, str) or (isinstance(p, dict) and isinstance(p.get("text"), str))))
+                if not named:
+                    chunks.append(f"\n{INLINE_IMAGE_NOTE}")
             elif isinstance(part, dict) and part.get("type"):
                 rendered = _history_dict_text(part, image_urls=True)
                 chunks.append(rendered if part["type"] in _HISTORY_TEXT_KINDS else f"\n{rendered}")
@@ -221,6 +238,11 @@ def _history_to_messages(history: list[dict], *, profile_home=None) -> list[dict
             continue
         if role == "user":
             content_text = _DISCORD_TRIGGERING_NOTE_RE.sub(r"\1", content_text)
+            # An attached image's ``[Image attached at: <path>]`` handle shows as the ``@image:`` reference
+            # clients render (the form the persisted row already carries).
+            from agent.context_references import format_reference_value
+            from agent.inline_images import display_image_handles
+            content_text = display_image_handles(content_text, format_reference_value)
         if role == "assistant" and m.get("tool_calls"):
             for tc in m["tool_calls"]:
                 fn, tc_id = tc.get("function", {}), tc.get("id", "")

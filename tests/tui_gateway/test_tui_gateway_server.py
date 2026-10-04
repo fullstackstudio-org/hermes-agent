@@ -2713,15 +2713,16 @@ def test_history_to_messages_still_drops_empty_assistant_without_reasoning():
 
 
 def test_history_to_messages_renders_multimodal_content():
-    # bb/gui preserves image URLs in the resume payload so the desktop
-    # renderer's extractEmbeddedImages can pull them back out and display
-    # the actual image instead of a placeholder. This also keeps the
-    # resume payload in sync with the cached message.
+    # A remote image URL stays in the resume payload so the desktop renderer's
+    # extractEmbeddedImages can pull it back out and display it. An inline
+    # (base64) image never does: the history names it by path, and one it
+    # cannot name shows as ``[image]`` (agent/inline_images.py).
     history = [
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": "look here"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
             ],
         },
@@ -2729,7 +2730,7 @@ def test_history_to_messages_renders_multimodal_content():
     ]
 
     assert server._history_to_messages(history) == [
-        {"role": "user", "text": "look here\ndata:image/png;base64,abc"},
+        {"role": "user", "text": "look here\nhttps://example.com/cat.png\n[image]"},
         {"role": "assistant", "text": "saw it"},
     ]
 

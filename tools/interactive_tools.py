@@ -316,10 +316,12 @@ REVIEW_DIFF_SCHEMA = {
         "reject each BEFORE you write them. Pass the unified diff of that one file as it is (the output of git diff "
         "-- <file> or diff -u): no Markdown fence, no commentary around it. The gateway reads the diff itself and "
         "numbers the hunks; at most 64 KiB, 200 hunks, 400 lines per hunk and 500 characters per line. Every line is "
-        "shown exactly as written (tabs are fine), so a diff with a carriage return (a CRLF file), whitespace at the "
-        "end of a line, a hidden character, more than 16 spaces in a row or a line indented more than 32 spaces is "
-        "refused "
-        "and the error names the line; a binary diff or a diff of several files (one call per file) is refused too. "
+        "shown exactly as written (a tab counts as a stop every 8 columns), so a diff with a carriage return (a CRLF "
+        "file), whitespace at the end of a line, a hidden character, more than 16 columns of spaces in a row or a line "
+        "indented more than 32 columns is refused and the error names the line; so is a binary diff, a diff of "
+        "several files (one call per file), a change of a file's mode, a new or deleted file that is a symbolic link, "
+        "a submodule or executable (only regular files, mode 100644), and a diff whose '\\ No newline at end of "
+        "file' line is not directly after the last - or + line of the LAST hunk (never after a context line). "
         + _VERBATIM +
         "Outcomes: 'approved' — approved_patch is the patch of exactly the approved hunks, in git's form, written by "
         "the gateway; apply that, not your own diff; hunks says which were approved and which rejected (a rejected "
@@ -331,9 +333,10 @@ REVIEW_DIFF_SCHEMA = {
             "summary": {"type": "string", "description": "Plain text, at most 500 characters: what the changes do and "
                                                          "that you apply only what is approved."},
             "diff": {"type": "string", "description": "The unified diff of one file, text only."},
-            "path": {"type": "string", "description": "Optional relative path of the file, at most 300 characters. Only "
-                                                      "needed when the diff has no ---/+++ header lines; with them it "
-                                                      "must be the file they name."},
+            "path": {"type": "string", "description": "Relative path of the file, at most 300 characters. REQUIRED "
+                                                      "when the diff has no ---/+++ header lines (the person must "
+                                                      "see which file it is); with them it must be the file they "
+                                                      "name."},
             "title": {"type": "string", "description": "Optional short heading, at most 80 characters."},
         },
         "required": ["summary", "diff"],

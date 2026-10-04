@@ -134,7 +134,7 @@ def test_the_schemas_and_descriptions():
     diff_text = tool.REVIEW_DIFF_SCHEMA["description"]
     assert "NOT an approval" in diff_text and "approved_patch" in diff_text and "ONE file" in diff_text
     for limit in ("64 KiB", "200 hunks", "400 lines per hunk", "500 characters per line", "carriage return",
-                  "binary diff", "no Markdown fence"):
+                  "binary diff", "no Markdown fence", "mode 100644", "stop every 8 columns", "LAST hunk"):
         assert limit in diff_text, limit
     assert tool.ASK_FILE_SCHEMA["parameters"]["properties"]["accept"]["enum"] == ["image", "document", "audio", "any"]
     assert tool.ASK_FORM_SCHEMA["parameters"]["properties"]["fields"]["items"]["properties"]["kind"]["enum"] == [
@@ -400,7 +400,8 @@ def test_review_diff_round_trip_hands_back_the_patch_of_the_approved_hunks(serve
     _caps(server, phone, requests=list(ALL))
     release = _bind_ui_session("s1")
     try:
-        for bad in ({"diff": "@@ -1 +1 @@\n-a\n+b\rc\n"}, {"diff": "--- a/x\n+++ b/x\n"}, {"diff": DIFF, "path": "other.txt"},
+        for bad in ({"diff": "@@ -1 +1 @@\n-a\n+b\rc\n", "path": "f.py"}, {"diff": "--- a/x\n+++ b/x\n"},
+                    {"diff": "@@ -1 +1 @@\n-a\n+b\n"},    # bare hunks: the file must be named {"diff": DIFF, "path": "other.txt"},
                     {"diff": "Binary files a/x and b/x differ\n"}, {"diff": DIFF, "summary": ""}):
             assert "error" in json.loads(tool.review_diff_tool(**{"summary": "x", **bad}))
         assert phone.requests("review.diff") == []
@@ -411,7 +412,7 @@ def test_review_diff_round_trip_hands_back_the_patch_of_the_approved_hunks(serve
     finally:
         release()
     frame = phone.requests("review.diff")[0]["params"]
-    assert frame["path"] == "notes.txt" and [h["id"] for h in frame["hunks"]] == ["h1", "h2"]
+    assert (frame["kind"], frame["path"]) == ("modify", "notes.txt") and [h["id"] for h in frame["hunks"]] == ["h1", "h2"]
     assert frame["title"] == "Notes" and frame["optional"] is False
     data = json.loads(box["r"])
     assert data["outcome"] == "approved" and data["hunks"] == {"h1": "rejected", "h2": "approved"}

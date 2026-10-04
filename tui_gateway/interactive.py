@@ -301,22 +301,21 @@ def build_diff(sid: str, *, summary: object, diff: object, path: object = None, 
     """The ``review.diff`` params and the file head the gateway read from the diff (what :func:`request` needs to put
     the approved patch back together). *diff* is the agent's unified diff of ONE file (``diff_hunks.parse``: bounded,
     every line verbatim, one file, text only); a diff that cannot be shown as it is raises
-    :class:`InteractiveParamsError` saying what to change. *path* names the file when the diff has no header lines;
-    with them it must be the file they name. The hunks in the params are the gateway's own copy."""
+    :class:`InteractiveParamsError` saying what to change. *path* names the file and is required when the diff has
+    no ``---``/``+++`` lines (the person must see which file it is); with them it must be the file they name. The
+    params carry ``kind`` (modify, new, delete, rename), ``path`` (and a rename's ``old_path``) and the hunks: the
+    gateway's own copy."""
     if path is not None and not isinstance(path, str):
         raise InteractiveParamsError("path must be a string")
     try:
         parsed = diff_hunks.parse(diff, path)
     except diff_hunks.DiffError as exc:
         raise InteractiveParamsError(str(exc)) from None
-    shown = parsed.path
-    if shown is not None and len(shown) > diff_hunks.MAX_PATH_CHARS:
-        raise InteractiveParamsError(f"The file names are {len(shown)} characters together; the limit is "
-                                     f"{diff_hunks.MAX_PATH_CHARS}.")
     params = _envelope(sid, "review.diff", summary=summary, title=title, detail=None, optional=False,
                        timeout=timeout)
-    if shown is not None:
-        params["path"] = shown
+    params["kind"], params["path"] = parsed.head.kind, parsed.path
+    if parsed.head.old_path is not None:
+        params["old_path"] = parsed.head.old_path
     params["hunks"] = [hunk.as_dict() for hunk in parsed.hunks]
     return params, parsed.head
 
@@ -512,11 +511,13 @@ def request(sid: str, method: str, params: dict, *, timeout: float = TIMEOUT_SEC
             head: diff_hunks.FileHead | None = None) -> Outcome:
     """Ask the clients of *sid* that can show *method* (and belong to the person the turn acts for) and block for
     the outcome. *params* come from the matching builder (for ``review.diff``, *head* is the file head
-    :func:`build_diff` returned; without it the approved patch is headed by ``params["path"]`` alone). Call it on
-    the turn's own thread: the acting user is read from its context. Never raises for a client-side failure: every
-    way of not getting a valid answer is ``unavailable`` or ``timeout``."""
+    :func:`build_diff` returned and is required: the approved patch is written from it). Call it on the turn's own
+    thread: the acting user is read from its context. Never raises for a client-side failure: every way of not
+    getting a valid answer is ``unavailable`` or ``timeout``."""
     if method not in INTERACTIVE_METHODS:
         raise ValueError(f"{method!r} is not an interactive request method")
+    if method == "review.diff" and head is None:
+        raise ValueError("a review.diff request needs the file head build_diff returned")
     log = _Audit(sid, method)
     if os.environ.get("HERMES_COMPUTE_HOST_CHILD") == "1":
         return log.outcome(Outcome("unavailable", reason="turn_isolation"))
@@ -587,7 +588,7 @@ def _answer_outcome(sid: str, key: str, method: str, params: dict, answer: dict,
         if answer["decision"] == "rejected":
             return Outcome("rejected", payload={"hunks": hunks}, answered_by=login)
         approved = {hunk_id for hunk_id, decision in hunks.items() if decision == "approved"}
-        patch = diff_hunks.compose_patch(head, params["hunks"], approved, path=params.get("path"))
+        patch = diff_hunks.compose_patch(head, params["hunks"], approved)
         return Outcome("approved", payload={"approved_patch": patch, "hunks": hunks}, answered_by=login)
     if answer["decision"] == "rejected":
         comment = clean_text(answer.get("comment"), multiline=True)

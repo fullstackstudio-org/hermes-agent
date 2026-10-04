@@ -408,7 +408,9 @@ hunk. Params: the envelope (`optional` is false: there is no skip) plus
 
 | Key | Type |
 | --- | --- |
-| `path` | string, 1–300, one line, optional: the file's relative path, display only. A renamed file shows `old -> new`. |
+| `kind` | `modify` (an existing file), `new` (a file that does not exist yet), `delete` (the file is removed) or `rename` (moved to `path`, with the edits the hunks show). The gateway reads it from the diff's header. |
+| `path` | string, 1–300, one line, REQUIRED: the file's relative path, display only (never absolute, never a `..` or `.git` segment). For `rename` the new path; for `delete` the removed file. |
+| `old_path` | string, 1–300, one line: a rename's previous path. Present for `rename` and only then. |
 | `hunks` | 1–200 hunks (below), `id` unique within the request |
 
 A hunk:
@@ -422,12 +424,20 @@ A hunk:
 A line is one line of the hunk, in the order of the diff. Its first character is its marker: a space (context,
 unchanged), `+` (added) or `-` (removed). The rest is the line's text. The one other line there is, git's note that
 the file has no final newline, is exactly `\ No newline at end of file`; it belongs to the line before it. The
-header's counts say how many old (` ` and `-`) and new (` ` and `+`) lines the hunk has, and the gateway built the
+gateway builds a hunk with that note only in the LAST hunk, once per side, directly after the last `-` line and/or
+the last `+` line of the hunk, never after a context line (anywhere else the line before it would be glued to the
+next line of the file when the patch is applied, invisibly). A change to the final newline of a file is therefore
+always shown as `-` and `+` lines of that line. The header's counts say how many old (` ` and `-`) and new (` ` and `+`) lines the hunk has, and the gateway built the
 hunk so that they agree with `lines`. The starting line numbers are as the agent's diff gave them.
 
 The gateway reads the agent's unified diff itself (at most 64 KiB, at most 200 hunks, at most 400 lines in a hunk)
-and numbers the hunks; the agent never passes a hunk. A diff of several files, a binary diff and a diff the gateway
-cannot show as it is are refused to the agent, and nothing is sent.
+and numbers the hunks; the agent never passes a hunk. A diff of several files, a binary diff, a change of a file's mode,
+a new or deleted file that is not a regular file of mode 100644 (a symbolic link, a submodule, an executable) and a
+diff the gateway cannot show as it is are refused to the agent, and nothing is sent. A diff without `---` and `+++`
+lines is accepted only with the agent's `path`: the person always sees which file it is.
+
+A client shows `kind` (a new, deleted or renamed file is not a plain edit: "New file", "Delete file", "Renamed from
+`old_path`") and `path` above the hunks.
 
 ### 7.1 What is shown
 
@@ -441,11 +451,16 @@ space. A carriage return that is part of a line, a bidi or zero-width character,
 long run of spaces or a line of more than 500 code points refuses the diff.
 
 One difference from §6.2: **U+0009 (tab) is allowed** in a hunk line and in a header's section text, leading and
-inside the line, so that Go, Makefile and other tab-indented code can be reviewed. A tab counts as one code point
-for the 500 limit and as a character that is not a space for §6.3 (it ends the indent and a run of spaces: only
-spaces are counted there). Whitespace at the end of a line stays refused, a tab included, and every other
-character §6.2 refuses stays refused. A client MUST show a tab visibly, as a marker or as a fixed-width tab stop,
-never hidden, collapsed or silently turned into spaces. The header must pass the same rule as a whole.
+inside the line, so that Go, Makefile and other tab-indented code can be reviewed. A tab counts as ONE code point for
+the 500 limit. For §6.3 a tab is a fixed tab stop every 8 columns, and a run of spaces and tabs is measured in
+columns: walking the line from column 0, a space advances one column, a tab advances to the next multiple of 8, and
+every other character advances one. A run of spaces and tabs that holds a tab and starts the line (the indent) is
+refused above `MAX_INDENT` = 32 columns (four tab levels), any other such run above `MAX_SPACE_RUN` = 16 columns
+(width counted from where the run starts). A run without a tab is judged as in §6.3. So 300 tabs, 400 tabs
+inside a line or ` \t` repeated cannot push text out of view. Whitespace at the end of a line stays refused, a
+tab included, and every other character §6.2 refuses stays refused. A client MUST render a tab as such a stop
+(8 columns) or as a visible marker, never hidden, collapsed or silently turned into a different number of spaces.
+The header must pass the same rule as a whole.
 
 A client shows a hunk monospaced, one row per line, with the marker in a gutter apart from the text, added and
 removed lines distinguished by more than colour, and scrolls long rows sideways instead of wrapping them into a

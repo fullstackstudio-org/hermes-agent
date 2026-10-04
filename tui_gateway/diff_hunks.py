@@ -12,12 +12,15 @@ nothing is repaired; a diff that cannot be shown as it is raises :class:`DiffErr
   line numbers are not checked;
 - every line passes the verbatim rules of README §6.2 and §6.3 (:func:`line_problem`): the marker (space, ``+`` or
   ``-``) is taken off first and the rest is checked as one line of text (:func:`text_problem`: a tab is the one
-  exception to README §6.2, so Go and Makefile diffs can be reviewed), so a carriage return that is part of
+  exception to README §6.2, so Go and Makefile diffs can be reviewed; for the indent and space-run limits it is a
+  tab stop every 8 columns), so a carriage return that is part of
   the line (CRLF content), a hidden character, whitespace at the end of a line or a long run of spaces refuses the
   diff, never rewrites it. A blank context line is one space (an empty line inside a hunk is read as that);
 - the line ending of the DIFF itself may be CRLF (every line, the last one aside, ends in CR: they are all removed);
   a CR on only some lines is a CR in the content and refused;
-- ``\\ No newline at end of file`` is kept as a line of its hunk (exactly that text, after a line, never first);
+- ``\\ No newline at end of file`` is kept as a line of its hunk (exactly that text) only in the LAST hunk, once per
+  side, directly after the last ``-`` line and/or the last ``+`` line of the hunk, never after a context line:
+  anywhere else ``git apply`` would join the line to the next one of the file, invisibly;
 - a binary diff (``Binary files ... differ``, ``GIT binary patch``), a diff of several files, a diff without a hunk and
   header lines this module does not know (mode changes, copies) are refused.
 
@@ -34,7 +37,7 @@ import re
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
-from tui_gateway.request_text import verbatim_problem
+from tui_gateway.request_text import MAX_INDENT, MAX_SPACE_RUN, verbatim_problem
 
 MAX_DIFF_BYTES = 65_536
 MAX_HUNKS = 200
@@ -46,6 +49,12 @@ NO_NEWLINE = "\\ No newline at end of file"
 #: ``@@ -a,b +c,d @@`` and, after a space, the section text git adds (the function the hunk is in). A count left out is 1.
 HEADER = re.compile(r"@@ -(\d{1,9})(?:,(\d{1,9}))? \+(\d{1,9})(?:,(\d{1,9}))? @@((?: .*)?)")
 _MODE = re.compile(r"[0-7]{6}")
+_INDEX = re.compile(r"index [0-9a-fA-F]{4,64}\.\.[0-9a-fA-F]{4,64}(?: ([0-7]{6}))?")
+#: The one mode of a file the gateway lets a diff create or delete: a regular, non-executable file.
+REGULAR_MODE = "100644"
+#: A tab stop every this many columns, for :data:`MAX_INDENT` and :data:`MAX_SPACE_RUN` (README §7.1).
+TAB_STOP = 8
+_WHITESPACE_RUN = re.compile(r"[ \t]+")
 _SIMILARITY = re.compile(r"(\d{1,3})%")
 _SHORT = 60
 
@@ -56,22 +65,24 @@ class DiffError(ValueError):
 
 @dataclass(frozen=True)
 class FileHead:
-    """What the diff says about its one file. ``kind`` is ``modify``, ``new``, ``deleted`` or ``rename``; ``old`` and
-    ``new`` are relative paths (``None`` for the side that does not exist, and both ``None`` for a diff of bare hunks
-    without a path); ``mode`` is a new or deleted file's mode, ``similarity`` a rename's index (percent)."""
+    """What the diff says about its one file. ``kind`` is ``modify``, ``new``, ``delete`` or ``rename``; ``old`` and
+    ``new`` are relative paths (``None`` for the side that does not exist); ``similarity`` is a rename's index
+    (percent). A new or deleted file is always a regular file of mode 100644: any other mode is refused."""
 
-    kind: str = "modify"
+    kind: str
     old: str | None = None
     new: str | None = None
-    mode: str | None = None
     similarity: int | None = None
 
     @property
-    def path(self) -> str | None:
-        """The path the person is shown: the file's own, for a rename ``<old> -> <new>``."""
-        if self.kind == "rename":
-            return f"{self.old} -> {self.new}"
-        return self.new or self.old
+    def path(self) -> str:
+        """The path the person is shown: the file's own (the new path of a rename; ``old_path`` is the other)."""
+        return (self.old if self.kind == "delete" else self.new) or ""
+
+    @property
+    def old_path(self) -> str | None:
+        """A rename's previous path, else ``None``."""
+        return self.old if self.kind == "rename" else None
 
 
 @dataclass(frozen=True)
@@ -90,7 +101,7 @@ class ParsedDiff:
     hunks: tuple[Hunk, ...]
 
     @property
-    def path(self) -> str | None:
+    def path(self) -> str:
         return self.head.path
 
 
@@ -100,13 +111,34 @@ class ParsedDiff:
 def text_problem(text: str) -> str:
     """Why *text*, one line of a hunk without its marker (or a header), cannot be shown as it is, or "". README §6.2
     and §6.3 with ONE difference for a diff: U+0009 is allowed, leading and inside the line. It counts as one code
-    point, as a character that is not a space (so it ends an indent and a run of spaces), and a client shows it
-    visibly (a marker or a fixed-width tab stop), never hidden. Whitespace at the end of the line, a tab included, is
-    still refused: no rendering shows it."""
-    if problem := verbatim_problem(text.replace("\t", "x")):
+    point for the line's length; for the layout limits a tab is a fixed tab stop every :data:`TAB_STOP` columns, so a
+    run of tabs and spaces is measured in columns (the indent against :data:`MAX_INDENT`, any other run against
+    :data:`MAX_SPACE_RUN`) and tabs cannot push the text out of view. A client shows a tab visibly (a marker or such a
+    tab stop), never hidden. Whitespace at the end of the line, a tab included, is still refused: no rendering shows it."""
+    if "\t" not in text:
+        return verbatim_problem(text)
+    # Runs of spaces and tabs that hold a tab are measured below; for everything else the rules of §6 apply as they
+    # are, with each such run standing in as one visible character.
+    flattened = _WHITESPACE_RUN.sub(lambda run: "x" if "\t" in run.group() else run.group(), text)
+    if problem := verbatim_problem(flattened):
         return problem
     if text != text.rstrip():
         return "whitespace at the end of a line or of the text cannot be seen"
+    column, position = 0, 0
+    for run in _WHITESPACE_RUN.finditer(text):
+        column += run.start() - position
+        start = column
+        for ch in run.group():
+            column = (column // TAB_STOP + 1) * TAB_STOP if ch == "\t" else column + 1
+        position = run.end()
+        if "\t" not in run.group():
+            continue
+        if run.start() == 0 and column > MAX_INDENT:
+            return (f"it is indented {column} columns (a tab is a stop every {TAB_STOP}; at most {MAX_INDENT}), "
+                    "which can put part of it out of view; present it without padding")
+        if run.start() != 0 and column - start > MAX_SPACE_RUN:
+            return (f"it has {column - start} columns of spaces and tabs in a row (a tab is a stop every {TAB_STOP}; "
+                    f"at most {MAX_SPACE_RUN}), which can put part of it out of view; present it without padding")
     return ""
 
 
@@ -140,16 +172,21 @@ def _short(line: str) -> str:
 
 
 def path_problem(path: str) -> str:
-    """Why *path* is not a path to name a file by, or "": it must be relative, without empty, ``.`` or ``..``
-    segments, at most :data:`MAX_PATH_CHARS` characters, and text that can be shown as it is."""
+    """Why *path* is not a path to name a file by, or "": it must be relative, without empty, ``.``, ``..`` or ``.git``
+    (any case) segments, at most :data:`MAX_PATH_CHARS` characters, free of control characters (a line break would
+    inject header lines into the patch) and text that can be shown as it is."""
     if not path:
         return "it is empty"
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path):
+        return "it has a control character"
     if len(path) > MAX_PATH_CHARS:
         return f"it is {len(path)} characters (at most {MAX_PATH_CHARS})"
     if path.startswith("/"):
         return "it is absolute: use a path relative to the repository"
     if any(segment in ("", ".", "..") for segment in path.split("/")):
         return "it has an empty, . or .. segment"
+    if any(segment.lower() == ".git" for segment in path.split("/")):
+        return "it has a .git segment"
     if "\\" in path:
         return "it has a backslash"
     return verbatim_problem(path)
@@ -179,8 +216,8 @@ class _Preamble:
     old_name: str | None = None
     new_name: str | None = None
     has_files: bool = False
-    new_mode: str | None = None
-    deleted_mode: str | None = None
+    new_file: bool = False
+    deleted_file: bool = False
     similarity: int | None = None
     rename_from: str | None = None
     rename_to: str | None = None
@@ -197,11 +234,20 @@ def _read_preamble(lines: list[str]) -> tuple[_Preamble, int]:
                 raise DiffError("The diff names more than one file; review one file at a time (one call each).")
             pre.git = True
         elif line.startswith("index "):
-            pass
+            match = _INDEX.fullmatch(line)
+            if match is None:
+                raise DiffError(f"Line {number}: an index line looks like 'index 1234567..89abcde 100644'.")
+            if match.group(1) is not None:
+                _mode(match.group(1), number)
         elif line.startswith("new file mode "):
-            pre.new_mode = _mode(line[len("new file mode "):], number)
+            _mode(line[len("new file mode "):], number)
+            pre.new_file = True
         elif line.startswith("deleted file mode "):
-            pre.deleted_mode = _mode(line[len("deleted file mode "):], number)
+            _mode(line[len("deleted file mode "):], number)
+            pre.deleted_file = True
+        elif line.startswith("old mode ") or line.startswith("new mode "):
+            raise DiffError(f"Line {number}: a change of a file's mode cannot be reviewed; only the content of regular "
+                            "files (mode 100644) can.")
         elif line.startswith("similarity index "):
             match = _SIMILARITY.fullmatch(line[len("similarity index "):])
             if match is None or int(match.group(1)) > 100:
@@ -228,18 +274,30 @@ def _read_preamble(lines: list[str]) -> tuple[_Preamble, int]:
 
 
 def _mode(text: str, number: int) -> str:
+    """*text* when it is :data:`REGULAR_MODE`; any other mode is refused with the reason: only regular, non-executable
+    files can be created or deleted through a review (a link or a submodule would write something other than what
+    the hunks show, and an executable bit is not in a hunk at all)."""
     if _MODE.fullmatch(text) is None:
         raise DiffError(f"Line {number}: a file mode is six octal digits (100644).")
+    if text != REGULAR_MODE:
+        what = {"120000": "a symbolic link", "160000": "a submodule (gitlink)", "100755": "an executable file"}.get(
+            text, "not a regular file")
+        raise DiffError(f"Line {number}: mode {text} is {what}; only regular files of mode {REGULAR_MODE} can be "
+                        "reviewed.")
     return text
 
 
 def _head(pre: _Preamble, path: str | None) -> FileHead:
-    """The :class:`FileHead` the header lines and the agent's ``path`` say; refuses what contradicts."""
+    """The :class:`FileHead` the header lines and the agent's ``path`` say; refuses what contradicts. A diff without
+    ``---`` and ``+++`` lines (bare hunks) needs the agent's ``path``: the person must see which file it is."""
     if path is not None:
         _checked(path, "path")
     if not pre.has_files:
-        if pre.git or pre.new_mode or pre.deleted_mode or pre.rename_from or pre.rename_to:
+        if pre.git or pre.new_file or pre.deleted_file or pre.rename_from or pre.rename_to:
             raise DiffError("The diff has file header lines but no '--- ' and '+++ ' lines.")
+        if path is None:
+            raise DiffError("path is required: the diff has no '--- ' and '+++ ' lines, so say which file it changes "
+                            "(a relative path) or send the diff with its header lines.")
         return FileHead("modify", path, path)
     old, new = pre.old_name, pre.new_name
     # git writes a/ and b/ in front of both names; strip them as a pair (or from the one that exists).
@@ -252,15 +310,15 @@ def _head(pre: _Preamble, path: str | None) -> FileHead:
     if old is None and new is None:
         raise DiffError("The diff has /dev/null on both sides.")
     if old is None:
-        if pre.deleted_mode or pre.rename_from or pre.rename_to:
+        if pre.deleted_file or pre.rename_from or pre.rename_to:
             raise DiffError("The header says the file is new but also deleted or renamed.")
-        head = FileHead("new", None, new, mode=pre.new_mode)
+        head = FileHead("new", None, new)
     elif new is None:
-        if pre.new_mode or pre.rename_from or pre.rename_to:
+        if pre.new_file or pre.rename_from or pre.rename_to:
             raise DiffError("The header says the file is deleted but also new or renamed.")
-        head = FileHead("deleted", old, None, mode=pre.deleted_mode)
+        head = FileHead("delete", old, None)
     elif old == new:
-        if pre.new_mode or pre.deleted_mode or pre.rename_from or pre.rename_to:
+        if pre.new_file or pre.deleted_file or pre.rename_from or pre.rename_to:
             raise DiffError("The header says the file is new, deleted or renamed but names one path on both sides.")
         head = FileHead("modify", old, new)
     else:
@@ -268,8 +326,8 @@ def _head(pre: _Preamble, path: str | None) -> FileHead:
             raise DiffError("The diff names two different files without 'rename from' and 'rename to' lines that "
                             "say so; review one file at a time.")
         head = FileHead("rename", old, new, similarity=pre.similarity)
-    if path is not None and path != (head.old if head.kind == "deleted" else head.new):
-        raise DiffError(f"path {_short(path)} is not the file the diff changes ({_short(head.path or '')}); leave "
+    if path is not None and path != head.path:
+        raise DiffError(f"path {_short(path)} is not the file the diff changes ({_short(head.path)}); leave "
                         "path out or name that file.")
     return head
 
@@ -290,10 +348,26 @@ def _read_hunk(lines: list[str], i: int, number: int) -> tuple[Hunk, int]:
     match = HEADER.fullmatch(header)
     old_left, new_left = _count(match.group(2)), _count(match.group(4))
     body: list[str] = []
+    marked: set[str] = set()
     i += 1
 
     def fail(message: str) -> DiffError:
         return DiffError(f"Hunk {hid}: {message}")
+
+    def check_marker(number: int) -> None:
+        """``\\ No newline at end of file`` says the line before it has no newline. It is allowed only after a ``-``
+        or ``+`` line that is the last of its side in the hunk (git apply would otherwise join that line to the next
+        one in the file, invisibly), once per side; the last hunk is checked by the caller."""
+        if not body or body[-1] == NO_NEWLINE:
+            raise fail(f"line {number}: '{NO_NEWLINE}' must follow a line.")
+        side = body[-1][0]
+        if side == " ":
+            raise fail(f"line {number}: '{NO_NEWLINE}' after a context line is refused: show the change of the final "
+                       "newline as - and + lines of that line.")
+        if (old_left if side == "-" else new_left) > 0 or side in marked:
+            raise fail(f"line {number}: '{NO_NEWLINE}' is allowed only once after the last "
+                       f"{'old (-)' if side == '-' else 'new (+)'} line of the hunk.")
+        marked.add(side)
 
     while old_left > 0 or new_left > 0:
         if i >= len(lines):
@@ -303,8 +377,7 @@ def _read_hunk(lines: list[str], i: int, number: int) -> tuple[Hunk, int]:
         if line == "":
             line = " "  # an editor may have stripped the space of a blank context line
         if line == NO_NEWLINE:
-            if not body or body[-1] == NO_NEWLINE:
-                raise fail(f"line {i + 1}: '{NO_NEWLINE}' must follow a line.")
+            check_marker(i + 1)
         elif line[0] == " " and old_left > 0 and new_left > 0:
             old_left, new_left = old_left - 1, new_left - 1
         elif line[0] == "-" and old_left > 0:
@@ -319,7 +392,8 @@ def _read_hunk(lines: list[str], i: int, number: int) -> tuple[Hunk, int]:
         i += 1
         if len(body) > MAX_HUNK_LINES:
             raise fail(f"it has more than {MAX_HUNK_LINES} lines; split the change into smaller hunks.")
-    if i < len(lines) and lines[i] == NO_NEWLINE and body and body[-1] != NO_NEWLINE:
+    if i < len(lines) and lines[i] == NO_NEWLINE:
+        check_marker(i + 1)
         body.append(NO_NEWLINE)
         i += 1
         if len(body) > MAX_HUNK_LINES:
@@ -337,7 +411,7 @@ def _check_line(line: str, hid: str, index: int, number: int) -> None:
 
 def parse(diff: object, path: str | None = None) -> ParsedDiff:
     """The one-file unified diff *diff* as a :class:`ParsedDiff`; *path* is the agent's name for the file (a diff of
-    bare hunks has no other). Raises :class:`DiffError`, the sentence to give the agent."""
+    bare hunks, without ``---`` and ``+++`` lines, needs it). Raises :class:`DiffError`, the sentence to give the agent."""
     if not isinstance(diff, str):
         raise DiffError("diff is required: a unified diff of one file, as text.")
     try:
@@ -368,6 +442,9 @@ def parse(diff: object, path: str | None = None) -> ParsedDiff:
                             "only another hunk may follow.")
         if len(hunks) >= MAX_HUNKS:
             raise DiffError(f"The diff has more than {MAX_HUNKS} hunks; review a smaller change.")
+        if hunks and NO_NEWLINE in hunks[-1].lines:
+            raise DiffError(f"Hunk {hunks[-1].id}: '{NO_NEWLINE}' is allowed only in the last hunk (the end of the "
+                            "file).")
         hunk, i = _read_hunk(lines, i, len(hunks) + 1)
         hunks.append(hunk)
     if not hunks:
@@ -378,21 +455,15 @@ def parse(diff: object, path: str | None = None) -> ParsedDiff:
 # ── the patch the person approved ─────────────────────────────────────────────────────────────
 
 
-def _head_lines(head: FileHead | None, path: str | None) -> list[str]:
-    """The header of the recomposed patch, from the stored head (or, without one, from the displayed *path*)."""
-    if head is None:
-        head = FileHead("modify", path, path)
+def _head_lines(head: FileHead) -> list[str]:
+    """The header of the recomposed patch, from the stored head."""
     old, new = head.old, head.new
     if head.kind == "modify":
-        if old is None:
-            return []  # bare hunks and no path: nothing to name
         return [f"diff --git a/{old} b/{new}", f"--- a/{old}", f"+++ b/{new}"]
     if head.kind == "new":
-        return [f"diff --git a/{new} b/{new}", f"new file mode {head.mode or '100644'}", "--- /dev/null",
-                f"+++ b/{new}"]
-    if head.kind == "deleted":
-        return [f"diff --git a/{old} b/{old}", f"deleted file mode {head.mode or '100644'}", f"--- a/{old}",
-                "+++ /dev/null"]
+        return [f"diff --git a/{new} b/{new}", f"new file mode {REGULAR_MODE}", "--- /dev/null", f"+++ b/{new}"]
+    if head.kind == "delete":
+        return [f"diff --git a/{old} b/{old}", f"deleted file mode {REGULAR_MODE}", f"--- a/{old}", "+++ /dev/null"]
     similarity = [] if head.similarity is None else [f"similarity index {head.similarity}%"]
     return [f"diff --git a/{old} b/{new}", *similarity, f"rename from {old}", f"rename to {new}", f"--- a/{old}",
             f"+++ b/{new}"]
@@ -413,10 +484,9 @@ def _shifted(header: str, shift: int) -> str:
     return f"@@ -{old} +{new} @@{match.group(5)}"
 
 
-def compose_patch(head: FileHead | None, hunks: Sequence[dict], approved: Collection[str], *,
-                  path: str | None = None) -> str:
-    """The patch of exactly the *approved* hunk ids, in order: the head the gateway stored (or, without one, one built
-    from *path*), then each approved hunk's header and lines as the gateway stored them. A rejected hunk before an
+def compose_patch(head: FileHead, hunks: Sequence[dict], approved: Collection[str]) -> str:
+    """The patch of exactly the *approved* hunk ids, in order: the head the gateway stored, then each approved hunk's
+    header and lines as the gateway stored them. A rejected hunk before an
     approved one moves that one's new-side start back by its net line change. Empty when no hunk is approved."""
     out: list[str] = []
     shift = 0
@@ -429,4 +499,4 @@ def compose_patch(head: FileHead | None, hunks: Sequence[dict], approved: Collec
             shift += net
     if not out:
         return ""
-    return "\n".join([*_head_lines(head, path), *out]) + "\n"
+    return "\n".join([*_head_lines(head), *out]) + "\n"

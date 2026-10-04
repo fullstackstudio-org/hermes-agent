@@ -373,7 +373,7 @@ def test_sha256sums_pin_the_directory():
 
 def _diff_params(hunks: list[dict], **extra) -> dict:
     return {"session_id": "s_example", "v": 1, "title": "Diff", "summary": "A diff.", "expires_at": 0,
-            "optional": False, **extra, "hunks": hunks}
+            "optional": False, "kind": "modify", "path": "f.py", **extra, "hunks": hunks}
 
 
 def _hunk(hunk_id: str = "h1", header: str = "@@ -1 +1 @@", lines: list[str] | None = None) -> dict:
@@ -415,6 +415,22 @@ def test_diff_params_are_bounded():
     assert _parses(model, _diff_params([_hunk()], path="p" * 300))
     assert not _parses(model, _diff_params([_hunk()], path="p" * 301))
     assert not _parses(model, _diff_params([_hunk()], path=""))
+
+
+def test_a_diff_names_its_file_and_what_happens_to_it():
+    model = SERVER_REQUESTS["review.diff"].params
+    base = _diff_params([_hunk()])
+    assert not _parses(model, {k: v for k, v in base.items() if k != "path"}), "the path is required"
+    assert not _parses(model, {k: v for k, v in base.items() if k != "kind"}), "the kind is required"
+    for kind in ("modify", "new", "delete"):
+        assert _parses(model, {**base, "kind": kind})
+        assert not _parses(model, {**base, "kind": kind, "old_path": "old.py"}), kind
+    assert _parses(model, {**base, "kind": "rename", "old_path": "old.py"})
+    assert not _parses(model, {**base, "kind": "rename"}), "a rename names its old path"
+    assert not _parses(model, {**base, "kind": "move"}) and not _parses(model, {**base, "kind": "Modify"})
+    assert not _parses(model, {**base, "kind": "rename", "old_path": ""})
+    assert not _parses(model, {**base, "kind": "rename", "old_path": "o" * 301})
+    assert not _parses(model, {**base, "kind": "rename", "old_path": "o\nld"})
 
 
 @pytest.mark.parametrize("hunk_id, ok", [("h1", True), ("h200", True), ("h999", True), ("h0", False), ("h01", False),

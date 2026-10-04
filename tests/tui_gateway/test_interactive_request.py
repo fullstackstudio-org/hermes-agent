@@ -89,7 +89,17 @@ DIFF = ("diff --git a/src/notes.py b/src/notes.py\nindex 1234567..89abcde 100644
 def _diff(build, **kwargs):
     kwargs.setdefault("summary", "Please look at these changes.")
     kwargs.setdefault("diff", DIFF)
+    if isinstance(kwargs["diff"], str) and "--- " not in kwargs["diff"].split("@@")[0]:
+        kwargs.setdefault("path", "f.py")      # bare hunks: the file must be named
     return build.build_diff_params("s1", **kwargs)
+
+
+def _head_of(params):
+    """The head ``build_diff`` returns for a request built by hand in a test."""
+    from tui_gateway import diff_hunks
+    path, old = params["path"], params.get("old_path")
+    return diff_hunks.FileHead(params["kind"], {"new": None, "rename": old}.get(params["kind"], path),
+                               None if params["kind"] == "delete" else path)
 
 
 def _file(build, **kwargs):
@@ -440,7 +450,7 @@ def test_draft_display_fields_are_bounded(build, kwargs, message):
 def test_a_diff_is_built_into_hunks_by_the_gateway(build):
     params = _diff(build, title="Notes")
     assert params["v"] == 1 and params["optional"] is False and params["title"] == "Notes"
-    assert params["path"] == "src/notes.py" and "detail" not in params
+    assert (params["kind"], params["path"]) == ("modify", "src/notes.py") and "detail" not in params
     assert [h["id"] for h in params["hunks"]] == ["h1", "h2", "h3"]
     assert params["hunks"][1] == {"id": "h2", "header": "@@ -20,3 +21,4 @@ def tail():",
                                   "lines": [" one", "-two", "+TWO", "+two and a half", " three"]}
@@ -451,14 +461,33 @@ def test_a_diff_is_built_into_hunks_by_the_gateway(build):
     assert (head.kind, head.old, head.new) == ("modify", "src/notes.py", "src/notes.py") and "head" not in params
 
 
-def test_a_diff_of_bare_hunks_takes_the_agents_path_and_cleans_nothing(build):
+def test_a_diff_of_bare_hunks_needs_the_agents_path(build):
     bare = "@@ -1,2 +1,2 @@\n a\n-b\n+c\n"
-    assert "path" not in _diff(build, diff=bare)
+    with pytest.raises(build.InteractiveParamsError, match="path is required"):
+        build.build_diff_params("s1", summary="x", diff=bare)
     params = _diff(build, diff=bare, path="lib/x.py")
-    assert params["path"] == "lib/x.py"
+    assert (params["kind"], params["path"]) == ("modify", "lib/x.py") and "old_path" not in params
     _contract_accepts("review.diff", params)
-    renamed = ("similarity index 90%\nrename from a.txt\nrename to b/c.txt\n--- a/a.txt\n+++ b/b/c.txt\n" + bare)
-    assert _diff(build, diff=renamed)["path"] == "a.txt -> b/c.txt"
+
+
+def test_the_request_says_what_happens_to_the_file(build):
+    bare = "@@ -1,2 +1,2 @@\n a\n-b\n+c\n"
+    renamed = _diff(build, diff="similarity index 90%\nrename from a.txt\nrename to b/c.txt\n--- a/a.txt\n"
+                                "+++ b/b/c.txt\n" + bare)
+    assert (renamed["kind"], renamed["path"], renamed["old_path"]) == ("rename", "b/c.txt", "a.txt")
+    created = _diff(build, diff="--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1 @@\n+x\n")
+    assert (created["kind"], created["path"]) == ("new", "n.txt") and "old_path" not in created
+    deleted = _diff(build, diff="--- a/g.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
+    assert (deleted["kind"], deleted["path"]) == ("delete", "g.txt")
+    assert _diff(build)["kind"] == "modify"
+    for params in (renamed, created, deleted):
+        _contract_accepts("review.diff", params)
+
+
+def test_a_review_diff_request_needs_the_head_the_builder_returned(build):
+    params = _diff(build)
+    with pytest.raises(ValueError, match="needs the file head"):
+        build.request("s1", "review.diff", params, timeout=5)
 
 
 @pytest.mark.parametrize("kwargs, message", [
@@ -478,6 +507,10 @@ def test_a_diff_of_bare_hunks_takes_the_agents_path_and_cleans_nothing(build):
     ({"diff": "@@ -1,401 +1,401 @@\n" + " x\n" * 401}, "more than 400 lines"),
     ({"diff": "@@ -1 +1 @@\n-" + "é" * 40_000 + "\n+b\n"}, "bytes; the limit is 65536"),
     ({"path": "other.py"}, "not the file the diff changes"),
+    ({"diff": "new file mode 100755\n--- /dev/null\n+++ b/n.sh\n@@ -0,0 +1 @@\n+x\n"}, "mode 100755 is an executable"),
+    ({"diff": "--- /dev/null\n+++ b/.git/hooks/pre-commit\n@@ -0,0 +1 @@\n+x\n"}, r"\.git segment"),
+    ({"diff": "@@ -1 +1 @@\n-a\n+b\n", "path": "x\ny"}, "control character"),
+    ({"diff": DIFF.replace(" gamma\n", " gamma\n\\ No newline at end of file\n")}, "after a context line"),
     ({"path": 5}, "path must be a string"),
     ({"summary": ""}, "summary is required"), ({"summary": "x" * 501}, "summary is 501 characters"),
     ({"title": "t" * 81}, "title is 81 characters"),
@@ -513,10 +546,11 @@ def _start(interactive, sid, method, params, *, timeout=10.0):
     """``interactive.request`` on a thread, the way a turn asks (inside a copy of this context)."""
     box: dict = {}
     ctx = contextvars.copy_context()
+    extra = {"head": _head_of(params)} if method == "review.diff" else {}
 
     def run():
         try:
-            box["outcome"] = ctx.run(interactive.request, sid, method, params, timeout=timeout)
+            box["outcome"] = ctx.run(interactive.request, sid, method, params, timeout=timeout, **extra)
         except BaseException as exc:  # noqa: BLE001
             box["error"] = exc
 
@@ -815,7 +849,7 @@ def test_the_agents_header_text_never_reaches_the_patch_only_the_head_the_gatewa
         "diff --git a/old/a.txt b/new/b.txt\nsimilarity index 88%\nrename from old/a.txt\nrename to new/b.txt\n"
         "--- a/old/a.txt\n+++ b/new/b.txt\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n")
     frame = phone.requests("review.diff")[0]["params"]
-    assert frame["path"] == "old/a.txt -> new/b.txt"
+    assert (frame["kind"], frame["path"], frame["old_path"]) == ("rename", "new/b.txt", "old/a.txt")
     for text in ("elsewhere", "2026"):
         assert text not in outcome.payload["approved_patch"]
 
@@ -823,29 +857,16 @@ def test_the_agents_header_text_never_reaches_the_patch_only_the_head_the_gatewa
 def test_a_new_and_a_deleted_file_are_patched_with_their_own_head(server, build):
     phone = _WS("phone", ROBIN)
     _capable(server, phone)
-    new = "diff --git a/n.txt b/n.txt\nnew file mode 100755\n--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n"
+    new = "diff --git a/n.txt b/n.txt\nnew file mode 100644\n--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n"
     rid, created = _ask_diff(server, build, phone, {"decision": "approved", "hunks": {"h1": "approved"}}, diff=new)
     assert created.payload["approved_patch"] == (
-        "diff --git a/n.txt b/n.txt\nnew file mode 100755\n--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n")
+        "diff --git a/n.txt b/n.txt\nnew file mode 100644\n--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n")
     build.reset_for_tests()
     gone = "--- a/g.txt\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-one\n-two\n"
     rid, deleted = _ask_diff(server, build, phone, {"decision": "approved", "hunks": {"h1": "approved"}}, diff=gone)
     assert deleted.payload["approved_patch"] == (
         "diff --git a/g.txt b/g.txt\ndeleted file mode 100644\n--- a/g.txt\n+++ /dev/null\n@@ -1,2 +0,0 @@\n"
         "-one\n-two\n")
-
-
-def test_without_the_head_the_patch_is_headed_by_the_shown_path(server, build):
-    phone = _WS("phone", ROBIN)
-    _capable(server, phone)
-    params = _diff(build)
-    box = _start(build, "s1", "review.diff", params)
-    rid = _open_id("review.diff")
-    _frame(server, phone, rid, result={"decision": "approved", "hunks": {"h1": "approved", "h2": "rejected",
-                                                                          "h3": "rejected"}})
-    outcome = _finish(box)
-    assert outcome.payload["approved_patch"].startswith(
-        "diff --git a/src/notes.py b/src/notes.py\n--- a/src/notes.py\n+++ b/src/notes.py\n@@ -1,3 +1,4 @@\n")
 
 
 def test_the_tool_bridge_builds_asks_and_returns_the_patch(server, build):
@@ -865,7 +886,7 @@ def test_the_tool_bridge_builds_asks_and_returns_the_patch(server, build):
     assert outcome.payload["approved_patch"].startswith("diff --git a/src/notes.py b/src/notes.py\n")
     assert "@@ -20" not in outcome.payload["approved_patch"]
     with pytest.raises(build.InteractiveParamsError, match="U\\+000D"):
-        build.request_from_tool("s1", "review.diff", summary="x", diff="@@ -1 +1 @@\n-a\n+b\rc\n")
+        build.request_from_tool("s1", "review.diff", summary="x", diff="@@ -1 +1 @@\n-a\n+b\rc\n", path="f.py")
 
 
 def test_a_diff_review_in_a_shared_session_naming_nobody_is_unavailable_with_nothing_sent(server, build):

@@ -897,19 +897,36 @@ class DiffHunk(Params):
         min_length=1, max_length=DIFF_HUNK_LINES_MAX)
 
 
+class DiffKind(WireEnum):
+    """What the diff does to its file, as the gateway read it from the header: ``modify`` an existing file, ``new``
+    a file that does not exist yet, ``delete`` a file, ``rename`` a file to another path (with the edits the hunks
+    show; the person is shown the old path too)."""
+
+    modify = "modify"
+    new = "new"
+    delete = "delete"
+    rename = "rename"
+
+
 class ReviewDiffRequestParams(InteractiveRequestParams):
     """The changes to one file, hunk by hunk, for the person to approve or reject each (``contract/requests``
-    §7). ``path`` is the file's relative path, display only (a rename shows ``old -> new``); ``hunks``: 1-200, ids
-    unique. Every line of every hunk is shown verbatim (the rules of §6 on the line without its marker)."""
+    §7). ``path`` (required) is the file's relative path, display only: the new path of a rename, the deleted file's
+    path for ``delete``. ``kind`` says what happens to it and ``old_path`` is a rename's previous path (present for
+    ``rename`` only). ``hunks``: 1-200, ids unique. Every line of every hunk is shown verbatim (the rules of §6 on
+    the line without its marker, with tabs allowed)."""
 
-    path: str | None = Field(default=None, min_length=1, max_length=DIFF_PATH_MAX, pattern=ONE_LINE)
+    kind: DiffKind
+    path: str = Field(min_length=1, max_length=DIFF_PATH_MAX, pattern=ONE_LINE)
+    old_path: str | None = Field(default=None, min_length=1, max_length=DIFF_PATH_MAX, pattern=ONE_LINE)
     hunks: list[DiffHunk] = Field(min_length=1, max_length=DIFF_HUNKS_MAX)
 
     @model_validator(mode="after")
-    def _unique_hunk_ids(self) -> ReviewDiffRequestParams:
+    def _consistent(self) -> ReviewDiffRequestParams:
         ids = [hunk.id for hunk in self.hunks]
         if len(set(ids)) != len(ids):
             raise ValueError("review.diff: two hunks have the same id")
+        if (self.kind == DiffKind.rename) != (self.old_path is not None):
+            raise ValueError("review.diff: old_path is given for a rename and only for a rename")
         return self
 
 

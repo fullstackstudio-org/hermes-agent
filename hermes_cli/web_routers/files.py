@@ -591,6 +591,151 @@ async def get_attached_image(name: str, profile: Optional[str] = None):
     )
 
 
+# GET /api/files/outbox/{token}/{name}: the files a bot shared with the person (tui_gateway/outbox.py,
+# contract/outbox). Exactly the recorded copy, by its unguessable token and its recorded name; only to a caller
+# the conversation belonged to; never active content: every response is sandboxed and nosniff, and only an
+# image (not SVG), a video, an audio file or a PDF whose bytes were checked is shown inline.
+_OUTBOX_CSP = "default-src 'none'; sandbox"
+_OUTBOX_INLINE_KINDS = frozenset({"image", "video", "audio", "pdf"})
+_OUTBOX_CHUNK = 256 * 1024
+_OUTBOX_RANGE_RE = re.compile(r"(\d*)-(\d*)")
+_OUTBOX_NOT_FOUND = "File not found"
+
+
+def _outbox_request_login(request: Request) -> Optional[str]:
+    """``<provider>:<user id>`` of the signed-in caller (the form a session's logins take), else None: the session
+    token and loopback carry no per-person identity."""
+    session = getattr(request.state, "session", None)
+    provider = str(getattr(session, "provider", "") or "").strip()
+    user_id = str(getattr(session, "user_id", "") or "").strip()
+    return f"{provider}:{user_id}" if provider and user_id else None
+
+
+def _outbox_live_logins(session_id: str) -> set:
+    """The logins of the live conversation *session_id* (its creator, stored owner and everyone who attached),
+    when this process hosts it: a person who joined after the file was shared may fetch it too."""
+    server = sys.modules.get("tui_gateway.server")
+    if server is None or not session_id:
+        return set()
+    try:
+        with server._sessions_lock:
+            live = list(server._sessions.values())
+        logins: set = set()
+        for record in live:
+            if session_id in (record.get("session_key"), getattr(record.get("agent"), "session_id", None)):
+                logins |= {server._session_auth_user_id(record), record.get("stored_owner"),
+                           *(record.get("attached_logins") or ())}
+        return {login for login in logins if isinstance(login, str) and login}
+    except Exception:
+        return set()
+
+
+def _outbox_range(header: Optional[str], size: int):
+    """``None`` (no usable range: the whole file), ``"unsatisfiable"`` (416) or ``(first, last)`` inclusive.
+    One ``bytes`` range only: another unit or several ranges are ignored (the whole file, RFC 9110 §14.2)."""
+    if not header:
+        return None
+    unit, _, spec = header.partition("=")
+    if unit.strip().lower() != "bytes" or "," in spec:
+        return None
+    match = _OUTBOX_RANGE_RE.fullmatch(spec.strip())
+    if match is None or not (match.group(1) or match.group(2)) or size <= 0:
+        return "unsatisfiable"
+    first, last = match.group(1), match.group(2)
+    if not first:  # suffix: the last N bytes
+        count = int(last)
+        return "unsatisfiable" if count == 0 else (max(0, size - count), size - 1)
+    start = int(first)
+    end = size - 1 if not last else int(last)
+    if start >= size or end < start:
+        return "unsatisfiable"
+    return start, min(end, size - 1)
+
+
+def _outbox_disposition(inline: bool, name: str) -> str:
+    from urllib.parse import quote
+    fallback = "".join(ch if 32 <= ord(ch) < 127 and ch not in '"\\' else "_" for ch in name) or "file"
+    return f"{'inline' if inline else 'attachment'}; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
+
+
+def _outbox_body(fd: int, start: int, length: int) -> Iterator[bytes]:
+    try:
+        offset, remaining = start, length
+        while remaining > 0:
+            chunk = os.pread(fd, min(_OUTBOX_CHUNK, remaining), offset)
+            if not chunk:
+                break
+            offset += len(chunk)
+            remaining -= len(chunk)
+            yield chunk
+    finally:
+        os.close(fd)
+
+
+@router.get("/api/files/outbox/{token}/{name}")
+@router.head("/api/files/outbox/{token}/{name}")
+async def get_outbox_file(request: Request, token: str, name: str, profile: Optional[str] = None):
+    """One file a bot shared in a chat of ``profile`` (the dashboard's own when absent): the copy recorded under
+    ``token`` whose name is ``name``. 404 for anything else, a caller the conversation did not belong to
+    included, with no hint which. Range requests are answered (206/416) so audio and video can seek."""
+    from fastapi.responses import Response, StreamingResponse
+    from hermes_cli.web_server_cron import _cron_profile_home
+    from tui_gateway import outbox
+
+    if not outbox.TOKEN_RE.match(token) or not name:
+        raise HTTPException(status_code=404, detail=_OUTBOX_NOT_FOUND)
+    login = _outbox_request_login(request)
+    if login is None and getattr(request.app.state, "auth_required", False):
+        raise HTTPException(status_code=404, detail=_OUTBOX_NOT_FOUND)  # a gated caller with no person: refuse
+    _canon, home = _cron_profile_home(profile)
+    shared = await asyncio.to_thread(outbox.open_shared, home, token, name)
+    if shared is None:
+        raise HTTPException(status_code=404, detail=_OUTBOX_NOT_FOUND)
+    try:
+        record = shared.record
+        live = await asyncio.to_thread(_outbox_live_logins, str(record.get("session_id") or ""))
+        if not outbox.may_fetch(record, login, live):
+            raise HTTPException(status_code=404, detail=_OUTBOX_NOT_FOUND)
+        mime = str(record.get("mime") or "application/octet-stream")
+        served = outbox.served_type(mime)
+        inline = bool(record.get("inline")) and record.get("kind") in _OUTBOX_INLINE_KINDS and served == mime
+        etag = f'"{str(record.get("sha256") or "")[:40]}"'
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "private, max-age=86400",
+            "Content-Disposition": _outbox_disposition(inline, record["name"]),
+            "Content-Security-Policy": _OUTBOX_CSP,
+            "Cross-Origin-Resource-Policy": "same-origin",
+            "ETag": etag,
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+        }
+        size = shared.size
+        if_none_match = request.headers.get("if-none-match", "")
+        if if_none_match and (if_none_match.strip() == "*" or etag in [t.strip() for t in if_none_match.split(",")]):
+            return Response(status_code=304, headers=headers)
+        if_range = request.headers.get("if-range")
+        wanted = None if (if_range is not None and if_range.strip() != etag) else \
+            _outbox_range(request.headers.get("range"), size)
+        if wanted == "unsatisfiable":
+            return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+        start, end = (0, size - 1) if wanted is None else wanted
+        length = max(0, end - start + 1)
+        headers["Content-Length"] = str(length)
+        status = 200
+        if wanted is not None:
+            status = 206
+            headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        if request.method == "HEAD":
+            return Response(status_code=status, headers=headers, media_type=served)
+        fd, shared.fd = shared.fd, -1  # the body owns the descriptor from here
+        return StreamingResponse(_outbox_body(fd, start, length), status_code=status, headers=headers,
+                                 media_type=served)
+    finally:
+        if shared.fd >= 0:
+            shared.close()
+
+
 @dataclass(frozen=True)
 class _NoFollowTarget:
     """A write below ``uploads/hermie``: *anchor* is the folder that holds ``uploads`` (its own symlinks resolved:

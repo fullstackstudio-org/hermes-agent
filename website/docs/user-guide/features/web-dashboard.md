@@ -600,6 +600,12 @@ The bytes of an image attached to a chat, so a client can show the picture a con
 
 Only a regular file directly in `<profile home>/images/` is served, with an image suffix (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`) and at most 25 MB: `name` is one path component, neither the folder nor the file may be a symbolic link, and the managed-files root (`HERMES_DASHBOARD_FILES_ROOT`) does not widen or narrow it. Anything else is `404`, without saying whether the file exists. The response is `image/*` with `X-Content-Type-Options: nosniff` and `Content-Disposition: inline`. It needs the dashboard session (header or cookie), like every `/api/` route; the `?token=` query parameter is not accepted here.
 
+### GET /api/files/outbox/\{token\}/\{name\}
+
+The bytes of a file a bot shared in a Hermie chat (`files.outbox_sources`). The reply's `message.complete` and its history row carry `attachments`: `{id, name, mime, kind, size, sha256, created_at, url}`, with `kind` one of `image`, `video`, `audio`, `pdf`, `file`, and the text no longer shows the `MEDIA:` line. `url` is this route. Query parameter: `profile` (the dashboard's own profile when omitted; unknown profiles return `404`, invalid names `400`). `HEAD` is answered too.
+
+Only the copy recorded under `token` whose recorded name is `name` is served, read without following a link. It needs the dashboard session (header or cookie); the `?token=` query parameter is not accepted. A signed-in caller must belong to the conversation (the login it was created under, its owner, or someone who attached to it); anything else is `404`, without saying whether the file exists. Every response carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`. Images (not SVG), video, audio and PDF whose bytes match their type are `inline`; everything else is `attachment`, and HTML, SVG, XML and scripts are sent as `application/octet-stream`. One byte range is answered with `206` (`bytes=0-99`, `bytes=100-`, `bytes=-100`), an unsatisfiable or malformed one with `416`, so players can seek. Shared files are removed after `files.outbox_retention_days` and when a profile's outbox passes `files.outbox_max_total_mb` (see [Configuration](../configuration.md#files-a-bot-shares-top-level-files)). The full contract is `contract/outbox/` in the repository.
+
 ### GET /api/sessions/search
 
 Full-text search across message content. Query parameter: `q`. Returns matching session IDs with highlighted snippets.

@@ -308,6 +308,28 @@ Consequences to know before you turn a rule on:
 `hermes approvals test -- <command>` reports `ask-passkey` (exit 2) for a command a rule covers, and
 `hermes dashboard passkey status` lists the rules in force.
 
+## Key facts and reviewed drafts
+
+An agent can add up to eight **fields** to a confirmation: the key facts of the action, shown by the app apart
+from the summary (an amount large and bold with its currency, a recipient or domain monospaced and never a
+link, a model, a count, a date). The agent is told to use them whenever an action has an amount, a recipient, a
+domain or a model, and before it runs or switches to an expensive model or starts work with a high estimated
+cost (the spending preset: an `amount`, a `count` labelled `tokens` and a `model`).
+
+- Each label (at most 40 characters), value (at most 200) and currency (at most 16) is one line, shown exactly as
+  the agent wrote it. A field with an invisible, bidirectional or control character, a line break or padding is
+  refused and goes back to the agent; it is never cleaned up behind its back.
+- A confirmation with fields goes only to apps that said they can show them. With no such app attached it ends
+  `unavailable (no_capable_client)` and nothing is shown: an older app would have asked the person to confirm
+  less than the agent asked. The agent may then ask again without fields, with the facts in the summary.
+- At `passkey` the fields are part of what the passkey signs (version 2 of the text digest), in their order.
+
+After `review_draft`, the agent can pass the approval's `draft_id` to `confirm_action`. The gateway then shows,
+as the detail, the text the person approved, exactly as the gateway kept it (and at `passkey` the passkey signs
+that text); whatever detail the agent passed is ignored. An unknown or expired `draft_id` (drafts are kept for
+an hour, per conversation) is refused before anything is sent. A draft longer than the 2,000-character detail
+cannot be confirmed this way.
+
 ## The four outcomes
 
 | Outcome | Meaning | What the agent should do |
@@ -321,7 +343,7 @@ Consequences to know before you turn a rule on:
 
 | `reason` | Level | Meaning |
 | --- | --- | --- |
-| `no_capable_client` | both | No app attached to this conversation can answer (at `passkey`: none signed in as the person, with a passkey for this gateway). |
+| `no_capable_client` | both | No app attached to this conversation can answer (at `passkey`: none signed in as the person, with a passkey for this gateway; with fields: none that shows them). |
 | `error_response`, `write_failed` | both | The app could not show it, or it could not be delivered. |
 | `already_pending`, `rate_limited` | both | Another confirmation is open, or too many were sent. |
 | `cancelled:<why>` | both | Withdrawn: the turn was stopped, the conversation closed, the gateway shut down. |
@@ -356,7 +378,9 @@ command), `redacted` (the command holds a secret),
   and method, whether it was verified, and the signed-in user and network address of the app whose answer
   counted. At `passkey` every refused answer (`confirm_passkey_refused`, with the reason) and every accepted
   one (`confirm_passkey_verified`) is recorded too, with the first characters of the passkey's id, its RP,
-  the base URL and the digest of the text. The title, summary, detail, nonce and signature are never logged.
+  the base URL and the digest of the text. A request with fields records how many (`fields: 3`), one whose
+  detail is a reviewed draft records `draft: true`. The title, summary, detail, field labels and values, nonce
+  and signature are never logged.
 - Plugins can send a push for a request through the `pre_confirm_request` hook (ids, level, user and
   expiry; never the text).
 
@@ -416,3 +440,16 @@ checks, test vectors):
   disabled until the detail has been scrolled to its end, both ways.
 - `confirm_passkey` in the second call is checked by the gateway, not by the contract: unknown extra keys
   are allowed, and a shape it does not accept only drops `passkey`.
+
+Structured fields (`contract/confirm-passkey/README.md` §4.1):
+
+- A gateway that knows them puts `confirm_fields` in every `client.capabilities` result (false until accepted)
+  and `versions: [1, 2]` in `confirm_passkey`. Only then send `confirm_fields: true` in the second call, and,
+  when you also compute the version-2 digest, `confirm_passkey: {v: 2, kind, rp_id}`. A `v: 2` client gets
+  `v: 1` and `v: 2` frames.
+- A frame with `params.fields` lists 1 to 8 `{id, kind, label, value, currency?}` in display order. Show every
+  field as text, exactly as sent; never parse, convert, round, localise or link a value. If you cannot show a
+  field, do not advertise `confirm_fields`.
+- At `passkey` such a frame has `passkey.v: 2`: hash `text_digest_v2` (title, summary, detail, then each
+  field's id, kind, label, value and currency in order) and answer with `passkey.v: 2`. Any other `v` is
+  refused as `bad_shape`. The vectors are `text_digest_v2_vectors` and `assertion_vectors_v2`.

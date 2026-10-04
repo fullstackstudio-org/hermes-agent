@@ -96,7 +96,7 @@ profile's does not, and that `os.environ` is unchanged afterwards.
 | Theming | `theme.ts` + `branding.tsx` | `gateway.ready` carries skin data |
 | Plugin compat notice | — | `plugins.compat_report` (see `plugins/AGENTS.md`) |
 | Connection operations (desktop card) | desktop `store/connection-request.ts` | `connection.request` → `connection.update`* → `connection.respond {op_id}`; `connectors.operation.status`. The op lives in `tools/connectors/live.py`; the card never parks the tool thread (`methods_connectors.py`). |
-| Confirm (fork) | the apps' own confirm sheet | server→client request `confirm` (levels `plain`, `passkey`), gated on `client.capabilities {confirm: [...]}`; tool `confirm_action`. Guide: `website/docs/guides/confirm-sensitive-actions.md`. |
+| Confirm (fork) | the apps' own confirm sheet | server→client request `confirm` (levels `plain`, `passkey`), gated on `client.capabilities {confirm: [...]}`; structured `fields` only to `confirm_fields: true` (at `passkey` also `confirm_passkey {v: 2}`, text digest v2); `draft_id` takes the detail from `review_register`; tool `confirm_action`. Guide: `website/docs/guides/confirm-sensitive-actions.md`. |
 | Interactive requests (fork) | the apps' own form, file, draft and diff sheets | server→client requests `input.form`, `input.file`, `review.draft`, `review.diff`, gated on `client.capabilities {requests: [...]}`; tools `ask_form`, `ask_file`, `review_draft`, `review_diff`. See "Interactive requests" below. |
 
 ## Interactive requests (fork)

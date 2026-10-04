@@ -37,7 +37,35 @@ def test_the_page_names_client_and_redirect_host_escaped_and_cannot_be_framed(gw
     assert r.headers["cache-control"] == "no-store"
     assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
     assert "default-src 'none'" in r.headers["content-security-policy"]
-    assert r.headers["x-frame-options"] == "DENY" and r.headers["referrer-policy"] == "no-referrer"
+    assert r.headers["x-frame-options"] == "DENY"
+
+
+# What a browser puts in ``Origin`` on a same-origin form POST, by the page's referrer policy (Fetch,
+# "serializing a request origin"): ``no-referrer`` turns it into ``null``; every other policy keeps the page's
+# origin for a same-origin request. TestClient sends whatever a test writes, so the policy is pinned here.
+def _browser_post_origin(policy: str, page_origin: str) -> str:
+    return "null" if policy.strip().lower() == "no-referrer" else page_origin
+
+
+def test_the_page_policy_lets_a_browser_send_its_real_origin(gw):
+    # Pinned: same-origin. Under no-referrer a real browser POSTs "Origin: null" and the Origin rule refuses
+    # every Allow and Deny (TestClient hid that by setting Origin by hand). same-origin still sends no
+    # Referer to the client's host on the 303, so the transaction id in the page's address does not leak.
+    flow, _ = _consent_open(gw)
+    page = gw.client.get(f"/mcp/consent?txn={flow.txn}", headers=cookie())
+    policy = page.headers["referrer-policy"]
+    assert policy == "same-origin"
+    refused = gw.client.get("/mcp/consent?txn=gone", headers=cookie() | {"Accept": "text/html"})
+    assert refused.status_code == 404 and refused.headers["referrer-policy"] == "same-origin"
+
+    # What the old no-referrer page made a browser send: refused, and the transaction stays open.
+    r = gw.decide(flow, headers=cookie(origin=_browser_post_origin("no-referrer", BASE)))
+    assert (r.status_code, r.json()["error"]) == (403, "origin_not_listed")
+    # What this page makes a browser send: the decision goes through.
+    r = gw.decide(flow, headers=cookie(origin=_browser_post_origin(policy, BASE)))
+    assert r.status_code == 303 and r.headers["location"].startswith(REDIRECT + "?")
+    # The way back to the client carries no referrer of its own either.
+    assert r.headers["referrer-policy"] == "no-referrer"
 
 
 def test_a_cookie_decision_needs_this_gateways_origin(gw):

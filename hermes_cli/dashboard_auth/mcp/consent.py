@@ -19,7 +19,11 @@ Rules:
 - The form's nonce is bound to the transaction by the store; an unknown, expired, decided or mismatched
   transaction is 404 ``not_found``. A person at the cap of live grants gets 409 ``too_many_grants`` and the
   transaction stays open (revoke one in Settings › MCP, then Allow again).
-- Bodies of at most 16 KiB. The page is ``no-store``, cannot be framed, sends no referrer, and runs no script.
+- Bodies of at most 16 KiB. The page is ``no-store``, cannot be framed and runs no script. Its referrer
+  policy is ``same-origin``, not ``no-referrer``: under ``no-referrer`` a browser sends ``Origin: null`` on
+  the form POST (Fetch, *serializing a request origin*) and the Origin rule above would refuse every real
+  Allow and Deny. The 303 back to the client is cross-origin, so it carries no ``Referer`` (and the 303
+  itself says ``no-referrer``): the transaction id in the page's address never reaches the client's host.
 - Audit: ``mcp_consent_granted`` / ``mcp_consent_denied`` (``outcome`` ``denied`` for the person's no,
   ``refused`` with a ``reason`` for a request the gateway refused), with the user, client id and name,
   scopes and address; never the nonce or the code.
@@ -60,7 +64,9 @@ _PAGE_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; "
                                "base-uri 'none'",
     "X-Frame-Options": "DENY",
-    "Referrer-Policy": "no-referrer",
+    # Not no-referrer: under it a browser sends "Origin: null" on the form POST and the Origin rule refuses
+    # every real decision. same-origin still sends nothing to another host (the 303 back to the client).
+    "Referrer-Policy": "same-origin",
     "X-Content-Type-Options": "nosniff",
 }
 
@@ -202,7 +208,8 @@ async def consent_endpoint(request: Request) -> Response:
             audit_log(AuditEvent.MCP_CONSENT_GRANTED, user_id=user_id, ip=ip, auth=auth, **fields)
         else:
             audit_log(AuditEvent.MCP_CONSENT_DENIED, user_id=user_id, ip=ip, auth=auth, outcome="denied", **fields)
-        return RedirectResponse(outcome.redirect_url, status_code=303, headers={"Cache-Control": "no-store"})
+        return RedirectResponse(outcome.redirect_url, status_code=303,
+                                headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
     response, _ = await routes.provider_call(request, decide)
     return response

@@ -4749,6 +4749,80 @@ class TestDashboardPluginStaticAssetAllowlist:
         # — never 200.
         assert resp.status_code in (403, 404)
 
+    def _dashboard_dir(self):
+        from hermes_constants import get_hermes_home
+
+        return get_hermes_home() / "plugins" / "example-dashboard" / "dashboard"
+
+    def test_directory_with_trailing_slash_redirects_to_index(self):
+        app_dir = self._dashboard_dir() / "app"
+        app_dir.mkdir()
+        (app_dir / "index.html").write_text("<!doctype html><title>x</title>")
+        resp = self.client.get("/dashboard-plugins/example/app/", follow_redirects=False)
+        assert resp.status_code == 307
+        # Relative, so the redirect survives a reverse-proxy path prefix.
+        assert resp.headers["location"] == "index.html"
+        assert "no-store" in resp.headers["cache-control"]
+        followed = self.client.get("/dashboard-plugins/example/app/")
+        assert followed.status_code == 200
+        assert followed.headers["content-type"].startswith("text/html")
+
+    def test_directory_without_trailing_slash_redirects_into_it(self):
+        app_dir = self._dashboard_dir() / "app"
+        app_dir.mkdir()
+        (app_dir / "index.html").write_text("<!doctype html><title>x</title>")
+        resp = self.client.get("/dashboard-plugins/example/app", follow_redirects=False)
+        assert resp.status_code == 307
+        # Resolved against /dashboard-plugins/example/app this is .../app/index.html.
+        assert resp.headers["location"] == "app/index.html"
+        followed = self.client.get("/dashboard-plugins/example/app")
+        assert followed.status_code == 200
+
+    def test_nested_directory_redirect_uses_last_segment(self):
+        nested = self._dashboard_dir() / "app" / "sub"
+        nested.mkdir(parents=True)
+        (nested / "index.html").write_text("<!doctype html><title>x</title>")
+        resp = self.client.get("/dashboard-plugins/example/app/sub", follow_redirects=False)
+        assert resp.status_code == 307
+        assert resp.headers["location"] == "sub/index.html"
+
+    def test_directory_without_index_html_stays_404(self):
+        (self._dashboard_dir() / "empty").mkdir()
+        for path in ("/dashboard-plugins/example/empty/", "/dashboard-plugins/example/empty"):
+            resp = self.client.get(path, follow_redirects=False)
+            assert resp.status_code == 404
+
+    def test_plugin_root_directory_without_index_html_stays_404(self):
+        resp = self.client.get("/dashboard-plugins/example/", follow_redirects=False)
+        assert resp.status_code == 404
+
+    def test_plugin_root_directory_with_index_html_redirects(self):
+        (self._dashboard_dir() / "index.html").write_text("<!doctype html><title>x</title>")
+        resp = self.client.get("/dashboard-plugins/example/", follow_redirects=False)
+        assert resp.status_code == 307
+        assert resp.headers["location"] == "index.html"
+
+    def test_traversal_to_a_directory_is_403_and_never_redirects(self):
+        import asyncio
+
+        from fastapi import HTTPException
+
+        from hermes_cli.web_routers.dashboard_ui import serve_plugin_asset
+
+        # The plugins dir above the dashboard dir has an index-less parent; plant one so a
+        # missing guard would show up as a redirect instead of a 403.
+        (self._dashboard_dir().parent / "index.html").write_text("<!doctype html>")
+        for bad in ("../", ".."):
+            with pytest.raises(HTTPException) as exc:
+                asyncio.run(serve_plugin_asset("example", bad))
+            assert exc.value.status_code == 403
+        resp = self.client.get("/dashboard-plugins/example/%2e%2e/", follow_redirects=False)
+        assert resp.status_code in (403, 404)
+
+    def test_redirect_does_not_bypass_plugin_gate(self):
+        resp = self.client.get("/dashboard-plugins/nope/app/", follow_redirects=False)
+        assert resp.status_code == 404
+
 
 def _fake_httpx_async_client(*, status: int | None = None, raise_exc: bool = False):
     """Build a drop-in for httpx.AsyncClient with a canned GET response."""

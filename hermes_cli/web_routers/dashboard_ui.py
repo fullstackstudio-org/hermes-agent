@@ -9,9 +9,10 @@ import logging
 import re
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from hermes_cli.web_deps import LateState, late
 from hermes_cli.config import cfg_get
@@ -413,6 +414,20 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
 
     if not target.is_relative_to(base.resolve()):
         raise HTTPException(status_code=403, detail="Path traversal blocked")
+    if target.is_dir() and (target / "index.html").is_file():
+        # A plugin directory with an ``index.html`` (a client opened at ``.../app/``) redirects
+        # to it instead of 404ing. The ``Location`` is relative so it keeps whatever path
+        # prefix a reverse proxy put in front of us: from ``.../app/`` it is ``index.html``;
+        # from ``.../app`` (no slash) a bare ``index.html`` would resolve one level up, so it
+        # is ``app/index.html``. Everything above (activation, traversal guard) already ran,
+        # and a directory without an ``index.html`` still falls through to the 404 below.
+        if not file_path or file_path.endswith("/"):
+            location = "index.html"
+        else:
+            location = quote(file_path.rsplit("/", 1)[-1], safe="") + "/index.html"
+        return RedirectResponse(
+            location, status_code=307, headers={"Cache-Control": "no-store, no-cache, must-revalidate"}
+        )
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 

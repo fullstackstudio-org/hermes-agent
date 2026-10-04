@@ -667,11 +667,23 @@ def _emit(event: str, sid: str, payload: dict | None = None) -> bool:
 
 from tui_gateway import server_requests as _server_requests  # noqa: E402
 
+def _inflight_turn_author(sid: str) -> dict | None:
+    """The ``author`` of the turn running in live session *sid* (its in-flight record's ``display_metadata``, with
+    ``via`` when an agent sent it); None when none runs or it names nobody. Lock-free: a request may open on a
+    thread that holds the session's ``history_lock``."""
+    session = _sessions.get(sid)
+    inflight = session.get("inflight_turn") if isinstance(session, dict) and session.get("running") else None
+    metadata = inflight.get("display_metadata") if isinstance(inflight, dict) else None
+    author = metadata.get("author") if isinstance(metadata, dict) else None
+    return dict(author) if isinstance(author, dict) else None
+
+
 _server_requests.bind_sinks(lambda frame: write_json(frame), lambda event, sid, payload: _emit(event, sid, payload),
                             lambda sid: _session_client_answers_requests(sid),
                             access=lambda sid, transport: _transport_may_access_session(
                                 _sessions.get(sid), transport, sid=sid),
-                            peers=lambda sid: _session_client_peers(sid))
+                            peers=lambda sid: _session_client_peers(sid),
+                            turn_author=lambda sid: _inflight_turn_author(sid))
 
 # ``pre_server_request`` / ``post_server_request`` / ``on_background_complete`` (``request_hooks``) name the
 # conversation and the login a turn acts for; both are read here, on the calling thread.

@@ -43,6 +43,11 @@ class _WS:
 
 
 AGENT = {"kind": "mcp", "client": "Claude Code", "grant": "grant-g1"}
+#: Who sent the running turn, as its in-flight record names it: the agent (for the person), the person in her
+#: own app, another person.
+AGENTS_TURN = {"id": ROBIN, "name": "Robin", "via": {"kind": "mcp", "client": "Claude Code"}}
+PERSONS_TURN = {"id": ROBIN, "name": "Robin"}
+OTHERS_TURN = {"id": "oidc:sam", "name": "Sam"}
 
 
 @pytest.fixture()
@@ -86,9 +91,11 @@ def clarify_setting(monkeypatch):
     return state
 
 
-def _session(server, sid, *peers):
+def _session(server, sid, *peers, turn_by=AGENTS_TURN):
+    """A live session whose running turn was sent by *turn_by* (the requests opened in it remember that)."""
     session = {"session_key": f"key-{sid}", "transport": None, "history": [], "history_lock": threading.Lock(),
-               "agent_ready": None, "auth_user_id": ROBIN, "auth_user_name": "Robin"}
+               "agent_ready": None, "auth_user_id": ROBIN, "auth_user_name": "Robin", "running": True,
+               "inflight_turn": {"user": "marker", "display_metadata": {"turn_id": "t-1", "author": dict(turn_by)}}}
     server._sessions[sid] = session
     for peer in peers:
         server._attach_session_transport(session, peer)
@@ -244,6 +251,55 @@ def test_an_unreadable_config_refuses_clarify_from_an_agent(server, monkeypatch)
     assert _rpc(server, agent, "request.answer", {"id": req.id, "result": {"answer": "a"}})["error"]["code"] == 4033
 
 
+# ── clarify: only of the agent's own turn, and never over a locked answer (review X1b) ──────────────
+
+
+@pytest.mark.parametrize("turn_by", [PERSONS_TURN, OTHERS_TURN, None], ids=["persons", "another_persons", "nobodys"])
+def test_an_agent_cannot_answer_the_clarify_of_a_turn_it_did_not_send(server, audits, clarify_setting, turn_by):
+    """The person's own turn in her app, another person's, or one nobody is named for: the question is theirs."""
+    from tui_gateway import server_requests
+    agent, phone = _WS("agent", ROBIN, AGENT), _WS("phone", ROBIN)
+    session = _session(server, "s1", phone, agent, turn_by=turn_by or {})
+    if turn_by is None:
+        session["inflight_turn"] = None
+    req = _open("s1", "clarify", {"questions": []}, qids=["q1", "q2"])
+
+    refused = _rpc(server, agent, "request.answer", {"id": req.id, "result": {"answers": {"q1": "agent"}}})
+    assert refused["error"]["code"] == 4033 and "turn it sent" in refused["error"]["message"]
+    _frame(server, agent, req.id, result={"answers": {"q1": "agent", "q2": "agent"}})
+    _frame(server, agent, req.id, error={"code": -32000, "message": "marker"})
+    assert _rpc(server, agent, "clarify.lock", {"request_id": req.id, "question_id": "q1", "answer": "agent"})[
+        "error"]["code"] == 4033
+    assert req.id in server_requests._open and not req.answered and not req.errored and req.locked == {}
+    assert {f["reason"] for e, f in audits if e == "mcp_request_answer_refused"} == {"not_agents_turn"}
+
+    # The person answers it as before.
+    assert _rpc(server, phone, "request.answer", {"id": req.id, "result": {"answers": {"q1": "a", "q2": "b"}}})[
+        "result"] == {"status": "ok"}
+    assert req.result == {"answers": {"q1": "a", "q2": "b"}}
+
+
+def test_an_agents_closing_answers_never_overwrite_a_question_the_person_locked(server, audits, clarify_setting):
+    from tui_gateway import server_requests
+    agent, phone = _WS("agent", ROBIN, AGENT), _WS("phone", ROBIN)
+    _session(server, "s1", phone, agent)
+    req = _open("s1", "clarify", {"questions": []}, qids=["q1", "q2"])
+    assert _rpc(server, phone, "clarify.lock", {"request_id": req.id, "question_id": "q1", "answer": "person-marker"})[
+        "result"]["status"] == "ok"
+
+    refused = _rpc(server, agent, "request.answer", {"id": req.id, "result": {"answers": {"q1": "x", "q2": "y"}}})
+    assert refused["error"]["code"] == 4034
+    _frame(server, agent, req.id, result={"answers": {"q1": "agent-marker", "q2": "agent-marker-2"}})
+    assert req.id in server_requests._open and req.locked == {"q1": "person-marker"}
+    assert _rpc(server, agent, "clarify.lock", {"request_id": req.id, "question_id": "q1", "answer": "agent"})[
+        "error"]["code"] == 4034
+    assert {f["reason"] for e, f in audits if e == "mcp_request_answer_refused"} == {"locked"}
+
+    # The questions nobody locked are the agent's to answer; the person's answer stands.
+    _frame(server, agent, req.id, result={"answers": {"q2": "agent-marker-2"}})
+    assert req.result == {"answers": {"q1": "person-marker", "q2": PREFIX + "agent-marker-2"}}
+
+
 def test_the_person_answers_clarify_unmarked(server, clarify_setting):
     phone = _WS("phone", ROBIN)
     _session(server, "s1", phone)
@@ -280,6 +336,31 @@ def test_the_relay_to_a_child_refuses_an_agent_for_an_approval(server, child_req
     refused = _rpc(server, agent, "request.answer", {"id": "srq-child", "result": {"choice": "once"}})
     assert refused["error"]["code"] == 4033
     _frame(server, agent, "srq-child", result={"choice": "once"})
+    assert relayed == []
+
+
+@pytest.mark.parametrize("turn_by", [PERSONS_TURN, OTHERS_TURN], ids=["persons", "another_persons"])
+def test_the_relay_to_a_child_refuses_an_agent_for_a_turn_it_did_not_send(server, child_request, clarify_setting,
+                                                                          turn_by):
+    make, relayed = child_request
+    agent = _WS("agent", ROBIN, AGENT)
+    make("clarify", [agent])["inflight_turn"]["display_metadata"]["author"] = dict(turn_by)
+    assert _rpc(server, agent, "request.answer", {"id": "srq-child", "result": {"answer": "x"}})["error"][
+        "code"] == 4033
+    _frame(server, agent, "srq-child", result={"answer": "x"})
+    assert _rpc(server, agent, "clarify.lock", {"request_id": "srq-child", "question_id": "q1", "answer": "x"})[
+        "error"]["code"] == 4033
+    assert relayed == []
+
+
+def test_the_relay_to_a_child_never_overwrites_a_locked_answer(server, child_request, clarify_setting):
+    make, relayed = child_request
+    agent = _WS("agent", ROBIN, AGENT)
+    make("clarify", [agent])["_compute_host_open_request"]["params"]["answers"] = {"q1": "person-marker"}
+    assert _rpc(server, agent, "request.answer", {"id": "srq-child", "result": {"answers": {"q1": "x"}}})[
+        "error"]["code"] == 4034
+    assert _rpc(server, agent, "clarify.lock", {"request_id": "srq-child", "question_id": "q1", "answer": "x"})[
+        "error"]["code"] == 4034
     assert relayed == []
 
 

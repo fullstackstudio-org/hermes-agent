@@ -53,10 +53,13 @@ through MCP). Such a connection still receives every frame its session fans out,
 still lists the ungated ones to it, read-only, so it can say what the person is being asked. It may answer
 ``clarify`` and nothing else (:func:`agent_answer_refusal`, on every answer path: the response frame, the
 ``request.answer`` proxy, ``clarify.lock`` and the compute-host relays); approvals, sudo, secrets and vault
-prompts are the person's own, and a gated request never reaches it at all. A clarify answer it gives has
-every non-empty answer prefixed (:func:`mark_agent_answer`) before it reaches the tool, so the model reads
-it as the agent's and not the person's; ``dashboard.mcp.answer_clarify: false`` refuses clarify too. Each
-answer and each refusal is an audit line naming the grant.
+prompts are the person's own, and a gated request never reaches it at all. It may answer a clarify only of a
+turn it sent itself -- the request remembers, when it opens, who sent the turn it belongs to (the in-flight
+record's ``author`` with ``via``) -- and never a question somebody already locked (:func:`agent_request_refusal`,
+checked again under the lock that settles). A clarify answer it gives has every non-empty answer prefixed
+(:func:`mark_agent_answer`) before it reaches the tool, so the model reads it as the agent's and not the
+person's; ``dashboard.mcp.answer_clarify: false`` refuses
+clarify too. Each answer and each refusal is an audit line naming the grant.
 """
 
 from __future__ import annotations
@@ -99,7 +102,7 @@ def new_request_id() -> str:
 class ServerRequest:
     __slots__ = ("id", "sid", "method", "params", "event", "result", "answered", "created_at",
                  "qids", "locked", "on_result", "errored", "cancel_reason", "level", "validate", "targets",
-                 "answered_by", "target", "max_refusals", "refusals", "exhausted", "on_refusal")
+                 "answered_by", "target", "max_refusals", "refusals", "exhausted", "on_refusal", "turn_author")
 
     def __init__(self, sid: str, method: str, params: dict, *, qids: list[str] | None = None,
                  on_result: Callable[[dict | None], None] | None = None, level: str | None = None,
@@ -132,6 +135,9 @@ class ServerRequest:
         self.refusals = 0
         self.exhausted = False
         self.on_refusal: Callable[[Any, str, Any, bool], None] | None = None
+        # Who sent the turn this request was opened in (the in-flight record's ``author``, with ``via`` when an
+        # agent sent it), read once now: an agent may answer only a request of its own turn.
+        self.turn_author = _read_turn_author(sid)
 
     def frame(self) -> dict:
         return {"jsonrpc": "2.0", "id": self.id, "method": self.method,
@@ -163,6 +169,18 @@ _access: Callable[[str, Any], bool] = lambda sid, transport: True  # noqa: E731
 # ``peers(sid)``: the client connections attached to the session right now (each one, not the fan-out
 # that wraps them) — where a gated request may be written (session_transports.py::_session_client_peers).
 _peers: Callable[[str], list] = lambda sid: []  # noqa: E731
+# ``turn_author(sid)``: the ``author`` of the turn running in session *sid* (its in-flight record's
+# ``display_metadata``), None when none runs or it names nobody (``server._inflight_turn_author``).
+_turn_author: Callable[[str], dict | None] = lambda sid: None  # noqa: E731
+
+
+def _read_turn_author(sid: str) -> dict | None:
+    try:
+        author = _turn_author(sid)
+    except Exception:  # noqa: BLE001 - unknown is "nobody's": an agent is then refused, a person unaffected
+        logger.debug("server request: turn author of %s unreadable", sid, exc_info=True)
+        return None
+    return dict(author) if isinstance(author, dict) else None
 
 # Client transports that sent ``client.capabilities {server_requests: true}`` (identity set: StdioTransport
 # has __slots__ and cannot be weak-referenced; ws.py forgets a peer on disconnect).
@@ -183,13 +201,16 @@ DETAILED_LEVELS = frozenset({"passkey"})
 
 def bind_sinks(write_json: Callable[[dict], Any], emit: Callable[[str, str, dict], Any],
                answerable: Callable[[str], bool], peers: Callable[[str], list] | None = None,
-               access: Callable[[str, Any], bool] | None = None) -> None:
-    global _write, _emit, _answerable, _peers, _access
+               access: Callable[[str, Any], bool] | None = None,
+               turn_author: Callable[[str], dict | None] | None = None) -> None:
+    global _write, _emit, _answerable, _peers, _access, _turn_author
     _write, _emit, _answerable = write_json, emit, answerable
     if peers is not None:
         _peers = peers
     if access is not None:
         _access = access
+    if turn_author is not None:
+        _turn_author = turn_author
 
 
 def _caller() -> Any:
@@ -302,6 +323,69 @@ def agent_answer_refusal(method: str, transport: Any) -> tuple[int, str] | None:
     if not _agent_clarify_allowed():
         return 4033, "answering clarify questions through MCP is turned off on this gateway"
     return None
+
+
+def agent_turn_refusal(turn_author: Any, transport: Any) -> tuple[int, str] | None:
+    """Why the agent ``transport`` may not answer a request of the turn *turn_author* sent: (4033, message) unless
+    that turn was sent by this connection's person through this agent (``author.id`` and ``via``). None for a
+    connection that is not an agent's. A turn the person sent in her app, or another person's, is theirs to
+    answer."""
+    identity = _agent_identity(transport)
+    if identity is None:
+        return None
+    from tui_gateway.row_author import AGENT_KIND, UNNAMED_AGENT, agent_from_row_author, agent_marker
+
+    login = (f"{str(identity.get('provider') or '').strip()}:{str(identity.get('user_id') or '').strip()}"
+             if identity.get("provider") and identity.get("user_id") else None)
+    marker = agent_marker(identity.get("agent")) or {"kind": AGENT_KIND, "client": UNNAMED_AGENT}
+    if (isinstance(turn_author, dict) and login is not None and turn_author.get("id") == login
+            and agent_from_row_author(turn_author) == marker):
+        return None
+    return 4033, ("an agent connected through MCP answers only the questions of a turn it sent; this one belongs "
+                  "to a turn somebody else sent")
+
+
+#: Why an agent's answer to an already-locked batch question is refused (4034).
+LOCKED_MESSAGE = "a question the person already answered cannot be answered again"
+
+
+def _overwrites_locked(req: ServerRequest, result: Any) -> bool:
+    """Caller holds ``_lock``. *result* answers a question of the batch *req* that is already locked."""
+    answers = result.get("answers") if isinstance(result, dict) else None
+    return bool(req.qids) and isinstance(answers, dict) and any(qid in req.locked for qid in answers)
+
+
+def _agent_request_refusal_locked(req: ServerRequest, result: Any, transport: Any) -> tuple[int, str, str] | None:
+    """Caller holds ``_lock``. ``(code, message, audit reason)`` when the agent *transport* may not settle *req*
+    with *result*: not its turn's request, or an answer over a locked question."""
+    if (refusal := agent_turn_refusal(req.turn_author, transport)) is not None:
+        return (*refusal, "not_agents_turn")
+    if _overwrites_locked(req, result):
+        return 4034, LOCKED_MESSAGE, "locked"
+    return None
+
+
+def agent_request_refusal(request_id: str, result: Any, transport: Any) -> tuple[int, str] | None:
+    """:func:`agent_turn_refusal` and the locked-question rule for the open request *request_id*, with the audit
+    line of a refusal; None when it may (or *transport* is not an agent's, or the request is not open here)."""
+    if _agent_identity(transport) is None:
+        return None
+    with _lock:
+        req = _open.get(request_id)
+        refusal = _agent_request_refusal_locked(req, result, transport) if req is not None else None
+        sid, method = (req.sid, req.method) if req is not None else ("", "")
+    if refusal is None:
+        return None
+    audit_agent_answer(transport, sid=sid, request_id=request_id, method=method, outcome="refused", reason=refusal[2])
+    return refusal[0], refusal[1]
+
+
+class AgentLockRefused(ValueError):
+    """:func:`lock_answer` refused an agent's lock (:func:`agent_turn_refusal`, or a question already locked)."""
+
+    def __init__(self, code: int, message: str, reason: str) -> None:
+        super().__init__(message)
+        self.code, self.message, self.reason = code, message, reason
 
 
 def _agent_answer_prefix(transport: Any) -> str:
@@ -597,6 +681,8 @@ def answer_problem(request_id: str, result: Any) -> tuple[int, str] | tuple[int,
             audit_agent_answer(transport, sid=request_session(request_id) or "", request_id=request_id,
                                method=method, outcome="refused", reason="agent")
             return refusal
+        if (refusal := agent_request_refusal(request_id, result, transport)) is not None:
+            return refusal
     with _lock:
         req = _open.get(request_id)
         if req is None:
@@ -664,6 +750,7 @@ def resolve_response(frame: dict) -> bool:
     transport = _caller()
     exhausted = False
     agent_answer: tuple[str, str] | None = None
+    agent_refused: tuple[int, str, str] | None = None
     if _agent_identity(transport) is not None and (method := request_method(rid)) is not None:
         # An agent: refused for every method but clarify (an error frame too -- it would settle an approval
         # as unanswered); a clarify answer is marked as the agent's before anything can read it. Returns
@@ -687,11 +774,16 @@ def resolve_response(frame: dict) -> bool:
             logger.warning("server request %s (%s): response refused, the connection may not act on session %s",
                            rid, req.method, req.sid)
             return False
-        verdict, problem = _gated_verdict(req, frame) if req.level is not None else ("settle", "")
+        if agent_answer is not None:
+            # Checked here, under the lock that settles: the person may lock a question until this very moment.
+            agent_refused = _agent_request_refusal_locked(req, frame.get("result"), transport)
+        verdict, problem = ("refused", "") if agent_refused is not None else (
+            _gated_verdict(req, frame) if req.level is not None else ("settle", ""))
         if verdict == "counted":
             exhausted = _count_refusal(req)
         elif verdict != "settle":
-            return verdict == "kept"
+            if agent_refused is None:
+                return verdict == "kept"
         else:
             # Removing the request and committing its outcome are one settlement.
             # ``cancel()`` also settles under this lock, so the first side to get
@@ -713,6 +805,12 @@ def resolve_response(frame: dict) -> bool:
                     req.result = {**req.result, "answers": merged}
                 req.answered = True
                 req.answered_by = transport
+    if agent_refused is not None and agent_answer is not None:
+        # The request stays open for the one whose turn it is; True: it is here, so no child is handed the frame.
+        logger.warning("server request %s (%s): answer refused: %s", rid, agent_answer[1], agent_refused[2])
+        audit_agent_answer(transport, sid=agent_answer[0], request_id=rid, method=agent_answer[1],
+                           outcome="refused", reason=agent_refused[2])
+        return True
     if verdict == "counted":
         # A bare response frame gets no reply; the refusal is still counted and reported to the owner.
         _after_refusal(req, transport, problem, frame.get("result"), exhausted)
@@ -763,16 +861,22 @@ def _gated_verdict(req: ServerRequest, frame: dict) -> tuple[str, str]:
     return "settle", ""
 
 
-def lock_answer(request_id: str, question_id: str, answer: str) -> list[str] | None:
+def lock_answer(request_id: str, question_id: str, answer: str, *, agent: Any = None) -> list[str] | None:
     """Lock one batch-clarify answer (update-in-place). Returns the question ids still unanswered;
     the last lock resolves the request with the full ``{"answers"}`` set. ``None`` when no open
-    batch has that id (expired or foreign); ``ValueError`` for an unknown question id."""
+    batch has that id (expired or foreign); ``ValueError`` for an unknown question id. *agent*: the agent's
+    connection locking it, held to :func:`agent_turn_refusal` and to a question nobody locked yet
+    (:class:`AgentLockRefused`, checked under the same lock as the write)."""
     with _lock:
         req = _open.get(request_id)
         if req is None or req.qids is None:
             return None
         if question_id not in req.qids:
             raise ValueError(f"unknown question_id {question_id!r}")
+        if agent is not None and _agent_identity(agent) is not None:
+            refusal = _agent_request_refusal_locked(req, {"answers": {question_id: answer}}, agent)
+            if refusal is not None:
+                raise AgentLockRefused(*refusal)
         req.locked[question_id] = answer
         remaining = [qid for qid in req.qids if qid not in req.locked]
         if not remaining:

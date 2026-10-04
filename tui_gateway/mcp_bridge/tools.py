@@ -245,14 +245,30 @@ def _resume(transport: AgentTransport, bot: str, chat_id: str) -> dict:
     return _call(transport, "session.resume", {"session_id": chat_id, "profile": bot, "omit_messages": True})
 
 
-def _request_summary(entry: dict) -> dict:
-    """F3b's request summary in the tool's words."""
+def _request_summary(entry: dict, own: set | frozenset | None = None) -> dict:
+    """F3b's request summary in the tool's words. *own*: the request ids of turns this grant's watches adopted;
+    when given, a request outside it is never ``answerable_via_mcp`` (the gateway refuses it too)."""
+    answerable = bool(entry.get("answerable")) and (own is None or entry.get("id") in own)
     out: dict[str, Any] = {"request_id": entry.get("id"), "kind": entry.get("kind"),
-                           "answerable_via_mcp": bool(entry.get("answerable"))}
+                           "answerable_via_mcp": answerable}
     for key in ("questions", "batch", "locked", "description", "tool_name", "command"):
         if key in entry:
             out[key] = entry[key]
     return out
+
+
+def _own_requests(caller: Caller, chat_id: str, open_requests: Any) -> frozenset:
+    """The ids among *open_requests* (a session's ``open_requests``) that belong to a turn THIS grant sent: a
+    started, unconcluded watch of the grant on *chat_id* adopted that turn, and a session runs one turn at a
+    time, so the session's open requests are that turn's. Each such watch takes the list in (as its own
+    reconcile would) and answers for the ids it holds."""
+    own: set = set()
+    for watch in turns.watches_of(chat_id, identity=caller.identity):
+        if watch.grant == caller.grant_id and watch.started and not watch.concluded:
+            watch._apply_open_requests(open_requests)
+            own.update(entry["id"] for entry in open_requests if isinstance(entry, dict)
+                       and isinstance(entry.get("id"), str) and watch.has_request(entry["id"]))
+    return frozenset(own)
 
 
 def _live_row(transport: AgentTransport, session_id: str) -> dict | None:
@@ -427,12 +443,14 @@ def chat_open(bridge: Bridge, caller: Caller, bot: Any, chat_id: Any) -> dict:
         _record(bridge, caller, bot=name, chat_id=chat_id, how="open")
         sid = str(result.get("session_id") or "")
         row = _live_row(transport, sid) or {}
-        requests = turns.summarize_open_requests(result.get("open_requests"), transport)
+        open_requests = result.get("open_requests") if isinstance(result.get("open_requests"), list) else []
+        requests = turns.summarize_open_requests(open_requests, transport)
+        own = _own_requests(caller, chat_id, open_requests)
     finally:
         _release(transport)
     return {"chat_id": chat_id, "bot": name, "title": _text(row.get("title"), TITLE_MAX),
             "status": str(row.get("status") or result.get("status") or ""),
-            "open_requests": [_request_summary(r) for r in requests]}
+            "open_requests": [_request_summary(r, own) for r in requests]}
 
 
 def _history_rows(messages: list) -> list[dict]:
@@ -671,15 +689,18 @@ def bot_interrupt(bridge: Bridge, caller: Caller, chat_id: Any, bot: Any = None)
             _release(transport)
 
 
-def _open_requests(transport: AgentTransport, sid: str) -> list[dict]:
+def _open_requests(caller: Caller, chat_id: str, transport: AgentTransport, sid: str) -> tuple[list[dict], frozenset]:
+    """``(summaries, own ids)`` of the chat's open requests (see :func:`_own_requests`)."""
     result = _call(transport, "session.events.since", {"session_id": sid, "last_seen": turns._NO_EVENTS_SEQ})
-    return turns.summarize_open_requests(result.get("open_requests"), transport)
+    open_requests = result.get("open_requests") if isinstance(result.get("open_requests"), list) else []
+    return turns.summarize_open_requests(open_requests, transport), _own_requests(caller, chat_id, open_requests)
 
 
 def requests_open(bridge: Bridge, caller: Caller, chat_id: Any, bot: Any = None) -> dict:
     chat, transport, sid, owned = _chat_transport(bridge, caller, chat_id, bot)
     try:
-        return {"chat_id": chat.session_key, "requests": [_request_summary(r) for r in _open_requests(transport, sid)]}
+        requests, own = _open_requests(caller, chat.session_key, transport, sid)
+        return {"chat_id": chat.session_key, "requests": [_request_summary(r, own) for r in requests]}
     finally:
         if owned:
             _release(transport)
@@ -697,12 +718,16 @@ def clarify_answer(bridge: Bridge, caller: Caller, chat_id: Any, request_id: Any
     request_id = request_id.strip()
     chat, transport, sid, owned = _chat_transport(bridge, caller, chat_id, bot)
     try:
-        entry = next((r for r in _open_requests(transport, sid) if r.get("id") == request_id), None)
+        requests, own = _open_requests(caller, chat.session_key, transport, sid)
+        entry = next((r for r in requests if r.get("id") == request_id), None)
         if entry is None:
             raise ToolFailure("not_found", "no such open request in this chat (answered, expired or another chat's)")
         if entry.get("kind") != "clarify" or not entry.get("answerable"):
             raise ToolFailure("not_answerable", f"a {entry.get('kind')} request is answered in the person's own app, "
                               "not through MCP")
+        if request_id not in own:
+            raise ToolFailure("not_answerable", "this question belongs to a turn this agent did not send; the "
+                              "person answers it in their own app")
         try:
             for watch in turns.watches_of(chat.session_key, identity=caller.identity):
                 if watch.transport is transport:

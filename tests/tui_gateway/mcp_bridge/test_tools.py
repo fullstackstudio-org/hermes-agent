@@ -227,6 +227,41 @@ def test_clarify_answer_answers_only_a_clarify_of_this_chat(bridge):
     assert tools.clarify_answer(bridge, ROBIN, waiting["chat_id"], request["request_id"], "one")["ok"] is True
 
 
+@pytest.mark.parametrize("who", [("oidc:user-a", "Robin"), ("oidc:user-b", "Sam")], ids=["persons", "another_persons"])
+def test_clarify_answer_answers_only_a_clarify_of_the_agents_own_turn(bridge, who):
+    """Regression (review X1b): the agent answered the clarify of a turn the person started in her app, and of
+    one another person started, with a prefix naming the wrong person."""
+    chat = tools.chat_new(bridge, ROBIN, "default")["chat_id"]
+    app, _sid = _app_turn(bridge, chat, text="marker clarify", user=who)
+    deadline = time.monotonic() + 5
+    while not tools.requests_open(bridge, ROBIN, chat)["requests"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    [request] = tools.requests_open(bridge, ROBIN, chat)["requests"]
+    assert (request["kind"], request["answerable_via_mcp"]) == ("clarify", False)
+    assert [r["answerable_via_mcp"] for r in tools.chat_open(bridge, ROBIN, "default", chat)["open_requests"]] == [False]
+    assert _fail(tools.clarify_answer, bridge, ROBIN, chat, request["request_id"], "one").code == "not_answerable"
+    agent = bridge.live.agent_of(chat)
+    assert agent.clarify_answers == []
+    app.call("request.answer", {"id": request["request_id"], "result": {"answer": "two"}})
+    deadline = time.monotonic() + 5
+    while not agent.clarify_answers and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert agent.clarify_answers == ["two"]
+
+
+def test_another_grant_cannot_answer_the_agents_clarify(bridge):
+    waiting = tools.bot_prompt(bridge, ROBIN, "default", "marker clarify")
+    other = Caller(**{**ROBIN.__dict__, "grant_id": "grant-g3"})
+    tools.chat_open(bridge, other, "default", waiting["chat_id"])
+    [request] = tools.requests_open(bridge, other, waiting["chat_id"])["requests"]
+    assert request["answerable_via_mcp"] is False
+    assert _fail(tools.clarify_answer, bridge, other, waiting["chat_id"], request["request_id"], "one").code \
+        == "not_answerable"
+    [mine] = tools.requests_open(bridge, ROBIN, waiting["chat_id"])["requests"]
+    assert mine["answerable_via_mcp"] is True
+    assert tools.clarify_answer(bridge, ROBIN, waiting["chat_id"], request["request_id"], "one")["ok"] is True
+
+
 # ── limits and scopes ─────────────────────────────────────────────────────────────────────────
 
 

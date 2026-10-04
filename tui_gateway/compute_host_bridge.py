@@ -219,6 +219,35 @@ def _compute_host_request_method(request_id: str) -> str | None:
         return str(mirrored.get("method") or "") if _open_request_matches(located[1], request_id) else None
 
 
+def _compute_host_agent_refusal(sid: str, session: dict, request_id: str, result, caller) -> tuple | None:
+    """``(code, message, audit reason)`` when the agent connection *caller* may not settle the host-owned request
+    *request_id* with *result*: the turn running in the session (the one the child asked in) was not sent by
+    this person through this agent, or *result* answers a question already locked (the parent's mirror keeps
+    the locked answers). None for anyone who is not an agent. ``server_requests.agent_request_refusal`` is the
+    same rule for a request this process owns."""
+    from tui_gateway import server_requests
+    from tui_gateway.agent_guard import agent_identity
+    if agent_identity(caller) is None:
+        return None
+    if (refusal := server_requests.agent_turn_refusal(_inflight_turn_author(sid), caller)) is not None:
+        return (*refusal, "not_agents_turn")
+    with _history_lock(session):
+        mirrored = session.get("_compute_host_open_request") if _open_request_matches(session, request_id) else None
+        locked = set(((mirrored or {}).get("params") or {}).get("answers") or {})
+    answers = result.get("answers") if isinstance(result, dict) else None
+    if isinstance(answers, dict) and locked & set(answers):
+        return 4034, server_requests.LOCKED_MESSAGE, "locked"
+    return None
+
+
+def _compute_host_agent_answer_refusal(request_id: str, result, caller) -> tuple | None:
+    """:func:`_compute_host_agent_refusal` for a request located by its id (None when no child owns it)."""
+    located = _compute_host_request_session(request_id)
+    if located is None or not _session_uses_compute_host(located[1]):
+        return None
+    return _compute_host_agent_refusal(located[0], located[1], request_id, result, caller)
+
+
 def _relay_compute_host_response(frame: dict) -> bool:
     """Forward a client's response frame to the compute-host child that owns the request. False when no
     child owns that id. An agent's connection is held to the parent's rules here, where its identity is
@@ -238,6 +267,11 @@ def _relay_compute_host_response(frame: dict) -> bool:
         logger.warning("compute-host response refused: an agent may not answer %s requests", method or "these")
         server_requests.audit_agent_answer(caller, sid=sid, request_id=request_id, method=method,
                                            outcome="refused", reason="agent")
+        return True
+    if (refusal := _compute_host_agent_refusal(sid, session, request_id, frame.get("result"), caller)) is not None:
+        logger.warning("compute-host response refused: %s", refusal[2])
+        server_requests.audit_agent_answer(caller, sid=sid, request_id=request_id, method=method,
+                                           outcome="refused", reason=refusal[2])
         return True
     if "result" in frame:
         frame = {**frame, "result": server_requests.mark_agent_answer(method, frame.get("result"), caller)}
@@ -261,6 +295,12 @@ def _lock_compute_host_clarify(rid: str, request_id: str, question_id: str, answ
     sid, session = located
     if not _transport_may_access_session(session, current_transport(), sid=sid):
         return _err(rid, 4033, "this connection may not answer requests of that session")
+    if (refusal := _compute_host_agent_refusal(sid, session, request_id, {"answers": {question_id: answer}},
+                                               current_transport())) is not None:
+        from tui_gateway import server_requests
+        server_requests.audit_agent_answer(current_transport(), sid=sid, request_id=request_id, method="clarify",
+                                           outcome="refused", reason=refusal[2])
+        return _err(rid, refusal[0], refusal[1])
     try:
         ack = _get_compute_host_supervisor().respond(
             sid, {"lock": {"request_id": request_id, "question_id": question_id, "answer": answer}})

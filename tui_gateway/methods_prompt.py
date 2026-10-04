@@ -1297,7 +1297,12 @@ def _(rid, params: dict) -> dict:
     if (sid := server_requests.request_session(request_id)) is not None and not _caller_may_access_session_id(sid):
         return _err(rid, 4033, "this connection may not answer requests of that session")
     try:
-        remaining = server_requests.lock_answer(request_id, question_id, answer)
+        # An agent may lock only a question of its own turn that nobody locked yet (checked under the lock).
+        remaining = server_requests.lock_answer(request_id, question_id, answer, agent=caller)
+    except server_requests.AgentLockRefused as refused:
+        server_requests.audit_agent_answer(caller, sid=sid or "", request_id=request_id, method="clarify",
+                                           outcome="refused", reason=refused.reason)
+        return _err(rid, refused.code, refused.message)
     except ValueError as e:
         return _err(rid, 4002, str(e))
     if remaining is None:
@@ -1327,6 +1332,9 @@ def _(rid, params: dict) -> dict:
     if server_requests.request_method(request_id) is None and (refusal := server_requests.agent_answer_refusal(
             _compute_host_request_method(request_id) or "", current_transport())) is not None:
         return _err(rid, *refusal)
+    if server_requests.request_method(request_id) is None and (
+            refusal := _compute_host_agent_answer_refusal(request_id, result, current_transport())) is not None:
+        return _err(rid, refusal[0], refusal[1])
     frame = {"jsonrpc": "2.0", "id": request_id, "result": result}
     if server_requests.resolve_response(frame) or _relay_compute_host_response(frame):
         return _ok(rid, {"status": "ok"})

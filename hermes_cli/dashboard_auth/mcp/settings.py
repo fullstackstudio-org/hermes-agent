@@ -155,8 +155,9 @@ def slug(text: Any) -> str:
 
 def server_label(settings: MCPSettings, host: str = "") -> str:
     """The name this gateway goes by in the ``claude mcp add`` command and the ``.mcp.json`` fragment, and
-    in the ``whoami`` tool: the slug of ``dashboard.mcp.label`` (the dashboard's display label), else
-    ``hermie-<primary public host>``, else ``hermie``. One function, so the REST page and the tool agree."""
+    in the ``whoami`` tool: the slug of ``dashboard.mcp.label`` (an operator setting of its own: the dashboard
+    has no display label to borrow), else ``hermie-<primary public host>``, else ``hermie``. One function, so
+    the REST page and the tool agree."""
     return slug(settings.label) or slug(f"{DEFAULT_SERVER_NAME}-{host}") or DEFAULT_SERVER_NAME
 
 

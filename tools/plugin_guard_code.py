@@ -105,8 +105,8 @@ _NATIVE_LOADER_ATTRS = {"dlopen", "LoadLibrary"}
 # Frame attributes that hand out a module's namespace, builtins included.
 _FRAME_NAMESPACES = {"f_builtins", "f_globals", "f_locals"}
 # What Python (or the dynamic linker) loads by suffix: a file with one of these written at run time is code.
-_IMPORTABLE_SUFFIXES = {".py", ".pyw", ".pyc", ".pyo", ".so", ".pyd", ".dylib", ".dll", ".pth", ".zip", ".egg",
-                        ".whl", ".pyz"}
+_IMPORTABLE_SUFFIXES = {".py", ".pyw", ".pyc", ".pyo", ".so", ".pyd", ".dylib", ".dll", ".pth"}
+# (An archive written elsewhere imports nothing until it is put on sys.path, which is checked there.)
 # Calls that write a file, and which argument names the destination.
 _WRITERS: Dict[str, Tuple[int, str]] = {"copy": (1, "dst"), "copy2": (1, "dst"), "copyfile": (1, "dst"),
                                         "copytree": (1, "dst"), "move": (1, "dst"), "rename": (1, "dst"),
@@ -114,7 +114,17 @@ _WRITERS: Dict[str, Tuple[int, str]] = {"copy": (1, "dst"), "copy2": (1, "dst"),
                                         "extractall": (0, "path"), "extract": (1, "path"),
                                         "unpack_archive": (1, "extract_dir")}
 _PYTHON_EXE = re.compile(r"(?:^|[\\/])python[\d.]*(?:\.exe)?$")
-_FOLD_LIMIT = 4096        # a constant longer than this is not followed (``v = v + v`` doubles each line)
+_FOLD_LIMIT = 4096
+# Openers that take (file, mode): a write mode makes them writers.
+_FILE_OPENERS = {"builtins.open", "io.open", "_io.open", "codecs.open", "io.FileIO", "_io.FileIO", "tarfile.open",
+                 "gzip.open", "bz2.open", "lzma.open", "zipfile.ZipFile", "tarfile.TarFile"}
+_OS_WRITE_FLAGS = {"O_WRONLY", "O_RDWR", "O_CREAT", "O_APPEND", "O_TRUNC", "O_EXCL"}
+# tempfile creators: (positional index of suffix, of dir) when they take them positionally.
+_TEMPFILE_MAKERS = {"mkstemp": (0, 2), "mkdtemp": (0, 2), "NamedTemporaryFile": (None, None),
+                    "TemporaryFile": (None, None), "SpooledTemporaryFile": (None, None),
+                    "TemporaryDirectory": (0, 2)}
+_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "ash", "mksh", "csh", "tcsh", "busybox"}
+_OPTIONAL_IMPORT = " (optional import, guarded by except ImportError)"        # a constant longer than this is not followed (``v = v + v`` doubles each line)
 # Ways a path expression climbs one directory.
 _UP_CALLS = {"dirname"}
 _SAME_DIR_CALLS = {"Path", "PurePath", "PosixPath", "WindowsPath", "PurePosixPath", "PureWindowsPath", "str",
@@ -147,6 +157,7 @@ _DESCRIPTIONS = {
     "native_load": "loads native code with ctypes or cffi (machine code no scan reads)",
     "missing_module": "imports or loads a module the plugin does not ship (written or unpacked at run time?)",
     "code_written": "writes or unpacks a file Python can import, or into the plugin's own directory, at run time",
+    "shell_code": "runs a shell on a command built at run time (sh -c <computed>): no scan reads what runs",
 }
 _SEVERITY = {"dynamic_source_loader": "medium"}
 # Every finding this module makes: a route by which code runs that no text scan reads. Under a test
@@ -618,6 +629,7 @@ class _CodeReader:
                                        tuple(a.name for a in node.names if a.name != "*"), node)
         elif isinstance(node, (ast.List, ast.Tuple)):
             self.check_interpreter_argv(node)
+            self.check_shell(list(node.elts), node)
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node not in self.prose:
             self.check_string(node.value.strip(), node)
         elif isinstance(node, (ast.BinOp, ast.JoinedStr)) and not isinstance(self.parents.get(node), ast.BinOp):
@@ -813,6 +825,10 @@ class _CodeReader:
                 level = len(target) - len(target.lstrip("."))
                 self.check_relative_module(level, target.lstrip("."), (), node)
         self.check_write(node, name, qualified)
+        if qualified.startswith(("os.exec", "os.spawn", "os.posix_spawn")) and not any(
+                isinstance(a, (ast.List, ast.Tuple)) for a in node.args):
+            # os.execl('/bin/sh', 'sh', '-c', cmd): the argv is the call's own arguments.
+            self.check_shell([a for a in node.args if not isinstance(a, ast.Starred)][1:], node)
 
     def check_relative_module(self, level: int, module: str, names: Tuple[str, ...], node: ast.AST) -> None:
         """A relative import of something the plugin does not ship: code written at run time."""
@@ -823,39 +839,123 @@ class _CodeReader:
             return
         base = package[:len(package) - (level - 1)] + ([p for p in module.split(".") if p] if module else [])
         if module and not self.ships_module(base):
-            self.add("missing_module", node)
+            self.add_missing(node)
             return
         if module:
             return            # from .x import name: name is an attribute of x as often as a submodule
         defined = self.package_names.get("/".join(base))
         for item in names:
             if not self.ships_module(base + [item]) and (defined is None or item not in defined):
-                self.add("missing_module", node)
+                self.add_missing(node)
+
+    def add_missing(self, node: ast.AST) -> None:
+        """``missing_module``, at medium when it is an optional import: the only statement of a ``try``
+        whose every handler catches only ImportError/ModuleNotFoundError (``plugin_guard`` raises it
+        back to high when anything in the plugin writes code at run time)."""
+        parent = self.parents.get(node)
+        optional = isinstance(node, ast.ImportFrom) and isinstance(parent, ast.Try) and parent.body == [node] \
+            and parent.handlers and all(_catches_only_import_errors(h) for h in parent.handlers)
+        self.add("missing_module", node)
+        if optional:
+            found = self.found[("missing_module", getattr(node, "lineno", 0))]
+            found.severity = "medium"
+            found.description = _DESCRIPTIONS["missing_module"] + _OPTIONAL_IMPORT
 
     def check_write(self, node: ast.Call, name: Optional[str], qualified: str) -> None:
-        """A write whose destination Python can import, or that lands in the plugin's own directory."""
-        target = None
-        if qualified == "builtins.open" or (name == "open" and isinstance(node.func, ast.Name)):
-            mode = _argument(node, 1, "mode")
-            mode_text = self.fold(mode) if mode is not None else "r"
-            if mode_text is None or set(mode_text) & set("wax+"):
-                target = _argument(node, 0, "file")
-        elif name in {"write_text", "write_bytes", "symlink_to", "hardlink_to"} \
-                and isinstance(node.func, ast.Attribute):
-            target = node.func.value
+        """A write whose destination Python can import, or that lands in the plugin's own directory:
+        ``open``/``io.open``/``codecs.open`` and the compressed-file openers in a write mode,
+        ``Path(...).open`` in a write mode, ``os.open`` with write flags, ``write_text``/``write_bytes``,
+        copies, moves, links, archive extraction, and ``tempfile`` files made in the plugin or with an
+        importable suffix."""
+        func = node.func
+        targets: List[ast.AST] = []
+        if qualified in _FILE_OPENERS or (name == "open" and isinstance(func, ast.Name)):
+            if self.writes_mode(_argument(node, 1, "mode")):
+                targets = [t for t in (_argument(node, 0, "file") or _argument(node, 0, "name"),) if t is not None]
+        elif qualified == "os.open":
+            if self.writes_flags(_argument(node, 1, "flags")):
+                targets = [t for t in (_argument(node, 0, "path"),) if t is not None]
+        elif name == "open" and isinstance(func, ast.Attribute) and not qualified:
+            # Path(...).open(mode): the object is the path, the mode is the first argument.
+            mode = _argument(node, 0, "mode")
+            text = self.fold(mode) if mode is not None else None
+            if text is not None and not set(text) <= set("rwxabt+U"):
+                return            # ZipFile(...).open(name): the first argument is not a mode
+            if self.writes_mode(mode):
+                targets = [func.value]
+        elif name in {"write_text", "write_bytes", "symlink_to", "hardlink_to", "touch"} \
+                and isinstance(func, ast.Attribute) and not qualified.startswith(("zipfile.", "tarfile.")):
+            targets = [func.value]
+        elif name in _TEMPFILE_MAKERS and qualified.startswith("tempfile."):
+            suffix_at, dir_at = _TEMPFILE_MAKERS[name]
+            suffix = _argument(node, suffix_at, "suffix") if suffix_at is not None else _argument(node, 99, "suffix")
+            folder = _argument(node, dir_at, "dir") if dir_at is not None else _argument(node, 99, "dir")
+            folded = self.fold(suffix) if suffix is not None else None
+            if (folded is not None and _suffix(folded) in _IMPORTABLE_SUFFIXES) or (
+                    folder is not None and (self.locate(folder) is not None or self.inside_plugin(folder))):
+                self.add("code_written", node)
+            return
         elif name in _WRITERS and (qualified.startswith(("shutil.", "os.", "tarfile.", "zipfile."))
                                    or name in {"extractall", "extract", "copyfile", "copytree", "unpack_archive"}):
             position, keyword = _WRITERS[name]
             target = _argument(node, position, keyword)
             if target is None and name == "extractall":
                 return            # into the working directory: not importable from the plugin by itself
-        if target is None:
-            return
-        tail = self.tail(target)
-        if (tail is not None and _suffix(tail) in _IMPORTABLE_SUFFIXES) or self.locate(target) is not None \
-                or (self.inside_plugin(target) and tail is None):
-            self.add("code_written", node)
+            targets = [target] if target is not None else []
+        for target in targets:
+            tail = self.tail(target)
+            if (tail is not None and _suffix(tail) in _IMPORTABLE_SUFFIXES) or self.locate(target) is not None \
+                    or (self.inside_plugin(target) and tail is None):
+                self.add("code_written", node)
+                return
 
+    def writes_mode(self, mode: Optional[ast.AST]) -> bool:
+        """Whether an open() mode writes: absent is read, a mode the scan cannot fold may write."""
+        if mode is None:
+            return False
+        text = self.fold(mode)
+        return text is None or bool(set(text) & set("wax+"))
+
+    def writes_flags(self, flags: Optional[ast.AST]) -> bool:
+        """Whether ``os.open`` flags may write: any write flag named, or flags the scan cannot read."""
+        if flags is None:
+            return False
+        names = {n.attr if isinstance(n, ast.Attribute) else n.id for n in ast.walk(flags)
+                 if isinstance(n, (ast.Attribute, ast.Name))}
+        if names & _OS_WRITE_FLAGS:
+            return True
+        return not (names and names <= {"os", "O_RDONLY", "O_CLOEXEC", "O_NOFOLLOW", "O_BINARY", "O_NONBLOCK"})
+
+    # ── shells ──────────────────────────────────────────────────────────────────────────────
+
+    def is_shell(self, node: ast.AST) -> bool:
+        text = self.fold(node)
+        if text is None and isinstance(node, ast.Call) and self.qual(node.func) == "shutil.which" and node.args:
+            text = self.fold(node.args[0])
+        return text is not None and re.split(r"[\\/]", text)[-1] in _SHELLS
+
+    def shell_command(self, items: List[ast.AST]) -> Optional[ast.AST]:
+        """In argv *items*, the command a shell is given with ``-c`` (``sh -c cmd``, ``bash -ec cmd``,
+        ``env bash -lc cmd``), or None when the argv does not run a shell on a command."""
+        i = 0
+        if items and _basename(self.fold(items[0])) == "env":
+            i = 1
+            while i < len(items) and ((self.fold(items[i]) or "").startswith("-") or "=" in (self.fold(items[i]) or "")):
+                i += 1
+        if i >= len(items) or not self.is_shell(items[i]):
+            return None
+        for j in range(i + 1, len(items)):
+            flag = self.fold(items[j])
+            if flag is None or not flag.startswith("-") or flag.startswith("--"):
+                return None
+            if "c" in flag[1:]:
+                return items[j + 1] if j + 1 < len(items) else None
+        return None
+
+    def check_shell(self, items: List[ast.AST], where: ast.AST) -> None:
+        command = self.shell_command(items)
+        if command is not None and self.fold(command) is None:
+            self.add("shell_code", where)
 
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.Module)
 
@@ -969,6 +1069,9 @@ def _call_refs(reader: "_CodeReader", node: ast.Call, refs: ModuleRefs) -> None:
         if not reader.is_interpreter(items[0]):
             if not constant(items[0]):
                 refs.dynamic = True       # the program itself is computed
+            command = reader.shell_command(items)
+            if command is not None and not constant(command):
+                refs.dynamic = True       # a shell runs a command the scan cannot read
             return
         # A Python interpreter: what it runs is the first argument that is not an option.
         rest = iter(items[1:])
@@ -993,6 +1096,16 @@ def _call_refs(reader: "_CodeReader", node: ast.Call, refs: ModuleRefs) -> None:
                 refs.dynamic = True
             return
         refs.dynamic = True               # an interpreter with no script reads stdin
+
+
+def _basename(text: Optional[str]) -> str:
+    return re.split(r"[\\/]", text)[-1] if text else ""
+
+
+def _catches_only_import_errors(handler: ast.ExceptHandler) -> bool:
+    kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return handler.type is not None and all(
+        isinstance(k, ast.Name) and k.id in {"ImportError", "ModuleNotFoundError"} for k in kinds)
 
 
 def _stored_names(target: ast.AST) -> List[str]:

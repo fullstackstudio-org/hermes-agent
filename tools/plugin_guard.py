@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, List, Optional, Tuple
 
+from tools.plugin_guard_code import _OPTIONAL_IMPORT as OPTIONAL_IMPORT_NOTE
 from tools.plugin_guard_code import (
     PYTHON_SOURCE_EXTENSIONS, ROUTE_PATTERN_IDS, ModuleRefs, module_refs, python_code_findings)
 from tools.plugin_guard_context import (
@@ -29,7 +30,7 @@ from tools.skills_guard import (
     Finding, ScanResult, SCANNABLE_EXTENSIONS, SUSPICIOUS_BINARY_EXTENSIONS, SourceText, _determine_verdict,
     decode_python_source, format_scan_report, read_source_text, scan_text)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-fork-13"
+PLUGIN_SCANNER_VERSION = "plugin-guard-fork-14"
 
 # Caches and vendored environments a checkout makes for itself. Skipped only when nothing in
 # them is tracked by git: a TRACKED ``venv/evil.py`` or ``__pycache__/x.pyc`` ships with the
@@ -531,7 +532,13 @@ def _package_names(sources: dict) -> dict:
         except (SyntaxError, ValueError, RecursionError, MemoryError):
             continue
         names: set = set()
+        # A fallback bound in an ``except`` handler (``_speedups = None``) does not make the module
+        # the try imports exist.
+        fallbacks = {id(n) for handler in ast.walk(tree) if isinstance(handler, ast.ExceptHandler)
+                     for n in ast.walk(handler)}
         for node in ast.walk(tree):
+            if id(node) in fallbacks:
+                continue
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 names.add(node.name)
             elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
@@ -893,6 +900,12 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
                     python_code_findings(view.text, rel, line_fallback=suffix in PYTHON_SOURCE_EXTENSIONS,
                                          tree_files=tree_files, package_names=package_names),
                     rel, f, js, from_ast=True, **judged))
+        # An optional import of a module the plugin does not ship is a note, unless the plugin also
+        # writes code at run time: then the missing module is likely what it writes.
+        if any(f.pattern_id == "code_written" for f in all_findings):
+            for f in all_findings:
+                if f.pattern_id == "missing_module" and f.description.endswith(OPTIONAL_IMPORT_NOTE):
+                    f.severity = "medium" if f.file in unreached else "high"
     verdict = _determine_verdict(all_findings)
     if all_findings:
         categories = sorted({f.category for f in all_findings})

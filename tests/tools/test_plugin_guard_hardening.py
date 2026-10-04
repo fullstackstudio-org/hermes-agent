@@ -570,3 +570,125 @@ def test_ordinary_imports_and_state_writes_are_not_flagged(tmp_path, files):
     plugin = _plugin(tmp_path, files)
     _commit_all(plugin)
     assert not any(pid in {"missing_module", "code_written"} for pid, _f in _found(plugin, at_least="low"))
+
+
+# ── Third review ──────────────────────────────────────────────────────────────────────────────
+
+_ANCHOR = "import os, io, codecs, tempfile\nfrom pathlib import Path\nHERE = Path(__file__).parent\nD = os.path.dirname(__file__)\n"
+
+
+# 1. every way to write a file the scan can see
+@pytest.mark.parametrize("line", [
+    "(HERE / 'probe_payload.py').open('w').write('MARKER = 1')",                      # w1: Path.open
+    "io.open(os.path.join(D, 'probe_payload.py'), 'w').write('MARKER = 1')",          # w2: io.open
+    "(HERE / 'probe_payload.py').open(mode='a').write('MARKER = 1')",
+    "Path(D, 'probe_payload.py').open('x').write('MARKER = 1')",
+    "codecs.open(os.path.join(D, 'probe_payload.py'), 'w', 'utf-8').write('MARKER = 1')",
+    "os.write(os.open(os.path.join(D, 'probe_payload.py'), os.O_WRONLY | os.O_CREAT), b'MARKER = 1')",
+    "(HERE / 'probe_payload.py').write_text('MARKER = 1')",
+    "(HERE / 'probe_payload.py').write_bytes(b'MARKER = 1')",
+    "fd, p = tempfile.mkstemp(suffix='.py', dir=D)",
+    "f = tempfile.NamedTemporaryFile('w', dir=str(HERE), delete=False)",
+    "f = tempfile.NamedTemporaryFile('w', suffix='.pth', delete=False)",
+    "open(os.path.join(D, 'probe_payload.py'), mode).write('MARKER = 1')",
+])
+def test_every_writer_into_the_plugin_is_code_written(tmp_path, line):
+    plugin = _plugin(tmp_path, {"__init__.py": _ANCHOR + "mode = input()\n" + line + "\n"})
+    _commit_all(plugin)
+    assert ("code_written", "__init__.py") in _found(plugin), line
+
+
+@pytest.mark.parametrize("line", [
+    "(HERE / 'data.json').read_text()",
+    "(HERE / 'data.json').open().read()",
+    "(HERE / 'data.json').open('rb').read()",
+    "io.open(os.path.join(D, 'data.json'), 'r').read()",
+    "os.open(os.path.join(D, 'data.json'), os.O_RDONLY)",
+    "f = tempfile.NamedTemporaryFile('w', suffix='.json', delete=False)",
+    "import zipfile\nzipfile.ZipFile(io.BytesIO()).open('member.py')",
+    "Path.home().joinpath('.cache', 'x.json').write_text('{}')",
+])
+def test_reads_and_writes_outside_the_plugin_are_not_code_written(tmp_path, line):
+    plugin = _plugin(tmp_path, {"__init__.py": _ANCHOR + line + "\n", "data.json": "{}"})
+    _commit_all(plugin)
+    assert ("code_written", "__init__.py") not in _found(plugin, at_least="low"), line
+
+
+# 2. a shell on a command the scan cannot read
+@pytest.mark.parametrize("line", [
+    "subprocess.run(['sh', '-c', cmd])",
+    "subprocess.run(['/bin/bash', '-ec', cmd])",
+    "subprocess.run(['bash', '-lc', cmd])",
+    "subprocess.run(['/usr/bin/env', 'zsh', '-c', cmd])",
+    "subprocess.Popen(('dash', '-e', '-c', cmd))",
+    "os.execl('/bin/sh', 'sh', '-c', cmd)",
+    "subprocess.run([shutil.which('fish'), '-c', cmd])",
+])
+def test_a_shell_on_a_computed_command_is_flagged(tmp_path, line):
+    plugin = _plugin(tmp_path, {"__init__.py": (
+        "import os, shutil, subprocess\ncmd = ''.join(['ec', 'ho ', input()])\n" + line + "\n")})
+    _commit_all(plugin)
+    assert ("shell_code", "__init__.py") in _found(plugin), line
+
+
+@pytest.mark.parametrize("line", [
+    "subprocess.run(['sh', '-c', 'echo SCANNER_PROBE_MARKER'])",
+    "subprocess.run(['bash', '-c', 'ec' + 'ho ok'])",
+    "subprocess.run(['git', 'commit', '-m', message])",
+    "subprocess.run(['bash', script_path])",
+])
+def test_ordinary_process_calls_are_not_shell_code(tmp_path, line):
+    plugin = _plugin(tmp_path, {"__init__.py": (
+        "import subprocess\nmessage = input()\nscript_path = input()\n" + line + "\n")})
+    _commit_all(plugin)
+    assert ("shell_code", "__init__.py") not in _found(plugin, at_least="low"), line
+
+
+def test_a_shell_on_a_computed_command_reaches_every_test_file(tmp_path):
+    plugin = _plugin(tmp_path, {"__init__.py": "import subprocess\nsubprocess.run(['sh', '-c', input()])\n",
+                                "tests/test_x.py": EX})
+    _commit_all(plugin)
+    assert ("exec_dynamic_code", "tests/test_x.py") in _found(plugin)
+
+
+# 3. an optional import of a module the plugin does not ship
+OPTIONAL = "try:\n    from . import _speedups\nexcept ImportError:\n    _speedups = None\n"
+
+
+def test_an_optional_import_of_a_missing_module_is_a_note(tmp_path):
+    plugin = _plugin(tmp_path, {"__init__.py": OPTIONAL})
+    _commit_all(plugin)
+    result = scan_plugin(plugin)
+    assert [f.severity for f in result.findings if f.pattern_id == "missing_module"] == ["medium"]
+    assert result.verdict == "safe"
+
+
+@pytest.mark.parametrize("source", [
+    # more than the import in the try body
+    "try:\n    from . import _speedups\n    X = 1\nexcept ImportError:\n    _speedups = None\n",
+    # a handler that catches more than import errors
+    "try:\n    from . import _speedups\nexcept Exception:\n    _speedups = None\n",
+    "try:\n    from . import _speedups\nexcept (ImportError, OSError):\n    _speedups = None\n",
+    "try:\n    from . import _speedups\nexcept:\n    _speedups = None\n",
+    # not guarded at all
+    "from . import _speedups\n",
+    # guarded, but the plugin writes code at run time
+    OPTIONAL + "import os\nopen(os.path.join(os.path.dirname(__file__), '_speedups.py'), 'w').write('X = 1')\n",
+])
+def test_a_missing_module_stays_high_unless_every_optional_condition_holds(tmp_path, source):
+    plugin = _plugin(tmp_path, {"__init__.py": source})
+    _commit_all(plugin)
+    assert [f.severity for f in scan_plugin(plugin).findings if f.pattern_id == "missing_module"] == ["high"], source
+
+
+def test_a_code_write_in_another_file_keeps_the_optional_import_high(tmp_path):
+    plugin = _plugin(tmp_path, {"__init__.py": OPTIONAL, "writer.py": (
+        "from pathlib import Path\n(Path(__file__).parent / '_speedups.py').write_text('X = 1')\n")})
+    _commit_all(plugin)
+    assert [f.severity for f in scan_plugin(plugin).findings if f.pattern_id == "missing_module"] == ["high"]
+
+
+def test_modulenotfounderror_is_an_import_error(tmp_path):
+    plugin = _plugin(tmp_path, {"__init__.py": OPTIONAL.replace("ImportError", "(ImportError, ModuleNotFoundError)")})
+    _commit_all(plugin)
+    assert [f.severity for f in scan_plugin(plugin).findings if f.pattern_id == "missing_module"] == ["medium"]

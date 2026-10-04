@@ -602,5 +602,5 @@ def test_covers_is_clarify_secret_sudo_the_vault_and_the_interactive_methods_onl
     covered = {method for method in contracts.SERVER_REQUESTS if request_hooks.covers(method)}
     assert covered == {"clarify", "secret", "sudo", "vault.unlock_prompt", "vault.save_login", "vault.code",
                        *INTERACTIVE_METHODS}
-    assert {"input.form", "input.file", "review.draft"} <= covered
+    assert {"input.form", "input.file", "review.draft", "review.diff"} <= covered
     assert not request_hooks.covers("confirm") and not request_hooks.covers("approval")

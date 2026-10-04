@@ -1,11 +1,11 @@
 ---
-title: "Ask the Person for a Form, a File or a Draft Review"
-description: "Turn on the interactive toolset so an agent can ask for typed fields, a file or the approval of a draft in the connected app, and learn who is asked, what the apps show, what the agent gets back and which limits apply"
+title: "Ask the Person for a Form, a File, a Draft or a Diff Review"
+description: "Turn on the interactive toolset so an agent can ask for typed fields, a file, the approval of a draft or the approval of the hunks of a diff in the connected app, and learn who is asked, what the apps show, what the agent gets back and which limits apply"
 ---
 
-# Ask the Person for a Form, a File or a Draft Review
+# Ask the Person for a Form, a File, a Draft or a Diff Review
 
-The `interactive` toolset gives an agent three tools for asking the person something in the connected app,
+The `interactive` toolset gives an agent four tools for asking the person something in the connected app,
 instead of asking one question at a time in chat:
 
 | Tool | Asks for | What the agent gets back |
@@ -13,11 +13,12 @@ instead of asking one question at a time in chat:
 | `ask_form` | Typed fields (1 to 12): text, number, amount, date, time, date and time, date range, choice, toggle. | The values, by field id, or `skipped`. |
 | `ask_file` | One or more files: a photo, a scan, a document, a voice note. | The path of each file in the workspace, its size and SHA-256, and a `ref_text` the agent can attach; or `skipped`. |
 | `review_draft` | Approval of a draft (an email, a post, a message, a document), which the person may edit first. | The exact text the person approved, or `rejected` with an optional comment. |
+| `review_diff` | Approval of the changes to one file, hunk by hunk, before the agent writes them. | `approved_patch`, the patch of exactly the approved hunks, and the decision for each hunk; or `rejected`. |
 
-Each one is a server to client request (`input.form`, `input.file`, `review.draft`) defined in
+Each one is a server to client request (`input.form`, `input.file`, `review.draft`, `review.diff`) defined in
 `contract/requests/` in the gateway repository, which is the normative description for app developers.
 
-The title, summary, labels and draft are **the agent's own words**. Apps show them verbatim as plain text and
+The title, summary, labels, draft and diff are **the agent's own words**. Apps show them verbatim as plain text and
 mark them as coming from the agent, with the app's own controls around them. An agent can word them to look like
 a system or security message; read them as the agent's description of what it asks, nothing more. Values that
 come back are the person's input, checked only against the form's own rules: the agent treats them as data, not
@@ -60,9 +61,9 @@ When the gateway cannot name that person:
 - With no sign-in provider (one trust domain), any app that can show the request may answer it.
 - In a shared conversation, a form or a file request goes to every app that can show it, and the result tells the
   agent which login answered (`answered_by`).
-- In a shared conversation, a **draft review is never put to anyone**: it ends `unavailable` with reason
-  `no_acting_user` at once. Approving text that goes out in someone's name is not a question to put to whoever
-  happens to be watching.
+- In a shared conversation, a **draft or diff review is never put to anyone**: it ends `unavailable` with reason
+  `no_acting_user` at once. Approving text that goes out in someone's name, or changes to a file, is not a
+  question to put to whoever happens to be watching.
 
 The first valid answer wins; the other connections get the request withdrawn.
 
@@ -81,6 +82,11 @@ The first valid answer wins; the other connections get the request withdrawn.
   body, and a way to approve or reject it. The person can edit the text first unless the agent said it is not editable.
   There is no Skip: the person rejects. The text the person approved is the text the agent gets back, not the
   agent's earlier version; the gateway works out whether it was edited.
+
+- **A diff review**: the file's path and each hunk of the change in monospace, one row per line, with the
+  marker (`+`, `-` or a space) apart from the text and every line exactly as written, and a way to approve or
+  reject each hunk. There is no Skip and no editing: the person approves hunks. What the agent gets back is a patch
+  the gateway wrote from the hunks it showed, containing the approved ones only, never the agent's own diff.
 
 An app that cannot show a request (no camera and no picker, a permission denied, an upload that failed, an
 unknown field kind, an app too old for this version of the request, an app that is closing) answers with an
@@ -112,9 +118,9 @@ Every tool result is JSON with an `outcome` and a one-sentence `message` that sa
 | --- | --- |
 | `answered` | `ask_form`: `values`. `ask_file`: `files` and, for a voice note, `text`. |
 | `skipped` | The person chose to skip. That is their answer; the agent does not ask again unless told to. |
-| `approved` | `review_draft`: `text` is the exact approved text, `edited` says whether it changed, `draft_id` names it in the gateway. |
-| `rejected` | `review_draft`: do not send it; `comment` may say why. |
-| `unavailable` | Nothing reached a person who answered; `reason` says why (table below). Not an answer, and for a draft never an approval. |
+| `approved` | `review_draft`: `text` is the exact approved text, `edited` says whether it changed, `draft_id` names it in the gateway. `review_diff`: `approved_patch` holds exactly the approved hunks (git's form: apply it with `git apply`), `hunks` says which were approved and which rejected. |
+| `rejected` | `review_draft`: do not send it; `comment` may say why. `review_diff`: apply none of it. |
+| `unavailable` | Nothing reached a person who answered; `reason` says why (table below). Not an answer, and for a draft or a diff never an approval. |
 | `timeout` | No answer within 300 seconds. Not an answer. |
 
 For `unavailable` and `timeout` the agent is told to tell the person what happened and not to retry at once.
@@ -122,7 +128,7 @@ For `unavailable` and `timeout` the agent is told to tell the person what happen
 | `reason` | Meaning |
 | --- | --- |
 | `no_capable_client` | No app signed in as the person could show it within the waiting time (see below). The message names the app kind, such as the phone app for a scan. |
-| `no_acting_user` | A draft review in a shared conversation whose turn does not say which person it is for. |
+| `no_acting_user` | A draft or diff review in a shared conversation whose turn does not say which person it is for. |
 | `error_response`, `write_failed` | The app could not show it, or it could not be delivered. |
 | `cannot_show:<why>` | The app said it cannot show it: `no_camera`, `not_supported_on_device`, `permission_denied`, `upload_failed`, `unsupported_version`, `shutting_down`, or `declined` (the person chose not to provide it: respect it, do not ask again at once). Any other reason the app gives is reported as `error_response`. |
 | `upload_dir_unsafe`, `upload_dir_unavailable` | The upload folder in the workspace is or passes through a link or a non-folder, or could not be created. Nothing was sent. |
@@ -153,6 +159,13 @@ background) gets a fresh two-minute window from that moment, never past the 300-
   characters) is refused for the agent to fix.
 - One open request per conversation, and at most 12 sent per 10 minutes (separately from `confirm_action`).
   Requests that reached no app do not count.
+- A diff is one file's unified diff (`git diff -- <file>` or `diff -u`), at most 64 KiB, 200 hunks, 400 lines per
+  hunk and 500 characters per line. The gateway reads it itself and refuses what cannot be shown as written, naming
+  the hunk and the line: a tab, a carriage return (a CRLF file), whitespace at the end of a line, a hidden or
+  bidirectional character, more than 16 spaces in a row, a line indented by more than 32 spaces; also a binary diff,
+  a diff of several files (one call per file), a quoted file name, an absolute path or one with `..`, and anything
+  around the diff such as a Markdown fence. A code file indented with tabs cannot be reviewed this way: the agent
+  is told what to change, nothing is rewritten.
 - Ten refused answers end a request.
 - Each request and each outcome writes one record to the dashboard auth audit log
   (`$HERMES_HOME/logs/dashboard-auth.log`, events `interactive_request` and `interactive_outcome`): the session,
@@ -166,7 +179,7 @@ background) gets a fresh two-minute window from that moment, never past the 300-
 ## For app developers
 
 Read `contract/requests/README.md` in the gateway repository. In short: advertise the methods you can show in a second `client.capabilities` call
-(`{"server_requests": true, "requests": ["input.form", "input.file", "review.draft"]}`) only after the first
+(`{"server_requests": true, "requests": ["input.form", "input.file", "review.draft", "review.diff"]}`) only after the first
 call's result lists them under `server_requests`; render every string as plain text marked as the agent's;
 answer with a JSON-RPC response (or `request.answer`); and answer `4041` with a `data.reason` when you cannot
 show a request. The examples in `examples.json` are normative.

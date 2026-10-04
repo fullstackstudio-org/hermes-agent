@@ -97,14 +97,16 @@ profile's does not, and that `os.environ` is unchanged afterwards.
 | Plugin compat notice | — | `plugins.compat_report` (see `plugins/AGENTS.md`) |
 | Connection operations (desktop card) | desktop `store/connection-request.ts` | `connection.request` → `connection.update`* → `connection.respond {op_id}`; `connectors.operation.status`. The op lives in `tools/connectors/live.py`; the card never parks the tool thread (`methods_connectors.py`). |
 | Confirm (fork) | the apps' own confirm sheet | server→client request `confirm` (levels `plain`, `passkey`), gated on `client.capabilities {confirm: [...]}`; tool `confirm_action`. Guide: `website/docs/guides/confirm-sensitive-actions.md`. |
-| Interactive requests (fork) | the apps' own form, file and draft sheets | server→client requests `input.form`, `input.file`, `review.draft`, gated on `client.capabilities {requests: [...]}`; tools `ask_form`, `ask_file`, `review_draft`. See "Interactive requests" below. |
+| Interactive requests (fork) | the apps' own form, file, draft and diff sheets | server→client requests `input.form`, `input.file`, `review.draft`, `review.diff`, gated on `client.capabilities {requests: [...]}`; tools `ask_form`, `ask_file`, `review_draft`, `review_diff`. See "Interactive requests" below. |
 
 ## Interactive requests (fork)
 
-Three server→client requests beyond `clarify`, `approval` and `confirm`: `input.form` (typed fields, 1-12),
-`input.file` (files, uploaded) and `review.draft` (approve, edit or reject a draft). Code: `server_requests.py`
+Four server→client requests beyond `clarify`, `approval` and `confirm`: `input.form` (typed fields, 1-12),
+`input.file` (files, uploaded), `review.draft` (approve, edit or reject a draft) and `review.diff` (approve or
+reject each hunk of the changes to one file). Code: `server_requests.py`
 (the gate and the parking), `interactive.py` (the builders, the validators' bridge, the outcomes, the audit),
-`interactive_validate.py` / `interactive_fields.py` (pure checks), `review_register.py`, `upload_dirs.py`,
+`interactive_validate.py` / `interactive_fields.py` (pure checks), `diff_hunks.py` (a unified diff into hunks, and
+the approved patch back), `review_register.py`, `upload_dirs.py`,
 `request_hooks.py`; the agent's side is `tools/interactive_tools.py`. The wire is declared in
 `contracts/server_requests.py` (`INTERACTIVE_METHODS`) like every other request.
 
@@ -146,7 +148,7 @@ at once; parking is for method-gated requests only. Turn isolation (`HERMES_COMP
 (`unavailable (turn_isolation)`), as for `confirm`.
 
 **Envelope.** The gateway builds every params object and the agent never passes one through (`build_form_params`,
-`build_file_params`, `build_draft_params`). All share `v`, `title` (1-80), `summary` (1-500), `detail` (at most
+`build_file_params`, `build_draft_params`, `build_diff_params`). All share `v`, `title` (1-80), `summary` (1-500), `detail` (at most
 2,000), `expires_at`, `optional` (`input.*`: true unless the agent says otherwise; `review.*`: false) and
 `acting_user`. Text is cleaned and refused, never truncated, when empty or over a bound; a draft is not cleaned
 but must be showable verbatim (line-end whitespace is removed, a tab, control, format or bidi character is refused).
@@ -154,7 +156,7 @@ Params and results are never logged; the audit log gets `interactive_request` an
 request id, method, acting user, connections reached, outcome, reason, answering login and peer; never a title,
 summary, value, path, name or draft).
 
-**Toolsets and tools.** `interactive` holds `ask_form`, `ask_file` and `review_draft`. It is in
+**Toolsets and tools.** `interactive` holds `ask_form`, `ask_file`, `review_draft` and `review_diff`. It is in
 `_DEFAULT_OFF_TOOLSETS` (`hermes_cli/tools_config.py`), like `confirm`, so a new install has it off; `hermes tools`
 turns it on per platform. `device` is reserved in the same set for a later phase and has no tools yet. The tools
 are withheld outside the interactive gateway (CLI, messaging, cron: the bridge is not installed) and a call that
@@ -178,6 +180,20 @@ size and SHA-256 against the declaration. A mismatch is `unavailable (bad_upload
 routes (`hermes_cli/web_routers/files.py`) follow no link at or below `uploads/hermie` either and never replace an
 existing file when the client said not to overwrite.
 
+**Diff review.** `review_diff` hands the gateway a unified diff of ONE file as text; `diff_hunks.parse` turns it
+into hunks the gateway numbers (`h1..`) and bounds (64 KiB, 200 hunks, 400 lines per hunk, 500 characters per
+line, 200 per header) and the request carries those hunks, never the agent's text. A hunk is read by its header's
+counts (the way `patch` does); every line passes `request_text.verbatim_problem` with its marker (space, `+`, `-`)
+taken off, so a tab, a CR that is part of a line, a hidden character or trailing whitespace refuses the diff instead
+of being rewritten (a diff whose own line ending is CRLF is read like an LF one). Binary diffs, several files and a
+diff without a hunk are refused; the file's head (modified, new, deleted, renamed, from the `---`/`+++`,
+`new file mode`, `deleted file mode` and `rename from/to` lines) is read into a structure and the header the agent
+wrote is thrown away. The answer carries only a decision per hunk id (`interactive_validate._diff_problem`: every
+hunk decided once, `approved` only with some hunk approved, `rejected` only with none). When it settles, an approved
+outcome's `approved_patch` is `diff_hunks.compose_patch` over the gateway's stored hunks and head, with the
+approved hunks only (git's form, new-side starts corrected for the rejected hunks before them), so it names exactly
+the path the person was shown and contains exactly the lines they saw. A client has no way to put text in it.
+
 **`4041 cannot_show`.** An app that cannot show a request answers a JSON-RPC error `4041` with
 `data.reason`, never a made-up `skipped` or `rejected`. The reasons the contract lists (`no_camera`,
 `not_supported_on_device`, `permission_denied`, `upload_failed`, `unsupported_version`, `shutting_down`,
@@ -191,7 +207,7 @@ calls a hook. The interactive methods are listed under `pre_server_request` in `
 hooks.md`, with `reached` possibly 0, and `tests/tui_gateway/test_request_hooks.py` pins that table against
 `request_hooks.METHODS`. Add a method to one and the test fails until the other follows.
 
-Tests: `tests/tui_gateway/test_interactive_request.py`, `test_interactive_validate.py`, `test_request_hooks.py`,
+Tests: `tests/tui_gateway/test_interactive_request.py`, `test_interactive_validate.py`, `test_diff_hunks.py`, `test_request_hooks.py`,
 `tests/tui_gateway/contracts/test_requests_contract.py`, `tests/tools/test_interactive_tools.py`.
 
 ## Shared subagent snapshots

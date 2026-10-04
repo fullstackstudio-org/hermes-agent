@@ -167,7 +167,7 @@ background) gets a fresh two-minute window from that moment, never past the 300-
   per file), a quoted file name, an absolute path or one with `..` or `.git`, a change of file mode, a new or deleted
   symbolic link, submodule or executable file (only regular files, mode 100644), a `\ No newline at end of file`
   line anywhere but directly after the last `-` or `+` line of the last hunk, and anything around the diff such as
-  a Markdown fence. A diff of bare hunks must come with the file's `path`, and a hunk needs unchanged lines around its change (`git diff -U3`, never `-U0`) unless it starts at line 0 or 1. The agent is told what to change,
+  a Markdown fence. A diff of bare hunks must come with the file's `path`, and a hunk needs unchanged lines around its change (`git diff -U3`, never `-U0`) unless it starts at line 0 or 1, and only the last hunk may end with a change (it is then applied at the end of the file; the app labels it that way, because the line numbers in a hunk header are not checked against the file). The agent is told what to change,
   nothing is rewritten.
 - Ten refused answers end a request.
 - Each request and each outcome writes one record to the dashboard auth audit log

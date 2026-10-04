@@ -192,7 +192,7 @@ glues a line to the next one invisibly). The file's head (kind `modify`, `new`, 
 `---`/`+++`, `new file mode`, `deleted file mode` and `rename from/to` lines) is read into a structure and the
 header the agent wrote is thrown away; only regular files of mode 100644 can be created or deleted (a link, a
 submodule, an executable or a mode change is refused), paths are relative with no `..` or `.git` segment and no
-control character, a diff of bare hunks needs the agent's `path`, and a hunk without a context line is refused unless it starts at line 0 or 1 (`git apply` would put it at the end of the file). The request carries `kind`, `path` (required)
+control character, a diff of bare hunks needs the agent's `path`, and a hunk without a context line is refused unless it starts at line 0 or 1, and a hunk with no context line after its last change must be the last one (`git apply` pins it to the end of the file whatever its header says). Each hunk carries `anchor` (`start`, `end`, `both`, from `diff_hunks.anchor_of`) so clients can say so; the header's line numbers are not checked against the file. The request carries `kind`, `path` (required)
 and a rename's `old_path`. The answer carries only a decision per hunk id (`interactive_validate._diff_problem`: every
 hunk decided once, `approved` only with some hunk approved, `rejected` only with none). When it settles, an approved
 outcome's `approved_patch` is `diff_hunks.compose_patch` over the gateway's stored hunks and head, with the

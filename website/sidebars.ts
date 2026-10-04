@@ -766,6 +766,7 @@ const sidebars: SidebarsConfig = {
         'guides/delegation-patterns',
         'guides/agent-email-address',
         'guides/confirm-sensitive-actions',
+        'guides/interactive-requests',
         'guides/mcp-endpoint',
         'guides/github-pr-review-agent',
         'guides/webhook-github-pr-review',

@@ -1,5 +1,6 @@
-"""``ask_form``, ``ask_file`` and ``review_draft`` (``tools/interactive_tools.py``, plan ``request-types-v2`` task
-P1-F4): the tools the agent asks the person with, over ``tui_gateway/interactive.py``.
+"""``ask_form``, ``ask_file``, ``review_draft`` and ``review_diff`` (``tools/interactive_tools.py``, plan
+``request-types-v2`` tasks P1-F4 and P2-F1): the tools the agent asks the person with, over
+``tui_gateway/interactive.py``.
 
 Pinned: the tools are withheld without the gateway bridge and the toolset is off by default (``hermes tools`` lists
 it, no platform gets it unless named); a call outside an interactive session (CLI, messaging surface, cron) is
@@ -7,7 +8,8 @@ it, no platform gets it unless named); a call outside an interactive session (CL
 verbatim, marked as yours; never a system message; unavailable is not an answer or consent); every outcome and every
 reason has its own sentence, and ``unavailable`` / ``timeout`` always say it is not an answer, to tell the person
 and not to retry at once; the JSON keeps non-ASCII text as it is; the answer reaches the model in the result; text
-the agent must fix comes back as a tool error, with nothing sent. Every payload is a harmless marker.
+the agent must fix comes back as a tool error, with nothing sent; a diff review hands back the patch of exactly the
+approved hunks, written by the gateway. Every payload is a harmless marker.
 """
 
 from __future__ import annotations
@@ -26,9 +28,14 @@ from tests.tui_gateway.test_server_requests_gate import (  # noqa: F401 - fixtur
 from tools import interactive_tools as tool
 from tools.registry import registry
 
-NAMES = ("ask_form", "ask_file", "review_draft")
+NAMES = ("ask_form", "ask_file", "review_draft", "review_diff")
 FIELD = {"id": "name", "kind": "text", "label": "Name"}
-ALL = ("input.form", "input.file", "review.draft")
+ALL = ("input.form", "input.file", "review.draft", "review.diff")
+#: The methods whose result is an approval (a decision), not an answer.
+REVIEWS = ("review.draft", "review.diff")
+DIFF = ("diff --git a/notes.txt b/notes.txt\nindex 1234567..89abcde 100644\n--- a/notes.txt\n+++ b/notes.txt\n"
+        "@@ -1,3 +1,4 @@\n alpha\n-beta\n+BETA\n+BETA2\n gamma\n@@ -20,3 +21,4 @@ tail\n one\n-two\n+TWO\n+two and a half\n"
+        " three\n")
 
 
 @pytest.fixture(autouse=True)
@@ -105,15 +112,17 @@ def test_the_toolset_is_off_by_default_and_listed_in_hermes_tools():
 
 
 def test_the_schemas_and_descriptions():
-    schemas = {s["name"]: s for s in (tool.ASK_FORM_SCHEMA, tool.ASK_FILE_SCHEMA, tool.REVIEW_DRAFT_SCHEMA)}
+    schemas = {s["name"]: s for s in (tool.ASK_FORM_SCHEMA, tool.ASK_FILE_SCHEMA, tool.REVIEW_DRAFT_SCHEMA,
+                                      tool.REVIEW_DIFF_SCHEMA)}
     assert set(schemas) == set(NAMES)
     required = {name: set(s["parameters"]["required"]) for name, s in schemas.items()}
     assert required == {"ask_form": {"summary", "fields"}, "ask_file": {"summary", "accept"},
-                        "review_draft": {"summary", "text", "kind"}}
+                        "review_draft": {"summary", "text", "kind"}, "review_diff": {"summary", "diff"}}
     props = {name: set(s["parameters"]["properties"]) for name, s in schemas.items()}
     assert props["ask_form"] == {"summary", "fields", "title", "detail", "optional"}
     assert props["ask_file"] == {"summary", "accept", "capture", "multiple", "title"}
     assert props["review_draft"] == {"summary", "text", "kind", "subject", "recipients", "editable", "title"}
+    assert props["review_diff"] == {"summary", "diff", "path", "title"}
     for name, schema in schemas.items():
         text = schema["description"]
         assert "verbatim, marked as coming from you" in text, name
@@ -122,10 +131,15 @@ def test_the_schemas_and_descriptions():
         assert "NOT an" in text, name  # not an answer / not an approval
     assert "never ask for passwords, API keys or card numbers" in tool.ASK_FORM_SCHEMA["description"]
     assert "NOT an approval" in tool.REVIEW_DRAFT_SCHEMA["description"]
+    diff_text = tool.REVIEW_DIFF_SCHEMA["description"]
+    assert "NOT an approval" in diff_text and "approved_patch" in diff_text and "ONE file" in diff_text
+    for limit in ("64 KiB", "200 hunks", "400 lines per hunk", "500 characters per line", "carriage return",
+                  "binary diff", "no Markdown fence"):
+        assert limit in diff_text, limit
     assert tool.ASK_FILE_SCHEMA["parameters"]["properties"]["accept"]["enum"] == ["image", "document", "audio", "any"]
     assert tool.ASK_FORM_SCHEMA["parameters"]["properties"]["fields"]["items"]["properties"]["kind"]["enum"] == [
         "text", "number", "amount", "date", "time", "datetime", "daterange", "choice", "toggle"]
-    json.dumps([tool.ASK_FORM_SCHEMA, tool.ASK_FILE_SCHEMA, tool.REVIEW_DRAFT_SCHEMA])
+    json.dumps([tool.ASK_FORM_SCHEMA, tool.ASK_FILE_SCHEMA, tool.REVIEW_DRAFT_SCHEMA, tool.REVIEW_DIFF_SCHEMA])
 
 
 # ── no interactive session ──────────────────────────────────────────────────────────────────────
@@ -226,7 +240,7 @@ REASONS = ("no_capable_client", "write_failed", "error_response", "no_session", 
            "cannot_show:unsupported_version", "cannot_show:shutting_down", "cannot_show:declined",
            "upload_dir_unsafe",
            "upload_dir_unavailable", "something_new", "")
-METHODS = ("input.form", "input.file", "review.draft")
+METHODS = ALL
 
 
 @pytest.mark.parametrize("method", METHODS)
@@ -238,7 +252,9 @@ def test_unavailable_is_never_an_answer_and_says_what_to_do(method, reason):
     else:
         assert "tell the person" in sentence.lower() and "do not retry at once" in sentence
     assert ("This is not an approval: do not send, post or act on the draft." in sentence) == (method == "review.draft")
-    assert ("This is not an answer from the person" in sentence) == (method != "review.draft")
+    assert ("This is not an approval: do not apply or write any of these changes." in sentence) == (
+        method == "review.diff")
+    assert ("This is not an answer from the person" in sentence) == (method not in REVIEWS)
     for banned in ("confirmed", "approved this", "The person filled in", "The person sent"):
         assert banned not in sentence
 
@@ -263,6 +279,9 @@ def test_no_capable_client_names_the_kind_of_app():
     draft = tool._sentence("review.draft", unavailable)
     assert "app that can show forms" in form
     assert "app that can show drafts" in draft
+    assert "app that can show changes to a file" in tool._sentence("review.diff", unavailable)
+    assert "No app signed in as the person this conversation is for can show a diff review" in tool._sentence(
+        "review.diff", unavailable)
     # a file: the scanner is the phone and iPad app's; any other way of getting a file works on every app
     scan = tool._sentence("input.file", unavailable, "scan")
     assert "the Hermie app on a phone or iPad" in scan and "Mac app does not scan" in scan
@@ -288,8 +307,8 @@ def test_declined_is_the_persons_choice_not_an_answer_and_not_to_be_pressed(meth
     assert "their choice, not a device problem" in sentence
     assert "do not ask again at once" in sentence and "continue without it" in sentence
     assert "ask in the chat what they would prefer" in sentence
-    assert ("not an approval" in sentence) == (method == "review.draft")
-    assert ("not an answer from the person" in sentence) == (method != "review.draft")
+    assert ("not an approval" in sentence) == (method in REVIEWS)
+    assert ("not an answer from the person" in sentence) == (method not in REVIEWS)
     for device in ("no camera", "permission", "could not show", "update", "closing"):
         assert device not in sentence
 
@@ -306,6 +325,14 @@ def test_the_sentences_for_answers_say_only_what_is_known():
     assert "approved this exact text." in plain and "after changing it" in changed
     assert "not anything else" in plain and "draft_id" in plain
     assert "Do not send, post or use it" in tool._sentence("review.draft", {"outcome": "rejected"})
+    some = tool._sentence("review.diff", {"outcome": "approved", "hunks": {"h1": "approved", "h2": "rejected",
+                                                                           "h3": "approved"}})
+    assert some.startswith("The person approved 2 of 3 hunks.") and "approved_patch holds exactly the approved" in some
+    assert "git apply" in some and "NOT approved: do not apply it" in some and "this patch only" in some
+    assert "The person approved 1 of 1 hunks." in tool._sentence(
+        "review.diff", {"outcome": "approved", "hunks": {"h1": "approved"}})
+    assert tool._sentence("review.diff", {"outcome": "rejected", "hunks": {"h1": "rejected"}}) == (
+        "The person rejected every hunk. Do not apply any of these changes.")
     assert "(problem: file:0:hash)" in tool._sentence(
         "input.file", {"outcome": "unavailable", "reason": "bad_upload", "problem": "file:0:hash"})
 
@@ -365,6 +392,66 @@ def test_review_draft_round_trip_gives_the_approved_text_and_a_draft_id(server):
     assert "after changing it" in data["message"]
     assert review_register.get("key-s1", data["draft_id"]).text == data["text"]
     assert phone.requests("review.draft")[0]["params"]["editable"] is True
+
+
+def test_review_diff_round_trip_hands_back_the_patch_of_the_approved_hunks(server):
+    phone = _WS("phone", ROBIN)
+    _session(server, "s1", phone, creator=ROBIN)
+    _caps(server, phone, requests=list(ALL))
+    release = _bind_ui_session("s1")
+    try:
+        for bad in ({"diff": "a\tb"}, {"diff": "--- a/x\n+++ b/x\n"}, {"diff": DIFF, "path": "other.txt"},
+                    {"diff": "Binary files a/x and b/x differ\n"}, {"diff": DIFF, "summary": ""}):
+            assert "error" in json.loads(tool.review_diff_tool(**{"summary": "x", **bad}))
+        assert phone.requests("review.diff") == []
+        thread, box = _call(tool.review_diff_tool, summary="Two small edits to the notes.", diff=DIFF, title="Notes")
+        rid = _wait_open("review.diff")
+        _frame(server, phone, rid, result={"decision": "approved", "hunks": {"h1": "rejected", "h2": "approved"}})
+        thread.join(5)
+    finally:
+        release()
+    frame = phone.requests("review.diff")[0]["params"]
+    assert frame["path"] == "notes.txt" and [h["id"] for h in frame["hunks"]] == ["h1", "h2"]
+    assert frame["title"] == "Notes" and frame["optional"] is False
+    data = json.loads(box["r"])
+    assert data["outcome"] == "approved" and data["hunks"] == {"h1": "rejected", "h2": "approved"}
+    assert data["approved_patch"] == ("diff --git a/notes.txt b/notes.txt\n--- a/notes.txt\n+++ b/notes.txt\n"
+                                      "@@ -20,3 +20,4 @@ tail\n one\n-two\n+TWO\n+two and a half\n three\n")
+    assert "index" not in data["approved_patch"], "the patch is the gateway's, not the agent's header"
+    assert data["message"].startswith("The person approved 1 of 2 hunks.")
+
+
+def test_a_rejected_diff_has_no_patch_in_the_result(server):
+    phone = _WS("phone", ROBIN)
+    _session(server, "s1", phone, creator=ROBIN)
+    _caps(server, phone, requests=list(ALL))
+    release = _bind_ui_session("s1")
+    try:
+        thread, box = _call(tool.review_diff_tool, summary="Two small edits.", diff=DIFF)
+        rid = _wait_open("review.diff")
+        _frame(server, phone, rid, result={"decision": "rejected", "hunks": {"h1": "rejected", "h2": "rejected"}})
+        thread.join(5)
+    finally:
+        release()
+    data = json.loads(box["r"])
+    assert data["outcome"] == "rejected" and "approved_patch" not in data
+    assert data["message"] == "The person rejected every hunk. Do not apply any of these changes."
+
+
+def test_a_diff_nobody_can_show_is_not_an_approval(server, monkeypatch):
+    from tui_gateway import interactive
+    monkeypatch.setattr(interactive, "PARK_SECONDS", 0.1)
+    old = _WS("old", ROBIN)
+    _session(server, "s1", old, creator=ROBIN)
+    _caps(server, old, requests=None)
+    release = _bind_ui_session("s1")
+    try:
+        data = json.loads(tool.review_diff_tool(summary="x", diff=DIFF))
+    finally:
+        release()
+    assert (data["outcome"], data["reason"]) == ("unavailable", "no_capable_client")
+    assert "approved_patch" not in data and "do not apply or write any of these changes" in data["message"]
+    assert "diff review" in data["message"] and old.frames == []
 
 
 def test_ask_file_round_trip_gives_path_and_ref_text(server, tmp_path):

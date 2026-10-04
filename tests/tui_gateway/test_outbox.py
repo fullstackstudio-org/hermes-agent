@@ -971,3 +971,20 @@ def test_the_conversation_is_looked_up_once_and_only_when_a_file_is_shared(home)
     records = [json.loads((home / "outbox" / a["id"] / "record.json").read_text()) for a in shared.attachments]
     assert {r["conversation_id"] for r in records} == {"root-session"}
     assert {r["session_id"] for r in records} == {"s-new"}
+
+
+@pytest.mark.parametrize("text", [
+    "Quote:\n> MEDIA:/tmp/marker.png\nAfter",
+    "Quote:\n> Here MEDIA:/tmp/marker.png ok\nAfter",
+    "Code `MEDIA:/tmp/marker.png` inline\nAfter",
+    "Ends with `MEDIA:/tmp/marker.png`",
+    "A MEDIA:/tmp/marker.png B MEDIA:/tmp/other.png C\nAfter",
+    "Hi [[audio_as_voice]] there\nMEDIA:/tmp/marker.mp3 end",
+])
+@pytest.mark.parametrize("chunk", [1, 4, 1000])
+def test_the_stream_shows_what_the_final_text_shows_for_inline_directives_and_quotes(text, chunk):
+    """What a directive's line streams matches ``strip_directives`` of the whole text (the ``message.complete``
+    text), for any chunking: a quoted or code-spanned directive stays, an inline one goes."""
+    stream = outbox_share.MediaDeltaFilter()
+    streamed = "".join(stream.feed(text[i:i + chunk]) for i in range(0, len(text), chunk)) + stream.flush()
+    assert streamed == outbox_share.strip_directives(text)

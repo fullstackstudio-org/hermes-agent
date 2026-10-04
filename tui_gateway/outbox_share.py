@@ -324,10 +324,27 @@ class MediaDeltaFilter:
         self._line += emit
         return emit
 
+    @staticmethod
+    def _clean_tail(prefix: str, rest: str) -> str:
+        """*rest*, the held end of a line whose start *prefix* was already emitted, as the final text shows it.
+        The final text judges the whole line, so a directive in a ``>`` quote or an inline code span stays as it
+        is there; judged alone, the held part would lose that context and be stripped. Falls back to *rest*
+        alone when the cleaned line no longer starts with what was emitted (a collapsed run of spaces)."""
+        whole = strip_directives(prefix + rest)
+        for marker in _MARKERS:
+            whole = whole.replace(marker, "")
+        if prefix and whole.startswith(prefix):
+            return whole[len(prefix):]
+        cleaned = strip_directives(rest)
+        for marker in _MARKERS:
+            cleaned = cleaned.replace(marker, "")
+        return cleaned
+
     def _end_line(self, piece: str) -> str:
         """The rest of the current line and its newline."""
+        prefix = self._line
         rest, self._held = self._held + piece, ""
-        line, self._line = self._line + rest, ""
+        line, self._line = prefix + rest, ""
         opens_fence = line.lstrip().startswith(_FENCES)
         if self._in_fence:
             if opens_fence:
@@ -338,19 +355,14 @@ class MediaDeltaFilter:
             return rest + "\n"
         if _MARK not in rest and not any(m in rest for m in _MARKERS):
             return rest + "\n"
-        cleaned = strip_directives(rest)
-        for marker in _MARKERS:
-            cleaned = cleaned.replace(marker, "")
-        if not cleaned.strip() and not line[: len(line) - len(rest)].strip():
+        cleaned = self._clean_tail(prefix, rest)
+        if not cleaned.strip() and not prefix.strip():
             return ""  # the whole line was a directive
         return cleaned + "\n"
 
     def flush(self) -> str:
         """What is still held when the turn ends, cleaned (the stream's last words)."""
-        held, self._held, self._line, self._skipping = self._held, "", "", False
+        held, prefix, self._held, self._line, self._skipping = self._held, self._line, "", "", False
         if not held or self._in_fence:
             return held
-        cleaned = strip_directives(held)
-        for marker in _MARKERS:
-            cleaned = cleaned.replace(marker, "")
-        return cleaned
+        return self._clean_tail(prefix, held)

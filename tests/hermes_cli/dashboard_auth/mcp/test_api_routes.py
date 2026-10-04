@@ -305,7 +305,8 @@ def test_the_wrong_method_on_a_live_route_is_405_with_allow(gw):
 # ── revoking ─────────────────────────────────────────────────────────────────────────────────────
 
 
-def test_a_revoke_ends_every_token_is_audited_and_is_announced_to_that_person_only(gw, transports):
+def test_a_revoke_ends_every_token_is_audited_and_is_announced_to_that_person_only(gw, transports, clock):
+    # clock: the store's time stands still, so revoked_at == now() holds across a second boundary.
     mine, other_tab, bobs, nobody = (transports(ALICE_ID), transports(ALICE_ID), transports(BOB_ID), transports(None))
     alices, bob_flow = gw.connect(ALICE), gw.connect(BOB)
     [grant] = grants_of(gw)

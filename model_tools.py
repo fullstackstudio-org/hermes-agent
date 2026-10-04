@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from contextvars import ContextVar
 import logging
 import threading
+from pathlib import Path
 import time
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -252,6 +253,20 @@ def get_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disabled_
     return list(cached)
 
 
+def _gateway_config_signature(scoped_config: Optional[Path]) -> Optional[tuple]:
+    """The gateway's own config.yaml signature when a profile scope reads another file: confirm_action's
+    passkey level is offered from the gateway's ``confirm.passkey`` (``passkeys.paths.gateway_home``),
+    so an edit there must reach a served profile's memoized definitions too."""
+    try:
+        from hermes_cli.dashboard_auth.passkeys.paths import gateway_home
+        path = gateway_home() / "config.yaml"
+        if scoped_config is not None and path == scoped_config:
+            return None
+        return file_signature(path.stat())
+    except (FileNotFoundError, OSError, ImportError):
+        return None
+
+
 def _tool_defs_cache_key(
     enabled_toolsets: Optional[List[str]], disabled_toolsets: Optional[List[str]], skip_tool_search_assembly: bool,
 ) -> Optional[tuple]:
@@ -266,13 +281,14 @@ def _tool_defs_cache_key(
         return None
     try:
         from hermes_cli.config import get_config_path
-        cfg_stat = get_config_path().stat()
-        cfg_fp = file_signature(cfg_stat)
+        cfg_path = get_config_path()
+        cfg_fp = file_signature(cfg_path.stat())
     except (FileNotFoundError, OSError, ImportError):
-        cfg_fp = None
+        cfg_path, cfg_fp = None, None
     return (
         registry.current_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
         frozenset(disabled_toolsets) if disabled_toolsets else None, registry._generation, cfg_fp,
+        _gateway_config_signature(cfg_path),
         bool(os.environ.get("HERMES_KANBAN_TASK")), bool(skip_tool_search_assembly),
         _is_delegated_child_context(), _is_dispatcher_owned_worker(), profile_scope,
     )

@@ -255,8 +255,29 @@ def require_from_config(cfg: Any) -> Require:
 
 
 def load_settings() -> PasskeySettings:
+    """The gateway's ``confirm.passkey``: read from the gateway's own config.yaml (``paths.gateway_home``),
+    never the one of the profile a turn or request is scoped to. A served profile's own section is not read:
+    it can neither switch the level off nor list another base URL."""
     from hermes_cli.config import load_config
-    return settings_from_config(load_config())
+    from hermes_cli.dashboard_auth.passkeys.paths import gateway_scope
+    with gateway_scope():
+        return settings_from_config(load_config())
+
+
+def merge_require(*rules: Require) -> Require:
+    """Every rule of each of *rules*: a pattern any of them lists, a flag any of them sets. A served
+    profile's own rules add to the gateway's and can never remove one."""
+    return Require(commands=tuple(dict.fromkeys(c for r in rules for c in r.commands)),
+                   smart_denied=any(r.smart_denied for r in rules), approvals=any(r.approvals for r in rules),
+                   tools=tuple(dict.fromkeys(t for r in rules for t in r.tools)))
+
+
+def gateway_require() -> Require:
+    """The gateway's operator rules (``confirm.passkey.require`` in the gateway's own config.yaml)."""
+    from hermes_cli.config import load_config_readonly
+    from hermes_cli.dashboard_auth.passkeys.paths import gateway_scope
+    with gateway_scope():
+        return require_from_config(load_config_readonly())
 
 
 def serialise_base_urls(urls: list) -> tuple[tuple[str, ...], tuple[str, ...]]:

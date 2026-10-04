@@ -338,8 +338,10 @@ class Committed:
 
 
 def default_path() -> Path:
-    from hermes_constants import get_hermes_home
-    return get_hermes_home() / "dashboard_auth" / FILE_NAME
+    """The gateway's store: ``<gateway home>/dashboard_auth/passkeys.db`` (``paths.gateway_home``), never a
+    profile's, whatever profile the calling turn or request is scoped to."""
+    from hermes_cli.dashboard_auth.passkeys.paths import gateway_home
+    return gateway_home() / "dashboard_auth" / FILE_NAME
 
 
 def _credential(row: sqlite3.Row) -> CredentialRecord:

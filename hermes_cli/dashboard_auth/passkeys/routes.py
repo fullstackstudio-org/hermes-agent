@@ -138,7 +138,7 @@ def _settings() -> PasskeySettings:
 
 
 def _store() -> PasskeyStore:
-    """One store object per file, so its identity is read once (the file follows ``$HERMES_HOME``)."""
+    """One store object per file, so its identity is read once (the gateway's, ``paths.gateway_home``)."""
     path = default_path()
     with _stores_lock:
         store = _stores.get(str(path))

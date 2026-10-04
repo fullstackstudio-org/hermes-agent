@@ -96,7 +96,10 @@ def _settings() -> PasskeySettings:
 
 
 def _store() -> PasskeyStore:
-    """One store object per file (``$HERMES_HOME/dashboard_auth/passkeys.db``), so its identity is read once."""
+    """One store object per file, so its identity is read once. The file is the GATEWAY's
+    (``<gateway home>/dashboard_auth/passkeys.db``, ``paths.gateway_home``), as are the settings
+    (``load_settings``): a turn in a profile this gateway multiplexes runs with that profile's home as its
+    ``HERMES_HOME`` override, and the owner's passkey belongs to the gateway's sign-in, not to the profile."""
     path = str(default_path())
     with _stores_lock:
         store = _stores.get(path)

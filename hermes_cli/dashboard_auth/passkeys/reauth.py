@@ -120,13 +120,10 @@ def policy(cfg: Any = None) -> Policy:
     (``settings.settings_from_config``), so the sign-in routes and the passkey routes never disagree: an
     unreadable flag, a ``self_enrol`` that is not a mapping or an unreadable cooling-off all mean off. An
     unreadable config never makes a grant usable."""
-    from hermes_cli.dashboard_auth.passkeys.settings import settings_from_config
+    from hermes_cli.dashboard_auth.passkeys.settings import load_settings, settings_from_config
 
     try:
-        if cfg is None:
-            from hermes_cli.config import load_config
-            cfg = load_config()
-        settings = settings_from_config(cfg)
+        settings = load_settings() if cfg is None else settings_from_config(cfg)
     except Exception:  # noqa: BLE001 - an unreadable config never enables the level
         _log.warning("passkey self-enrolment: confirm.passkey could not be read", exc_info=False)
         return Policy()

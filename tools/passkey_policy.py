@@ -90,15 +90,32 @@ def _config() -> Any:
     return load_config_readonly()
 
 
+def _in_gateway_home() -> bool:
+    from hermes_cli.dashboard_auth.passkeys.paths import gateway_home
+    from hermes_constants import get_hermes_home, hermes_home_key
+    return hermes_home_key(get_hermes_home()) == hermes_home_key(gateway_home())
+
+
 def require():
-    """The operator rules now (``settings.Require``). An unreadable config reads as no rules, the way
-    ``approvals.deny`` does (the config loader serves the last readable file when an edit breaks it)."""
-    from hermes_cli.dashboard_auth.passkeys.settings import Require, require_from_config
+    """The operator rules now (``settings.Require``): the gateway's own (its config.yaml, whatever profile
+    the turn runs in) plus, in a profile the gateway serves, that profile's own, which can add rules and
+    never remove one. An unreadable config reads as no rules from it, the way ``approvals.deny`` does (the
+    config loader serves the last readable file when an edit breaks it)."""
+    from hermes_cli.dashboard_auth.passkeys.settings import Require, gateway_require, merge_require, \
+        require_from_config
     try:
-        return require_from_config(_config())
+        own = require_from_config(_config())
     except Exception:  # noqa: BLE001 - parity with approvals.deny: logged, not raised into every command
         logger.warning("confirm.passkey.require could not be read; no passkey rules apply", exc_info=True)
-        return Require()
+        own = Require()
+    try:
+        if _in_gateway_home():
+            return own
+        return merge_require(gateway_require(), own)
+    except Exception:  # noqa: BLE001 - as above, for the gateway's file
+        logger.warning("the gateway's confirm.passkey.require could not be read; only this profile's rules "
+                       "apply", exc_info=True)
+        return own
 
 
 @dataclass(frozen=True)

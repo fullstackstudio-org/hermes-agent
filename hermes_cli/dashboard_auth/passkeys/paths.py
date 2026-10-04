@@ -7,18 +7,65 @@ an imported one would carry grants nobody consented to here. Names are compared 
 ``os.path.samestat``, because macOS (APFS) and Windows file systems ignore case: ``Dashboard_Auth/Passkeys.db``
 in an archive, or ``<home>/../.HERMES`` in a request, names the same file or folder. Standard library only:
 backups, profiles and the file manager import this.
+
+Which home is THE gateway's (:func:`gateway_home`): the owner's passkey belongs to the dashboard sign-in,
+which is the gateway's, so the level's settings (``confirm.passkey``) and its store (credentials, gateway
+id) are read from the gateway's own home, never from the profile a turn or request is scoped to. A gateway
+that multiplexes profiles runs each profile's turns with that profile's home as the context-local
+``HERMES_HOME`` override; reading through it gave every profile turn a store of its own (another gateway
+id, no credentials) and a config without the operator's base URLs.
 """
 
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path, PurePath
-from typing import Iterable
+from typing import Iterable, Iterator
 
 STORE_DIR = "dashboard_auth"
 STORE_PREFIX = "passkeys.db"
 #: Every store file name (and its ``-wal`` / ``-shm`` / ``-journal`` siblings) these rules cover.
 STORE_PREFIXES = (STORE_PREFIX, "mcp.db")
+
+
+#: Set by ``hermes dashboard passkey`` run inside a profile the host gateway serves (:func:`use_gateway_home`).
+_GATEWAY_HOME: ContextVar[str | None] = ContextVar("_PASSKEY_GATEWAY_HOME", default=None)
+
+
+def gateway_home() -> Path:
+    """The home whose ``confirm.passkey`` settings and passkey store this gateway uses: the process's own
+    (launch) home as ``hermes_constants.get_routing_process_hermes_home`` names it, never a turn's or a
+    request's profile override; or the home :func:`use_gateway_home` chose for the block."""
+    chosen = _GATEWAY_HOME.get()
+    if chosen:
+        return Path(chosen)
+    from hermes_constants import get_routing_process_hermes_home
+    return get_routing_process_hermes_home()
+
+
+@contextmanager
+def use_gateway_home(home: Path | str) -> Iterator[None]:
+    """Make *home* the gateway's home for the block (the operator CLI inside a served profile)."""
+    token = _GATEWAY_HOME.set(str(home))
+    try:
+        yield
+    finally:
+        _GATEWAY_HOME.reset(token)
+
+
+@contextmanager
+def gateway_scope() -> Iterator[Path]:
+    """Run the block with ``get_hermes_home()`` resolving to :func:`gateway_home`, so ``load_config``,
+    ``save_config`` and the audit log read and write the gateway's files. Yields that home."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    home = gateway_home()
+    token = set_hermes_home_override(str(home))
+    try:
+        yield home
+    finally:
+        reset_hermes_home_override(token)
 
 
 def is_store_file_name(file_name: str) -> bool:

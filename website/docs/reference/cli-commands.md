@@ -1880,7 +1880,7 @@ Register this install as a self-hosted dashboard with your Nous Portal account. 
 
 ### `hermes dashboard passkey`
 
-Operator commands for the `confirm` level `passkey`: its base URLs and its store (`$HERMES_HOME/dashboard_auth/passkeys.db`). Run them on the gateway host as the gateway's user. The dashboard's settings page, raw config editor and file manager, and the `config.set` RPC, refuse to change the store or the `confirm.passkey` settings.
+Operator commands for the `confirm` level `passkey`: its base URLs and its store (`$HERMES_HOME/dashboard_auth/passkeys.db`). Run them on the gateway host as the gateway's user. Passkeys belong to the gateway, not to a profile: a gateway that serves several profiles uses its own home's settings and store for every profile's conversations, and `hermes -p <name> dashboard passkey ...` in a profile it serves shows and changes the gateway's (and says so). A `gateway.standalone` profile keeps its own. The dashboard's settings page, raw config editor and file manager, and the `config.set` RPC, refuse to change the store or the `confirm.passkey` settings.
 
 That is a narrow guarantee. A stolen dashboard session can still run code on the gateway host through the dashboard itself: shell hooks (`/api/ops/hooks`), the file editor writing `config.yaml` (`/api/fs/write-text`), a console, or an agent's unsandboxed terminal. With code execution it can change these settings, write the store, or run these commands. The passkey level raises the bar for a *confirm*; it does not make a stolen dashboard session harmless.
 

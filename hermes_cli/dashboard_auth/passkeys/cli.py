@@ -20,6 +20,7 @@ import argparse
 import datetime as _dt
 import re
 import sys
+from pathlib import Path
 from typing import Callable, Optional, TextIO
 
 _DURATION = re.compile(r"^\s*(\d+)\s*([smhd]?)\s*$", re.IGNORECASE)
@@ -123,12 +124,60 @@ def cmd_dashboard_passkey(args) -> None:
         sys.exit(code)
 
 
+def serving_gateway_home() -> Optional[Path]:
+    """The home of the gateway that serves this command's profile, when that is not the profile itself.
+
+    Passkeys and ``confirm.passkey`` are the gateway's (the dashboard sign-in's), so ``hermes -p <name>
+    dashboard passkey ...`` in a profile the host gateway multiplexes acts on the gateway's settings and
+    store. None for the default home, a ``gateway.standalone`` profile, a profile whose own gateway is
+    running (a host gateway started from that profile), or a host whose default gateway does not serve
+    every profile: then the command's own home is the gateway's."""
+    from hermes_constants import get_default_hermes_root, get_routing_process_hermes_home, profile_name_for_home
+    home = get_routing_process_hermes_home()
+    if profile_name_for_home(home) in (None, "default"):
+        return None
+    try:
+        from hermes_cli.profiles import profile_is_standalone
+        if profile_is_standalone(home):
+            return None
+        from gateway.status import live_gateway_pid_for_home
+        if live_gateway_pid_for_home(home) is not None:
+            return None
+        from hermes_cli.gateway_multiplex_mode import default_gateway_multiplexes
+        root = get_default_hermes_root()
+        if Path(root).resolve() == Path(home).resolve() or not default_gateway_multiplexes(root):
+            return None
+    except Exception:  # noqa: BLE001 - undecidable: the command's own home, as before
+        return None
+    return Path(root)
+
+
 def run(args, *, out: TextIO | None = None, err: TextIO | None = None, store=None, settings=None,
         public_urls: Optional[list[str]] = None, isatty: Optional[Callable[[], bool]] = None,
         sign_in_providers: Optional[list[str]] = None) -> int:
-    """The command; the keyword arguments are seams for tests. Returns the exit code."""
+    """The command; the keyword arguments are seams for tests. Returns the exit code. Inside a profile the
+    host gateway serves, it reads and writes that gateway's settings and store (:func:`serving_gateway_home`)
+    and says so."""
     out = out or sys.stdout
     err = err or sys.stderr
+    served_by = serving_gateway_home() if store is None and settings is None else None
+    if served_by is None:
+        return _run(args, out=out, err=err, store=store, settings=settings, public_urls=public_urls,
+                    isatty=isatty, sign_in_providers=sign_in_providers)
+    from hermes_cli.dashboard_auth.passkeys.paths import gateway_scope, use_gateway_home
+    from hermes_constants import get_routing_process_hermes_home, profile_name_for_home
+    profile = profile_name_for_home(get_routing_process_hermes_home())
+    command = getattr(args, "passkey_command", None)
+    print(f"Profile '{profile}' is served by the gateway at {served_by}; passkeys and confirm.passkey are that "
+          "gateway's, so this shows and changes the gateway's settings and store.",
+          file=out if command == "status" else err)
+    with use_gateway_home(served_by), gateway_scope():
+        return _run(args, out=out, err=err, store=store, settings=settings, public_urls=public_urls,
+                    isatty=isatty, sign_in_providers=sign_in_providers)
+
+
+def _run(args, *, out: TextIO, err: TextIO, store, settings, public_urls: Optional[list[str]],
+         isatty: Optional[Callable[[], bool]], sign_in_providers: Optional[list[str]]) -> int:
     if store is None:
         from hermes_cli.dashboard_auth.passkeys.store import PasskeyStore
         store = PasskeyStore.default()

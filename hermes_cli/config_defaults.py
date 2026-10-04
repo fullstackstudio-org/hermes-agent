@@ -1716,6 +1716,8 @@ DEFAULT_CONFIG = {
     # asked about (contract/confirm-passkey). Protected: the dashboard's config writers and the config.set
     # RPC refuse any change below ``confirm.passkey``; the operator edits it here or with `hermes config set`.
     # Credentials and codes live in $HERMES_HOME/dashboard_auth/passkeys.db (`hermes dashboard passkey`).
+    # Both are the gateway's: a profile the gateway serves uses the gateway's section and store, not its own
+    # (a profile's own `require` rules only add to the gateway's).
     "confirm": {
         "passkey": {
             "enabled": False,

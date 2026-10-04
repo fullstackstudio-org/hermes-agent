@@ -1,7 +1,7 @@
 """The consent page (``hermes_cli/dashboard_auth/mcp/consent.py``): the one place an MCP grant is born.
 
 Pinned here: the page shows the client's name AND its redirect host, escaped; it cannot be framed or
-cached and runs no script; a cookie decision needs this gateway's own Origin (a bearer caller is exempt);
+cached and runs no script; a decision needs the cookie session (never a bearer) and this gateway's own Origin;
 the nonce is bound to the transaction and a transaction is decided once; Deny sends ``access_denied`` back;
 the per-person cap refuses with the transaction left open; the identity comes from the gate's session only;
 and the audit lines name the decision without the nonce or the code.
@@ -80,9 +80,19 @@ def test_a_cookie_decision_needs_this_gateways_origin(gw):
     assert gw.decide(flow).status_code == 303
 
 
-def test_a_bearer_decision_is_exempt_from_the_origin_rule(gw):
+def test_a_bearer_may_not_decide_a_consent(gw):
+    # Security 2: a grant is born from the cookie session on this page, never from a bearer, which would
+    # also skip the Origin rule. With the right Origin, with none, or beside a cookie: refused.
     flow, _ = _consent_open(gw)
-    r = gw.decide(flow, headers=idp_bearer())
+    for headers in (idp_bearer(), idp_bearer() | {"Origin": BASE}, cookie() | idp_bearer()):
+        for decision in ("allow", "deny"):
+            r = gw.decide(flow, decision, headers=headers)
+            assert (r.status_code, r.json()["error"]) == (403, "cookie_session_required"), headers
+    assert not gw.store.grants(include_inactive=True)
+    refused = [line for line in audit_lines() if line["event"] == "mcp_consent_denied"]
+    assert refused and all((line["reason"], line["auth"]) == ("bearer", "bearer") for line in refused)
+    # The transaction is still open for the person's own browser.
+    r = gw.decide(flow)
     assert r.status_code == 303 and "code=" in r.headers["location"]
 
 

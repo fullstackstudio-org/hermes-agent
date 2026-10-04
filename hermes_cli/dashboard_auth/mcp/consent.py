@@ -13,9 +13,11 @@ Rules:
 
 - The identity is the gate's verified session and nothing in the form; without one (or the server's own
   internal identity) the answer is 403 ``no_identity``.
-- A cookie-authenticated POST must carry ``Origin`` equal to the primary public origin (the only origin the
-  page is served on); otherwise 403 ``origin_not_listed``. A bearer caller is exempt (a browser never
-  attaches one on its own), as for the dashboard's other writes.
+- A decision comes from the cookie session only (plan Security 2): a POST that carries a bearer is 403
+  ``cookie_session_required``, whatever else it carries. It is not exempt from the Origin rule as the
+  dashboard's other writes are: a bearer never saw the page, and a grant must be born in a browser.
+- The POST must carry ``Origin`` equal to the primary public origin (the only origin the page is served
+  on); otherwise 403 ``origin_not_listed``.
 - The form's nonce is bound to the transaction by the store; an unknown, expired, decided or mismatched
   transaction is 404 ``not_found``. A person at the cap of live grants gets 409 ``too_many_grants`` and the
   transaction stays open (revoke one in Settings › MCP, then Allow again).
@@ -137,6 +139,7 @@ _TITLES = {
     "no_identity": "No signed-in person",
     "not_found": "This sign-in request is no longer open",
     "origin_not_listed": "This request did not come from this gateway's page",
+    "cookie_session_required": "Decide in your browser",
     "too_many_grants": "Too many connected clients",
     "bad_request": "This request is not valid",
     "body_too_large": "This request is too large",
@@ -176,7 +179,11 @@ async def consent_endpoint(request: Request) -> Response:
                   reason=reason, **fields)
         return _refusal(request, status, error, detail)
 
-    if auth == "cookie" and request.headers.get("origin", "") != rt.primary_origin:
+    if auth == "bearer":
+        return refused(403, "cookie_session_required",
+                       "Allow or deny an MCP client on this gateway's consent page, signed in in your browser.",
+                       "bearer")
+    if request.headers.get("origin", "") != rt.primary_origin:
         return refused(403, "origin_not_listed",
                        "A browser decision must come from this gateway's own consent page.", "origin_not_listed")
     try:

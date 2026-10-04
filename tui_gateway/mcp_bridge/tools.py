@@ -531,15 +531,32 @@ def _turn_result(bridge: Bridge, snapshot: dict, *, bot: str) -> dict:
 
 def bot_prompt(bridge: Bridge, caller: Caller, bot: Any, text: Any, chat_id: Any = None,
                wait_seconds: Any = WAIT_DEFAULT_S, *, on_progress: Callable[[str], None] | None = None,
-               stop: threading.Event | None = None, admit: Callable[[], None] | None = None) -> dict:
+               stop: threading.Event | None = None, admit: Callable[[], Any] | None = None) -> dict:
+    """``admit()`` applies the grant's prompt limits once the request is known to be well formed; what it returns
+    (a reserved running-turn slot, :class:`~.limits.Slot`) goes to the turn's watch, which releases it when the
+    turn concludes. A submit that fails releases it here."""
     name = _bot(caller, bot)
     if not isinstance(text, str) or not text.strip():
         raise ToolFailure("bad_request", "text is required")
     if len(text) > PROMPT_MAX_CHARS:
         raise ToolFailure("bad_request", f"text is longer than {PROMPT_MAX_CHARS} characters")
     wait = _wait_seconds(wait_seconds)
-    if admit is not None:
-        admit()  # the prompt limits, once the request is known to be well formed
+    slot = admit() if admit is not None else None
+    try:
+        watch, chat = _submit_prompt(bridge, caller, name, text, chat_id, slot)
+    except BaseException:
+        if slot is not None:
+            slot.release()
+        raise
+    _drop_draft((caller.login, chat))
+    snapshot = watch.wait(time.monotonic() + wait, on_progress=on_progress, stop=stop)
+    return _turn_result(bridge, snapshot, bot=name)
+
+
+def _submit_prompt(bridge: Bridge, caller: Caller, name: str, text: str, chat_id: Any,
+                   slot: Any) -> tuple[turns.TurnWatch, str]:
+    """Resume or create the chat and start the turn on a fresh connection; ``(watch, chat id)``. The watch owns
+    the connection and *slot* from here."""
     transport = caller.transport()
     owned = True
     try:
@@ -563,16 +580,15 @@ def bot_prompt(bridge: Bridge, caller: Caller, bot: Any, text: Any, chat_id: Any
             sid = str(resumed.get("session_id") or "")
             _record(bridge, caller, bot=name, chat_id=chat, how="prompt")
         try:
-            watch = turns.start_turn(transport, chat_id=chat, session_id=sid, text=text, params={"queued": True})
+            watch = turns.start_turn(transport, chat_id=chat, session_id=sid, text=text, params={"queued": True},
+                                     slot=slot)
         except rpc.BridgeError as exc:
             raise _failure_from(exc) from exc
         owned = False  # the watch releases it after the turn
     finally:
         if owned:
             _release(transport)
-    _drop_draft((caller.login, chat))
-    snapshot = watch.wait(time.monotonic() + wait, on_progress=on_progress, stop=stop)
-    return _turn_result(bridge, snapshot, bot=name)
+    return watch, chat
 
 
 def _unknown_turn(bridge: Bridge, caller: Caller, chat_id: str) -> dict:

@@ -10,7 +10,9 @@ Every payload is a harmless marker.
 
 from __future__ import annotations
 
+import functools
 import json
+import threading
 import time
 
 import anyio
@@ -157,15 +159,67 @@ def test_clarify_answer_answers_only_a_clarify_of_this_chat(bridge):
 # ── limits and scopes ─────────────────────────────────────────────────────────────────────────
 
 
+def _admit(bridge, caller, maximum):
+    bridge.settings = MCPSettings(enabled=True, max_running_turns_per_grant=maximum)
+    return functools.partial(bridge_server.Endpoint(bridge)._admit_prompt, caller)
+
+
 def test_the_running_turn_limit_counts_the_grants_unfinished_turns(bridge):
-    first = tools.bot_prompt(bridge, ROBIN, "default", "marker gated", wait_seconds=0)
+    admit = _admit(bridge, ROBIN, 1)
+    first = tools.bot_prompt(bridge, ROBIN, "default", "marker gated", wait_seconds=0, admit=admit)
     assert limits.running_turns(ROBIN.grant_id) == 1
-    refusal = limits.check_running(ROBIN.grant_id, 1)
-    assert refusal is not None and refusal.code == "busy"
+    with pytest.raises(bridge_server._Refused) as refused:
+        tools.bot_prompt(bridge, ROBIN, "default", "marker reply", wait_seconds=0, admit=admit)
+    assert refused.value.refusal.code == "busy"
+    assert limits.running_turns(ROBIN.grant_id) == 1  # the refused call holds nothing
     assert limits.check_running(SAM.grant_id, 1) is None
     bridge.live.agent_of(first["chat_id"]).gate.set()
     assert tools.bot_wait(bridge, ROBIN, first["chat_id"], first["turn_id"])["status"] == "done"
-    assert limits.check_running(ROBIN.grant_id, 1) is None
+    assert limits.running_turns(ROBIN.grant_id) == 0 and limits.check_running(ROBIN.grant_id, 1) is None
+
+
+def test_parallel_prompts_cannot_all_pass_the_running_turn_limit(bridge):
+    """Regression (review X1b): the limit was a check, and three parallel calls all passed it before any of
+    them held a turn. The slot is now taken in the same step as the count."""
+    admit = _admit(bridge, ROBIN, 1)
+    barrier = threading.Barrier(3, timeout=10)
+
+    def admit_together():
+        barrier.wait()  # every caller reaches the limit before any of them has submitted anything
+        return admit()
+
+    outcomes: list = []
+
+    def prompt():
+        try:
+            outcomes.append(tools.bot_prompt(bridge, ROBIN, "default", "marker gated", wait_seconds=0,
+                                             admit=admit_together))
+        except bridge_server._Refused as refused:
+            outcomes.append(refused.refusal.code)
+
+    threads = [threading.Thread(target=prompt) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(20)
+    started = [o for o in outcomes if isinstance(o, dict)]
+    assert len(started) == 1 and sorted(o for o in outcomes if isinstance(o, str)) == ["busy", "busy"]
+    assert limits.running_turns(ROBIN.grant_id) == 1
+    bridge.live.agent_of(started[0]["chat_id"]).gate.set()
+    assert tools.bot_wait(bridge, ROBIN, started[0]["chat_id"], started[0]["turn_id"])["status"] == "done"
+    assert limits.running_turns(ROBIN.grant_id) == 0
+
+
+def test_a_submit_that_fails_gives_its_slot_back(bridge, monkeypatch):
+    admit = _admit(bridge, ROBIN, 1)
+    chat = tools.chat_new(bridge, ROBIN, "default")["chat_id"]
+
+    def refuse(*_a, **_k):
+        raise turns.WatchLimitReached("marker full")
+
+    monkeypatch.setattr(turns, "start_turn", refuse)
+    assert _fail(tools.bot_prompt, bridge, ROBIN, "default", "marker reply", chat_id=chat, admit=admit).code == "busy"
+    assert limits.running_turns(ROBIN.grant_id) == 0
 
 
 def test_prompts_are_limited_per_grant(monkeypatch):

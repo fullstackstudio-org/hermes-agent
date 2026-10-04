@@ -3,8 +3,10 @@ on anything a client chooses.
 
 * every tool call: :data:`TOOL_CALLS_PER_MINUTE` a minute;
 * ``bot_prompt``: :data:`PROMPTS_PER_WINDOW` in :data:`PROMPT_WINDOW_S`;
-* turns that have not concluded: ``dashboard.mcp.max_running_turns_per_grant`` (default 3), counted from the
-  grant's watches (:mod:`.turns`), so a turn that ends frees its slot without bookkeeping here;
+* turns that have not concluded: ``dashboard.mcp.max_running_turns_per_grant`` (default 3). A slot is RESERVED
+  (:func:`reserve_running`: count and take in one step under a lock, so parallel ``bot_prompt`` calls cannot all
+  pass a check before any of them holds a turn) before the prompt is submitted, and released exactly once: when
+  the submit fails, or when the turn it became concludes (or its watch is dropped);
 * one waiter per turn: :meth:`~tui_gateway.mcp_bridge.turns.TurnWatch.wait` hands a turn to the newest
   waiter and returns the older one at once.
 
@@ -90,20 +92,74 @@ def check_prompt(grant_id: str) -> Refusal | None:
                    "on this connection", _retry(wait))
 
 
-def running_turns(grant_id: str) -> int:
-    """Turns this grant submitted that have not concluded (queued ones included)."""
-    from tui_gateway.mcp_bridge import turns
+class Slot:
+    """One reserved running-turn slot of a grant. :meth:`release` gives it back; only the first call counts, so
+    every path that may end a turn (a failed submit, the turn's conclusion, its watch being dropped) can call it."""
 
-    return sum(1 for watch in turns.watches() if watch.grant == grant_id and not watch.concluded)
+    __slots__ = ("grant_id", "_released", "_lock")
+
+    def __init__(self, grant_id: str) -> None:
+        self.grant_id = grant_id
+        self._released = False
+        self._lock = threading.Lock()
+
+    @property
+    def released(self) -> bool:
+        return self._released
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        _release_slot(self.grant_id)
+
+
+_running_lock = threading.Lock()
+_running: dict[str, int] = {}
+
+
+def _release_slot(grant_id: str) -> None:
+    with _running_lock:
+        left = _running.get(grant_id, 0) - 1
+        if left > 0:
+            _running[grant_id] = left
+        else:
+            _running.pop(grant_id, None)
+
+
+def running_turns(grant_id: str) -> int:
+    """Running-turn slots this grant holds now (turns submitted that have not concluded, queued ones included,
+    and submits in progress)."""
+    with _running_lock:
+        return _running.get(grant_id, 0)
+
+
+def _busy(maximum: int) -> Refusal:
+    return Refusal("busy", f"{maximum} turns started through this connection have not finished; wait for one "
+                   "(bot_wait) or stop it (bot_interrupt)", 5)
+
+
+def reserve_running(grant_id: str, maximum: int) -> Slot | Refusal:
+    """Take one of the grant's *maximum* running-turn slots, or the ``busy`` refusal when all are held. The count
+    and the take are one step under a lock: of parallel callers at the limit, exactly as many as there are free
+    slots get one."""
+    with _running_lock:
+        held = _running.get(grant_id, 0)
+        if held >= maximum:
+            return _busy(maximum)
+        _running[grant_id] = held + 1
+    return Slot(grant_id)
 
 
 def check_running(grant_id: str, maximum: int) -> Refusal | None:
-    if running_turns(grant_id) < maximum:
-        return None
-    return Refusal("busy", f"{maximum} turns started through this connection have not finished; wait for one "
-                   "(bot_wait) or stop it (bot_interrupt)", 5)
+    """Whether a slot is free now, without taking it (a read for callers that only report; admission uses
+    :func:`reserve_running`)."""
+    return None if running_turns(grant_id) < maximum else _busy(maximum)
 
 
 def reset_for_tests() -> None:
     TOOL_CALLS.reset()
     PROMPTS.reset()
+    with _running_lock:
+        _running.clear()

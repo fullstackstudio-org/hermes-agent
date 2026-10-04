@@ -285,6 +285,9 @@ class TurnWatch:
         self._pending_end: list[tuple[str, int | None]] = []
         self._queue_position: int | None = None
         self._idle_unqueued_at: float | None = None
+        #: The grant's running-turn slot this turn holds (``limits.Slot``), given back once it concludes or the
+        #: watch is dropped (``Slot.release`` counts once).
+        self._slot: Any = None
         transport.set_event_sink(self._feed)
 
     # ── the emitting side (never blocks, never calls the gateway) ────────────────────────────
@@ -564,8 +567,25 @@ class TurnWatch:
         self.ended_at = time.monotonic()
         self._requests.clear()
         self._candidate = None
+        self._release_slot()
         self._schedule_detach()
         self._cond.notify_all()
+
+    def _release_slot(self) -> None:
+        """Caller holds the lock."""
+        slot, self._slot = self._slot, None
+        if slot is not None:
+            slot.release()
+
+    def _hold_slot(self, slot: Any) -> None:
+        """Take *slot* for this turn; a turn that already concluded (a fast one) gives it back at once."""
+        if slot is None:
+            return
+        with self._cond:
+            if self._status in TERMINAL_STATUSES or self._detached:
+                slot.release()
+            else:
+                self._slot = slot
 
     def _open_request(self, request_id: str, method: str, params: dict) -> None:
         if request_id in self._requests:
@@ -790,6 +810,7 @@ class TurnWatch:
                 return
             self._detached = True
             timer, self._detach_timer = self._detach_timer, None
+            self._release_slot()  # a watch dropped before its turn concluded (eviction) holds no slot
         if timer is not None:
             timer.cancel()
         self._transport.set_event_sink(None)
@@ -871,7 +892,8 @@ def watches_of(chat_id: str, *, identity: dict) -> list[TurnWatch]:
 
 
 def start_turn(transport: AgentTransport, *, chat_id: str, session_id: str, text: str,
-               params: dict | None = None, timeout: float | None = rpc.DEFAULT_TIMEOUT_S) -> TurnWatch:
+               params: dict | None = None, timeout: float | None = rpc.DEFAULT_TIMEOUT_S,
+               slot: Any = None) -> TurnWatch:
     """Submit *text* to the live session *session_id* (the stored chat *chat_id*, already resumed or created
     on *transport*) and return the watch of the turn it starts or joins.
 
@@ -881,7 +903,9 @@ def start_turn(transport: AgentTransport, *, chat_id: str, session_id: str, text
     :class:`WatchLimitReached`, :class:`~tui_gateway.mcp_bridge.rpc.GatewayRestarting`
     (5035), :class:`~tui_gateway.mcp_bridge.rpc.RpcError` (4001 for a session this person may not act on,
     4009 busy, ...), or any other :class:`~tui_gateway.mcp_bridge.rpc.BridgeError`. *params* adds
-    ``prompt.submit`` parameters (``queued``, ...), checked by the RPC allowlist."""
+    ``prompt.submit`` parameters (``queued``, ...), checked by the RPC allowlist. *slot* (a grant's reserved
+    running-turn slot) is the watch's from success on, released when the turn concludes; on failure the caller
+    keeps it."""
     if not isinstance(transport, AgentTransport):
         raise rpc.DisallowedCall("a turn is watched on an AgentTransport only")
     if transport.has_event_sink:
@@ -909,6 +933,7 @@ def start_turn(transport: AgentTransport, *, chat_id: str, session_id: str, text
         _unregister(watch)
         transport.set_event_sink(None)
         raise
+    watch._hold_slot(slot)  # only now: on any failure above the slot stays the caller's
     watch._set_mode(str(result.get("status") or ""), result.get("user_row_id"))
     if watch.submit_status == "queued":
         watch._probe_queue()

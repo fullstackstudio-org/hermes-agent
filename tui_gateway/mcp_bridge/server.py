@@ -209,11 +209,17 @@ class Endpoint:
         self._audit("mcp_tool_call", **fields, outcome="ok", **extra)
         return _result(result)
 
-    def _admit_prompt(self, caller: Caller) -> None:
-        refusal = limits.check_running(caller.grant_id, self.bridge.settings.max_running_turns_per_grant) \
-            or limits.check_prompt(caller.grant_id)
+    def _admit_prompt(self, caller: Caller) -> limits.Slot:
+        """The prompt limits of the grant: one running-turn slot, reserved (the caller hands it to the turn's
+        watch, or releases it when the submit fails), and one prompt of the window."""
+        slot = limits.reserve_running(caller.grant_id, self.bridge.settings.max_running_turns_per_grant)
+        if isinstance(slot, limits.Refusal):
+            raise _Refused(slot)
+        refusal = limits.check_prompt(caller.grant_id)
         if refusal is not None:
+            slot.release()
             raise _Refused(refusal)
+        return slot
 
     def _refused(self, fields: dict, refusal: limits.Refusal) -> CallToolResult:
         if refusal.code == "rate_limited":

@@ -173,7 +173,9 @@ class Endpoint:
         refusal = limits.check_tool_call(caller.grant_id)
         if refusal is not None:  # before any store read: a flood of refused calls costs no sqlite
             return self._refused(fields, refusal)
-        # A store read (sqlite): on a worker thread, never on the event loop.
+        # A store read (sqlite): on a worker thread, never on the event loop. Not abandoned on cancel: a call
+        # cancelled while it reads waits for the read, and the cancellation lands at the tool's own await below,
+        # before the tool starts, which audits it as cancelled.
         session_key = await anyio.to_thread.run_sync(self._audited_chat, caller, chat_id,
                                                      limiter=_thread_limiter())
         fields["session_key"] = session_key

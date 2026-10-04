@@ -387,6 +387,36 @@ def test_the_audits_chat_lookup_runs_after_the_rate_limit_and_off_the_event_loop
     assert reads == []
 
 
+def test_a_call_cancelled_during_the_audits_chat_lookup_is_audited_as_cancelled(bridge, monkeypatch):
+    """The call goes away while its chat lookup runs on a worker thread: no tool runs, and the call still has its
+    ``cancelled`` audit line (naming no chat), as one cancelled while the tool runs does."""
+    monkeypatch.setattr(bridge_server, "caller_from_token", lambda: ROBIN)
+    reading, release = threading.Event(), threading.Event()
+    ran: list = []
+
+    def chats_for(_login):
+        reading.set()
+        release.wait(5)
+        return []
+
+    monkeypatch.setattr(bridge.store, "chats_for", chats_for)
+    endpoint = bridge_server.Endpoint(bridge)
+
+    async def call():
+        async with anyio.create_task_group() as group:
+            group.start_soon(lambda: endpoint.run(None, "chat_history", "bots:read",
+                                                  lambda *a, **k: ran.append(a) or {}, "20990101_000000_marker",
+                                                  chat_id="20990101_000000_marker"))
+            await anyio.to_thread.run_sync(reading.wait, 5)
+            group.cancel_scope.cancel()
+            release.set()
+
+    anyio.run(call)
+    assert ran == []
+    lines = [fields for event, fields in bridge.audits if event == "mcp_tool_call"]
+    assert [(f["outcome"], f["session_key"], f["tool"]) for f in lines] == [("cancelled", "", "chat_history")]
+
+
 def test_a_full_draft_store_never_evicts_another_grants_new_chat(bridge):
     from tui_gateway.mcp_bridge.transport import AgentTransport
 

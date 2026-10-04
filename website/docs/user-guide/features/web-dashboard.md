@@ -594,6 +594,12 @@ Returns metadata for a single session.
 
 Returns a bounded page of message history, including tool calls and timestamps. By default it returns the latest 500 messages in chronological order. Use `limit` (maximum 500), `offset`, and `order=oldest|latest` for explicit pagination.
 
+### GET /api/files/images/\{name\}
+
+The bytes of an image attached to a chat, so a client can show the picture a conversation names. A user turn names an attached image by its path (`[Image attached at: <profile home>/images/<name>]`, or `@image:<path>` in history text); the client takes the last path segment as `name`. Query parameter: `profile` (the dashboard's own profile when omitted; unknown profiles return `404`, invalid names `400`).
+
+Only a regular file directly in `<profile home>/images/` is served, with an image suffix (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.bmp`) and at most 25 MB: `name` is one path component, neither the folder nor the file may be a symbolic link, and the managed-files root (`HERMES_DASHBOARD_FILES_ROOT`) does not widen or narrow it. Anything else is `404`, without saying whether the file exists. The response is `image/*` with `X-Content-Type-Options: nosniff` and `Content-Disposition: inline`. It needs the dashboard session (header or cookie), like every `/api/` route; the `?token=` query parameter is not accepted here.
+
 ### GET /api/sessions/search
 
 Full-text search across message content. Query parameter: `q`. Returns matching session IDs with highlighted snippets.

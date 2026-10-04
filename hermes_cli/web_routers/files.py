@@ -508,6 +508,77 @@ async def stream_managed_file(request: Request, path: str):
     return _managed_file_response(request, path, content_disposition_type="inline", media_only=True)
 
 
+# GET /api/files/images/{name}: the images clients attached to a chat (``image.attach_bytes`` writes
+# them to ``<profile home>/images/upload_<ts>_<n>.<ext>``; the conversation names them by that path).
+# Only a plain file directly in that one directory, with an image suffix, is served: no other
+# directory, no link, no subfolder, whatever the managed-files root is.
+_ATTACHED_IMAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
+_ATTACHED_IMAGE_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+    ".webp": "image/webp", ".bmp": "image/bmp",
+}
+_ATTACHED_IMAGE_MAX_BYTES = 25 * 1024 * 1024  # image.attach_bytes refuses anything larger
+
+
+def _read_attached_image(images_dir: Path, name: str) -> bytes:
+    """The bytes of ``images_dir/name``, opened without following a link at either step."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow | getattr(os, "O_CLOEXEC", 0)
+    if not upload_dirs.supported():  # no dir_fd/O_NOFOLLOW (Windows): refuse links by lstat instead
+        target = images_dir / name
+        if images_dir.is_symlink() or target.is_symlink() or not target.is_file():
+            raise HTTPException(status_code=404, detail="Image not found")
+        if target.stat().st_size > _ATTACHED_IMAGE_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Image is too large")
+        return target.read_bytes()
+    try:
+        dir_fd = os.open(str(images_dir), dir_flags)
+    except OSError:
+        raise HTTPException(status_code=404, detail="Image not found")
+    try:
+        fd = os.open(name, os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0), dir_fd=dir_fd)
+    except OSError:
+        raise HTTPException(status_code=404, detail="Image not found")
+    finally:
+        os.close(dir_fd)
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise HTTPException(status_code=404, detail="Image not found")
+        if info.st_size > _ATTACHED_IMAGE_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Image is too large")
+        return handle.read(_ATTACHED_IMAGE_MAX_BYTES + 1)
+
+
+@router.get("/api/files/images/{name}")
+async def get_attached_image(name: str, profile: Optional[str] = None):
+    """An image attached to a chat of ``profile`` (the dashboard's own when absent), by file name.
+
+    The name is one path component (``upload_20261004_120000_1.png``); the file must be a regular file
+    directly in ``<profile home>/images/``. Anything else is 404, with no hint whether it exists."""
+    from fastapi.responses import Response
+    from hermes_cli.web_server_cron import _cron_profile_home
+
+    suffix = Path(name).suffix.lower()
+    if not _ATTACHED_IMAGE_NAME_RE.match(name) or ".." in name or suffix not in _ATTACHED_IMAGE_TYPES:
+        raise HTTPException(status_code=404, detail="Image not found")
+    _canon, home = _cron_profile_home(profile)
+    try:
+        images_dir = Path(home).resolve() / "images"
+    except (OSError, RuntimeError):
+        raise HTTPException(status_code=404, detail="Image not found")
+    data = await asyncio.to_thread(_read_attached_image, images_dir, name)
+    return Response(
+        content=data,
+        media_type=_ATTACHED_IMAGE_TYPES[suffix],
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f'inline; filename="{name}"',
+            "Cache-Control": "private, max-age=3600",
+        },
+    )
+
+
 @dataclass(frozen=True)
 class _NoFollowTarget:
     """A write below ``uploads/hermie``: *anchor* is the folder that holds ``uploads`` (its own symlinks resolved:

@@ -437,8 +437,15 @@ off; the rest, as a text of one line, must pass §6.2 (characters) and §6.3 (la
 and the length of a line; the limits for blank lines in a row do not come into play on one line) with the same
 numbers, and no whitespace at its end (§6.1 does not strip here: a line with whitespace at its end is refused, not
 rewritten, because a change that only adds or removes it would be invisible). A blank context line is a single
-space. A tab, a carriage return that is part of a line, a bidi or zero-width character, a long run of spaces or a
-line of more than 500 code points refuses the diff. The header must pass the same rule as a whole.
+space. A carriage return that is part of a line, a bidi or zero-width character, whitespace at the end of a line, a
+long run of spaces or a line of more than 500 code points refuses the diff.
+
+One difference from §6.2: **U+0009 (tab) is allowed** in a hunk line and in a header's section text, leading and
+inside the line, so that Go, Makefile and other tab-indented code can be reviewed. A tab counts as one code point
+for the 500 limit and as a character that is not a space for §6.3 (it ends the indent and a run of spaces: only
+spaces are counted there). Whitespace at the end of a line stays refused, a tab included, and every other
+character §6.2 refuses stays refused. A client MUST show a tab visibly, as a marker or as a fixed-width tab stop,
+never hidden, collapsed or silently turned into spaces. The header must pass the same rule as a whole.
 
 A client shows a hunk monospaced, one row per line, with the marker in a gutter apart from the text, added and
 removed lines distinguished by more than colour, and scrolls long rows sideways instead of wrapping them into a

@@ -400,7 +400,7 @@ def test_review_diff_round_trip_hands_back_the_patch_of_the_approved_hunks(serve
     _caps(server, phone, requests=list(ALL))
     release = _bind_ui_session("s1")
     try:
-        for bad in ({"diff": "a\tb"}, {"diff": "--- a/x\n+++ b/x\n"}, {"diff": DIFF, "path": "other.txt"},
+        for bad in ({"diff": "@@ -1 +1 @@\n-a\n+b\rc\n"}, {"diff": "--- a/x\n+++ b/x\n"}, {"diff": DIFF, "path": "other.txt"},
                     {"diff": "Binary files a/x and b/x differ\n"}, {"diff": DIFF, "summary": ""}):
             assert "error" in json.loads(tool.review_diff_tool(**{"summary": "x", **bad}))
         assert phone.requests("review.diff") == []

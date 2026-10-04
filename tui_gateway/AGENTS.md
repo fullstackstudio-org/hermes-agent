@@ -184,7 +184,7 @@ existing file when the client said not to overwrite.
 into hunks the gateway numbers (`h1..`) and bounds (64 KiB, 200 hunks, 400 lines per hunk, 500 characters per
 line, 200 per header) and the request carries those hunks, never the agent's text. A hunk is read by its header's
 counts (the way `patch` does); every line passes `request_text.verbatim_problem` with its marker (space, `+`, `-`)
-taken off, so a tab, a CR that is part of a line, a hidden character or trailing whitespace refuses the diff instead
+taken off (a tab is allowed, leading and inside a line, so Go and Makefile diffs work), so a CR that is part of a line, a hidden character or trailing whitespace (a tab included) refuses the diff instead
 of being rewritten (a diff whose own line ending is CRLF is read like an LF one). Binary diffs, several files and a
 diff without a hunk are refused; the file's head (modified, new, deleted, renamed, from the `---`/`+++`,
 `new file mode`, `deleted file mode` and `rename from/to` lines) is read into a structure and the header the agent

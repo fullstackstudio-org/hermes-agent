@@ -1823,6 +1823,38 @@
               }
             ]
           }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_diff_go",
+          "method": "review.diff",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to main.go",
+            "summary": "I changed the loop bound and print the double of each value. The file is indented with tabs.",
+            "path": "cmd/main.go",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ -5,4 +5,5 @@ func main() {",
+                "lines": [
+                  " func main() {",
+                  " \tfor i := 0; i < 3; i++ {",
+                  "-\t\tfmt.Println(i)",
+                  "+\t\tfmt.Println(i)",
+                  "+\t\tfmt.Println(i * 2)",
+                  " \t}"
+                ]
+              }
+            ]
+          }
         }
       ],
       "invalid_frames": [
@@ -2278,6 +2310,32 @@
             ]
           },
           "note": "Ids are unique within the request; JSON Schema cannot compare two items."
+        },
+        {
+          "name": "line_with_a_vertical_tab",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to main.go",
+            "summary": "I changed the loop bound and print the double of each value. The file is indented with tabs.",
+            "path": "cmd/main.go",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ -5,4 +5,5 @@ func main() {",
+                "lines": [
+                  "+one\u000btwo"
+                ]
+              }
+            ]
+          }
         }
       ],
       "answers": [
@@ -2334,6 +2392,17 @@
               "h1": "rejected"
             }
           }
+        },
+        {
+          "name": "approved_the_tab_indented_hunk",
+          "request": "req_diff_go",
+          "result": {
+            "decision": "approved",
+            "hunks": {
+              "h1": "approved"
+            }
+          },
+          "note": "Tabs are allowed in a hunk line; the client shows them visibly."
         }
       ],
       "invalid_answers": [

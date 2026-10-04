@@ -316,8 +316,9 @@ REVIEW_DIFF_SCHEMA = {
         "reject each BEFORE you write them. Pass the unified diff of that one file as it is (the output of git diff "
         "-- <file> or diff -u): no Markdown fence, no commentary around it. The gateway reads the diff itself and "
         "numbers the hunks; at most 64 KiB, 200 hunks, 400 lines per hunk and 500 characters per line. Every line is "
-        "shown exactly as written, so a diff with a tab, a carriage return (a CRLF file), whitespace at the end of a "
-        "line, a hidden character, more than 16 spaces in a row or a line indented more than 32 spaces is refused "
+        "shown exactly as written (tabs are fine), so a diff with a carriage return (a CRLF file), whitespace at the "
+        "end of a line, a hidden character, more than 16 spaces in a row or a line indented more than 32 spaces is "
+        "refused "
         "and the error names the line; a binary diff or a diff of several files (one call per file) is refused too. "
         + _VERBATIM +
         "Outcomes: 'approved' — approved_patch is the patch of exactly the approved hunks, in git's form, written by "

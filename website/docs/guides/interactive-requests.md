@@ -161,11 +161,11 @@ background) gets a fresh two-minute window from that moment, never past the 300-
   Requests that reached no app do not count.
 - A diff is one file's unified diff (`git diff -- <file>` or `diff -u`), at most 64 KiB, 200 hunks, 400 lines per
   hunk and 500 characters per line. The gateway reads it itself and refuses what cannot be shown as written, naming
-  the hunk and the line: a tab, a carriage return (a CRLF file), whitespace at the end of a line, a hidden or
+  the hunk and the line: a carriage return (a CRLF file), whitespace at the end of a line, a hidden or
   bidirectional character, more than 16 spaces in a row, a line indented by more than 32 spaces; also a binary diff,
   a diff of several files (one call per file), a quoted file name, an absolute path or one with `..`, and anything
-  around the diff such as a Markdown fence. A code file indented with tabs cannot be reviewed this way: the agent
-  is told what to change, nothing is rewritten.
+  around the diff such as a Markdown fence. Tabs are fine (apps show them visibly). The agent is told what to
+  change, nothing is rewritten.
 - Ten refused answers end a request.
 - Each request and each outcome writes one record to the dashboard auth audit log
   (`$HERMES_HOME/logs/dashboard-auth.log`, events `interactive_request` and `interactive_outcome`): the session,

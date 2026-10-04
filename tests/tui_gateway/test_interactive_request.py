@@ -463,7 +463,8 @@ def test_a_diff_of_bare_hunks_takes_the_agents_path_and_cleans_nothing(build):
 
 @pytest.mark.parametrize("kwargs, message", [
     ({"diff": ""}, "diff is required"), ({"diff": None}, "diff is required"), ({"diff": 5}, "diff is required"),
-    ({"diff": DIFF.replace("two and a half", "two\tand")}, r"Hunk h2, line 4 .*U\+0009"),
+    ({"diff": DIFF.replace("two and a half", "two\u200band")}, r"Hunk h2, line 4 .*U\+200B"),
+    ({"diff": DIFF.replace("two and a half", "two\t")}, r"Hunk h2, line 4 .*whitespace at the end"),
     ({"diff": DIFF.replace("BETA2", "BETA2 ")}, "Hunk h1, line 4 .*whitespace at the end"),
     ({"diff": DIFF.replace("BETA2", "BE\u202eTA")}, r"U\+202E"),
     ({"diff": "Binary files a/x and b/x differ\n"}, "binary diff cannot be reviewed"),
@@ -863,8 +864,8 @@ def test_the_tool_bridge_builds_asks_and_returns_the_patch(server, build):
     assert outcome.status == "approved"
     assert outcome.payload["approved_patch"].startswith("diff --git a/src/notes.py b/src/notes.py\n")
     assert "@@ -20" not in outcome.payload["approved_patch"]
-    with pytest.raises(build.InteractiveParamsError, match="U\\+0009"):
-        build.request_from_tool("s1", "review.diff", summary="x", diff="@@ -1 +1 @@\n-a\n+b\tc\n")
+    with pytest.raises(build.InteractiveParamsError, match="U\\+000D"):
+        build.request_from_tool("s1", "review.diff", summary="x", diff="@@ -1 +1 @@\n-a\n+b\rc\n")
 
 
 def test_a_diff_review_in_a_shared_session_naming_nobody_is_unavailable_with_nothing_sent(server, build):

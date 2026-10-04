@@ -11,7 +11,8 @@ nothing is repaired; a diff that cannot be shown as it is raises :class:`DiffErr
   so a removed line that looks like ``--- x`` is content; counts that do not match the lines refuse the diff. Starting
   line numbers are not checked;
 - every line passes the verbatim rules of README §6.2 and §6.3 (:func:`line_problem`): the marker (space, ``+`` or
-  ``-``) is taken off first and the rest is checked as one line of text, so a tab, a carriage return that is part of
+  ``-``) is taken off first and the rest is checked as one line of text (:func:`text_problem`: a tab is the one
+  exception to README §6.2, so Go and Makefile diffs can be reviewed), so a carriage return that is part of
   the line (CRLF content), a hidden character, whitespace at the end of a line or a long run of spaces refuses the
   diff, never rewrites it. A blank context line is one space (an empty line inside a hunk is read as that);
 - the line ending of the DIFF itself may be CRLF (every line, the last one aside, ends in CR: they are all removed);
@@ -96,17 +97,30 @@ class ParsedDiff:
 # ── one line ──────────────────────────────────────────────────────────────────────────────────
 
 
+def text_problem(text: str) -> str:
+    """Why *text*, one line of a hunk without its marker (or a header), cannot be shown as it is, or "". README §6.2
+    and §6.3 with ONE difference for a diff: U+0009 is allowed, leading and inside the line. It counts as one code
+    point, as a character that is not a space (so it ends an indent and a run of spaces), and a client shows it
+    visibly (a marker or a fixed-width tab stop), never hidden. Whitespace at the end of the line, a tab included, is
+    still refused: no rendering shows it."""
+    if problem := verbatim_problem(text.replace("\t", "x")):
+        return problem
+    if text != text.rstrip():
+        return "whitespace at the end of a line or of the text cannot be seen"
+    return ""
+
+
 def line_problem(line: str) -> str:
     """Why the hunk line *line* (marker included) cannot be shown as it is, or "". The rule of README §7: at most
     :data:`MAX_LINE_CHARS` code points; the line is the ``\\ No newline at end of file`` marker or starts with a space,
-    ``+`` or ``-``; the rest, taken as one line of text, passes ``verbatim_problem`` (§6.2 and §6.3)."""
+    ``+`` or ``-``; the rest, taken as one line of text, passes :func:`text_problem` (§6.2 and §6.3, tabs allowed)."""
     if len(line) > MAX_LINE_CHARS:
         return f"it is {len(line)} characters (at most {MAX_LINE_CHARS})"
     if line == NO_NEWLINE:
         return ""
     if line[:1] not in (" ", "+", "-"):
         return "it does not start with a space, + or -"
-    return verbatim_problem(line[1:])
+    return text_problem(line[1:])
 
 
 def header_problem(header: str) -> str:
@@ -115,7 +129,7 @@ def header_problem(header: str) -> str:
         return f"it is {len(header)} characters (at most {MAX_HEADER_CHARS})"
     if HEADER.fullmatch(header) is None:
         return "it is not of the form @@ -a,b +c,d @@"
-    return verbatim_problem(header)
+    return text_problem(header)
 
 
 def _short(line: str) -> str:

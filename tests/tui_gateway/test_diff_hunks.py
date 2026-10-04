@@ -384,7 +384,8 @@ def test_a_blank_context_line_is_one_space_or_an_empty_line():
     ("@@@ -1,2 -1,2 +1,2 @@@\n a\n", "not of the form"),
     ("@@ -1,2 +1,2\n a\n", "not of the form"),
     ("@@ -1 +1 @@\n?a\n+b\n", "does not fit"),
-    ("@@ -1 +1 @@ tab\there\n-a\n+b\n", "cannot be shown"),
+    ("@@ -1 +1 @@ \u202ebidi\n-a\n+b\n", "cannot be shown"),
+    ("@@ -1 +1 @@ tab\t\n-a\n+b\n", "whitespace at the end"),
 ])
 def test_a_hunk_whose_counts_or_lines_do_not_fit_is_refused(text, match):
     with pytest.raises(dh.DiffError, match=match):
@@ -454,7 +455,10 @@ def test_at_most_64_kib_of_diff():
 
 
 @pytest.mark.parametrize("line, why", [
-    ("+tab\there", "U+0009"),
+    ("+trailing tab\t", "whitespace at the end"),
+    ("-\t", "whitespace at the end"),
+    ("+tab\t then spaces" + " " * 17 + "y", "17 spaces in a row"),
+    ("+" + " " * 33 + "\tx", "indented 33 spaces"),
     ("+bidi ‮ text", "U+202E"),
     ("+zero​width", "U+200B"),
     ("+nbsp here", "U+00A0"),
@@ -490,7 +494,7 @@ def test_the_marker_is_not_part_of_the_rule_and_the_rest_is_a_line_of_text():
 
 
 def test_an_error_names_the_hunk_and_the_line_and_quotes_little():
-    text = _hunk(" a", " b", "+" + "x\ty" + "z" * 100)
+    text = _hunk(" a", " b", "+" + "x\u202ey" + "z" * 100)
     with pytest.raises(dh.DiffError) as caught:
         dh.parse(text)
     message = str(caught.value)
@@ -504,3 +508,60 @@ def test_a_diff_that_is_not_text_is_refused():
             dh.parse(bad)
     with pytest.raises(dh.DiffError, match="surrogate"):
         dh.parse("@@ -1 +1 @@\n-a\n+\ud800\n")
+
+
+# ── tabs ────────────────────────────────────────────────────────────────────────────────────────
+
+
+def test_a_tab_is_allowed_leading_and_inside_a_line_and_counts_as_one_character():
+    for line in ("+\tif x {", " \t\treturn a\tb", "-\t\t// comment\twith a tab", "+a\tb"):
+        assert dh.line_problem(line) == "", line
+    assert dh.line_problem("+\t") != ""                   # a tab at the end is whitespace nobody sees
+    assert dh.line_problem("+" + "\t" * 499) != ""        # all tabs: nothing visible, whitespace at the end
+    assert dh.line_problem("+" + "\t" * 498 + "x") == ""  # 500 code points
+    assert dh.line_problem("+" + "\t" * 499 + "x") != ""   # 501: over the limit, a tab counts as one
+    # A tab is not a space: it ends the indent and a run of spaces (README §6.3 counts spaces only).
+    assert dh.line_problem("+" + " " * 32 + "\t" + " " * 16 + "x") == ""     # 32 of indent, then a run of 16
+    assert dh.line_problem("+" + " " * 32 + "\t" + " " * 17 + "x") != ""     # the run after the tab is a run, not indent
+    assert dh.line_problem("+x" + " " * 16 + "\t" + " " * 16 + "y") == ""
+    assert dh.line_problem("+x" + " " * 17 + "\ty") != ""
+    # Every other character the README refuses stays refused.
+    for bad in ("+\x0b", "+a\x0cb", "+a\rb", "+a\u00a0b", "+a\u202eb", "+a\u200bb", "+a\x00b"):
+        assert dh.line_problem(bad) != "", repr(bad)
+
+
+GO = """package main
+
+import "fmt"
+
+func main() {
+\tfor i := 0; i < 3; i++ {
+\t\tfmt.Println(i)
+\t}
+}
+"""
+
+
+@needs_git
+def test_a_tab_indented_go_diff_round_trips(repo):
+    repo.write("main.go", GO)
+    repo.write("Makefile", "all:\n\tgo build ./...\n")
+    repo.commit()
+    new = GO.replace("i < 3", "i < 5").replace("\t\tfmt.Println(i)", "\t\tfmt.Println(i)\n\t\tfmt.Println(i * 2)")
+    repo.write("main.go", new)
+    text = repo.diff("--", "main.go")
+    assert "\t\tfmt.Println(i * 2)" in text
+    parsed = dh.parse(text)
+    assert any(line.startswith("+\t\tfmt.Println(i * 2)") for h in parsed.hunks for line in h.lines)
+    assert parsed.hunks[0].header.startswith("@@ -")
+    repo.git("checkout", "--", "main.go")
+    repo.apply(_compose(parsed, {h.id for h in parsed.hunks}))
+    assert (repo.root / "main.go").read_text() == new
+    repo.write("Makefile", "all:\n\tgo build ./...\n\tgo test ./...\n")
+    make = dh.parse(repo.diff("--", "Makefile"))
+    assert make.hunks[0].lines[-1] == "+\tgo test ./..."
+
+
+def test_a_tab_in_a_hunk_header_s_section_text_is_allowed():
+    parsed = dh.parse("@@ -1 +1 @@ func\t(a int)\n-a\n+b\n")
+    assert parsed.hunks[0].header == "@@ -1 +1 @@ func\t(a int)"

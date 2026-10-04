@@ -165,3 +165,115 @@ def test_python_that_does_not_parse_is_still_read_line_by_line(tmp_path):
     _commit_all(plugin)
     found = [f for f in scan_plugin(plugin).findings if f.pattern_id == "archive_on_sys_path"]
     assert [f.line for f in found] == [3]
+
+
+# ── code a plugin builds at run time and executes (HERM-197 (1)) ────────────────────────────
+
+RUNTIME_CODE_IDS = {"exec_dynamic_code", "compile_dynamic_code", "marshal_code", "import_hook_change"}
+
+
+def _runtime_code_cases(marker) -> dict:
+    import base64
+    import marshal
+
+    payload = _payload(marker)
+    encoded = base64.b64encode(payload.encode()).decode()
+    code = marshal.dumps(compile(payload, "payload", "exec"))
+    return {
+        "exec(open(p).read())": (
+            "import os\nexec(open(os.path.join(os.path.dirname(__file__), 'data.txt')).read())\n",
+            {"data.txt": payload}, "exec_dynamic_code"),
+        "exec(base64.b64decode(...))": (
+            f"import base64\nexec(base64.b64decode({encoded!r}))\n", {}, "exec_dynamic_code"),
+        "marshal.loads": (
+            f"import marshal\nexec(marshal.loads({code!r}))\n", {}, "marshal_code"),
+        "marshal.loads into a function": (
+            f"import types\nfrom marshal import loads as l\ntypes.FunctionType(l({code!r}), {{}})()\n", {},
+            "marshal_code"),
+        "compile(src, PATH, 'exec')": (
+            "import os\nPATH = os.path.join(os.path.dirname(__file__), 'data.txt')\n"
+            "code = compile(open(PATH).read(), PATH, 'exec')\nexec(code)\n",
+            {"data.txt": payload}, "compile_dynamic_code"),
+        "exec(pkgutil.get_data(...))": (
+            "import pkgutil\nexec(pkgutil.get_data(__name__, 'data.txt'))\n", {"data.txt": payload},
+            "exec_dynamic_code"),
+        "eval(compile(...))": (
+            f"import base64\neval(compile(base64.b64decode({encoded!r}), 'x', mode='exec'))\n", {},
+            "exec_dynamic_code"),
+        "builtins.exec": (
+            f"import base64, builtins as b\nb.exec(base64.b64decode({encoded!r}))\n", {}, "exec_dynamic_code"),
+        "getattr(builtins, 'exec')": (
+            f"import base64, builtins\ngetattr(builtins, 'exec')(base64.b64decode({encoded!r}))\n", {},
+            "exec_dynamic_code"),
+    }
+
+
+@pytest.mark.parametrize("case", list(_runtime_code_cases(None)))
+def test_code_built_at_run_time_runs_and_is_flagged(tmp_path, case):
+    marker = tmp_path / "ran.txt"
+    init, extra, pattern = _runtime_code_cases(marker)[case]
+    plugin = _plugin(tmp_path, {"__init__.py": init, **extra})
+    _commit_all(plugin)
+    _load_with_the_loader(plugin)
+    assert marker.read_text() == "PAYLOAD RAN"          # the route is real
+    result = scan_plugin(plugin)
+    assert any(f.pattern_id == pattern and f.severity == "high" for f in result.findings), result.findings
+    assert result.verdict != "safe"
+    assert should_allow_plugin_install(result)[0] is not True
+
+
+@pytest.mark.parametrize("line", [
+    "sys.meta_path.insert(0, Finder())",
+    "sys.meta_path.append(Finder())",
+    "sys.meta_path[:0] = [Finder()]",
+    "sys.meta_path = [Finder()] + sys.meta_path",
+    "sys.meta_path += [Finder()]",
+    "sys.path_hooks.append(Finder)",
+    "sys.path_hooks.insert(0, Finder)",
+    "sys.path_importer_cache['/x'] = Finder()",
+    "setattr(sys, 'meta_path', [Finder()])",
+    "import sys as s\ns.meta_path.insert(0, Finder())",
+    "from sys import meta_path as m\nm.insert(0, Finder())",
+])
+def test_a_change_to_the_import_machinery_is_flagged(tmp_path, line):
+    plugin = _plugin(tmp_path, {"__init__.py": (
+        "import sys\nclass Finder:\n    def find_spec(self, *a, **k):\n        return None\n" + line + "\n")})
+    _commit_all(plugin)
+    assert "import_hook_change" in _ids(plugin, at_least="high"), line
+
+
+@pytest.mark.parametrize("line", [
+    "eval('1 + 1')",
+    "exec(b'VALUE = 2')",
+    "PATTERN = re.compile(r'\\d+')",
+    "code = compile('1 + 1', '<x>', 'eval')",
+    "code = compile(source, '<x>', 'eval')",
+    "model.eval()",
+    "query.exec(statement)",
+    "finders = [f for f in sys.meta_path]",
+    "hooks = len(sys.path_hooks)",
+    "data = marshal.dumps({'a': 1})",
+    "proc = asyncio.create_subprocess_exec('ls')",
+    "'''exec(open(p).read()) and sys.meta_path.insert(0, x) in a docstring'''",
+])
+def test_ordinary_code_is_not_runtime_code(tmp_path, line):
+    plugin = _plugin(tmp_path, {"__init__.py": (
+        "import asyncio, marshal, re, sys\nsource = '1'\nmodel = query = statement = None\n"
+        f"def f():\n    {line}\n")})
+    _commit_all(plugin)
+    assert not _ids(plugin) & RUNTIME_CODE_IDS, line
+
+
+def test_runtime_code_in_a_test_tree_steps_down(tmp_path):
+    """A test that evals a fixture is reported at medium, like every other finding under tests/."""
+    plugin = _plugin(tmp_path, {"__init__.py": "", "tests/test_x.py": "def test_x(expr):\n    assert eval(expr, {})\n"})
+    _commit_all(plugin)
+    result = scan_plugin(plugin)
+    assert [f.severity for f in result.findings if f.pattern_id == "exec_dynamic_code"] == ["medium"]
+    assert result.verdict == "safe"
+
+
+def test_exec_of_unpacked_arguments_is_flagged(tmp_path):
+    plugin = _plugin(tmp_path, {"__init__.py": "parts = ['VALUE = 1']\nexec(*parts)\n"})
+    _commit_all(plugin)
+    assert "exec_dynamic_code" in _ids(plugin, at_least="high")

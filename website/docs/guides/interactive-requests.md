@@ -162,8 +162,8 @@ background) gets a fresh two-minute window from that moment, never past the 300-
 - A diff is one file's unified diff (`git diff -- <file>` or `diff -u`), at most 64 KiB, 200 hunks, 400 lines per
   hunk and 500 characters per line. The gateway reads it itself and refuses what cannot be shown as written, naming
   the hunk and the line: a carriage return (a CRLF file), whitespace at the end of a line, a hidden or
-  bidirectional character, more than 16 columns of spaces in a row, a line indented by more than 32 columns (a tab
-  counts as a stop every 8 columns, so four tab levels fit); also a binary diff, a diff of several files (one call
+  bidirectional character, more than 32 columns of spaces and tabs in a row, a line indented by more than 96 columns (a
+  tab counts as a stop every 8 columns, so twelve tab levels fit); also a binary diff, a diff of several files (one call
   per file), a quoted file name, an absolute path or one with `..` or `.git`, a change of file mode, a new or deleted
   symbolic link, submodule or executable file (only regular files, mode 100644), a `\ No newline at end of file`
   line anywhere but directly after the last `-` or `+` line of the last hunk, and anything around the diff such as

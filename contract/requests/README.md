@@ -443,28 +443,30 @@ A client shows `kind` (a new, deleted or renamed file is not a plain edit: "New 
 
 Every line is shown verbatim: the person sees exactly what would be written. The gateway refuses to build the
 request when a line does not pass, so a client only ever receives lines that do. The rule, per line: take the marker
-off; the rest, as a text of one line, must pass §6.2 (characters) and §6.3 (layout: the indent, a run of spaces
-and the length of a line; the limits for blank lines in a row do not come into play on one line) with the same
-numbers, and no whitespace at its end (§6.1 does not strip here: a line with whitespace at its end is refused, not
-rewritten, because a change that only adds or removes it would be invisible). A blank context line is a single
-space. A carriage return that is part of a line, a bidi or zero-width character, whitespace at the end of a line, a
-long run of spaces or a line of more than 500 code points refuses the diff.
+off; the rest, as a text of one line, must pass §6.2 (characters) with the one difference below, the layout limits
+below (a diff's own, not §6.3's), and no whitespace at its end (§6.1 does not strip here: a line with whitespace at
+its end is refused, not rewritten, because a change that only adds or removes it would be invisible). A blank context
+line is a single space. A carriage return that is part of a line, a bidi or zero-width character, whitespace at the
+end of a line, a wide run of whitespace or a line of more than 500 code points refuses the diff.
 
-One difference from §6.2: **U+0009 (tab) is allowed** in a hunk line and in a header's section text, leading and
-inside the line, so that Go, Makefile and other tab-indented code can be reviewed. A tab counts as ONE code point for
-the 500 limit. For §6.3 a tab is a fixed tab stop every 8 columns, and a run of spaces and tabs is measured in
-columns: walking the line from column 0, a space advances one column, a tab advances to the next multiple of 8, and
-every other character advances one. A run of spaces and tabs that holds a tab and starts the line (the indent) is
-refused above `MAX_INDENT` = 32 columns (four tab levels), any other such run above `MAX_SPACE_RUN` = 16 columns
-(width counted from where the run starts). A run without a tab is judged as in §6.3. So 300 tabs, 400 tabs
-inside a line or ` \t` repeated cannot push text out of view. Whitespace at the end of a line stays refused, a
-tab included, and every other character §6.2 refuses stays refused. A client MUST render a tab as such a stop
-(8 columns) or as a visible marker, never hidden, collapsed or silently turned into a different number of spaces.
-The header must pass the same rule as a whole.
+**U+0009 (tab) is allowed** in a hunk line and in a header's section text, leading and inside the line, so that Go,
+Makefile and other tab-indented code can be reviewed. A tab counts as ONE code point for the 500 limit. Every other
+character §6.2 refuses stays refused.
+
+**Layout limits** (they keep padding from pushing text out of view, as §6.3 does for a draft, but code nests deeper
+than prose, so a diff's numbers are wider than §6.3's 32 and 16). They count COLUMNS: walking the line from column 0
+(the text after the marker), a space advances one column, a tab advances to the next multiple of 8 (a fixed tab stop
+every 8 columns), and every other character advances one. A run of spaces and tabs that starts the line (the indent)
+is refused above `MAX_DIFF_INDENT` = 96 columns (twelve tab levels), any other run of spaces and tabs above
+`MAX_DIFF_SPACE_RUN` = 32 columns (its width, counted from where it starts). They apply to spaces alone as well as to
+tabs and mixes. So 300 tabs, 400 tabs inside a line, ` \t` repeated or 40 spaces inside a line cannot push text out
+of view, while six tab levels, a Python body nested eight 4-space levels deep and three tab-aligned trailing comments
+pass. A client MUST render a tab as such a stop (8 columns) or as a visible marker, never hidden, collapsed or
+silently turned into a different number of spaces. The header must pass the same rule as a whole.
 
 A client shows a hunk monospaced, one row per line, with the marker in a gutter apart from the text, added and
 removed lines distinguished by more than colour, and scrolls long rows sideways instead of wrapping them into a
-hidden break. It never trims, re-wraps, expands tabs in or re-orders a line, and never opens anything in it as a
+hidden break. It never trims, re-wraps or re-orders a line, and never opens anything in it as a
 link. `path` and `header` are display text like a subject (§6): shown apart from the lines.
 
 ### 7.2 The result

@@ -464,16 +464,16 @@ def test_at_most_64_kib_of_diff():
 @pytest.mark.parametrize("line, why", [
     ("+trailing tab\t", "whitespace at the end"),
     ("-\t", "whitespace at the end"),
-    ("+tab\t then spaces" + " " * 17 + "y", "17 spaces in a row"),
-    ("+" + " " * 33 + "\tx", "indented 40 columns"),
+    ("+tab\t then spaces" + " " * 33 + "y", "columns of spaces and tabs in a row"),
+    ("+" + " " * 90 + "\t\tx", "indented 104 columns"),
     ("+bidi ‮ text", "U+202E"),
     ("+zero​width", "U+200B"),
     ("+nbsp here", "U+00A0"),
     ("+soft­hyphen", "U+00AD"),
     ("+trailing space ", "whitespace at the end"),
     ("-trailing　", "U+3000"),
-    ("+x" + " " * 17 + "y", "17 spaces in a row"),
-    ("+" + " " * 33 + "x", "indented 33 spaces"),
+    ("+x" + " " * 33 + "y", "33 columns of spaces and tabs in a row"),
+    ("+" + " " * 97 + "x", "indented 97 columns"),
     ("+   ", "whitespace at the end"),
     ("+bell\x07", "U+0007"),
     ("+cr\rinside", "U+000D"),
@@ -492,9 +492,9 @@ def test_a_line_that_cannot_be_shown_as_it_is_is_refused(line, why):
 def test_the_marker_is_not_part_of_the_rule_and_the_rest_is_a_line_of_text():
     assert dh.line_problem(" ") == "" and dh.line_problem("+") == "" and dh.line_problem("-") == ""
     assert dh.line_problem("  ") != "" and dh.line_problem("+ ") != ""   # spaces after the marker are invisible
-    assert dh.line_problem(" " + " " * 32 + "x") == ""
-    assert dh.line_problem("+" + " " * 32 + "x") == "" and dh.line_problem("+" + " " * 33 + "x") != ""
-    assert dh.line_problem("+x" + " " * 16 + "y") == "" and dh.line_problem("+x" + " " * 17 + "y") != ""
+    assert dh.line_problem(" " + " " * 96 + "x") == "" and dh.line_problem(" " + " " * 97 + "x") != ""
+    assert dh.line_problem("+" + " " * 96 + "x") == "" and dh.line_problem("+" + " " * 97 + "x") != ""
+    assert dh.line_problem("+x" + " " * 32 + "y") == "" and dh.line_problem("+x" + " " * 33 + "y") != ""
     assert dh.line_problem("?x") != "" and dh.line_problem("") != ""
     assert dh.line_problem(dh.NO_NEWLINE) == "" and dh.line_problem("\\ No newline") != ""
     assert dh.line_problem("+déjà vu \U0001f600") == ""
@@ -528,29 +528,32 @@ def test_a_tab_is_allowed_leading_and_inside_a_line_and_counts_as_one_character(
     assert dh.line_problem("+" + "\t" * 4 + "x" * 496) != ""  # 501
 
 
-def test_a_tab_is_a_stop_every_eight_columns_for_the_indent_and_a_run_of_whitespace():
-    """The indent is measured in columns (a tab advances to the next multiple of 8) against 32, any other run of spaces
-    and tabs against 16, so tabs cannot push text out of view (README §7.1)."""
+def test_the_layout_limits_of_a_diff_line_are_96_columns_of_indent_and_32_in_a_run():
+    """A diff's own limits, wider than a draft's 32 and 16 because code nests: columns, a tab is a stop every 8
+    (README §7.1). They apply to spaces and tabs alike, so neither can push text out of view."""
     problem = dh.line_problem
-    assert TAB_STOP == 8
-    # the indent: four levels of tabs is 32 columns, five is 40
-    assert problem("+" + "\t" * 4 + "x") == "" and problem("+" + "\t" * 5 + "x") != ""
+    assert (TAB_STOP, dh.MAX_DIFF_INDENT, dh.MAX_DIFF_SPACE_RUN) == (8, 96, 32)
+    # the indent: twelve tab levels are 96 columns, thirteen are 104; six levels (48) are fine
+    assert problem("+" + "\t" * 6 + "x") == ""
+    assert problem("+" + "\t" * 12 + "x") == "" and problem("+" + "\t" * 13 + "x") != ""
     assert problem("+" + "\t" * 300 + "x") != ""
-    assert problem("+" + " \t" * 200 + "x") != ""                 # mixed: every pair is a stop
-    assert problem("+" + " " * 4 + "\t" * 3 + "x") == ""           # 4 spaces and a tab are 8 columns, then 16 more
-    assert problem("+" + " " * 8 + "\t" * 3 + "x") == ""           # 8 + 24 = 32
-    assert problem("+" + " " * 9 + "\t" * 3 + "x") == ""           # 9 -> 16, then 16 more = 32
-    assert problem("+" + " " * 9 + "\t" * 4 + "x") != ""           # 40
-    # inside a line: a run of 16 columns, counted from where it starts
-    assert problem("+x\t\ty") == "" and problem("+x\t\t\ty") != ""            # 15 columns, 23 columns
+    assert problem("+" + " \t" * 200 + "x") != ""                  # mixed: every pair is a stop
+    assert problem("+" + " " * 4 + "\t" * 11 + "x") == ""          # 4 spaces and a tab are 8 columns, then 88 more
+    assert problem("+" + " " * 9 + "\t" * 11 + "x") == ""          # 9 -> 16, then 80 more = 96
+    assert problem("+" + " " * 9 + "\t" * 12 + "x") != ""          # 104
+    # spaces alone: 96 columns of indent (24 levels of 4), 97 refused
+    assert problem("+" + " " * 96 + "x") == "" and problem("+" + " " * 97 + "x") != ""
+    # inside a line: a run of 32 columns, counted from where it starts
+    assert problem("+x" + " " * 32 + "y") == "" and problem("+x" + " " * 33 + "y") != ""
+    assert problem("+x" + " " * 40 + "y") != ""                        # 40 columns of spaces
+    assert problem("+x\t\t\ty") == "" and problem("+x\t\t\t\ty") == ""   # 23 and 31 columns
+    assert problem("+x\t\t\t\t\ty") != ""                            # 39 columns
     assert problem("+x" + "\t" * 400 + "y") != ""
-    assert problem("+" + "\t" + "x" + " " * 8 + "\ty") == ""                    # col 9 -> 16: 15 columns
-    assert problem("+x" + " " * 16 + "\t" + " " * 16 + "y") != ""              # a tab ends no run: it is part of one
-    assert problem("+x" + " " * 17 + "\ty") != ""
-    # a run without a tab is judged as in README §6.3
-    assert problem("+" + " " * 32 + "x") == "" and problem("+" + " " * 33 + "x") != ""
-    # ordinary Go and Makefile lines pass
-    for line in ("+\t\t\tif err != nil {", " \t\t\t\treturn nil", "-\tgo build ./...", "+all:\tdeps"):
+    assert problem("+" + "\t" + "x" + " " * 8 + "\ty") == ""          # col 9 -> 16: 15 columns
+    assert problem("+x" + " " * 16 + "\t" + " " * 16 + "y") != ""      # a tab is part of the run: 39 columns
+    # ordinary Go, Python and Makefile lines pass
+    for line in ("+\t\t\tif err != nil {", " \t\t\t\t\t\treturn nil", "-\tgo build ./...", "+all:\tdeps",
+                 "+" + " " * 32 + "return value", "+x = 1" + " " * 20 + "# a trailing comment aligned far right"):
         assert problem(line) == "", line
     # Every other character the README refuses stays refused.
     for bad in ("+\x0b", "+a\x0cb", "+a\rb", "+a\u00a0b", "+a\u202eb", "+a\u200bb", "+a\x00b", "+\ta\u202eb"):

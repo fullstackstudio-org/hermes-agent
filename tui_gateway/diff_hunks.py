@@ -12,9 +12,9 @@ nothing is repaired; a diff that cannot be shown as it is raises :class:`DiffErr
   line numbers are not checked;
 - every line passes the verbatim rules of README §6.2 and §6.3 (:func:`line_problem`): the marker (space, ``+`` or
   ``-``) is taken off first and the rest is checked as one line of text (:func:`text_problem`: a tab is the one
-  exception to README §6.2, so Go and Makefile diffs can be reviewed; for the indent and space-run limits it is a
-  tab stop every 8 columns), so a carriage return that is part of
-  the line (CRLF content), a hidden character, whitespace at the end of a line or a long run of spaces refuses the
+  exception to README §6.2, so Go and Makefile diffs can be reviewed; the layout limits are a diff's own, in columns
+  with a tab stop every 8: indent at most 96, any other run of spaces and tabs at most 32), so a carriage return that is part of
+  the line (CRLF content), a hidden character, whitespace at the end of a line or a wide run of whitespace refuses the
   diff, never rewrites it. A blank context line is one space (an empty line inside a hunk is read as that);
 - the line ending of the DIFF itself may be CRLF (every line, the last one aside, ends in CR: they are all removed);
   a CR on only some lines is a CR in the content and refused;
@@ -37,7 +37,7 @@ import re
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
-from tui_gateway.request_text import MAX_INDENT, MAX_SPACE_RUN, verbatim_problem
+from tui_gateway.request_text import verbatim_problem
 
 MAX_DIFF_BYTES = 65_536
 MAX_HUNKS = 200
@@ -52,8 +52,11 @@ _MODE = re.compile(r"[0-7]{6}")
 _INDEX = re.compile(r"index [0-9a-fA-F]{4,64}\.\.[0-9a-fA-F]{4,64}(?: ([0-7]{6}))?")
 #: The one mode of a file the gateway lets a diff create or delete: a regular, non-executable file.
 REGULAR_MODE = "100644"
-#: A tab stop every this many columns, for :data:`MAX_INDENT` and :data:`MAX_SPACE_RUN` (README §7.1).
+#: A tab stop every this many columns, for the two limits below (README §7.1).
 TAB_STOP = 8
+#: The layout limits of a diff line, in columns (README §7.1): wider than a draft's 32 and 16 (§6.3) because code nests.
+MAX_DIFF_INDENT = 96
+MAX_DIFF_SPACE_RUN = 32
 _WHITESPACE_RUN = re.compile(r"[ \t]+")
 _SIMILARITY = re.compile(r"(\d{1,3})%")
 _SHORT = 60
@@ -110,17 +113,15 @@ class ParsedDiff:
 
 def text_problem(text: str) -> str:
     """Why *text*, one line of a hunk without its marker (or a header), cannot be shown as it is, or "". README §6.2
-    and §6.3 with ONE difference for a diff: U+0009 is allowed, leading and inside the line. It counts as one code
-    point for the line's length; for the layout limits a tab is a fixed tab stop every :data:`TAB_STOP` columns, so a
-    run of tabs and spaces is measured in columns (the indent against :data:`MAX_INDENT`, any other run against
-    :data:`MAX_SPACE_RUN`) and tabs cannot push the text out of view. A client shows a tab visibly (a marker or such a
-    tab stop), never hidden. Whitespace at the end of the line, a tab included, is still refused: no rendering shows it."""
-    if "\t" not in text:
-        return verbatim_problem(text)
-    # Runs of spaces and tabs that hold a tab are measured below; for everything else the rules of §6 apply as they
-    # are, with each such run standing in as one visible character.
-    flattened = _WHITESPACE_RUN.sub(lambda run: "x" if "\t" in run.group() else run.group(), text)
-    if problem := verbatim_problem(flattened):
+    (characters) with ONE difference for a diff: U+0009 is allowed, leading and inside the line. The layout limits
+    are a diff's own, wider than a draft's because code nests deeper (README §7.1): a tab is a fixed stop every
+    :data:`TAB_STOP` columns and a run of spaces and tabs is measured in columns, the indent against
+    :data:`MAX_DIFF_INDENT` (96) and any other run against :data:`MAX_DIFF_SPACE_RUN` (32), so neither spaces nor tabs
+    can push the text out of view. A tab counts as one code point for the length of the line. A client shows a tab
+    visibly (a marker or such a tab stop), never hidden. Whitespace at the end of the line, a tab included, is still
+    refused: no rendering shows it."""
+    # Every run of spaces and tabs is measured below; for the characters, a run stands in as one visible character.
+    if problem := verbatim_problem(_WHITESPACE_RUN.sub("x", text)):
         return problem
     if text != text.rstrip():
         return "whitespace at the end of a line or of the text cannot be seen"
@@ -131,14 +132,12 @@ def text_problem(text: str) -> str:
         for ch in run.group():
             column = (column // TAB_STOP + 1) * TAB_STOP if ch == "\t" else column + 1
         position = run.end()
-        if "\t" not in run.group():
-            continue
-        if run.start() == 0 and column > MAX_INDENT:
-            return (f"it is indented {column} columns (a tab is a stop every {TAB_STOP}; at most {MAX_INDENT}), "
+        if run.start() == 0 and column > MAX_DIFF_INDENT:
+            return (f"it is indented {column} columns (a tab is a stop every {TAB_STOP}; at most {MAX_DIFF_INDENT}), "
                     "which can put part of it out of view; present it without padding")
-        if run.start() != 0 and column - start > MAX_SPACE_RUN:
+        if run.start() != 0 and column - start > MAX_DIFF_SPACE_RUN:
             return (f"it has {column - start} columns of spaces and tabs in a row (a tab is a stop every {TAB_STOP}; "
-                    f"at most {MAX_SPACE_RUN}), which can put part of it out of view; present it without padding")
+                    f"at most {MAX_DIFF_SPACE_RUN}), which can put part of it out of view; present it without padding")
     return ""
 
 

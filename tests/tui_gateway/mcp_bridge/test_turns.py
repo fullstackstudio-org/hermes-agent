@@ -299,6 +299,47 @@ def test_no_request_parameter_puts_an_agent_marker_on_a_persons_turn(gateway, ex
         assert response["error"]["code"] in (4000, -32602), response
 
 
+# ── an isolated turn the parent holds no record of (review X1c) ────────────────────────────
+
+
+def _isolated(gateway, monkeypatch, request=None):
+    """The session runs its turn in a compute-host child, started from the queue: the parent mirrors the child's
+    open request but keeps no in-flight record of the turn, so it knows nobody as its author."""
+    monkeypatch.setattr(server, "_session_uses_compute_host", lambda *_a, **_k: True)
+    gateway.session.update(running=True, inflight_turn=None)
+    if request is not None:
+        gateway.session["_compute_host_open_request"] = request
+
+
+def test_a_clarify_of_an_isolated_turn_without_a_parent_record_is_reported_not_answerable(gateway, monkeypatch):
+    from tui_gateway.mcp_bridge import tools
+
+    params = {"session_id": SID, "question": "Which marker?", "choices": ["one", "two"]}
+    _isolated(gateway, monkeypatch, {"id": "srq-iso", "method": "clarify", "params": params})
+    transport = gateway.connect()
+    # The gateway refuses the agent's answer there ...
+    assert server._compute_host_agent_answer_refusal("srq-iso", {"answer": "one"}, transport) is not None
+    # ... so the bridge never offers it, and says why, even for a turn this grant's watch adopted.
+    summary = turns.summarize_request("srq-iso", "clarify", params, transport)
+    assert summary["answerable"] is False and summary["not_answerable_reason"] == turns.ISOLATED_UNATTRIBUTED
+    out = tools._request_summary(summary, frozenset({"srq-iso"}))
+    assert out["answerable_via_mcp"] is False and out["not_answerable_reason"] == turns.ISOLATED_UNATTRIBUTED
+    assert turns.isolated_turn_unattributed(SID) is True
+    # With the parent's record of the agent's own turn the gateway takes the answer, and the bridge offers it.
+    gateway.session["inflight_turn"] = {"display_metadata": {"author": {
+        "id": ROBIN[0], "name": ROBIN[1], "via": {"kind": "mcp", "client": CLIENT}}}}
+    assert server._compute_host_agent_answer_refusal("srq-iso", {"answer": "one"}, transport) is None
+    again = turns.summarize_request("srq-iso", "clarify", params, transport)
+    assert again["answerable"] is True and "not_answerable_reason" not in again
+    assert turns.isolated_turn_unattributed(SID) is False
+
+
+def test_an_inline_turn_is_never_reported_as_isolated(gateway):
+    gateway.session.update(running=True, inflight_turn=None)
+    assert turns.isolated_turn_unattributed(SID) is False
+    assert turns.isolated_turn_unattributed("sid-unknown") is False
+
+
 # ── an agent's stop (review X1b) ──────────────────────────────────────────────────────────
 
 

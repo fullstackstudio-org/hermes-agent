@@ -99,6 +99,13 @@ _PENDING_TURNS_MAX = 8
 _DROPPED_CONFIRM_S = 1.0
 DROPPED_MESSAGE = "the queued prompt did not run: the chat was stopped before its turn came"
 
+#: Why a turn's clarify is not answerable and its stop not available through MCP when the gateway holds no record
+#: of who sent it: a prompt queued behind a running turn and then run in an isolated (compute-host) worker leaves
+#: the parent no in-flight record, and the gateway takes an agent's answer or stop only by that record.
+ISOLATED_UNATTRIBUTED = ("this turn was queued and then run in an isolated worker, where the gateway keeps no "
+                         "record of who sent it, so it takes no answer or stop from an agent for it; the person "
+                         "answers or stops it in their own app")
+
 _QUESTION_MAX = 2000
 _CHOICE_MAX = 200
 _CHOICES_MAX = 20
@@ -137,15 +144,44 @@ def _question(entry: dict) -> dict:
             "multi_select": bool(entry.get("multi_select"))}
 
 
+def isolated_turn_unattributed(session_id: str) -> bool:
+    """Whether live session *session_id* runs a turn in an isolated (compute-host) worker that the parent holds no
+    record of (no in-flight author: a queued prompt drained to the child). The gateway refuses an agent's clarify
+    answer (``compute_host_bridge._compute_host_agent_refusal``) and stop (``_interrupt_agent_turn``) for such a
+    turn, so the bridge says :data:`ISOLATED_UNATTRIBUTED` instead of offering them. Read in-process, lock-free,
+    like the gateway's own check."""
+    from tui_gateway import server
+
+    try:
+        session = server._sessions.get(str(session_id))
+        return (isinstance(session, dict) and bool(session.get("running"))
+                and server._session_uses_compute_host(session) and server._inflight_turn_author(str(session_id)) is None)
+    except Exception:  # noqa: BLE001 - a summary never fails on a probe
+        return False
+
+
+def _request_isolated_unattributed(request_id: str) -> bool:
+    """:func:`isolated_turn_unattributed` for the session whose compute-host child owns *request_id*."""
+    from tui_gateway import server
+
+    try:
+        located = server._compute_host_request_session(str(request_id))
+    except Exception:  # noqa: BLE001
+        return False
+    return located is not None and isolated_turn_unattributed(located[0])
+
+
 def summarize_request(request_id: str, method: str, params: dict | None, transport: Any) -> dict:
     """What the agent may know of one open server request (see the module docstring). Every string came
     from the bot and is untrusted."""
     from tui_gateway import server_requests
 
     params = params if isinstance(params, dict) else {}
-    summary: dict[str, Any] = {
-        "id": str(request_id), "kind": str(method),
-        "answerable": server_requests.agent_answer_refusal(str(method), transport) is None}
+    answerable = server_requests.agent_answer_refusal(str(method), transport) is None
+    summary: dict[str, Any] = {"id": str(request_id), "kind": str(method), "answerable": answerable}
+    if answerable and _request_isolated_unattributed(str(request_id)):
+        summary["answerable"] = False
+        summary["not_answerable_reason"] = ISOLATED_UNATTRIBUTED
     if method == "clarify":
         batch = isinstance(params.get("questions"), list)
         entries = params["questions"] if batch else [params]

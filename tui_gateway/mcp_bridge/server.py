@@ -58,7 +58,8 @@ another) with a turn_id; call bot_wait(chat_id, turn_id) to keep waiting.
 
 Statuses: done, running, queued, waiting_for_person, interrupted, error, restarted.
 - waiting_for_person: the bot asked something. A clarify question with answerable_via_mcp true may be
-  answered with clarify_answer (the answer is marked as yours, not the person's). Everything else
+  answered with clarify_answer (the answer is marked as yours, not the person's); when it is false, a
+  not_answerable_reason may say why. Everything else
   (approvals, passkey confirmations, secrets, sudo, vault prompts) can only be answered by the person in
   their own app; tell them, then bot_wait.
 - restarted: the gateway restarted during the turn; it continues after the restart. Call bot_wait again

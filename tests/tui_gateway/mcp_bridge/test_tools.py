@@ -409,6 +409,27 @@ def test_a_full_draft_store_never_evicts_another_grants_new_chat(bridge):
     assert sum(1 for d in tools._drafts.values() if d.grant == "grant-g2") == tools.DRAFTS_MAX - 1
 
 
+def test_bot_interrupt_says_why_an_isolated_queued_turn_cannot_be_stopped(monkeypatch):
+    """Review X1c: the gateway stops an agent's turn only by the parent's record of it, which a queued prompt
+    drained to an isolated worker does not leave; the agent is told that, not that the turn is somebody else's."""
+    from types import SimpleNamespace
+
+    from tui_gateway.mcp_bridge import rpc
+
+    chat = SimpleNamespace(session_key="20990101_000000_marker", profile="default")
+    monkeypatch.setattr(tools, "_chat_transport", lambda *_a: (chat, None, "sid-iso", False))
+    monkeypatch.setattr(tools, "_live_row", lambda *_a: {"status": "running"})
+    watch = SimpleNamespace(grant=ROBIN.grant_id, started=True, concluded=False, gateway_turn_id="t-iso")
+    monkeypatch.setattr(turns, "watches_of", lambda *_a, **_k: [watch])
+    monkeypatch.setattr(rpc, "interrupt_turn", lambda *_a, **_k: False)
+    monkeypatch.setattr(turns, "isolated_turn_unattributed", lambda sid: sid == "sid-iso")
+    out = tools.bot_interrupt(None, ROBIN, chat.session_key)
+    assert (out["ok"], out["was_running"], out["reason"]) == (False, True, turns.ISOLATED_UNATTRIBUTED)
+    monkeypatch.setattr(turns, "isolated_turn_unattributed", lambda sid: False)
+    assert tools.bot_interrupt(None, ROBIN, chat.session_key)["reason"] == \
+        "the running turn was not started by this agent"
+
+
 def test_without_a_verified_token_a_tool_is_unauthenticated(bridge, monkeypatch):
     monkeypatch.setattr(bridge_server, "caller_from_token", lambda: None)
     result = anyio.run(lambda: bridge_server.Endpoint(bridge).run(None, "whoami", None, tools.whoami))

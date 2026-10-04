@@ -253,7 +253,7 @@ def _request_summary(entry: dict, own: set | frozenset | None = None) -> dict:
     answerable = bool(entry.get("answerable")) and (own is None or entry.get("id") in own)
     out: dict[str, Any] = {"request_id": entry.get("id"), "kind": entry.get("kind"),
                            "answerable_via_mcp": answerable}
-    for key in ("questions", "batch", "locked", "description", "tool_name", "command"):
+    for key in ("questions", "batch", "locked", "description", "tool_name", "command", "not_answerable_reason"):
         if key in entry:
             out[key] = entry[key]
     return out
@@ -701,6 +701,10 @@ def bot_interrupt(bridge: Bridge, caller: Caller, chat_id: Any, bot: Any = None)
                     return {"ok": True, "was_running": True}
             except rpc.BridgeError as exc:
                 raise _failure_from(exc) from exc
+        if any(watch.grant == caller.grant_id and watch.started and not watch.concluded
+               for watch in turns.watches_of(chat.session_key, identity=caller.identity)) \
+                and turns.isolated_turn_unattributed(sid):
+            return {"ok": False, "was_running": True, "reason": turns.ISOLATED_UNATTRIBUTED}
         return {"ok": False, "was_running": True, "reason": "the running turn was not started by this agent"}
     finally:
         if owned:
@@ -740,6 +744,8 @@ def clarify_answer(bridge: Bridge, caller: Caller, chat_id: Any, request_id: Any
         entry = next((r for r in requests if r.get("id") == request_id), None)
         if entry is None:
             raise ToolFailure("not_found", "no such open request in this chat (answered, expired or another chat's)")
+        if entry.get("kind") == "clarify" and entry.get("not_answerable_reason"):
+            raise ToolFailure("not_answerable", str(entry["not_answerable_reason"]))
         if entry.get("kind") != "clarify" or not entry.get("answerable"):
             raise ToolFailure("not_answerable", f"a {entry.get('kind')} request is answered in the person's own app, "
                               "not through MCP")

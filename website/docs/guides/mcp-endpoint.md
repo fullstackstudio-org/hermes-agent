@@ -111,6 +111,10 @@ restarts during a turn, the agent gets `restarted` and waits again; the turn con
 - Change settings, delete, rename or hide chats, or read chats it was not given: it sees the chats it opened
   and your live chats, not every stored conversation on the gateway. A chat you have only in your app can be
   opened by its id with `chat_open`; that is logged.
+- Answer or stop a turn the gateway ran in an isolated worker after it waited in the queue: with turn
+  isolation on, such a turn leaves the gateway no record of who sent it, so the agent sees its question as
+  not answerable (`answerable_via_mcp: false`, with the reason) and `bot_interrupt` says why it cannot stop
+  it; you answer or stop it in your own app.
 - Act on someone else's chats: the same access rules apply as for your own app. In a chat opened by its id
   the agent can read what your app can read there today (HERM-185 will narrow both alike), and the bot is
   never told your profile (email, job title, groups) in a turn the agent sent.

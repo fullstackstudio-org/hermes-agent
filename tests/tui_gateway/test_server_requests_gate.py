@@ -442,12 +442,13 @@ def test_with_the_acting_user_target_another_login_never_gets_or_answers_it(serv
 
 
 def test_an_agent_never_gets_sees_or_answers_a_method_gated_request(server, cancels):
-    """An agent acting through MCP: its advertisement is ignored, it is never a target, it does not see the
+    """An agent acting through MCP: its advertisement is refused, it is never a target, it does not see the
     request in ``open_requests``, and every answer path refuses it (frame, error frame, ``request.answer``)."""
     from tui_gateway import server_requests
     agent, phone = _WS("agent", ROBIN, AGENT), _WS("phone", ROBIN)
     _session(server, "s1", agent, phone)
-    assert _caps(server, agent)["requests"] == []
+    refused = _rpc(server, agent, "client.capabilities", {"server_requests": True, "requests": ["review.draft"]})
+    assert refused["error"]["code"] == 4033  # the agent guard holds it to the keys the bridge sends
     server_requests.advertise(agent, True, None, requests=["review.draft"])  # even advertised directly
     _caps(server, phone)
     box = _ask(park_seconds=60)

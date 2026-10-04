@@ -41,7 +41,7 @@ def _table() -> list[tuple[int, int]]:
 MAX_MARKS = int(re.search(r"`MAX_COMBINING_MARKS` = (\d+) combining marks", SECTION).group(1))
 LIMITS = _limits()
 TABLE = _table()
-INVISIBLE_LETTERS = {0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0x1D159}  # README §6.2 item 4
+INVISIBLE_LETTERS = {0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0x1D159, 0x16FE4}  # README §6.2 item 4
 
 
 def test_the_readme_numbers_are_the_codes():

@@ -521,7 +521,7 @@ def test_a_diff_that_cannot_be_shown_as_it_is_is_refused_nothing_is_repaired(bui
 
 
 def test_a_diff_at_every_bound_is_valid(build):
-    many = "".join(f"@@ -{n * 3 + 1} +{n * 3 + 1} @@\n-a\n+b\n" for n in range(200))
+    many = "".join(f"@@ -{n * 4 + 1},2 +{n * 4 + 1},2 @@\n c\n-a\n+b\n" for n in range(200))
     assert len(_diff(build, diff=many)["hunks"]) == 200
     long = "@@ -1,400 +1,400 @@\n" + " x\n" * 400
     assert len(_diff(build, diff=long)["hunks"][0]["lines"]) == 400

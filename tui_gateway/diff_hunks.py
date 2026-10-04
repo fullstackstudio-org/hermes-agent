@@ -10,7 +10,7 @@ nothing is repaired; a diff that cannot be shown as it is raises :class:`DiffErr
 - a hunk is read by its header's counts (``@@ -a,b +c,d @@``: ``b`` old and ``d`` new lines), the way ``patch`` does,
   so a removed line that looks like ``--- x`` is content; counts that do not match the lines refuse the diff. Starting
   line numbers are not checked;
-- every line passes the verbatim rules of README §6.2 and §6.3 (:func:`line_problem`): the marker (space, ``+`` or
+- every line passes the verbatim rules of README §6.2 and §7.1 (:func:`line_problem`): the marker (space, ``+`` or
   ``-``) is taken off first and the rest is checked as one line of text (:func:`text_problem`: a tab is the one
   exception to README §6.2, so Go and Makefile diffs can be reviewed; the layout limits are a diff's own, in columns
   with a tab stop every 8: indent at most 96, any other run of spaces and tabs at most 32), so a carriage return that is part of
@@ -34,6 +34,7 @@ Rejecting an earlier hunk shifts the new-side start of the hunks after it; :func
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
@@ -57,6 +58,9 @@ TAB_STOP = 8
 #: The layout limits of a diff line, in columns (README §7.1): wider than a draft's 32 and 16 (§6.3) because code nests.
 MAX_DIFF_INDENT = 96
 MAX_DIFF_SPACE_RUN = 32
+#: All the spaces and tabs of one line together, indent included (a tab is a stop every 8 columns): runs separated by
+#: a nearly invisible character would otherwise add up without limit.
+MAX_DIFF_WHITESPACE = 160
 _WHITESPACE_RUN = re.compile(r"[ \t]+")
 _SIMILARITY = re.compile(r"(\d{1,3})%")
 _SHORT = 60
@@ -116,35 +120,44 @@ def text_problem(text: str) -> str:
     (characters) with ONE difference for a diff: U+0009 is allowed, leading and inside the line. The layout limits
     are a diff's own, wider than a draft's because code nests deeper (README §7.1): a tab is a fixed stop every
     :data:`TAB_STOP` columns and a run of spaces and tabs is measured in columns, the indent against
-    :data:`MAX_DIFF_INDENT` (96) and any other run against :data:`MAX_DIFF_SPACE_RUN` (32), so neither spaces nor tabs
-    can push the text out of view. A tab counts as one code point for the length of the line. A client shows a tab
-    visibly (a marker or such a tab stop), never hidden. Whitespace at the end of the line, a tab included, is still
-    refused: no rendering shows it."""
+    :data:`MAX_DIFF_INDENT` (96), any other run against :data:`MAX_DIFF_SPACE_RUN` (32) and all of them together
+    against :data:`MAX_DIFF_WHITESPACE` (160). That keeps padding from pushing the text far out of view; it cannot make
+    a long row fit, so a client shows an overflow indicator for a row wider than its view. A combining mark directly
+    after a space or a tab, or at the start of the text, is refused (it would only keep two runs apart). A tab counts
+    as one code point for the length of the line. A client shows a tab visibly (a marker or such a tab stop), never
+    hidden. Whitespace at the end of the line, a tab included, is still refused: no rendering shows it."""
     # Every run of spaces and tabs is measured below; for the characters, a run stands in as one visible character.
     if problem := verbatim_problem(_WHITESPACE_RUN.sub("x", text)):
         return problem
     if text != text.rstrip():
         return "whitespace at the end of a line or of the text cannot be seen"
-    column, position = 0, 0
+    for at, ch in enumerate(text):
+        if unicodedata.category(ch) in ("Mn", "Me") and (at == 0 or text[at - 1] in " \t"):
+            return f"character U+{ord(ch):04X} is a combining mark after a space or at the start of the text"
+    column, position, total = 0, 0, 0
     for run in _WHITESPACE_RUN.finditer(text):
         column += run.start() - position
         start = column
         for ch in run.group():
             column = (column // TAB_STOP + 1) * TAB_STOP if ch == "\t" else column + 1
         position = run.end()
+        total += column - start
         if run.start() == 0 and column > MAX_DIFF_INDENT:
             return (f"it is indented {column} columns (a tab is a stop every {TAB_STOP}; at most {MAX_DIFF_INDENT}), "
                     "which can put part of it out of view; present it without padding")
         if run.start() != 0 and column - start > MAX_DIFF_SPACE_RUN:
             return (f"it has {column - start} columns of spaces and tabs in a row (a tab is a stop every {TAB_STOP}; "
                     f"at most {MAX_DIFF_SPACE_RUN}), which can put part of it out of view; present it without padding")
+        if total > MAX_DIFF_WHITESPACE:
+            return (f"it has more than {MAX_DIFF_WHITESPACE} columns of spaces and tabs in all (a tab is a stop every "
+                    f"{TAB_STOP}), which can put part of it out of view; present it without padding")
     return ""
 
 
 def line_problem(line: str) -> str:
     """Why the hunk line *line* (marker included) cannot be shown as it is, or "". The rule of README §7: at most
     :data:`MAX_LINE_CHARS` code points; the line is the ``\\ No newline at end of file`` marker or starts with a space,
-    ``+`` or ``-``; the rest, taken as one line of text, passes :func:`text_problem` (§6.2 and §6.3, tabs allowed)."""
+    ``+`` or ``-``; the rest, taken as one line of text, passes :func:`text_problem` (§6.2 with tabs allowed, and §7.1's layout limits)."""
     if len(line) > MAX_LINE_CHARS:
         return f"it is {len(line)} characters (at most {MAX_LINE_CHARS})"
     if line == NO_NEWLINE:
@@ -172,7 +185,8 @@ def _short(line: str) -> str:
 
 def path_problem(path: str) -> str:
     """Why *path* is not a path to name a file by, or "": it must be relative, without empty, ``.``, ``..`` or ``.git``
-    (any case) segments, at most :data:`MAX_PATH_CHARS` characters, free of control characters (a line break would
+    (any case) segments or segments that start with a space or end with a space or a dot, at most
+    :data:`MAX_PATH_CHARS` characters, free of control characters (a line break would
     inject header lines into the patch) and text that can be shown as it is."""
     if not path:
         return "it is empty"
@@ -186,6 +200,8 @@ def path_problem(path: str) -> str:
         return "it has an empty, . or .. segment"
     if any(segment.lower() == ".git" for segment in path.split("/")):
         return "it has a .git segment"
+    if any(segment[0] == " " or segment[-1] in " ." for segment in path.split("/")):
+        return "a segment starts with a space or ends with a space or a dot"
     if "\\" in path:
         return "it has a backslash"
     return verbatim_problem(path)
@@ -321,6 +337,8 @@ def _head(pre: _Preamble, path: str | None) -> FileHead:
             raise DiffError("The header says the file is new, deleted or renamed but names one path on both sides.")
         head = FileHead("modify", old, new)
     else:
+        if pre.new_file or pre.deleted_file:
+            raise DiffError("The header says the file is renamed but also new or deleted.")
         if (pre.rename_from, pre.rename_to) != (old, new):
             raise DiffError("The diff names two different files without 'rename from' and 'rename to' lines that "
                             "say so; review one file at a time.")
@@ -399,6 +417,11 @@ def _read_hunk(lines: list[str], i: int, number: int) -> tuple[Hunk, int]:
             raise fail(f"it has more than {MAX_HUNK_LINES} lines; split the change into smaller hunks.")
     if not body:
         raise fail("it has no lines.")
+    start, count = int(match.group(1)), _count(match.group(2))
+    if not any(line[0] == " " for line in body) and (start > 1 or (count == 0 and start == 1)):
+        raise fail(f"it has no context line and starts at line {start}: git apply puts a hunk without context at the "
+                   "end of the file, not at that line, so the person would see one place and the change would land "
+                   "elsewhere. Include unchanged lines around the change (git diff -U3, never -U0).")
     return Hunk(hid, header, tuple(body)), i
 
 
@@ -448,6 +471,12 @@ def parse(diff: object, path: str | None = None) -> ParsedDiff:
         hunks.append(hunk)
     if not hunks:
         raise DiffError("The diff has no hunk (a line starting with @@): there is nothing to review.")
+    if head.kind in ("new", "delete"):
+        wanted, what = ("+", "added (+)") if head.kind == "new" else ("-", "removed (-)")
+        for hunk in hunks:
+            if any(line[0] not in (wanted, "\\") for line in hunk.lines):
+                raise DiffError(f"Hunk {hunk.id}: the file is {'new' if head.kind == 'new' else 'deleted'}, so every "
+                                f"line must be {what}, with no context or opposite line.")
     return ParsedDiff(head, tuple(hunks))
 
 

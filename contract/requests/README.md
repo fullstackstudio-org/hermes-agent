@@ -314,8 +314,8 @@ allowed as whitespace.
    isolates, the soft hyphen U+00AD, the invisible operators, the language tags, U+FEFF), a surrogate
    (`Cs`), a private-use character (`Co`) and an unassigned code point (`Cn`).
 4. An invisible letter or symbol: U+115F and U+1160 (Hangul Choseong and Jungseong fillers), U+3164
-   (Hangul filler), U+FFA0 (halfwidth Hangul filler), U+2800 (blank Braille pattern) and U+1D159
-   (musical null notehead).
+   (Hangul filler), U+FFA0 (halfwidth Hangul filler), U+2800 (blank Braille pattern), U+1D159
+   (musical null notehead) and U+16FE4 (Khitan small script filler).
 5. A default-ignorable code point: one that the table below contains. It is a copy of Unicode's
    `Default_Ignorable_Code_Point` (`DerivedCoreProperties.txt`, unchanged from Unicode 14.0 through
    16.0). Clients use THIS table, not their platform's property, so a platform that updates the property
@@ -430,6 +430,12 @@ next line of the file when the patch is applied, invisibly). A change to the fin
 always shown as `-` and `+` lines of that line. The header's counts say how many old (` ` and `-`) and new (` ` and `+`) lines the hunk has, and the gateway built the
 hunk so that they agree with `lines`. The starting line numbers are as the agent's diff gave them.
 
+The gateway builds a hunk without a single context line (a space-marked line) only when it starts at line 0 (a new
+file or an insertion at the top) or at line 1 with a non-empty old side (the whole file replaced or removed): `git
+apply` puts any other hunk without context at the END of the file, not at the line the header names, so the person
+would see one place and the change would land elsewhere. The agent includes unchanged lines around a change (`git
+diff -U3`, never `-U0`). A new file's hunks hold only `+` lines and a deleted file's only `-` lines.
+
 The gateway reads the agent's unified diff itself (at most 64 KiB, at most 200 hunks, at most 400 lines in a hunk)
 and numbers the hunks; the agent never passes a hunk. A diff of several files, a binary diff, a change of a file's mode,
 a new or deleted file that is not a regular file of mode 100644 (a symbolic link, a submodule, an executable) and a
@@ -458,11 +464,17 @@ than prose, so a diff's numbers are wider than §6.3's 32 and 16). They count CO
 (the text after the marker), a space advances one column, a tab advances to the next multiple of 8 (a fixed tab stop
 every 8 columns), and every other character advances one. A run of spaces and tabs that starts the line (the indent)
 is refused above `MAX_DIFF_INDENT` = 96 columns (twelve tab levels), any other run of spaces and tabs above
-`MAX_DIFF_SPACE_RUN` = 32 columns (its width, counted from where it starts). They apply to spaces alone as well as to
-tabs and mixes. So 300 tabs, 400 tabs inside a line, ` \t` repeated or 40 spaces inside a line cannot push text out
-of view, while six tab levels, a Python body nested eight 4-space levels deep and three tab-aligned trailing comments
-pass. A client MUST render a tab as such a stop (8 columns) or as a visible marker, never hidden, collapsed or
-silently turned into a different number of spaces. The header must pass the same rule as a whole.
+`MAX_DIFF_SPACE_RUN` = 32 columns (its width, counted from where it starts), and ALL the spaces and tabs of the line
+together (indent included) above `MAX_DIFF_WHITESPACE` = 160 columns. They apply to spaces alone as well as to tabs
+and mixes. A combining mark (`Mn` or `Me`) directly after a space or a tab, or at the start of the text, is refused,
+because it would only keep two runs of whitespace apart; the invisible letters of §6.2 item 4 are refused as in a
+draft. So 300 tabs, 400 tabs inside a line, ` \t` repeated, 40 spaces inside a line or several 32-column runs
+separated by a character cannot push the text far out of view, while six tab levels, a Python body nested eight
+4-space levels deep and three tab-aligned trailing comments pass. These limits bound the padding; they cannot make a
+long line fit: a row can still be wider than the view (up to 500 code points, and wide glyphs). A client MUST show an
+overflow indicator for a row that is wider than its view (an edge fade, a scroll bar that stays visible, or a marker
+at the cut), never silently cut it off. A client MUST render a tab as a stop of 8 columns or as a visible marker,
+never hidden, collapsed or silently turned into a different number of spaces. The header must pass the same rule as a whole.
 
 A client shows a hunk monospaced, one row per line, with the marker in a gutter apart from the text, added and
 removed lines distinguished by more than colour, and scrolls long rows sideways instead of wrapping them into a

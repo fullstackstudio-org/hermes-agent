@@ -19,7 +19,7 @@ import unicodedata
 
 # Letters and symbols that render as nothing (Hangul fillers, the blank Braille pattern, the musical null
 # notehead): text built from them looks empty or hides where a line really ends.
-_INVISIBLE_LETTERS = frozenset({"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800", "\U0001d159"})
+_INVISIBLE_LETTERS = frozenset({"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800", "\U0001d159", "\U00016fe4"})
 _LINE_BREAKS = frozenset({"\n", "\u2028", "\u2029"})
 #: ``Default_Ignorable_Code_Point`` as Unicode publishes it (``DerivedCoreProperties.txt``; unchanged
 #: from 14.0, which added U+180F, through 16.0): code points a renderer shows as nothing. ``unicodedata``
@@ -81,6 +81,9 @@ def clean_text(text: object, *, multiline: bool) -> str:
     marks = 0
     for ch in raw:
         category = unicodedata.category(ch)
+        if ch in _INVISIBLE_LETTERS:      # first: some are combining marks (U+16FE4) and would be kept as such
+            marks = 0
+            continue
         if category in ("Mn", "Me"):
             marks += 1
             if marks <= MAX_COMBINING_MARKS:
@@ -153,7 +156,7 @@ def verbatim_problem(text: str, *, json_strings: bool = False) -> str:
     marks = 0
     for ch in text:
         category = unicodedata.category(ch)
-        if category == "Cn" or default_ignorable(ch):
+        if category == "Cn" or default_ignorable(ch) or ch in _INVISIBLE_LETTERS:
             return f"character U+{ord(ch):04X} cannot be shown as it is"
         if category in ("Mn", "Me"):
             marks += 1

@@ -193,7 +193,7 @@ def review_draft_tool(summary: str, text: str, kind: str, subject: str | None = 
 
 
 def review_diff_tool(summary: str, diff: str, path: str | None = None, title: str | None = None) -> str:
-    return _run("review.diff", summary=summary, diff=diff, path=path, title=title)
+    return _run("review.diff", summary=summary, diff=diff, path=path or None, title=title or None)
 
 
 # ── schemas ───────────────────────────────────────────────────────────────────────────────────
@@ -317,10 +317,12 @@ REVIEW_DIFF_SCHEMA = {
         "-- <file> or diff -u): no Markdown fence, no commentary around it. The gateway reads the diff itself and "
         "numbers the hunks; at most 64 KiB, 200 hunks, 400 lines per hunk and 500 characters per line. Every line is "
         "shown exactly as written (a tab counts as a stop every 8 columns), so a diff with a carriage return (a CRLF "
-        "file), whitespace at the end of a line, a hidden character, more than 32 columns of spaces and tabs in a row "
-        "or a line indented more than 96 columns is refused and the error names the line; so is a binary diff, a diff of "
-        "several files (one call per file), a change of a file's mode, a new or deleted file that is a symbolic link, "
-        "a submodule or executable (only regular files, mode 100644), and a diff whose '\\ No newline at end of "
+        "file), whitespace at the end of a line, a hidden character, more than 32 columns of spaces and tabs in a row, "
+        "more than 160 columns of spaces and tabs in all, a combining mark after a space, or a line indented more than 96 columns is refused and the "
+        "error names the line; so is a binary diff, a diff of several files (one call per file), a change of a "
+        "file's mode, a new or deleted file that is a symbolic link, a submodule or executable (only regular files, "
+        "mode 100644), a hunk without a context line that does not start at line 0 or 1 (include unchanged lines "
+        "around the change: git diff -U3, never -U0), and a diff whose '\\ No newline at end of "
         "file' line is not directly after the last - or + line of the LAST hunk (never after a context line). "
         + _VERBATIM +
         "Outcomes: 'approved' — approved_patch is the patch of exactly the approved hunks, in git's form, written by "

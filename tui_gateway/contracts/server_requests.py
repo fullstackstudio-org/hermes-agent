@@ -913,7 +913,7 @@ class ReviewDiffRequestParams(InteractiveRequestParams):
     §7). ``path`` (required) is the file's relative path, display only: the new path of a rename, the deleted file's
     path for ``delete``. ``kind`` says what happens to it and ``old_path`` is a rename's previous path (present for
     ``rename`` only). ``hunks``: 1-200, ids unique. Every line of every hunk is shown verbatim (the rules of §6 on
-    the line without its marker, with tabs allowed)."""
+    the line without its marker, with tabs allowed, and the layout limits of §7.1)."""
 
     kind: DiffKind
     path: str = Field(min_length=1, max_length=DIFF_PATH_MAX, pattern=ONE_LINE)

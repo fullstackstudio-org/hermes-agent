@@ -134,7 +134,8 @@ def test_the_schemas_and_descriptions():
     diff_text = tool.REVIEW_DIFF_SCHEMA["description"]
     assert "NOT an approval" in diff_text and "approved_patch" in diff_text and "ONE file" in diff_text
     for limit in ("64 KiB", "200 hunks", "400 lines per hunk", "500 characters per line", "carriage return",
-                  "binary diff", "no Markdown fence", "mode 100644", "stop every 8 columns", "LAST hunk"):
+                  "binary diff", "no Markdown fence", "mode 100644", "stop every 8 columns", "LAST hunk",
+                  "-U3, never -U0", "160 columns"):
         assert limit in diff_text, limit
     assert tool.ASK_FILE_SCHEMA["parameters"]["properties"]["accept"]["enum"] == ["image", "document", "audio", "any"]
     assert tool.ASK_FORM_SCHEMA["parameters"]["properties"]["fields"]["items"]["properties"]["kind"]["enum"] == [
@@ -532,3 +533,19 @@ def test_a_symlinked_upload_folder_is_unavailable_with_nothing_sent(server, tmp_
     assert (data["outcome"], data["reason"]) == ("unavailable", "upload_dir_unsafe")
     assert "symbolic link" in data["message"] and phone.requests("input.file") == []
     assert list(elsewhere.iterdir()) == [], "nothing is created through the link"
+
+
+def test_review_diff_treats_empty_optional_strings_as_absent(server):
+    phone = _WS("phone", ROBIN)
+    _session(server, "s1", phone, creator=ROBIN)
+    _caps(server, phone, requests=list(ALL))
+    release = _bind_ui_session("s1")
+    try:
+        thread, box = _call(tool.review_diff_tool, summary="Two small edits.", diff=DIFF, path="", title="")
+        rid = _wait_open("review.diff")
+        _frame(server, phone, rid, result={"decision": "rejected", "hunks": {"h1": "rejected", "h2": "rejected"}})
+        thread.join(5)
+    finally:
+        release()
+    assert json.loads(box["r"])["outcome"] == "rejected"
+    assert phone.requests("review.diff")[0]["params"]["title"] == "Review changes"

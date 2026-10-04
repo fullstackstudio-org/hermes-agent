@@ -354,7 +354,7 @@ def test_the_agents_path_must_be_the_file_the_diff_changes():
 def _hunk(*lines: str, header: str | None = None) -> str:
     old = sum(1 for line in lines if line[:1] in (" ", "-"))
     new = sum(1 for line in lines if line[:1] in (" ", "+"))
-    return (header or f"@@ -1,{old} +1,{new} @@") + "\n" + "".join(line + "\n" for line in lines)
+    return (header or f"@@ -{1 if old else 0},{old} +1,{new} @@") + "\n" + "".join(line + "\n" for line in lines)
 
 
 def test_a_hunk_is_read_by_its_counts_so_a_dashed_line_is_content():
@@ -408,7 +408,7 @@ def test_the_bounds_are_the_contracts():
 
 
 def _many(count: int) -> str:
-    return "".join(f"@@ -{n * 3 + 1} +{n * 3 + 1} @@\n-a\n+b\n" for n in range(count))
+    return "".join(f"@@ -{n * 4 + 1},2 +{n * 4 + 1},2 @@\n c\n-a\n+b\n" for n in range(count))
 
 
 def test_at_most_two_hundred_hunks():
@@ -753,3 +753,128 @@ def test_the_head_says_what_happens_to_the_file():
     assert (deleted.kind, deleted.path, deleted.old_path) == ("delete", "x", None)
     renamed = dh.parse("rename from x\nrename to y/z\n--- a/x\n+++ b/y/z\n" + HUNK).head
     assert (renamed.kind, renamed.path, renamed.old_path) == ("rename", "y/z", "x")
+
+
+# ── a hunk without context ──────────────────────────────────────────────────────────────────────
+
+HEAD_F = "--- a/f.txt\n+++ b/f.txt\n"
+
+
+@needs_git
+@pytest.mark.parametrize("content, body, landed", [
+    # git apply puts a hunk without context at the END of the file, not at the line the header says (rc 0)
+    ("x\na\nb\na\n", "@@ -2 +2 @@ x\n-a\n+X\n", "x\na\nb\nX\n"),
+    ("1\n2\n3\n4\n5\n", "@@ -3,0 +4 @@\n+NEW\n", "1\n2\n3\n4\n5\nNEW\n"),
+])
+def test_a_hunk_without_context_is_refused_where_git_apply_would_put_it_elsewhere(repo, content, body, landed):
+    repo.write("f.txt", content)
+    repo.commit()
+    repo.apply(HEAD_F + body)
+    assert (repo.root / "f.txt").read_text() == landed, "the person would be shown line 2 or 3, git changes the end"
+    with pytest.raises(dh.DiffError, match="no context line and starts at line"):
+        dh.parse(HEAD_F + body)
+
+
+@needs_git
+@pytest.mark.parametrize("content, body, expected", [
+    ("a\n", "@@ -1 +1 @@\n-a\n+b\n", "b\n"),                                       # the whole file replaced
+    ("a\nb\n", "@@ -1,2 +1,2 @@\n-a\n-b\n+A\n+B\n", "A\nB\n"),
+    ("a\nb\n", "@@ -1,2 +0,0 @@\n-a\n-b\n", ""),                                   # everything removed
+    ("x\ny\nz\nw\n", "@@ -2,2 +2,2 @@\n-y\n+Y\n z\n", "x\nY\nz\nw\n"),               # trailing context only
+    ("x\ny\nz\nw\n", "@@ -1,2 +1,2 @@\n x\n-y\n+Y\n", "x\nY\nz\nw\n"),               # leading context only: git decides
+])
+def test_hunks_with_context_or_at_the_ends_apply_where_they_are_shown(repo, content, body, expected):
+    repo.write("f.txt", content)
+    repo.commit()
+    parsed = dh.parse(HEAD_F + body)
+    patch = _compose(parsed, {"h1"})
+    applied = subprocess.run(["git", "apply", "-"], cwd=repo.root, env=repo.env, input=patch.encode(),
+                             capture_output=True)
+    if applied.returncode:
+        return          # git itself refuses (leading context only, mid-file): nothing lands anywhere else
+    assert (repo.root / "f.txt").read_text() == expected
+
+
+@needs_git
+def test_a_new_file_keeps_its_zero_start(repo):
+    repo.write("keep.txt", "x\n")
+    repo.commit()
+    new = "--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+a\n+b\n"
+    repo.apply(_compose(dh.parse(new), {"h1"}))
+    assert (repo.root / "n.txt").read_text() == "a\nb\n"
+
+
+@pytest.mark.parametrize("body", ["@@ -2 +2 @@\n-a\n+b\n", "@@ -5,2 +5 @@\n-a\n-b\n+c\n", "@@ -3,0 +4 @@\n+NEW\n",
+                                  "@@ -1,0 +2 @@\n+NEW\n"])
+def test_the_error_says_to_include_context(body):
+    with pytest.raises(dh.DiffError, match=r"Include unchanged lines around the change \(git diff -U3, never -U0\)"):
+        dh.parse(HEAD_F + body)
+
+
+# ── padding kept apart by an invisible character ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("text", [
+    "x" + (" " * 32 + "\U00016fe4") * 14 + "MARKER",              # a Khitan filler between runs
+    "x" + (" " * 32 + "́") * 14 + "MARKER",                   # a combining mark between runs
+    "x" + ("\t" * 4 + "ͅ") * 14 + "MARKER",
+    "x" + (" " * 32 + "​") * 14 + "MARKER",
+    "x" + (" " * 30 + "y") * 6 + "z",                              # runs of 30 apart: 180 columns in all
+    "́x", "x ́y", "x\t́y",
+])
+def test_padding_kept_apart_by_something_invisible_is_refused(text):
+    assert dh.line_problem("+" + text) != ""
+
+
+def test_the_total_of_whitespace_in_a_line_is_capped_at_160_columns():
+    assert dh.MAX_DIFF_WHITESPACE == 160
+    assert dh.line_problem("+x" + (" " * 30 + "y") * 5) == ""                 # 150
+    assert dh.line_problem("+" + " " * 96 + "x" + (" " * 32 + "y") * 2) == ""   # 96 + 64 = 160
+    assert dh.line_problem("+" + " " * 96 + "x" + (" " * 32 + "y") * 2 + " z") != ""   # 161
+    assert dh.line_problem("+" + "\t" * 12 + "x" + ("\t" * 4 + "y") * 2) == ""        # 96 + 64
+    assert dh.line_problem("+" + "\t" * 12 + "x" + ("\t" * 4 + "y") * 2 + "\tz") != ""
+    assert "columns of spaces and tabs in all" in dh.line_problem("+x" + (" " * 30 + "y") * 6)
+
+
+def test_a_combining_mark_on_a_letter_is_fine_and_after_a_space_is_not():
+    assert dh.line_problem("+café au lait") == "" and dh.line_problem("+é́") == ""
+    assert "combining mark after a space" in dh.line_problem("+a ́")
+    assert "combining mark after a space" in dh.line_problem("+́a")
+    assert dh.line_problem("+́") != "" and dh.text_problem("́a") != ""
+    assert dh.line_problem("+a\U00016fe4") != ""
+
+
+# ── paths, heads and the kind of change ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("path", [" a/b", "a/ b", "a /b", "a/b ", "a./b", "a/b.", "a/...", "dir./f"])
+def test_a_path_segment_with_a_space_at_an_end_or_a_trailing_dot_is_refused(path):
+    assert dh.path_problem(path) != ""
+    with pytest.raises(dh.DiffError, match="cannot be used"):
+        dh.parse(HUNK, path)
+
+
+@pytest.mark.parametrize("path", ["a b/c d.txt", "dir/.hidden", "a.b/c.d", "a/b.c"])
+def test_ordinary_names_with_inner_spaces_and_dots_are_fine(path):
+    assert dh.path_problem(path) == ""
+
+
+def test_a_rename_cannot_also_be_new_or_deleted():
+    base = "rename from a.txt\nrename to b.txt\n--- a/a.txt\n+++ b/b.txt\n" + HUNK
+    assert dh.parse(base).head.kind == "rename"
+    for line in ("new file mode 100644\n", "deleted file mode 100644\n"):
+        with pytest.raises(dh.DiffError, match="renamed but also new or deleted"):
+            dh.parse(line + base)
+
+
+def test_a_new_file_has_only_added_lines_and_a_deleted_one_only_removed_lines():
+    assert dh.parse("--- /dev/null\n+++ b/n\n@@ -0,0 +1,2 @@\n+a\n+b\n\\ No newline at end of file\n").head.kind == "new"
+    assert dh.parse("--- a/g\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-a\n-b\n\\ No newline at end of file\n").head.kind == "delete"
+    with pytest.raises(dh.DiffError, match="the file is new, so every line must be added"):
+        dh.parse("--- /dev/null\n+++ b/n\n@@ -0,1 +1,2 @@\n-a\n+b\n+c\n")
+    with pytest.raises(dh.DiffError, match="the file is new, so every line must be added"):
+        dh.parse("--- /dev/null\n+++ b/n\n@@ -1,1 +1,2 @@\n a\n+b\n")
+    with pytest.raises(dh.DiffError, match="the file is deleted, so every line must be removed"):
+        dh.parse("--- a/g\n+++ /dev/null\n@@ -1,1 +0,1 @@\n-a\n+b\n")
+    with pytest.raises(dh.DiffError, match="the file is deleted, so every line must be removed"):
+        dh.parse("--- a/g\n+++ /dev/null\n@@ -1,2 +0,1 @@\n a\n-b\n")

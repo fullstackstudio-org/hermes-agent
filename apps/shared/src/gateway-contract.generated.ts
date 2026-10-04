@@ -4543,7 +4543,7 @@ export interface ReviewDraftRejected {
   decision: 'rejected'
   comment?: string | null
 }
-/** The changes to one file, hunk by hunk, for the person to approve or reject each (``contract/requests`` §7). ``path`` (required) is the file's relative path, display only: the new path of a rename, the deleted file's path for ``delete``. ``kind`` says what happens to it and ``old_path`` is a rename's previous path (present for ``rename`` only). ``hunks``: 1-200, ids unique. Every line of every hunk is shown verbatim (the rules of §6 on the line without its marker, with tabs allowed). */
+/** The changes to one file, hunk by hunk, for the person to approve or reject each (``contract/requests`` §7). ``path`` (required) is the file's relative path, display only: the new path of a rename, the deleted file's path for ``delete``. ``kind`` says what happens to it and ``old_path`` is a rename's previous path (present for ``rename`` only). ``hunks``: 1-200, ids unique. Every line of every hunk is shown verbatim (the rules of §6 on the line without its marker, with tabs allowed, and the layout limits of §7.1). */
 export interface ReviewDiffRequestParams {
   session_id: string
   v: 1

@@ -761,10 +761,10 @@ class MCPStore:
         a parallel refresh (:meth:`_raced`: :class:`Raced`, nothing revoked)."""
         if not token:
             return None
-        at = self._clock()
-        now = int(at)
         revoked: Optional[Grant] = None
         with self._write() as db:
+            at = self._clock()  # read holding the write lock: a wait for it never ages the presentation
+            now = int(at)
             row = self._token_row(db, token, "refresh")
             if row is None:
                 return None
@@ -793,11 +793,13 @@ class MCPStore:
         Raises :class:`TokenInvalid`; with ``reused`` the grant has been revoked (and that is committed; a
         :class:`Reused` when this call revoked it); with ``raced`` (:class:`Raced`, a parallel refresh,
         :meth:`_raced`) nothing changed."""
-        at = self._clock()
-        now = int(at)
         reused = False
         revoked: Optional[Grant] = None
         with self._write() as db:
+            # Read holding the write lock: a wait for it never stamps the rotation (``rotated_at_exact``) earlier
+            # than it committed, which would shorten the parallel-refresh window of the token it replaces.
+            at = self._clock()
+            now = int(at)
             row = self._token_row(db, token, "refresh") if token else None
             if row is None:
                 raise TokenInvalid("unknown")

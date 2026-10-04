@@ -7,6 +7,7 @@ import os
 import sqlite3
 import stat
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -672,6 +673,28 @@ def test_a_file_of_the_schema_before_the_exact_rotation_time_gains_it_and_rotate
     with pytest.raises(Raced):
         store.load_refresh(issued.refresh_token, client_id="client-1")
     assert store.rotate_refresh(rotated.refresh_token, client_id="client-1", scopes=None, **TTL).refresh_token
+
+
+def test_a_rotation_that_waited_for_the_write_lock_is_stamped_when_it_ran(store, clock):
+    """The clock is read holding the write lock: a rotation that waited for another writer is stamped with the
+    time it committed, so the window of the token it replaced still runs 5 s from then."""
+    _client(store)
+    issued = _grant(store)
+    blocker = sqlite3.connect(store.path, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    done: list = []
+    worker = threading.Thread(target=lambda: done.append(
+        store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)), daemon=True)
+    worker.start()
+    time.sleep(0.3)  # the rotation is waiting for the lock now
+    clock.t += 3
+    blocker.execute("COMMIT")
+    blocker.close()
+    worker.join(5)
+    assert done, "the rotation never ran"
+    clock.t += 4.9  # 7.9 s after the rotation was asked for, 4.9 s after it ran
+    with pytest.raises(Raced):
+        store.load_refresh(issued.refresh_token, client_id="client-1")
 
 
 @pytest.mark.parametrize("load", [True, False], ids=["load", "rotate"])

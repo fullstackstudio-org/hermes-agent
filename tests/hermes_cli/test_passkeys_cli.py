@@ -311,3 +311,15 @@ def test_self_enrol_on_off_writes_the_protected_flag(store, _isolate_hermes_home
     with pytest.raises(SystemExit):
         _parser().parse_args(["dashboard", "passkey", "self-enrol", "maybe"])
 
+
+def test_self_enrol_on_says_when_the_written_flag_does_not_take_effect(store, _isolate_hermes_home):
+    from hermes_cli.config import get_config_path
+
+    path = get_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("confirm:\n  passkey:\n    self_enrol:\n      cooling_off_s: 10m\n")
+    code, out, _ = _run(store, ["self-enrol", "on"])
+    assert code == 1 and "stays off" in out and "cooling_off_s" in out
+    path.write_text("confirm:\n  passkey:\n    enabled: false\n")
+    code, out, _ = _run(store, ["self-enrol", "on"])
+    assert code == 0 and "Self-enrolment on" in out and "confirm.passkey.enabled is false" in out

@@ -337,15 +337,25 @@ def _self_enrol(args, *, out, err) -> int:
     raw["confirm"] = {**confirm, "passkey": {**passkey, "self_enrol": {**section, "enabled": enabled}}}
     save_config(raw)
     from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
+    from hermes_cli.dashboard_auth.passkeys.settings import load_settings
     audit_log(AuditEvent.PASSKEY_SELF_ENROL_CHANGED, by="operator", enabled=enabled)
-    if enabled:
+    # What the gateway will actually apply, read back the way it reads it: "on" is written, but an unreadable
+    # cooling-off (or a level that is off) still keeps self-enrolment from working.
+    effective = load_settings()
+    problems = [p for p in effective.problems if p.startswith("self_enrol")]
+    if effective.self_enrol.enabled:
         print("Self-enrolment on: a signed-in person may add a passkey by signing in again (password or OIDC "
               "sign-in). Whoever can sign in as a person can then also add a passkey for them.", file=out)
+    elif enabled:
+        print("Wrote self_enrol.enabled: true, but self-enrolment stays off: "
+              + ("; ".join(problems) or "the setting could not be read back") + ".", file=out)
     else:
         print("Self-enrolment off: every passkey needs an enrolment code (`hermes dashboard passkey invite`, or "
               "one a person mints with an earlier passkey).", file=out)
+    if effective.self_enrol.enabled and not effective.enabled:
+        print("Note: confirm.passkey.enabled is false; nothing is enrolled until the level is enabled.", file=out)
     print("The running gateway reads it on the next request; no restart needed.", file=out)
-    return 0
+    return 1 if enabled and not effective.self_enrol.enabled else 0
 
 
 def _list(args, *, out, err, store, settings, public_urls, isatty, sign_in_providers) -> int:

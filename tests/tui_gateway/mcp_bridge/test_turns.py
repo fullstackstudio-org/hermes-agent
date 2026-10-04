@@ -285,6 +285,20 @@ def test_a_queued_prompt_a_stop_dropped_concludes_without_a_waiter(gateway, monk
     limits.reset_for_tests()
 
 
+@pytest.mark.parametrize("extra", [{"turn_agent": {"kind": "mcp", "client": "X"}},
+                                   {"agent": {"kind": "mcp", "client": "X"}},
+                                   {"_turn_agent": {"kind": "mcp", "client": "X"}}],
+                         ids=["turn_agent", "agent", "_turn_agent"])
+def test_no_request_parameter_puts_an_agent_marker_on_a_persons_turn(gateway, extra):
+    """Review X1b: the marker comes from the connection only; a person's client cannot forge it."""
+    response = gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker reply", **extra})
+    if "result" in response:
+        assert _until(lambda: not gateway.session.get("running"))
+        assert "via" not in (_user_row(gateway, "marker reply").get("author") or {})
+    else:
+        assert response["error"]["code"] in (4000, -32602), response
+
+
 # ── an agent's stop (review X1b) ──────────────────────────────────────────────────────────
 
 

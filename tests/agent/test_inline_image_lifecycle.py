@@ -314,15 +314,11 @@ def test_assistant_and_tool_rows_are_stored_as_they_are(tmp_path, native_parts):
 
 
 def test_image_files_get_distinct_names_and_are_created_exclusively(tmp_path, monkeypatch):
-    import os
-    import stat
-
     from agent import inline_images
 
     first = inline_images.create_image_file(tmp_path / "images", "upload", ".png", b"one")
     second = inline_images.create_image_file(tmp_path / "images", "upload", ".png", b"two")
     assert first != second and first.read_bytes() == b"one" and second.read_bytes() == b"two"
-    assert stat.S_IMODE(os.stat(first).st_mode) == 0o600
 
     # A name already taken (or a link planted under it) is never written: the next random name is used.
     tokens = iter(["aaaaaaaaaaaa", "bbbbbbbbbbbb"])
@@ -352,3 +348,19 @@ def test_two_sessions_of_one_profile_never_share_an_upload(tmp_path):
     assert path_a != path_b
     assert path_a.read_bytes() == b"from a" and path_b.read_bytes() == b"from b"
     assert a["attached_images"] == [str(path_a)] and b["attached_images"] == [str(path_b)]
+
+
+@pytest.mark.parametrize("umask, mode", [(0o022, 0o644), (0o077, 0o600)])
+def test_image_files_are_readable_as_the_umask_allows(tmp_path, umask, mode):
+    """0644 less the umask, as write_bytes made them: a sandbox running as another uid reads uploads."""
+    import os
+    import stat
+
+    from agent.inline_images import create_image_file
+
+    previous = os.umask(umask)
+    try:
+        made = create_image_file(tmp_path / "images", "upload", ".png", b"x")
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(os.stat(made).st_mode) == mode

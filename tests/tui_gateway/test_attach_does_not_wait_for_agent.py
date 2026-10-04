@@ -136,3 +136,29 @@ def test_sess_building_does_not_wait_but_sess_does(session, monkeypatch):
 
     server._sess({"session_id": sid}, "rid-sess")
     assert waited == ["rid-sess"]
+
+
+@pytest.mark.parametrize("outcome", ["fails", "raises"])
+def test_clipboard_paste_leaves_no_reserved_file_behind(session, tmp_path, monkeypatch, outcome):
+    """The empty file that reserves a clipboard image's name goes when the clipboard tool fails or raises."""
+    import hermes_cli.clipboard as clipboard
+
+    sid, record = session
+
+    def _save(dest):
+        if outcome == "raises":
+            raise RuntimeError("clipboard tool crashed")
+        return False
+
+    monkeypatch.setattr(clipboard, "save_clipboard_image", _save)
+    monkeypatch.setattr(clipboard, "has_clipboard_image", lambda: False)
+    request = {"id": "1", "method": "clipboard.paste", "params": {"session_id": sid}}
+    if outcome == "raises":
+        with pytest.raises(RuntimeError):
+            server.handle_request(request)
+    else:
+        server.handle_request(request)
+    images = tmp_path / "images"
+    assert not images.exists() or not any(images.iterdir())
+    assert record["image_counter"] == 0
+    assert record["attached_images"] == []

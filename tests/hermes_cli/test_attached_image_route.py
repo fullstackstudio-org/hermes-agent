@@ -187,3 +187,18 @@ def test_a_signed_in_browser_session_may_read_it_and_a_gated_dashboard_refuses_w
     finally:
         clear_providers()
         web_server.app.state.bound_host, web_server.app.state.bound_port = prev
+
+
+@pytest.mark.parametrize("filename", ["holiday..photo.png", "a...b.png", "plain.png"])
+def test_a_dashboard_chat_upload_can_be_fetched_back_by_name(homes, filename):
+    """The dashboard's chat image upload names files the image route will serve, ``..`` included."""
+    import base64
+
+    client, home, _lloyd = homes
+    uploaded = client.post("/api/chat/image-upload", json={
+        "data_url": "data:image/png;base64," + base64.b64encode(_PNG).decode(), "filename": filename})
+    assert uploaded.status_code == 200, uploaded.text
+    name = uploaded.json()["name"]
+    assert ".." not in name and Path(uploaded.json()["path"]).parent == (home / "images").resolve()
+    fetched = client.get(f"/api/files/images/{name}")
+    assert fetched.status_code == 200 and fetched.content == _PNG

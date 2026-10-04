@@ -209,7 +209,7 @@ def create_image_file(directory: Path, prefix: str, ext: str, data: Optional[byt
     The file is the only record of an attached image and clients fetch it by name, so two sessions of
     one profile attaching in the same second must never share a name: the name carries 48 random bits
     and the file is created with ``O_CREAT | O_EXCL`` (never an existing file, never through a link),
-    mode 0600. ``data`` is written when given; without it the empty file reserves the name for a writer
+    mode 0644 less the umask. ``data`` is written when given; without it the empty file reserves the name for a writer
     that fills it (a clipboard tool), and the caller removes it if that writer fails."""
     directory.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -217,7 +217,9 @@ def create_image_file(directory: Path, prefix: str, ext: str, data: Optional[byt
     for _ in range(8):
         path = directory / f"{prefix}_{stamp}_{secrets.token_hex(6)}{ext}"
         try:
-            fd = os.open(path, flags, 0o600)
+            # 0644 (less the umask) like the write_bytes this replaced: a sandbox (Docker) running as
+            # another uid must still be able to read the upload the agent is asked about.
+            fd = os.open(path, flags, 0o644)
         except FileExistsError:
             continue
         try:

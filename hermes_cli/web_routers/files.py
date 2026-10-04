@@ -373,6 +373,8 @@ async def upload_chat_image(payload: ChatImageUpload, profile: Optional[str] = N
 
             stem = Path(_sanitize_chat_image_filename(payload.filename)).stem or "pasted-image"
             stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._-") or "pasted-image"
+            # GET /api/files/images/{name} refuses a name containing "..": keep the upload fetchable.
+            stem = re.sub(r"\.{2,}", ".", stem)
             from agent.inline_images import create_image_file
 
             with _io_errors("Image directory is not writable", "Could not write image"):

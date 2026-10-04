@@ -577,12 +577,16 @@ class CLITerminalMixin:
         self._image_counter += 1
         # A new, randomly named file reserved for the clipboard tool to fill (never another session's).
         img_path = create_image_file(get_hermes_home() / "images", "clip", ".png")
-        if save_clipboard_image(img_path):
+        saved = False
+        try:
+            saved = save_clipboard_image(img_path)
+        finally:
+            if not saved:  # failed or raised: the reserved empty file must not stay behind
+                img_path.unlink(missing_ok=True)
+                self._image_counter -= 1
+        if saved:
             self._attached_images.append(img_path)
-            return True
-        img_path.unlink(missing_ok=True)
-        self._image_counter -= 1
-        return False
+        return saved
 
     def _write_osc52_clipboard(self, text: str) -> None:
         """Copy *text* to the terminal clipboard via OSC 52.

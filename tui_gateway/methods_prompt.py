@@ -872,9 +872,14 @@ def _(rid, params: dict) -> dict:
     # A new, randomly named file reserved for the clipboard tool to fill (never another session's).
     img_path = create_image_file(_session_images_dir(session), "clip", ".png")
     # Save-first (CLI keybinding parity): more robust than a has_image() precheck.
-    if not save_clipboard_image(img_path):
-        img_path.unlink(missing_ok=True)
-        session["image_counter"] = max(0, session["image_counter"] - 1)
+    saved = False
+    try:
+        saved = save_clipboard_image(img_path)
+    finally:
+        if not saved:  # failed or raised: the reserved empty file must not stay behind
+            img_path.unlink(missing_ok=True)
+            session["image_counter"] = max(0, session["image_counter"] - 1)
+    if not saved:
         return _ok(rid, {"attached": False, "message": (
             "Clipboard has image but extraction failed" if has_clipboard_image()
             else "No image found in clipboard")})

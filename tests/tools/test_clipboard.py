@@ -524,6 +524,24 @@ class TestTryAttachClipboardImage:
         assert path.suffix == ".png"
 
 
+    @pytest.mark.parametrize("outcome", ["fails", "raises"])
+    def test_no_reserved_file_stays_when_the_clipboard_tool_fails(self, cli, outcome):
+        def _save(dest):
+            if outcome == "raises":
+                raise RuntimeError("clipboard tool crashed")
+            return False
+
+        with patch("hermes_cli.clipboard.save_clipboard_image", side_effect=_save):
+            if outcome == "raises":
+                with pytest.raises(RuntimeError):
+                    cli._try_attach_clipboard_image()
+            else:
+                assert cli._try_attach_clipboard_image() is False
+        images = Path(os.environ["HERMES_HOME"]) / "images"
+        assert not images.exists() or not any(images.iterdir())
+        assert cli._image_counter == 0 and cli._attached_images == []
+
+
 class TestAutoAttachClipboardImageOnPaste:
     @pytest.mark.parametrize("pasted, expected", [
         ("  hello world  ", False),   # real text paste — don't hijack it

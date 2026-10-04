@@ -54,6 +54,9 @@ def _run_delivery(profile: str, tmp: str, env: dict | None = None, *,
 def _(rid, params: dict, _root=_relay_root) -> dict:
     """Replace this gateway's view of agents on OTHER connections → ``{count}`` accepted rows
     (``agents`` rows ``{profile, handle, connection_id, ...}``; invalid rows are dropped)."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "change the bot relay's roster")) is not None:
+        return refused
     try:
         from tools.bot_relay import write_remote_roster
         return _ok(rid, {"count": write_remote_roster(_root(), params.get("agents"))})
@@ -65,6 +68,9 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
 def _(rid, params: dict, _root=_relay_root) -> dict:
     """Claim every pending cross-connection envelope queued here → ``{envelopes}``; claimed
     envelopes move to ``claimed/`` atomically so concurrent drains can't double-deliver."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "claim the bot relay's outbox")) is not None:
+        return refused
     try:
         from tools.bot_relay import claim_pending_envelopes
         return _ok(rid, {"envelopes": claim_pending_envelopes(_root())})
@@ -78,6 +84,11 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
     """Deliver a relayed DM (``profile``, attribution-prefixed ``message``) into a Bot Chat ON THIS
     GATEWAY via the one-turn ``hermes -p <profile> chat -c "Bot Chat"`` transport local DMs use →
     ``{reply}``. Blocking by design (Desktop relay worker; the RPC pool keeps it off the reader)."""
+    # Its live-chat path dispatches ``prompt.submit`` as the gateway's own (``_internal_dispatch``, exempt from the
+    # agent rules there): never entered from an agent's connection, so an agent cannot reach that exemption.
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "relay a bot's message into a Bot Chat")) is not None:
+        return refused
     import tempfile
     profile = str(params.get("profile") or "").strip()
     message = str(params.get("message") or "").strip()
@@ -237,6 +248,9 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
 def _(rid, params: dict, _root=_relay_root) -> dict:
     """Write a relayed ``reply`` and/or ``error`` (+ optional typed ``reason``, see
     ``tools.bot_failure_reasons``) for envelope ``id`` so the sender-side waiter picks it up."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "answer a relayed bot message")) is not None:
+        return refused
     envelope_id = str(params.get("id") or "").strip()
     if not envelope_id:
         return _err(rid, 4093, "id required")

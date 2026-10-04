@@ -59,6 +59,11 @@ GUARDED = {
     "session.branch": {"session_id": SID},
     "session.branch_whole": {"session_id": SID},
     "session.branch_stored": {"parent_session_id": KEY},
+    # The bot relay: its live-chat delivery is the gateway's own dispatch (``_INTERNAL_DISPATCH``).
+    "bot_relay.deliver": {"profile": "marker", "message": "marker relayed"},
+    "bot_relay.outbox.drain": {},
+    "bot_relay.reply": {"id": "marker", "reply": "marker"},
+    "bot_relay.roster.sync": {"agents": []},
 }
 
 
@@ -201,6 +206,36 @@ def test_the_gateways_own_dispatch_on_an_agents_connection_is_not_the_agents_sub
     assert response.get("result", {}).get("status") == "streaming", response
     gateway.agent.gate.set()
     assert _until(lambda: "marker internal" in gateway.agent.texts)
+
+
+def test_a_relay_into_a_live_bot_chat_on_an_agents_connection_queues_unattributed(gateway):
+    """The relay's own submit into a live Bot Chat (``methods_bot_relay``: ``queued``, a ``DeliveryAuthor``, under
+    ``_internal_dispatch``) with an agent's connection current: still the gateway's, so it queues behind the running
+    turn as the relayed bot's, names neither the agent nor its person, and pins no connection."""
+    from tools.bot_relay import DeliveryAuthor
+    from tui_gateway.session_transports import _internal_dispatch
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    bot = {"id": "bot:marker", "name": "marker", "is_bot": True}
+    assert gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker gated"})["result"]["status"] \
+        == "streaming"
+    agent = _agent(gateway)
+    assert _dispatch(agent, "bot_relay.deliver", {"profile": "marker", "message": "marker relayed"})["error"][
+        "code"] == 4033
+    token = bind_transport(agent)
+    try:
+        with _internal_dispatch():
+            response = server._methods["prompt.submit"]("relay", {
+                "session_id": SID, "text": "marker relayed", "queued": True, "_turn_author": DeliveryAuthor(bot)})
+    finally:
+        reset_transport(token)
+    assert response.get("result", {}).get("status") == "queued", response
+    queued = gateway.session["queued_prompt"]
+    assert queued["text"] == "marker relayed" and queued["turn_author"] == bot
+    assert "turn_agent" not in queued and "turn_auth_user" not in queued
+    assert queued["transport"] is not agent
+    gateway.agent.gate.set()
+    assert _until(lambda: "marker relayed" in gateway.agent.texts)
 
 
 def test_the_person_may_still_send_without_queued(gateway, monkeypatch):

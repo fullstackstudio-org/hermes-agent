@@ -723,7 +723,7 @@ with contextlib.suppress(Exception):
 
     _confirm_tool.set_bridge(_confirm_bridge)
 
-# ask_form / ask_file / review_draft reach the turn's clients the same way (``tui_gateway/interactive.py``).
+# ask_form / ask_file / review_draft / review_diff / ask_signature reach the turn's clients the same way (``tui_gateway/interactive.py``).
 with contextlib.suppress(Exception):
     from tools import interactive_tools as _interactive_tools
 
@@ -732,6 +732,12 @@ with contextlib.suppress(Exception):
         return _interactive.request_from_tool(sid, method, **kwargs)
 
     _interactive_tools.set_bridge(_interactive_bridge)
+
+# device_location / device_contact / device_calendar / device_scan use the same bridge, in a toolset of their own.
+with contextlib.suppress(Exception):
+    from tools import device_tools as _device_tools
+
+    _device_tools.set_bridge(_interactive_bridge)
 
 
 def _register_strong_confirm(sid: str, key: str) -> None:

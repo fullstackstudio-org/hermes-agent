@@ -163,8 +163,12 @@ TOOLSETS = {
                    ["confirm_action"]),
     # Off by default like ``confirm``; the tools are withheld outside the interactive gateway and answer
     # "unavailable" when no connected app can show the request.
-    "interactive": _ts("Ask the person for typed fields, files, or the approval of a draft or of a diff's hunks in their connected app",
-                       ["ask_form", "ask_file", "review_draft", "review_diff"]),
+    "interactive": _ts("Ask the person for typed fields, files, a signature, or the approval of a draft or of a diff's hunks in their connected app",
+                       ["ask_form", "ask_file", "review_draft", "review_diff", "ask_signature"]),
+    # Off by default like ``interactive``; asks the person's own device for something of theirs, one thing at a time
+    # (``tools/device_tools.py``).
+    "device": _ts("Ask the person's device for their location, a contact they pick, a calendar entry they save, or a code they scan, in their connected app",
+                  ["device_location", "device_contact", "device_calendar", "device_scan"]),
     "code_execution": _ts("Run Python scripts that call tools programmatically (reduces LLM round trips)", ["execute_code"]),
     "delegation": _ts("Spawn subagents with isolated context for complex subtasks", ["delegate_task"]),
     "homeassistant": _ts("Home Assistant smart home control and monitoring", _HA_TOOLS),

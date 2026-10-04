@@ -1,6 +1,6 @@
 """Which turn identities count as a human messaging channel (``session_is_messaging_surface``).
 
-The interactive tools (``confirm_action``, ``ask_form``, ``ask_file``, ``review_draft``, ``review_diff``) answer ``no_session`` on a
+The interactive tools (``confirm_action``, ``ask_form``, ``ask_file``, ``review_draft``, ``review_diff``, ``ask_signature`` and the ``device`` tools) answer ``no_session`` on a
 messaging surface, and ``verify_on_stop: auto`` stays off there. An unknown identity is messaging (default-deny).
 """
 

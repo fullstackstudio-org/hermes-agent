@@ -28,7 +28,7 @@ from tests.tui_gateway.test_server_requests_gate import (  # noqa: F401 - fixtur
 from tools import interactive_tools as tool
 from tools.registry import registry
 
-NAMES = ("ask_form", "ask_file", "review_draft", "review_diff")
+NAMES = ("ask_form", "ask_file", "review_draft", "review_diff", "ask_signature")
 FIELD = {"id": "name", "kind": "text", "label": "Name"}
 ALL = ("input.form", "input.file", "review.draft", "review.diff")
 #: The methods whose result is an approval (a decision), not an answer.
@@ -113,16 +113,18 @@ def test_the_toolset_is_off_by_default_and_listed_in_hermes_tools():
 
 def test_the_schemas_and_descriptions():
     schemas = {s["name"]: s for s in (tool.ASK_FORM_SCHEMA, tool.ASK_FILE_SCHEMA, tool.REVIEW_DRAFT_SCHEMA,
-                                      tool.REVIEW_DIFF_SCHEMA)}
+                                      tool.REVIEW_DIFF_SCHEMA, tool.ASK_SIGNATURE_SCHEMA)}
     assert set(schemas) == set(NAMES)
     required = {name: set(s["parameters"]["required"]) for name, s in schemas.items()}
     assert required == {"ask_form": {"summary", "fields"}, "ask_file": {"summary", "accept"},
-                        "review_draft": {"summary", "text", "kind"}, "review_diff": {"summary", "diff"}}
+                        "review_draft": {"summary", "text", "kind"}, "review_diff": {"summary", "diff"},
+                        "ask_signature": {"summary", "statement"}}
     props = {name: set(s["parameters"]["properties"]) for name, s in schemas.items()}
     assert props["ask_form"] == {"summary", "fields", "title", "detail", "optional"}
     assert props["ask_file"] == {"summary", "accept", "capture", "multiple", "title"}
     assert props["review_draft"] == {"summary", "text", "kind", "subject", "recipients", "editable", "title"}
     assert props["review_diff"] == {"summary", "diff", "path", "title"}
+    assert props["ask_signature"] == {"summary", "statement", "signer_name"}
     for name, schema in schemas.items():
         text = schema["description"]
         assert "verbatim, marked as coming from you" in text, name
@@ -140,7 +142,11 @@ def test_the_schemas_and_descriptions():
     assert tool.ASK_FILE_SCHEMA["parameters"]["properties"]["accept"]["enum"] == ["image", "document", "audio", "any"]
     assert tool.ASK_FORM_SCHEMA["parameters"]["properties"]["fields"]["items"]["properties"]["kind"]["enum"] == [
         "text", "number", "amount", "date", "time", "datetime", "daterange", "choice", "toggle"]
-    json.dumps([tool.ASK_FORM_SCHEMA, tool.ASK_FILE_SCHEMA, tool.REVIEW_DRAFT_SCHEMA, tool.REVIEW_DIFF_SCHEMA])
+    json.dumps([tool.ASK_FORM_SCHEMA, tool.ASK_FILE_SCHEMA, tool.REVIEW_DRAFT_SCHEMA, tool.REVIEW_DIFF_SCHEMA,
+                tool.ASK_SIGNATURE_SCHEMA])
+    sign = tool.ASK_SIGNATURE_SCHEMA["description"]
+    assert "exactly as you wrote it" in sign and "NOT a signature" in sign and "500 characters" in sign
+    assert "statement_sha256" in sign and "covers that statement only" in sign
 
 
 # ── no interactive session ──────────────────────────────────────────────────────────────────────
@@ -549,3 +555,59 @@ def test_review_diff_treats_empty_optional_strings_as_absent(server):
         release()
     assert json.loads(box["r"])["outcome"] == "rejected"
     assert phone.requests("review.diff")[0]["params"]["title"] == "Review changes"
+
+
+# ── ask_signature ───────────────────────────────────────────────────────────────────────────────
+
+STATEMENT = "I have read the rental agreement and agree to its terms."
+SIGNATURE_PNG = b"\x89PNG\r\n\x1a\nmarker"
+SIGNATURE_SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0L1 1"/></svg>'
+
+
+def test_ask_signature_round_trip_gives_the_hash_and_both_files(server, tmp_path):
+    from tui_gateway.interactive_device import statement_sha256
+    phone = _WS("phone", ROBIN)
+    _session(server, "s1", phone, creator=ROBIN)
+    server._sessions["s1"]["cwd"] = str(tmp_path)
+    _caps(server, phone, requests=list(ALL) + ["input.signature"])
+    release = _bind_ui_session("s1")
+    try:
+        for bad in ({"statement": ""}, {"statement": "a\tb"}, {"statement": "x" * 501}, {"statement": STATEMENT,
+                                                                                        "signer_name": "n" * 81}):
+            assert "error" in json.loads(tool.ask_signature_tool(**{"summary": "x", **bad}))
+        assert phone.requests("input.signature") == []
+        thread, box = _call(tool.ask_signature_tool, summary="Sign to accept the agreement.", statement=STATEMENT,
+                            signer_name="Ada Lovelace")
+        rid = _wait_open("input.signature")
+        frame = phone.requests("input.signature")[0]["params"]
+        assert frame["statement"] == STATEMENT and frame["signer_name"] == "Ada Lovelace" and frame["optional"] is True
+        root = Path(frame["upload"]["dir"])
+        png, svg = root / "0123456789abcdef-signature.png", root / "fedcba9876543210-signature.svg"
+        png.write_bytes(SIGNATURE_PNG)
+        svg.write_bytes(SIGNATURE_SVG)
+        files = [{"path": str(png), "name": "signature.png", "mime": "image/png", "bytes": len(SIGNATURE_PNG),
+                  "sha256": hashlib.sha256(SIGNATURE_PNG).hexdigest()},
+                 {"path": str(svg), "name": "signature.svg", "mime": "image/svg+xml", "bytes": len(SIGNATURE_SVG),
+                  "sha256": hashlib.sha256(SIGNATURE_SVG).hexdigest()}]
+        _frame(server, phone, rid, result={"status": "answered", "files": files, "signed_at": 1791119310,
+                                           "statement_sha256": statement_sha256(STATEMENT)})
+        thread.join(5)
+    finally:
+        release()
+    data = json.loads(box["r"])
+    assert data["outcome"] == "answered" and data["signed"] is True
+    assert data["statement_sha256"] == statement_sha256(STATEMENT) == hashlib.sha256(STATEMENT.encode()).hexdigest()
+    assert [f["mime"] for f in data["files"]] == ["image/png", "image/svg+xml"] and "ref_text" in data["files"][0]
+    assert data["signer_name"] == "Ada Lovelace" and data["signed_at"] == 1791119310
+    assert data["message"].startswith("The person signed the statement (Ada Lovelace)")
+    assert "covers that statement only" in data["message"]
+
+
+def test_unavailable_is_not_a_signature():
+    for reason in ("no_capable_client", "cannot_show:declined", "rate_limited", "bad_upload", "timeout"):
+        outcome = "timeout" if reason == "timeout" else "unavailable"
+        sentence = tool._sentence("input.signature", {"outcome": outcome, "reason": reason})
+        assert "This is not a signature: do not treat the statement as signed or agreed to." in sentence, reason
+    assert "a Hermie app that can show a signature pad" in tool._sentence(
+        "input.signature", {"outcome": "unavailable", "reason": "no_capable_client"})
+    assert "No answer within 300 seconds" in tool._sentence("input.signature", {"outcome": "timeout"})

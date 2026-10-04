@@ -337,10 +337,12 @@ def test_the_child_binds_what_the_frame_says(room):
 
 
 def test_an_agents_mid_turn_steer_row_and_clause_say_it_was_the_agent(room):
+    """The carrier itself, in-process: a steer handed in with the marker lands as the agent's row and clause."""
+    from tui_gateway.row_author import deliver_correction
     agent, call, _peers = room
 
     def steer():
-        call("agent", "session.steer", text="marker steer")
+        assert deliver_correction(agent, "steer", "marker steer", ROBIN, VIA)
         agent.deliver_mid_turn()
 
     agent.script = [steer]
@@ -352,20 +354,37 @@ def test_an_agents_mid_turn_steer_row_and_clause_say_it_was_the_agent(room):
     assert "Sent by an agent, «Claude Code», through MCP on «Robin»'s behalf" in row["api_content"]
 
 
-def test_an_agents_redirect_row_carries_the_marker(room, monkeypatch):
-    monkeypatch.setattr(server, "_load_busy_input_mode", lambda: "interrupt")
-    agent, call, _peers = room
+def test_an_agents_redirect_row_carries_the_marker(room):
+    """The carrier itself, in-process: an agent's connection can no longer redirect (its text is queued), but a
+    redirect handed in with the marker still lands as the agent's row."""
+    from tui_gateway.row_author import deliver_correction
+    agent, _call, _peers = room
     agent._supports_active_turn_redirect = True
     agent._model_request_active.set()
 
     def redirect():
-        assert call("agent", "prompt.submit", text="marker redirect")["result"]["status"] == "redirected"
+        assert deliver_correction(agent, "redirect", "marker redirect", ROBIN, VIA)
         agent.deliver_mid_turn()
 
     agent.script = [redirect]
-    call("robin", "prompt.submit", text="marker first")
+    _call("robin", "prompt.submit", text="marker first")
     [row] = agent.rows
     assert row["display_metadata"]["author"] == AUTHOR_ROBIN_VIA
+
+
+def test_an_agents_submit_mid_turn_is_queued_never_a_redirect(room, monkeypatch):
+    """Plan "Agent prompts": whatever the busy mode, an agent's text waits for a turn of its own."""
+    monkeypatch.setattr(server, "_load_busy_input_mode", lambda: "interrupt")
+    agent, call, _peers = room
+    agent._supports_active_turn_redirect = True
+    agent._model_request_active.set()
+    answers = []
+    agent.script = [lambda: answers.append(call("agent", "prompt.submit", text="marker redirect"))]
+    call("robin", "prompt.submit", text="marker first")
+    assert answers[0]["result"]["status"] == "queued", answers
+    assert agent.rows == [] and agent._interrupt_requested is False
+    turn = _turn(agent, "marker redirect")
+    assert (turn["author"], turn["agent"]) == (AUTHOR_ROBIN_VIA, VIA)
 
 
 def test_the_person_steering_an_agents_turn_is_named_as_in_person(room):
@@ -383,8 +402,9 @@ def test_the_person_steering_an_agents_turn_is_named_as_in_person(room):
 
 
 def test_an_agents_leftover_steer_runs_as_the_agents(room):
+    from tui_gateway.row_author import deliver_correction
     agent, call, _peers = room
-    agent.script = [lambda: call("agent", "session.steer", text="marker leftover")]
+    agent.script = [lambda: deliver_correction(agent, "steer", "marker leftover", ROBIN, VIA)]
     call("robin", "prompt.submit", text="marker first")
 
     turn = _turn(agent, "marker leftover")
@@ -447,11 +467,23 @@ def test_the_person_retrying_their_agents_message_keeps_its_via(room):
     assert "This message was sent by an agent" not in turn["note"]
 
 
+def test_an_agent_cannot_regenerate_or_edit_a_row(room):
+    """Plan "Agent prompts": a rewind from an agent's connection is refused before anything is cut."""
+    agent, call, _peers = room
+    _stored_exchange(agent, "marker question", AUTHOR_ROBIN)
+    row_id = next(row["_row_id"] for row in agent.session["history"] if row["content"] == "marker question")
+    before = len(agent.db.get_messages("room", include_inactive=True))
+
+    response = call("agent", "prompt.submit", text="marker edited", truncate_before_row_id=row_id,
+                    confirm_truncate=True)
+    assert response["error"]["code"] == 4033, response
+    assert agent.turns == [] and len(agent.db.get_messages("room", include_inactive=True)) == before
+
+
 @pytest.mark.parametrize("who, text, original, expected", [
-    ("agent", "marker question", AUTHOR_ROBIN, AUTHOR_ROBIN),
-    ("agent", "marker edited", AUTHOR_ROBIN, AUTHOR_ROBIN_VIA),
     ("robin", "marker edited", AUTHOR_ROBIN_VIA, AUTHOR_ROBIN),
-], ids=["agent_regenerates", "agent_edits_robins_row", "robin_edits_the_agents_row"])
+    ("robin", "marker question", AUTHOR_ROBIN_VIA, AUTHOR_ROBIN_VIA),
+], ids=["robin_edits_the_agents_row", "robin_regenerates_the_agents_row"])
 def test_a_truncating_resubmit_keeps_whose_words_and_how_they_were_sent(room, who, text, original, expected):
     agent, call, _peers = room
     _stored_exchange(agent, "marker question", original)

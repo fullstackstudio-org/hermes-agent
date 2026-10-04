@@ -133,6 +133,11 @@ def test_a_method_outside_the_allowlist_is_refused_before_dispatch(method, dispa
     ("request.answer", {"id": "srq-1", "result": {}}),
     ("request.answer", {"id": "srq-1", "result": {"answers": {"q1": 1}}}),
     ("prompt.submit", {"session_id": SID, "text": object()}),
+    ("prompt.submit", {"session_id": SID, "text": "marker", "truncate_before_row_id": 1, "confirm_truncate": True}),
+    ("prompt.submit", {"session_id": SID, "text": "marker", "rebind_survivor_row_ids": [1]}),
+    ("prompt.submit", {"session_id": SID, "text": "marker", "interrupted": True}),
+    ("prompt.submit", {"session_id": SID, "text": "marker", "surface": "hud"}),
+    ("prompt.submit", {"session_id": SID, "text": "marker", "display_kind": "hidden"}),
 ])
 def test_forbidden_parameters_are_refused_before_dispatch(method, params, dispatched):
     transport = AgentTransport(identity())

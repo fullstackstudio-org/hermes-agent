@@ -573,6 +573,9 @@ def _run_after_agent_ready(
 
 _TRUNCATION_PARAMS = (
     "truncate_before_user_ordinal", "truncate_before_row_id", "truncate_before_message_id")
+#: What an agent's ``prompt.submit`` may never carry: every rewind / edit / regenerate parameter.
+_AGENT_REFUSED_SUBMIT_PARAMS = (
+    *_TRUNCATION_PARAMS, "confirm_truncate", "confirm_empty_truncate", "rebind_survivor_row_ids")
 
 
 def _lock_in_submit_turn(
@@ -629,9 +632,19 @@ def _(rid, params: dict) -> dict:
         if isinstance(title_preview, str) and title_preview.strip()
         else None
     )
-    if (stopped := _typed_stop_phrase_response(rid, text)) is not None:
+    # An AGENT acting for the person through MCP (plan "Agent prompts"): its text is always queued behind a
+    # running turn -- never a hard stop of her turn (the default busy mode) nor a steer into it -- and it never
+    # rewinds or cuts her chat. Held here, by the connection's marker, whatever the bridge sends. The gateway's
+    # own dispatch on that connection (a relayed bot DM) is not the agent's submit.
+    from tui_gateway.agent_guard import agent_identity
+    agent_submit = agent_identity(current_transport()) is not None and not _INTERNAL_DISPATCH.get()
+    if agent_submit and any(params.get(k) is not None for k in _AGENT_REFUSED_SUBMIT_PARAMS):
+        from tui_gateway.agent_guard import refusal as _agent_refusal
+        return _agent_refusal(rid, "rewind or cut a chat's history")
+    # A typed stop phrase ends the person's voice chat, a barge-in marks her speech: neither is an agent's.
+    if not agent_submit and (stopped := _typed_stop_phrase_response(rid, text)) is not None:
         return stopped
-    if params.get("interrupted"):
+    if params.get("interrupted") and not agent_submit:
         # Client-side barge-in: latch so this turn's model message carries the note.
         from tools.tts_streaming import mark_speech_interrupted
         mark_speech_interrupted()
@@ -745,7 +758,7 @@ def _(rid, params: dict) -> dict:
         # A replay never becomes a live steer or redirect (those rows would name the presser); it queues,
         # carrying its row's metadata apart from the presser who is its scope.
         busy_response = _handle_busy_submit(
-            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")) or replayed is not None,
+            rid, sid, session, text, busy_transport, queued=bool(params.get("queued")) or replayed is not None or agent_submit,
             turn_author=turn_author, turn_auth_user=submitter, turn_agent=submit_agent,
             row_metadata=display_metadata if replayed is not None else None, origin=origin)
         if busy_response is not None:

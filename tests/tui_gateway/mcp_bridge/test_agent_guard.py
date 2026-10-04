@@ -14,7 +14,7 @@ import pytest
 
 import tui_gateway.server as server
 
-from .conftest import SID
+from .conftest import KEY, SID
 
 #: method -> params its contract accepts. Each would act if it reached its body as the person.
 GUARDED = {
@@ -74,3 +74,71 @@ def test_an_agent_is_refused_by_the_handler_itself(gateway, monkeypatch, method)
 def test_the_person_is_not_refused(gateway, method):
     response = gateway.app.call(method, GUARDED[method])
     assert "agent connected through MCP" not in str(response)
+
+
+# ── an agent's prompt.submit (plan: "Agent prompts") ───────────────────────────────────────────────
+
+
+def _agent(gateway):
+    from tui_gateway import server_requests
+
+    transport = gateway.connect()
+    server_requests.advertise(transport, True)
+    return transport
+
+
+def _until(predicate, seconds=5.0):
+    import time
+
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+@pytest.mark.parametrize("mode", ["interrupt", "steer"])
+def test_an_agents_submit_without_queued_never_stops_or_steers_the_persons_turn(gateway, monkeypatch, mode):
+    """Past the bridge (which always sends ``queued``): the handler queues an agent's text whatever the busy mode,
+    so it neither hard-stops the person's running turn nor steers into it."""
+    steered: list = []
+    monkeypatch.setattr(server, "_load_busy_input_mode", lambda: mode)
+    monkeypatch.setattr(gateway.agent, "steer", lambda text, *_a, **_k: steered.append(text) or True, raising=False)
+    assert gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker gated"})["result"]["status"] \
+        == "streaming"
+    response = _dispatch(_agent(gateway), "prompt.submit", {"session_id": SID, "text": "marker reply"})
+    assert response.get("result", {}).get("status") == "queued", response
+    assert gateway.agent._interrupt_requested is False
+    assert steered == []
+    assert gateway.session["queued_prompt"]["text"] == "marker reply"
+    gateway.agent.gate.set()
+    assert _until(lambda: "marker reply" in gateway.agent.texts)
+
+
+@pytest.mark.parametrize("extra", [
+    {"truncate_before_row_id": 1, "confirm_truncate": True},
+    {"truncate_before_user_ordinal": 0, "confirm_truncate": True},
+    {"truncate_before_message_id": "marker", "confirm_truncate": True},
+    {"confirm_truncate": True},
+    {"confirm_empty_truncate": True},
+    {"rebind_survivor_row_ids": [1]},
+], ids=["row_id", "ordinal", "message_id", "confirm_truncate", "confirm_empty_truncate", "rebind"])
+def test_an_agents_submit_may_not_rewind_the_chat(gateway, extra):
+    gateway.db.append_message(KEY, "user", "marker person row")
+    before = len(gateway.db.get_messages(KEY, include_inactive=True))
+    response = _dispatch(_agent(gateway), "prompt.submit", {"session_id": SID, "text": "marker reply", **extra})
+    assert response.get("error", {}).get("code") == 4033, response
+    assert "agent connected through MCP" in response["error"]["message"]
+    assert gateway.session.get("running") is False and gateway.agent.texts == []
+    assert len(gateway.db.get_messages(KEY, include_inactive=True)) == before
+
+
+def test_the_person_may_still_send_without_queued(gateway, monkeypatch):
+    monkeypatch.setattr(server, "_load_busy_input_mode", lambda: "interrupt")
+    assert gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker gated"})["result"]["status"] \
+        == "streaming"
+    assert gateway.app.call("prompt.submit", {"session_id": SID, "text": "marker person"})["result"]["status"] \
+        == "queued"
+    assert gateway.agent._interrupt_requested is True  # the person's own busy mode still applies to her
+    gateway.agent.gate.set()

@@ -17,6 +17,7 @@ What is refused here, before anything is dispatched (:class:`DisallowedCall`, al
   neither may the bridge -- params are also round-tripped through JSON for that reason);
 * ``client.capabilities`` advertising anything but ``server_requests`` (an agent never performs a
   ``confirm`` level);
+* ``prompt.submit`` with any parameter beside :data:`PROMPT_SUBMIT_PARAMS`;
 * ``request.answer`` with a result that is not a clarify answer (``{answer}`` or ``{answers}``). The
   gateway refuses every other method from an agent anyway (4033); this keeps the bridge from even trying.
 
@@ -54,6 +55,11 @@ ALLOWED_METHODS = frozenset({
     "session.interrupt",
     "request.answer",
 })
+
+#: An agent's ``prompt.submit``: its text, queued behind a running turn. Never a rewind (``truncate_before_*``,
+#: ``rebind_survivor_row_ids``), a voice barge-in, a surface or a hidden row; the gateway refuses the rewind
+#: parameters from an agent's connection itself and always queues its text (``methods_prompt``).
+PROMPT_SUBMIT_PARAMS = frozenset({"session_id", "text", "queued"})
 
 DEFAULT_TIMEOUT_S = 30.0
 #: What a ``gateway_restarting`` error tells the agent to wait before trying again: the default drain
@@ -140,6 +146,8 @@ def check_call(method: str, params: Any) -> dict:
         raise DisallowedCall(f"{method}: parameter {key!r} is in-process only")
     if method == "client.capabilities" and params != {"server_requests": True}:
         raise DisallowedCall("client.capabilities: an agent advertises {server_requests: true} and nothing else")
+    if method == "prompt.submit" and set(params) - PROMPT_SUBMIT_PARAMS:
+        raise DisallowedCall("prompt.submit: an agent sends {session_id, text, queued} and nothing else")
     if method == "request.answer" and (set(params) - {"id", "result"} or not _clarify_result(params.get("result"))):
         raise DisallowedCall("request.answer: an agent answers clarify only ({answer} or {answers})")
     return params

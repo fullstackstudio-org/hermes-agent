@@ -25,7 +25,7 @@ line in the dashboard log saying why:
 
 1. `dashboard.mcp.enabled` is `true`. Only the operator can set it: in `config.yaml`, with
    `hermes config set dashboard.mcp.enabled true`, or in a container with
-   `HERMES_DASHBOARD_MCP_ENABLED=true`. The dashboard's own settings pages refuse to change it, so a stolen
+   `HERMES_DASHBOARD_MCP_ENABLED=true` (see [Configure from environment variables](../user-guide/docker.md#configure-from-environment-variables)). The dashboard's own settings pages refuse to change it, so a stolen
    dashboard session cannot switch it on.
 2. The dashboard has its sign-in gate engaged (OIDC or basic sign-in on a non-loopback bind). An ungated
    dashboard has no signed-in person to act for, so the endpoint stays off there.
@@ -33,8 +33,11 @@ line in the dashboard log saying why:
    is `https://` and has no path prefix. The OAuth issuer and the address tokens are bound to are
    `<public URL>/mcp`, and the OAuth metadata must be served at the host root. The endpoint answers on that
    primary host only; any other listed origin answers 404.
-4. The `mcp` package is installed (the `[mcp]` extra: `pip install 'hermes-agent[mcp]'` in a venv install).
-   Without it the endpoint stays off and the log says so.
+4. The `mcp` package is installed (the `[mcp]` extra). The container image has it, and so does any install
+   made with the installer, `setup-hermes.sh` or `hermes update` (they install the `[all]` extra, which
+   includes `[mcp]`). A venv installed with fewer extras needs it once: in the git checkout,
+   `uv pip install -e '.[mcp]'` (or `pip install -e '.[mcp]'`; for a pip-installed package,
+   `pip install 'hermes-agent[mcp]'`). Without it the endpoint stays off and the log says so, as one error line.
 
 ```yaml
 dashboard:

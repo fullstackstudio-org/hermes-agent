@@ -387,6 +387,7 @@ profile's config. The dashboard and `profiles.max` read their settings from that
 | `HERMES_DASHBOARD_OIDC_CLIENT_SECRET` | Optional (without it the client is a public PKCE client). It is not allowed on its own. It stays in the environment and is not written to disk. |
 | `HERMES_DASHBOARD_OIDC_SCOPES` | Optional. Sets `dashboard.oauth.self_hosted.scopes` and must include `openid`. |
 | `HERMES_DASHBOARD_TRUSTED_PROXIES` | Comma-separated IP addresses or bounded CIDR networks for `dashboard.trusted_proxies`. `*`, `0.0.0.0/0` and `::/0` are refused. |
+| `HERMES_DASHBOARD_MCP_ENABLED` | `true` or `false` for `dashboard.mcp.enabled`: serve the gateway's remote [MCP endpoint](../guides/mcp-endpoint.md) at `/mcp`, so a client such as Claude Code can talk to a person's bots as that person. Off by default, and only the operator can switch it (the dashboard's own settings refuse to change it). It takes effect only with the dashboard's sign-in gate engaged and `HERMES_DASHBOARD_PUBLIC_URL` an `https://` URL without a path prefix; otherwise the dashboard log says why it stayed off. The image already contains the `mcp` package, so nothing else needs installing. |
 | `HERMES_PROFILES_MAX` | Sets `profiles.max` (a whole number; `0` = unlimited). |
 | `HERMIE_PLUGIN` | The Hermie companion plugin; see [below](#the-hermie-plugin). |
 | `HERMES_DASHBOARD` | `1` starts the supervised dashboard (see [Running the dashboard](#running-the-dashboard)). |

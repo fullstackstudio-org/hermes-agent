@@ -137,12 +137,13 @@ def configure(app: Any, *, cfg: Any = None, store: Any = None) -> Optional[MCPRu
     issuer, primary = found
     try:
         from hermes_cli.dashboard_auth.mcp import routes
-    except ImportError as exc:
-        _log.error("dashboard.mcp.enabled is true but the mcp package is not installed (%s); the MCP endpoint "
-                   "stays off. Install the extra: pip install 'hermes-agent[mcp]'.", exc)
-        return None
-    try:
         runtime = routes.build_runtime(settings=settings, issuer_url=issuer, primary=primary, store=store)
+    except ImportError as exc:  # the SDK, or one of the modules that needs it (building the server imports more)
+        _log.error("dashboard.mcp.enabled is true but the mcp package could not be imported (%s); the MCP "
+                   "endpoint stays off. Install the extra: pip install 'hermes-agent[mcp]' (in a git checkout: "
+                   "uv pip install -e '.[mcp]'). The container image and an install of the [all] extra "
+                   "already have it.", exc)
+        return None
     except ValueError as exc:
         _off("%s", exc)
         return None

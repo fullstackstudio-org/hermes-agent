@@ -43,6 +43,9 @@ def available() -> bool:
 _NOT_ANSWER = "This is not an answer from the person: do not guess or fill in values yourself."
 _NOT_APPROVAL = "This is not an approval: do not send, post or act on the draft."
 _TELL = "Tell the person what happened; do not retry at once."
+# A person who declined knows what happened: the agent is told to respect it instead.
+_RESPECT = ("Respect their choice: do not ask again at once; continue without it, or ask in the chat what they would "
+            "prefer.")
 # The app that can answer, named so the agent can say what the person needs to open. A file request depends on how
 # the file is asked for: the document scanner is the phone and iPad app's (the Mac app does not scan).
 _APP_KIND = {
@@ -62,8 +65,9 @@ def _app_kind(method: str, capture: str | None) -> str:
 _THING = {"input.form": "form", "input.file": "file request", "review.draft": "draft review"}
 
 
-def _tail(method: str) -> str:
-    return f"{_NOT_APPROVAL if method == 'review.draft' else _NOT_ANSWER} {_TELL}"
+def _tail(method: str, reason: str = "") -> str:
+    follow = _RESPECT if reason == "cannot_show:declined" else _TELL
+    return f"{_NOT_APPROVAL if method == 'review.draft' else _NOT_ANSWER} {follow}"
 
 
 def _reason_head(method: str, reason: str, result: dict, capture: str | None = None) -> str:
@@ -84,6 +88,8 @@ def _reason_head(method: str, reason: str, result: dict, capture: str | None = N
         "cannot_show:unsupported_version": f"The connected app does not support this version of the {thing}; it "
                                            "may need an update.",
         "cannot_show:shutting_down": f"The connected app was closing and could not show the {thing}.",
+        "cannot_show:declined": f"The person declined to provide this: they chose not to give what the {thing} "
+                                "asks for. That is their choice, not a device problem.",
         "upload_dir_unsafe": "The upload folder in the workspace (uploads/hermie) is or passes through a symbolic "
                              "link or something that is not a folder, so no file can be received safely. Nothing "
                              "was sent to the person.",
@@ -131,7 +137,7 @@ def _sentence(method: str, result: dict, capture: str | None = None) -> str:
     head = _reason_head(method, reason, result, capture)
     if reason == "bad_upload" and result.get("problem"):
         head += f" (problem: {result['problem']})"
-    return f"{head} {_tail(method)}"
+    return f"{head} {_tail(method, reason)}"
 
 
 def _reply(method: str, result: dict, capture: str | None = None) -> str:

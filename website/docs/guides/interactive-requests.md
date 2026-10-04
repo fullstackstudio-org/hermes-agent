@@ -124,7 +124,7 @@ For `unavailable` and `timeout` the agent is told to tell the person what happen
 | `no_capable_client` | No app signed in as the person could show it within the waiting time (see below). The message names the app kind, such as the phone app for a scan. |
 | `no_acting_user` | A draft review in a shared conversation whose turn does not say which person it is for. |
 | `error_response`, `write_failed` | The app could not show it, or it could not be delivered. |
-| `cannot_show:<why>` | The app said it cannot show it: `no_camera`, `not_supported_on_device`, `permission_denied`, `upload_failed`, `unsupported_version` or `shutting_down`. Any other reason the app gives is reported as `error_response`. |
+| `cannot_show:<why>` | The app said it cannot show it: `no_camera`, `not_supported_on_device`, `permission_denied`, `upload_failed`, `unsupported_version`, `shutting_down`, or `declined` (the person chose not to provide it: respect it, do not ask again at once). Any other reason the app gives is reported as `error_response`. |
 | `upload_dir_unsafe`, `upload_dir_unavailable` | The upload folder in the workspace is or passes through a link or a non-folder, or could not be created. Nothing was sent. |
 | `bad_upload` | An uploaded file did not check out on the gateway. |
 | `too_many_attempts` | The app kept sending answers that did not fit. |

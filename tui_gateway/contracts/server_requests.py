@@ -341,7 +341,8 @@ server_request("confirm", params=ConfirmRequestParams, result=ConfirmResult,
 #   ``client.capabilities``.
 # - A client that cannot show a request answers a JSON-RPC ERROR with code ``4041`` (``cannot_show``,
 #   ``CANNOT_SHOW``) and ``data.reason`` (an open set: ``no_camera``, ``not_supported_on_device``,
-#   ``permission_denied``, ``upload_failed``, ``unsupported_version``, ``shutting_down``, …), never a
+#   ``permission_denied``, ``upload_failed``, ``unsupported_version``, ``shutting_down``, ``declined`` (the person
+#   chose not to provide it), …), never a
 #   made-up ``skipped`` or ``rejected``. The gateway reports that as ``unavailable``.
 # - An answer the gateway refuses is ``request.answer`` error ``4034`` with ``data.reason``: ``bad_shape``
 #   when it does not match the result model, otherwise one of the reasons in ``contract/requests/README.md``

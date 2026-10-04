@@ -88,7 +88,7 @@ NOT_SHOWN_REASONS = frozenset({"no_capable_client", "write_failed", server_reque
 #: The ``4041 cannot_show`` reasons the contract lists (``contract/requests`` §3), passed to the agent as
 #: ``cannot_show:<reason>``; any other reason (the set is open) is reported as plain ``error_response``.
 CANNOT_SHOW_REASONS = frozenset({"no_camera", "not_supported_on_device", "permission_denied", "upload_failed",
-                                 "unsupported_version", "shutting_down"})
+                                 "unsupported_version", "shutting_down", "declined"})
 
 _MIME = re.compile(r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}")
 _HASH_CHUNK = 1024 * 1024

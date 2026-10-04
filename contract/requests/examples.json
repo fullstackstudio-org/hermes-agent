@@ -2315,6 +2315,21 @@
       }
     },
     {
+      "name": "cannot_show_declined",
+      "direction": "client_to_gateway",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "req_form_booking",
+        "error": {
+          "code": 4041,
+          "message": "cannot_show",
+          "data": {
+            "reason": "declined"
+          }
+        }
+      }
+    },
+    {
       "name": "cannot_show_unknown_kind",
       "direction": "client_to_gateway",
       "frame": {

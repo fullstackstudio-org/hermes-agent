@@ -685,6 +685,7 @@ def test_a_request_parks_until_a_capable_device_attaches(server, build, audit_re
     ({"code": 4041, "message": "cannot_show", "data": {"reason": "no_camera"}}, "cannot_show:no_camera"),
     ({"code": 4041, "message": "cannot_show", "data": {"reason": "upload_failed"}}, "cannot_show:upload_failed"),
     ({"code": 4041, "message": "cannot_show", "data": {"reason": "shutting_down"}}, "cannot_show:shutting_down"),
+    ({"code": 4041, "message": "cannot_show", "data": {"reason": "declined"}}, "cannot_show:declined"),
     # a reason the contract does not list, one that is not a machine word, none, or another code: generic
     ({"code": 4041, "message": "cannot_show", "data": {"reason": "battery_low"}}, "error_response"),
     ({"code": 4041, "message": "cannot_show", "data": {"reason": f"no_camera {MARKER}"}}, "error_response"),
@@ -702,6 +703,21 @@ def test_an_error_response_is_unavailable_never_skipped(server, build, audit_rec
     outcome = _finish(box)
     assert (outcome.status, outcome.reason, outcome.payload) == ("unavailable", reason, {})
     assert audit_records[-1][1]["reason"] == reason and MARKER not in repr(audit_records)
+
+
+@pytest.mark.parametrize("method, make", [("input.form", _form), ("input.file", _file), ("review.draft", _draft)])
+def test_a_declined_4041_is_unavailable_for_every_method_and_audited(server, build, audit_records, method, make):
+    """``declined`` (the person chose not to provide it) is a listed reason for every interactive method, a
+    draft's included: it is never an answer and never a ``skipped`` or ``rejected``."""
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+    box = _start(build, "s1", method, make(build))
+    rid = _open_id(method)
+    error = {"code": 4041, "message": "cannot_show", "data": {"reason": "declined"}}
+    _as(phone, server.dispatch, {"jsonrpc": "2.0", "id": rid, "error": error}, phone)
+    outcome = _finish(box)
+    assert (outcome.status, outcome.reason, outcome.payload) == ("unavailable", "cannot_show:declined", {})
+    assert audit_records[-1][1]["reason"] == "cannot_show:declined"
 
 
 def test_an_interrupt_withdraws_it(server, build):

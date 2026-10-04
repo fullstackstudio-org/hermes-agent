@@ -104,7 +104,18 @@ shutting down) answers a JSON-RPC ERROR, never a made-up `skipped` or `rejected`
 
 `data.reason` is a short machine string; the set is open. In use: `no_camera`,
 `not_supported_on_device`, `permission_denied`, `upload_failed`, `unsupported_version`,
-`shutting_down`. The gateway reports the request as `unavailable` to the agent, which is not an answer.
+`shutting_down`, `declined`. The gateway reports the request as `unavailable` to the agent, which is
+not an answer.
+
+**Declined.** `declined` means the PERSON chose not to provide it; it is not a limitation of the device
+or the app. A client MUST let the person refuse a request that is not `optional` (an `input.*` request
+whose `optional` is false has no Skip): it offers a plain refusal ("Don't share") and answers
+`{"jsonrpc": "2.0", "id": "<request id>", "error": {"code": 4041, "message": "cannot_show", "data": {"reason": "declined"}}}`.
+It applies to every interactive method. For `review.draft` Reject (`decision: rejected`) is the normal
+refusal, but `declined` is still valid there (the person refuses to review it at all). The gateway
+passes the reason on to the agent and the audit record as `cannot_show:declined`, with a sentence that
+tells the agent to respect the choice and not to ask again at once; it is never taken for an answer,
+a skip or a rejection. For an `optional` request Skip (`status: skipped`) stays the normal refusal.
 
 **Refused answers.** The gateway checks every answer: first against the result model (`schema.json`),
 then against the request's params. A refused answer is `request.answer` error `4034` (or the same

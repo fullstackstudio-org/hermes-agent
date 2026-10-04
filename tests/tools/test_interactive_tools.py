@@ -184,7 +184,8 @@ REASONS = ("no_capable_client", "write_failed", "error_response", "no_session", 
            "rate_limited", "turn_isolation", "cancelled:interrupted", "cancelled:session_closed",
            "cancelled:shutdown", "too_many_attempts", "bad_upload", "cannot_show:no_camera",
            "cannot_show:not_supported_on_device", "cannot_show:permission_denied", "cannot_show:upload_failed",
-           "cannot_show:unsupported_version", "cannot_show:shutting_down", "upload_dir_unsafe",
+           "cannot_show:unsupported_version", "cannot_show:shutting_down", "cannot_show:declined",
+           "upload_dir_unsafe",
            "upload_dir_unavailable", "something_new", "")
 METHODS = ("input.form", "input.file", "review.draft")
 
@@ -193,7 +194,10 @@ METHODS = ("input.form", "input.file", "review.draft")
 @pytest.mark.parametrize("reason", REASONS)
 def test_unavailable_is_never_an_answer_and_says_what_to_do(method, reason):
     sentence = tool._sentence(method, {"outcome": "unavailable", "reason": reason})
-    assert "tell the person" in sentence.lower() and "do not retry at once" in sentence
+    if reason == "cannot_show:declined":  # the person knows: the agent is told to respect it instead
+        assert "tell the person" not in sentence.lower() and "do not ask again at once" in sentence
+    else:
+        assert "tell the person" in sentence.lower() and "do not retry at once" in sentence
     assert ("This is not an approval: do not send, post or act on the draft." in sentence) == (method == "review.draft")
     assert ("This is not an answer from the person" in sentence) == (method != "review.draft")
     for banned in ("confirmed", "approved this", "The person filled in", "The person sent"):
@@ -236,6 +240,19 @@ def test_a_cannot_show_reason_gets_a_sentence_of_its_own():
         assert words in sentence and "not an answer" in sentence
     unsafe = tool._sentence("input.file", {"outcome": "unavailable", "reason": "upload_dir_unsafe"})
     assert "symbolic link" in unsafe and "Nothing was sent" in unsafe
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_declined_is_the_persons_choice_not_an_answer_and_not_to_be_pressed(method):
+    sentence = tool._sentence(method, {"outcome": "unavailable", "reason": "cannot_show:declined"})
+    assert "The person declined to provide this" in sentence
+    assert "their choice, not a device problem" in sentence
+    assert "do not ask again at once" in sentence and "continue without it" in sentence
+    assert "ask in the chat what they would prefer" in sentence
+    assert ("not an approval" in sentence) == (method == "review.draft")
+    assert ("not an answer from the person" in sentence) == (method != "review.draft")
+    for device in ("no camera", "permission", "could not show", "update", "closing"):
+        assert device not in sentence
 
 
 def test_the_sentences_for_answers_say_only_what_is_known():

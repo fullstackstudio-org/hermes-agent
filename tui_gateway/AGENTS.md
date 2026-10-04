@@ -180,7 +180,8 @@ existing file when the client said not to overwrite.
 
 **`4041 cannot_show`.** An app that cannot show a request answers a JSON-RPC error `4041` with
 `data.reason`, never a made-up `skipped` or `rejected`. The reasons the contract lists (`no_camera`,
-`not_supported_on_device`, `permission_denied`, `upload_failed`, `unsupported_version`, `shutting_down`) reach the
+`not_supported_on_device`, `permission_denied`, `upload_failed`, `unsupported_version`, `shutting_down`,
+`declined`) reach the
 agent and the audit record as `unavailable (cannot_show:<reason>)`, each with a sentence of its own
 (`interactive.CANNOT_SHOW_REASONS`). Any other reason (the set is open) is plain `error_response`: only a short
 machine word from a `4041` is ever read, so nothing else of the client's reaches the agent.

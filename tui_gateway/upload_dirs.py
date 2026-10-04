@@ -9,6 +9,13 @@ time, each opened with ``O_NOFOLLOW | O_DIRECTORY`` relative to its parent's des
 ``mkdir(..., dir_fd=)`` when missing): a link or a non-directory anywhere on the way is :class:`UnsafePath`, never
 followed, and a link swapped in after a check cannot redirect the walk.
 
+The folder that holds ``uploads`` (the ANCHOR: the working directory, or the folder a route's path names) is resolved
+and opened normally, so its ancestors only need search permission (``/home`` at 0711 is fine), and links ABOVE
+``uploads``, the working directory itself included, are followed by design. That is safe when the working directory
+is the root of a bind mount the sandbox cannot rename or replace; a sandbox that mounts a PARENT of the working
+directory could swap the anchor for a link and is outside what this protects. Folders created here are 0700 (and
+uploaded files 0600): a sandbox that runs as another non-root uid without ``CAP_DAC_OVERRIDE`` cannot read uploads.
+
 Used by ``tui_gateway/interactive.py`` (the ``upload.dir`` builder and the post-settle file check) and
 ``hermes_cli/web_routers/files.py`` (the upload routes).
 """
@@ -60,10 +67,10 @@ def open_dir(name: str, *, dir_fd: int) -> int:
 
 
 def walk(parts: Sequence[str], *, create_from: int | None = None, start: str = "/") -> int:
-    """Open *start* (an absolute directory; ``/`` by default), then each of *parts* in turn without following a
-    link, and return the last one's descriptor (the caller closes it). Components from index *create_from* on are
-    created (mode :data:`DIR_MODE`) when missing; None creates nothing. Raises :class:`UnsafePath`,
-    ``FileNotFoundError`` or another ``OSError``."""
+    """Open *start* (an absolute, resolved directory: the anchor; its last component is opened with
+    ``O_NOFOLLOW``), then each of *parts* in turn without following a link, and return the last one's descriptor
+    (the caller closes it). Components from index *create_from* on are created (mode :data:`DIR_MODE`) when
+    missing; None creates nothing. Raises :class:`UnsafePath`, ``FileNotFoundError`` or another ``OSError``."""
     fd = os.open(start, _DIR_FLAGS)
     try:
         for index, name in enumerate(parts):
@@ -93,10 +100,15 @@ def components(path: str) -> list[str]:
     return parts
 
 
-def open_real_dir(path: str) -> int:
-    """Open the absolute directory *path* from ``/`` without following a link anywhere: it must be a real path
-    (``os.path.realpath(path) == path``) for this to succeed."""
-    return walk(components(path))
+def open_upload_dir(path: str) -> int:
+    """Open the absolute upload directory *path* (``<anchor>/uploads/hermie/...``): the anchor normally, then every
+    component from ``uploads`` down without following a link. :class:`UnsafePath` when *path* has no
+    ``uploads/hermie`` part or a link or non-directory sits at or below it."""
+    parts = components(path)
+    index = anchor_index(parts)
+    if index is None:
+        raise UnsafePath(errno.EINVAL, "not an upload directory", path)
+    return walk(parts[index:], start="/" + "/".join(parts[:index]))
 
 
 def anchor_index(parts: Sequence[str]) -> int | None:

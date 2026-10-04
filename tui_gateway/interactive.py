@@ -22,7 +22,7 @@ turn acts for; ``send_gated`` parks the request until a capable device attaches 
   ``cannot_show`` reaches the agent as ``cannot_show:<reason>`` when the reason is one the contract lists
   (:data:`CANNOT_SHOW_REASONS`), else as ``error_response``;
 - ``input.file`` answers name files by reference. After the request settled, outside every lock, the upload
-  directory is opened from ``/`` without following a symbolic link anywhere, each file is opened inside it by name
+  directory is opened without following a symbolic link from ``uploads`` down, each file is opened inside it by name
   (it must sit directly in the directory, and a link is refused, never followed), and its size and SHA-256 must
   match what the client declared (:func:`verify_files`); anything else is ``unavailable (bad_upload)`` and nothing is
   deleted;
@@ -206,14 +206,14 @@ def build_form_params(sid: str, *, summary: object, fields: object, title: objec
 
 def _upload_dir(sid: str, *, today: _dt.date | None = None) -> str:
     """``<session cwd>/uploads/hermie/<YYYY-MM-DD>``: absolute and a REAL path (the working directory's own
-    symlinks resolved), so :func:`verify_files` can open it from ``/`` without following a link.
+    symlinks resolved), so :func:`verify_files` can compare it with ``realpath``.
 
-    The working directory is the agent's, so nothing below it is trusted: the directory is walked from ``/`` one
-    component at a time without following a link (``upload_dirs.walk``), and ``uploads``, ``hermie`` and the date
-    are created when missing (mode 0700) inside their parent's descriptor. A symbolic link (or a non-directory) at
-    any of them, or anywhere on the resolved working directory by the time of the walk, raises
-    :class:`UploadDirUnavailable` ``upload_dir_unsafe``; a directory that cannot be created raises it with
-    ``upload_dir_unavailable``."""
+    The working directory is the agent's, so nothing below it is trusted: the resolved working directory is opened
+    (its ancestors need only search permission), then ``uploads``, ``hermie`` and the date are walked one at a time
+    without following a link (``upload_dirs.walk``) and created when missing (mode 0700) inside their parent's
+    descriptor. A symbolic link (or a non-directory) at any of them raises :class:`UploadDirUnavailable`
+    ``upload_dir_unsafe``; a directory that cannot be created or opened raises it with ``upload_dir_unavailable``.
+    Links above ``uploads`` are followed by design (``upload_dirs``)."""
     from tui_gateway import server
     cwd = str(server._session_cwd(server._sessions.get(sid)) or "")
     root = Path(os.path.expanduser(cwd)).resolve().as_posix() if cwd else ""
@@ -224,7 +224,7 @@ def _upload_dir(sid: str, *, today: _dt.date | None = None) -> str:
         raise UploadDirUnavailable("upload_dir_unavailable")
     try:
         parts = upload_dirs.components(root)
-        fd = upload_dirs.walk([*parts, *upload_dirs.UPLOAD_SEGMENTS, day], create_from=len(parts))
+        fd = upload_dirs.walk([*upload_dirs.UPLOAD_SEGMENTS, day], create_from=0, start=root)
     except upload_dirs.UnsafePath:
         raise UploadDirUnavailable("upload_dir_unsafe") from None
     except OSError:
@@ -301,12 +301,13 @@ def _unprintable(path: str) -> bool:
 
 
 def _open_upload_dir(directory: str) -> tuple[int | None, str]:
-    """``(descriptor, "")`` of the upload directory, opened from ``/`` without following a link anywhere and
-    checked to be the very directory ``lstat`` names; ``(None, problem)`` otherwise."""
+    """``(descriptor, "")`` of the upload directory -- a real path; its anchor (the folder holding ``uploads``)
+    opened normally and every component from ``uploads`` down without following a link -- checked to be the very
+    directory ``lstat`` names; ``(None, problem)`` otherwise."""
     if not upload_dirs.supported() or os.path.realpath(directory) != directory:
         return None, "dir:unsafe"
     try:
-        fd = upload_dirs.open_real_dir(directory)
+        fd = upload_dirs.open_upload_dir(directory)
     except FileNotFoundError:
         return None, "file:0:missing"
     except OSError:  # a link or a non-directory on the way (UnsafePath), or unreadable
@@ -324,8 +325,9 @@ def _open_upload_dir(directory: str) -> tuple[int | None, str]:
 
 def verify_files(params: dict, files: list[dict]) -> tuple[str, list[str]]:
     """Check on disk what an ``input.file`` answer claims, OUTSIDE every lock, without following a symbolic link
-    anywhere. ``upload.dir`` must be a real path (``realpath(dir) == dir``); it is opened from ``/`` one component
-    at a time with ``O_NOFOLLOW`` and its descriptor must be the directory ``lstat(dir)`` names (device and inode).
+    at or below ``uploads``. ``upload.dir`` must be a real path (``realpath(dir) == dir``); its anchor (the folder
+    holding ``uploads``) is opened normally, each component from ``uploads`` down with ``O_NOFOLLOW``, and the
+    descriptor must be the directory ``lstat(dir)`` names (device and inode).
     Each answered path must sit DIRECTLY in it (its lexical parent is ``dir``: the layout is flat,
     ``<dir>/<16 hex>-<name>``) and is opened by name inside that descriptor with ``O_NOFOLLOW``: it must be a
     regular file, not a link (a link is refused even when it points inside the directory), its size the declared

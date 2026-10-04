@@ -1,6 +1,7 @@
 """Tests for the dashboard-managed file browser API."""
 
 import base64
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -552,3 +553,21 @@ def test_an_upload_elsewhere_keeps_following_links_as_before(local_files_client)
     (home / "alias").symlink_to(real, target_is_directory=True)
     assert _upload_json(client, home / "alias" / "notes.txt").status_code == 200
     assert (real / "notes.txt").read_bytes() == b"MARKER"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.parametrize("route", sorted(_UPLOADS))
+def test_an_upload_below_uploads_hermie_under_a_search_only_ancestor_works(local_files_client, route):
+    """An ancestor the gateway may search but not list (``/home`` at 0711): only the folder holding ``uploads`` is
+    opened, never its ancestors."""
+    client, home = local_files_client
+    locked = home / "locked"
+    folder = locked / "work" / "uploads" / "hermie" / _DAY
+    (locked / "work").mkdir(parents=True)
+    locked.chmod(0o100)
+    try:
+        response = _UPLOADS[route](client, folder / "0123456789abcdef-x.txt")
+        assert response.status_code == 200, response.text
+        assert (folder / "0123456789abcdef-x.txt").read_bytes() == b"MARKER"
+    finally:
+        locked.chmod(0o700)

@@ -317,6 +317,24 @@ def test_a_symlink_below_the_working_directory_refuses_the_upload_dir(server, bu
     assert list(elsewhere.iterdir()) == []
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_a_search_only_ancestor_still_gets_an_upload_dir_and_its_files_verified(server, build, tmp_path):
+    """An ancestor of the working directory the gateway may search but not list (``/home`` at 0711): the
+    directory and the check open the working directory itself, never walk the ancestors."""
+    locked = tmp_path / "locked"
+    workspace = locked / "work"
+    workspace.mkdir(parents=True)
+    server._sessions["s1"]["cwd"] = str(workspace)
+    locked.chmod(0o100)
+    try:
+        params = _file(build)
+        root = Path(params["upload"]["dir"])
+        path = _put(root, "0123456789abcdef-a.txt", b"alpha")
+        assert build.verify_files(params, [_entry(path, b"alpha")]) == ("", [str(path)])
+    finally:
+        locked.chmod(0o700)
+
+
 def test_a_file_where_a_folder_belongs_refuses_the_upload_dir(server, build, tmp_path):
     (tmp_path / "uploads").write_bytes(b"MARKER")
     with pytest.raises(build.UploadDirUnavailable) as caught:

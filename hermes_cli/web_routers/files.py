@@ -550,8 +550,7 @@ def _nofollow_parent(target: _NoFollowTarget) -> Iterator[int]:
     try:
         target.anchor.mkdir(parents=True, exist_ok=True)
         anchor = target.anchor.resolve(strict=True)
-        parts = upload_dirs.components(str(anchor))
-        fd = upload_dirs.walk([*parts, *target.dirs], create_from=len(parts))
+        fd = upload_dirs.walk(target.dirs, create_from=0, start=str(anchor))
     except upload_dirs.UnsafePath:
         raise HTTPException(status_code=400, detail="Upload path passes through a symbolic link or a non-folder")
     except PermissionError:

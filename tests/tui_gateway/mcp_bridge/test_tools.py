@@ -346,6 +346,18 @@ def test_a_tool_outside_the_grants_scopes_is_forbidden(bridge, monkeypatch):
     assert (fields["outcome"], fields["reason"], fields["tool"]) == ("refused", "forbidden", "bot_prompt")
 
 
+def test_the_audit_names_a_chat_only_once_it_is_a_known_chat(bridge, monkeypatch):
+    """Regression (review X1b): the audit line carried the agent's raw chat_id text."""
+    monkeypatch.setattr(bridge_server, "caller_from_token", lambda: ROBIN)
+    endpoint = bridge_server.Endpoint(bridge)
+    known = tools.bot_prompt(bridge, ROBIN, "default", "marker reply")["chat_id"]
+    for chat_id in ("marker\nforged audit text " + "x" * 300, "20990101_000000_nochat", known):
+        anyio.run(lambda: endpoint.run(None, "chat_history", "bots:read", tools.chat_history, chat_id,
+                                       chat_id=chat_id))
+    keys = [fields["session_key"] for event, fields in bridge.audits if event == "mcp_tool_call"]
+    assert keys == ["", "", known]
+
+
 def test_without_a_verified_token_a_tool_is_unauthenticated(bridge, monkeypatch):
     monkeypatch.setattr(bridge_server, "caller_from_token", lambda: None)
     result = anyio.run(lambda: bridge_server.Endpoint(bridge).run(None, "whoami", None, tools.whoami))

@@ -167,9 +167,9 @@ class Endpoint:
         caller = caller_from_token()
         if caller is None:
             return _result(ToolFailure("unauthenticated", "no verified grant for this request").payload(), error=True)
-        session_key = chat_id if isinstance(chat_id, str) else ""
+        session_key = self._audited_chat(caller, chat_id)
         fields = {"user_id": caller.login, "grant_id": caller.grant_id, "client_name": caller.client,
-                  "ip": caller.ip, "tool": tool, "session_key": session_key[:200]}
+                  "ip": caller.ip, "tool": tool, "session_key": session_key}
         refusal = limits.check_tool_call(caller.grant_id)
         if refusal is not None:
             return self._refused(fields, refusal)
@@ -208,6 +208,17 @@ class Endpoint:
             fields["session_key"] = result["chat_id"][:200]
         self._audit("mcp_tool_call", **fields, outcome="ok", **extra)
         return _result(result)
+
+    def _audited_chat(self, caller: Caller, chat_id: Any) -> str:
+        """The chat id an audit line may name before the tool ran: a well-formed id (``tools._chat_id``) of a
+        chat this person opened through MCP; "" for anything else, so an agent-chosen string never reaches the
+        audit log. A tool that succeeds names its chat from its own result."""
+        try:
+            key = tools._chat_id(chat_id) if chat_id not in (None, "") else ""
+            known = bool(key) and any(chat.session_key == key for chat in self.bridge.store.chats_for(caller.login))
+        except Exception:  # noqa: BLE001 - a bad id or an unreadable store names nothing
+            return ""
+        return key if known else ""
 
     def _admit_prompt(self, caller: Caller) -> limits.Slot:
         """The prompt limits of the grant: one running-turn slot, reserved (the caller hands it to the turn's

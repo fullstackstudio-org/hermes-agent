@@ -679,6 +679,43 @@ def test_the_race_window_is_five_seconds():
     assert REFRESH_RACE_GRACE == 5
 
 
+@pytest.mark.parametrize("load", [True, False], ids=["load", "rotate"])
+@pytest.mark.parametrize("after, raced", [(4.9, True), (5.0, False), (5.1, False)])
+def test_the_race_window_ends_exactly_five_seconds_after_the_rotation(store, clock, load, after, raced):
+    """Measured from the clock's own reading at the rotation, not from its whole second: rotated at x.5, a copy
+    4.9 s later (whole seconds: 5 apart) is still a parallel refresh, and one 5 s or more later is a reuse."""
+    _client(store)
+    clock.t = 1_790_000_000.5
+    issued = _grant(store)
+    store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    clock.t += after
+    with pytest.raises(Raced if raced else Reused):
+        if load:
+            store.load_refresh(issued.refresh_token, client_id="client-1")
+        else:
+            store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    assert store.grant(issued.grant.id).live is raced
+
+
+def test_a_token_rotated_before_the_exact_time_was_kept_counts_from_its_whole_second(store, clock):
+    """A row an older build rotated has no exact time: its window runs from the whole second, so it is never
+    longer than 5 s."""
+    _client(store)
+    clock.t = 1_790_000_000.5
+    issued = _grant(store)
+    store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    db = sqlite3.connect(store.path)
+    db.execute("UPDATE tokens SET rotated_at_exact = NULL")
+    db.commit()
+    db.close()
+    clock.t += 4.4  # 4.9 s after the whole second
+    with pytest.raises(Raced):
+        store.load_refresh(issued.refresh_token, client_id="client-1")
+    clock.t += 0.2  # 5.1 s after it
+    with pytest.raises(Reused):
+        store.load_refresh(issued.refresh_token, client_id="client-1")
+
+
 def test_a_successor_is_found_by_an_index_and_an_older_file_gains_it(tmp_path, clock):
     path = tmp_path / "dashboard_auth" / "mcp.db"
     MCPStore(path, clock=clock).counts()

@@ -26,8 +26,10 @@ A grant is *live* while it is not revoked, its absolute lifetime has not passed 
 unrevoked, unrotated, unexpired token (a grant nobody refreshed for the sliding lifetime is dead even
 before it expires, and does not count against the person's cap).
 
-Time comes from the ``clock`` given to the store, in whole Unix seconds. Every failure is a
-:class:`StoreError` (database and file errors included).
+Time comes from the ``clock`` given to the store, in whole Unix seconds -- except a refresh token's rotation,
+which is also kept exactly (``tokens.rotated_at_exact``), so the parallel-refresh window is exactly
+:data:`REFRESH_RACE_GRACE` seconds rather than up to a second shorter. Every failure is a :class:`StoreError`
+(database and file errors included).
 """
 
 from __future__ import annotations
@@ -159,8 +161,10 @@ _LIVE = ("(g.revoked_at IS NULL AND g.expires_at > :now AND EXISTS (SELECT 1 FRO
 # Columns added after a file may have been created; ``_create`` adds any that are missing (additive only, so
 # the schema version stays and an older build still reads the file). ``tokens.parent_hash``: the refresh
 # token a rotation replaced (its successor's link back, for :data:`REFRESH_RACE_GRACE`); ``codes.reused_at``:
-# when a taken code was presented again (its exchange is then refused).
-_ADDED_COLUMNS = (("tokens", "parent_hash", "BLOB"), ("codes", "reused_at", "INTEGER"))
+# when a taken code was presented again (its exchange is then refused); ``tokens.rotated_at_exact``: the clock's
+# own reading at the rotation (``rotated_at`` is that in whole seconds), for :data:`REFRESH_RACE_GRACE`.
+_ADDED_COLUMNS = (("tokens", "parent_hash", "BLOB"), ("codes", "reused_at", "INTEGER"),
+                  ("tokens", "rotated_at_exact", "REAL"))
 # Indexes on added columns: created after them, on every open (``IF NOT EXISTS``), so an older file gains them
 # without a schema version. ``tokens_parent``: every rotated token presented again looks up its successor.
 _ADDED_INDEXES = ("CREATE INDEX IF NOT EXISTS tokens_parent ON tokens (parent_hash)",)
@@ -538,12 +542,14 @@ class MCPStore:
         return access, access_exp, refresh, refresh_exp
 
     @staticmethod
-    def _raced(db: sqlite3.Connection, row: sqlite3.Row, client_id: str, now: int) -> Optional[Raced]:
-        """The :class:`Raced` to raise when the rotated refresh token *row*, presented by *client_id*, is a
-        parallel refresh rather than a reuse: rotated less than REFRESH_RACE_GRACE seconds ago, of a grant of
-        that client, and the refresh token that replaced it has been neither rotated nor revoked since. None
-        otherwise."""
-        if row["rotated_at"] is None or now - int(row["rotated_at"]) >= REFRESH_RACE_GRACE:
+    def _raced(db: sqlite3.Connection, row: sqlite3.Row, client_id: str, at: float) -> Optional[Raced]:
+        """The :class:`Raced` to raise when the rotated refresh token *row*, presented by *client_id* at the
+        clock's reading *at*, is a parallel refresh rather than a reuse: rotated less than REFRESH_RACE_GRACE
+        seconds ago (exactly; a row rotated by a build that kept whole seconds only counts from the whole second,
+        which shortens its window, never lengthens it), of a grant of that client, and the refresh token that
+        replaced it has been neither rotated nor revoked since. None otherwise."""
+        rotated = row["rotated_at_exact"] if row["rotated_at_exact"] is not None else row["rotated_at"]
+        if rotated is None or at - float(rotated) >= REFRESH_RACE_GRACE:
             return None
         grant = db.execute("SELECT user_id FROM grants WHERE id = ? AND client_id = ? AND revoked_at IS NULL",
                            (row["grant_id"], client_id)).fetchone()
@@ -755,14 +761,15 @@ class MCPStore:
         a parallel refresh (:meth:`_raced`: :class:`Raced`, nothing revoked)."""
         if not token:
             return None
-        now = self.now()
+        at = self._clock()
+        now = int(at)
         revoked: Optional[Grant] = None
         with self._write() as db:
             row = self._token_row(db, token, "refresh")
             if row is None:
                 return None
             if row["rotated_at"] is not None:
-                if (raced := self._raced(db, row, client_id, now)) is not None:
+                if (raced := self._raced(db, row, client_id, at)) is not None:
                     raise raced  # nothing written: the transaction rolls back empty
                 if self._revoke(db, row["grant_id"], BY_REFRESH_REUSE, now):
                     revoked = self._grant_row(db, row["grant_id"], now)
@@ -786,7 +793,8 @@ class MCPStore:
         Raises :class:`TokenInvalid`; with ``reused`` the grant has been revoked (and that is committed; a
         :class:`Reused` when this call revoked it); with ``raced`` (:class:`Raced`, a parallel refresh,
         :meth:`_raced`) nothing changed."""
-        now = self.now()
+        at = self._clock()
+        now = int(at)
         reused = False
         revoked: Optional[Grant] = None
         with self._write() as db:
@@ -794,7 +802,7 @@ class MCPStore:
             if row is None:
                 raise TokenInvalid("unknown")
             if row["rotated_at"] is not None:
-                if (raced := self._raced(db, row, client_id, now)) is not None:
+                if (raced := self._raced(db, row, client_id, at)) is not None:
                     raise raced
                 if self._revoke(db, row["grant_id"], BY_REFRESH_REUSE, now):
                     revoked = self._grant_row(db, row["grant_id"], now)
@@ -811,8 +819,8 @@ class MCPStore:
                 wanted = tuple(scopes) if scopes else held
                 if not set(wanted) <= set(held):
                     raise TokenInvalid("scope")
-                if db.execute("UPDATE tokens SET rotated_at = ? WHERE token_hash = ? AND rotated_at IS NULL",
-                              (now, row["token_hash"])).rowcount != 1:
+                if db.execute("UPDATE tokens SET rotated_at = ?, rotated_at_exact = ? WHERE token_hash = ? "
+                              "AND rotated_at IS NULL", (now, at, row["token_hash"])).rowcount != 1:
                     raise TokenInvalid("unknown")
                 access, access_exp, refresh, refresh_exp = self._mint(
                     db, grant_id=grant.id, family=row["family"], now=now, ends_at=grant.expires_at,

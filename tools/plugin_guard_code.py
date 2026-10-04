@@ -114,17 +114,30 @@ _WRITERS: Dict[str, Tuple[int, str]] = {"copy": (1, "dst"), "copy2": (1, "dst"),
                                         "extractall": (0, "path"), "extract": (1, "path"),
                                         "unpack_archive": (1, "extract_dir")}
 _PYTHON_EXE = re.compile(r"(?:^|[\\/])python[\d.]*(?:\.exe)?$")
+# A constant longer than this is not followed (``v = v + v`` doubles each line).
 _FOLD_LIMIT = 4096
 # Openers that take (file, mode): a write mode makes them writers.
 _FILE_OPENERS = {"builtins.open", "io.open", "_io.open", "codecs.open", "io.FileIO", "_io.FileIO", "tarfile.open",
                  "gzip.open", "bz2.open", "lzma.open", "zipfile.ZipFile", "tarfile.TarFile"}
 _OS_WRITE_FLAGS = {"O_WRONLY", "O_RDWR", "O_CREAT", "O_APPEND", "O_TRUNC", "O_EXCL"}
 # tempfile creators: (positional index of suffix, of dir) when they take them positionally.
-_TEMPFILE_MAKERS = {"mkstemp": (0, 2), "mkdtemp": (0, 2), "NamedTemporaryFile": (None, None),
-                    "TemporaryFile": (None, None), "SpooledTemporaryFile": (None, None),
-                    "TemporaryDirectory": (0, 2)}
-_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "ash", "mksh", "csh", "tcsh", "busybox"}
-_OPTIONAL_IMPORT = " (optional import, guarded by except ImportError)"        # a constant longer than this is not followed (``v = v + v`` doubles each line)
+_TEMPFILE_MAKERS = {"mkstemp": (0, 2), "mkdtemp": (0, 2), "NamedTemporaryFile": (4, 6),
+                    "TemporaryFile": (4, 6), "SpooledTemporaryFile": (5, 7), "TemporaryDirectory": (0, 2)}
+_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "ash", "mksh", "csh", "tcsh"}
+# Shell options that take an argument (``bash -o pipefail -c cmd``), short and long.
+_SHELL_OPTIONS_WITH_ARGUMENT = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
+# Interpreters other than Python and the flag that makes them run code given on the command line.
+_CODE_FLAGS = {"perl": {"-e", "-E"}, "ruby": {"-e"}, "node": {"-e", "--eval", "-p", "--print"},
+               "nodejs": {"-e", "--eval", "-p", "--print"}, "bun": {"-e", "--eval"}, "deno": {"eval"},
+               "php": {"-r"}, "lua": {"-e"}, "Rscript": {"-e"}, "osascript": {"-e"}, "tclsh": set(),
+               "awk": set(), "gawk": set()}
+# Path methods that write to the path they are called on; rename/replace write to their argument.
+_PATH_WRITE_METHODS = {"write_text", "write_bytes", "touch", "symlink_to", "hardlink_to"}
+_PATH_MOVE_METHODS = {"rename", "replace"}
+# Process calls that hand a whole string to a shell.
+_SHELL_STRING_CALLS = {"subprocess.getoutput", "subprocess.getstatusoutput", "asyncio.create_subprocess_shell",
+                       "os.system", "os.popen"}
+        # a constant longer than this is not followed (``v = v + v`` doubles each line)
 # Ways a path expression climbs one directory.
 _UP_CALLS = {"dirname"}
 _SAME_DIR_CALLS = {"Path", "PurePath", "PosixPath", "WindowsPath", "PurePosixPath", "PureWindowsPath", "str",
@@ -150,7 +163,8 @@ _DESCRIPTIONS = {
                    "pythonapi)",
     "code_object": "builds or swaps a code object by hand (bytecode no scan reads)",
     "custom_loader": "defines an import loader or finder: it decides what code an import runs",
-    "interpreter_code": "runs a Python interpreter on code built at run time (python -c)",
+    "interpreter_code": "runs an interpreter on code built at run time (python -c, perl -e, node -e, "
+                        "code on stdin)",
     "import_hook_change": "changes the import machinery (sys.meta_path / sys.path_hooks): later imports can "
                           "come from anywhere",
     "sys_modules_lookup": "reaches a module through sys.modules by a computed name",
@@ -158,8 +172,12 @@ _DESCRIPTIONS = {
     "missing_module": "imports or loads a module the plugin does not ship (written or unpacked at run time?)",
     "code_written": "writes or unpacks a file Python can import, or into the plugin's own directory, at run time",
     "shell_code": "runs a shell on a command built at run time (sh -c <computed>): no scan reads what runs",
+    "foreign_python_path": "sets PYTHONPATH/PYTHONHOME/PYTHONSTARTUP for a child process to something computed: "
+                           "the child imports code from wherever that points (sys.path, out of process)",
 }
-_SEVERITY = {"dynamic_source_loader": "medium"}
+_SEVERITY = {"dynamic_source_loader": "medium", "foreign_python_path": "medium"}
+# Environment variables that decide what a child Python imports or runs first.
+_PYTHON_ENV_KEYS = {"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE"}
 # Every finding this module makes: a route by which code runs that no text scan reads. Under a test
 # tree these step down only when nothing the plugin runs imports the file (``plugin_guard``).
 ROUTE_PATTERN_IDS = frozenset(_DESCRIPTIONS)
@@ -322,10 +340,26 @@ class _CodeReader:
             self.prose.add(node.value)
 
     def single_value(self, node: ast.Name) -> Optional[ast.AST]:
+        """The one value a name is assigned, a ``None`` placeholder before it not counting."""
         found = self.lookup(node)
-        if found is not None and len(found.values) == 1 and not (found.other or found.imported or found.iters):
-            return found.values[0]
-        return None
+        if found is None or found.other or found.imported or found.iters:
+            return None
+        values = [v for v in found.values if not _is_none(v)]
+        return values[0] if len(values) == 1 else None
+
+    def call_name(self, func: ast.AST) -> Optional[str]:
+        """The last part of what a call calls, through imports and aliases (``P`` for ``Path``)."""
+        qualified = self.qual(func)
+        if qualified:
+            return qualified.rsplit(".", 1)[-1]
+        return func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+
+    def is_own_file(self, node: ast.AST) -> bool:
+        """``__file__``, or ``sys.modules[__name__].__file__``: this file's own path."""
+        if isinstance(node, ast.Name):
+            return node.id == "__file__"
+        return isinstance(node, ast.Attribute) and node.attr == "__file__" and isinstance(node.value, ast.Subscript) \
+            and self.qual(node.value.value) == "sys.modules" and self.own_module_name(node.value.slice)
 
     def qual(self, node: ast.AST, depth: int = 0) -> Optional[str]:
         """The dotted name *node* stands for ("builtins.exec", "marshal.loads", "sys.path"), through
@@ -406,6 +440,16 @@ class _CodeReader:
             return self.fold(value, depth + 1) if value is not None else None
         if isinstance(node, ast.Attribute) and node.attr == "sep" and self.qual(node) in {"os.sep", "os.path.sep"}:
             return "/"
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):       # 'payload.%s' % 'py'
+            left = self.fold(node.left, depth + 1)
+            right = [self.fold(e, depth + 1) for e in node.right.elts] if isinstance(node.right, ast.Tuple) \
+                else [self.fold(node.right, depth + 1)]
+            if left is None or None in right or len(left) > _FOLD_LIMIT:
+                return None
+            try:
+                return left % tuple(right)
+            except (TypeError, ValueError):
+                return None
         return None
 
     # ── paths ───────────────────────────────────────────────────────────────────────────────
@@ -435,15 +479,15 @@ class _CodeReader:
         is absolute (``os.path.join(HERE, '/tmp/x')`` discards HERE)."""
         if depth > _MAX_DEPTH:
             return None
+        if self.is_own_file(node):
+            return -1
         if isinstance(node, ast.Name):
-            if node.id == "__file__":
-                return -1
             if node.id == "__path__":
                 return 0
             found = self.lookup(node)
             if found is None or found.other or found.imported:
                 return None
-            values = found.values + found.iters
+            values = [v for v in found.values if not _is_none(v)] + found.iters
             if not values:
                 return None
             found = [self.ups(v, depth + 1) for v in values]
@@ -473,7 +517,7 @@ class _CodeReader:
             return self.climb(base, [node.right])
         if isinstance(node, ast.Call):
             func = node.func
-            name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+            name = self.call_name(func)
             if name in _UP_CALLS and node.args:
                 base = self.ups(node.args[0], depth + 1)
                 return None if base is None else base + 1
@@ -536,9 +580,9 @@ class _CodeReader:
                     return None
                 out.extend(re.split(r"[\\/]+", text))
             return out
+        if self.is_own_file(node):
+            return here
         if isinstance(node, ast.Name):
-            if node.id == "__file__":
-                return here
             if node.id == "__path__":
                 return here[:-1]
             value = self.single_value(node)
@@ -567,7 +611,7 @@ class _CodeReader:
             return base[:-1] + [base[-1] + text] if base else None
         if isinstance(node, ast.Call):
             func = node.func
-            name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+            name = self.call_name(func)
             if name in _UP_CALLS and node.args:
                 base = self.locate(node.args[0], depth + 1)
                 return base[:-1] if base else None
@@ -624,12 +668,17 @@ class _CodeReader:
                 self.check_store(target, node)
         elif isinstance(node, ast.ClassDef):
             self.check_class(node)
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if key is not None and self.fold(key) in _PYTHON_ENV_KEYS:
+                    self.check_python_env(value, node)
         elif isinstance(node, ast.ImportFrom) and node.level:
             self.check_relative_module(node.level, node.module or "",
                                        tuple(a.name for a in node.names if a.name != "*"), node)
         elif isinstance(node, (ast.List, ast.Tuple)):
             self.check_interpreter_argv(node)
             self.check_shell(list(node.elts), node)
+            self.check_code_flags(list(node.elts), node)
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node not in self.prose:
             self.check_string(node.value.strip(), node)
         elif isinstance(node, (ast.BinOp, ast.JoinedStr)) and not isinstance(self.parents.get(node), ast.BinOp):
@@ -730,8 +779,17 @@ class _CodeReader:
         elif name == "sys.modules.get" and called and parent.args and not self.own_module_name(parent.args[0]):
             self.add("sys_modules_lookup", parent)
 
+    def check_python_env(self, value: Optional[ast.AST], where: ast.AST) -> None:
+        """PYTHONPATH (and kin) set to something that is neither a constant nor a path in the plugin:
+        the out-of-process twin of ``foreign_sys_path``, reported as a tripwire (medium)."""
+        if value is not None and self.fold(value) is None and not self.inside_plugin(value):
+            self.add("foreign_python_path", where)
+
     def check_store(self, target: ast.AST, statement: ast.AST) -> None:
         """An assignment to ``sys.path`` (or a slice of it), or to the import machinery at all."""
+        if isinstance(target, ast.Subscript) and self.fold(target.slice) in _PYTHON_ENV_KEYS \
+                and getattr(statement, "value", None) is not None:
+            self.check_python_env(statement.value, statement)     # env["PYTHONPATH"] = root
         base = target.value if isinstance(target, ast.Subscript) else target
         name = self.qual(base)
         if name in _IMPORT_HOOKS:
@@ -825,10 +883,12 @@ class _CodeReader:
                 level = len(target) - len(target.lstrip("."))
                 self.check_relative_module(level, target.lstrip("."), (), node)
         self.check_write(node, name, qualified)
-        if qualified.startswith(("os.exec", "os.spawn", "os.posix_spawn")) and not any(
-                isinstance(a, (ast.List, ast.Tuple)) for a in node.args):
-            # os.execl('/bin/sh', 'sh', '-c', cmd): the argv is the call's own arguments.
-            self.check_shell([a for a in node.args if not isinstance(a, ast.Starred)][1:], node)
+        self.check_process(node, qualified)
+        for keyword in node.keywords:       # dict(os.environ, PYTHONPATH=root), env.update(PYTHONPATH=root)
+            if keyword.arg in _PYTHON_ENV_KEYS:
+                self.check_python_env(keyword.value, node)
+        if name in {"setdefault", "putenv"} and len(node.args) >= 2 and self.fold(node.args[0]) in _PYTHON_ENV_KEYS:
+            self.check_python_env(node.args[1], node)
 
     def check_relative_module(self, level: int, module: str, names: Tuple[str, ...], node: ast.AST) -> None:
         """A relative import of something the plugin does not ship: code written at run time."""
@@ -849,49 +909,60 @@ class _CodeReader:
                 self.add_missing(node)
 
     def add_missing(self, node: ast.AST) -> None:
-        """``missing_module``, at medium when it is an optional import: the only statement of a ``try``
-        whose every handler catches only ImportError/ModuleNotFoundError (``plugin_guard`` raises it
-        back to high when anything in the plugin writes code at run time)."""
-        parent = self.parents.get(node)
-        optional = isinstance(node, ast.ImportFrom) and isinstance(parent, ast.Try) and parent.body == [node] \
-            and parent.handlers and all(_catches_only_import_errors(h) for h in parent.handlers)
+        """``missing_module``, high even inside ``try: ... except ImportError`` (an optional import
+        looks the same as a module written at run time, and the scan cannot tell them apart)."""
         self.add("missing_module", node)
-        if optional:
-            found = self.found[("missing_module", getattr(node, "lineno", 0))]
-            found.severity = "medium"
-            found.description = _DESCRIPTIONS["missing_module"] + _OPTIONAL_IMPORT
+
+    def method_call(self, node: ast.Call) -> Tuple[Optional[str], Optional[ast.AST], List[ast.AST]]:
+        """``(method, object, arguments)`` for a call of a method on an object, by any spelling the
+        scan can follow: ``p.write_text(x)``, ``getattr(p, 'write_text')(x)``, ``w = getattr(...);
+        w(x)``, and the unbound ``pathlib.Path.write_text(p, x)``."""
+        func = node.func
+        if isinstance(func, ast.Name):
+            func = self.single_value(func) or func
+        if isinstance(func, ast.Call) and self.qual(func.func) == "builtins.getattr" and len(func.args) >= 2:
+            return self.fold(func.args[1]), func.args[0], list(node.args)
+        qualified = self.qual(func) or ""
+        if qualified.startswith(("pathlib.Path.", "pathlib.PosixPath.", "pathlib.WindowsPath.")) and node.args:
+            return qualified.rsplit(".", 1)[-1], node.args[0], list(node.args[1:])
+        if isinstance(func, ast.Attribute) and not qualified:
+            return func.attr, func.value, list(node.args)
+        return None, None, []
 
     def check_write(self, node: ast.Call, name: Optional[str], qualified: str) -> None:
         """A write whose destination Python can import, or that lands in the plugin's own directory:
         ``open``/``io.open``/``codecs.open`` and the compressed-file openers in a write mode,
-        ``Path(...).open`` in a write mode, ``os.open`` with write flags, ``write_text``/``write_bytes``,
-        copies, moves, links, archive extraction, and ``tempfile`` files made in the plugin or with an
-        importable suffix."""
-        func = node.func
+        ``Path.open`` in a write mode, ``os.open`` with write flags, ``write_text``/``write_bytes``,
+        ``rename``/``replace`` onto a path, copies, moves, links, archive extraction, ``tempfile``
+        files made in the plugin or with an importable suffix, and a process given a path in the
+        plugin (``pip install --target``, ``cp``)."""
         targets: List[ast.AST] = []
-        if qualified in _FILE_OPENERS or (name == "open" and isinstance(func, ast.Name)):
+        method, obj, arguments = self.method_call(node)
+        keywords = {kw.arg for kw in node.keywords}
+        if qualified in _FILE_OPENERS or (name == "open" and isinstance(node.func, ast.Name)):
             if self.writes_mode(_argument(node, 1, "mode")):
-                targets = [t for t in (_argument(node, 0, "file") or _argument(node, 0, "name"),) if t is not None]
+                targets = [t for t in (_argument(node, 0, "file") or _argument(node, 0, "name")
+                                       or _argument(node, 0, "filename"),) if t is not None]
         elif qualified == "os.open":
             if self.writes_flags(_argument(node, 1, "flags")):
                 targets = [t for t in (_argument(node, 0, "path"),) if t is not None]
-        elif name == "open" and isinstance(func, ast.Attribute) and not qualified:
+        elif method == "open" and obj is not None:
             # Path(...).open(mode): the object is the path, the mode is the first argument.
-            mode = _argument(node, 0, "mode")
+            mode = arguments[0] if arguments else next((kw.value for kw in node.keywords if kw.arg == "mode"), None)
             text = self.fold(mode) if mode is not None else None
             if text is not None and not set(text) <= set("rwxabt+U"):
                 return            # ZipFile(...).open(name): the first argument is not a mode
             if self.writes_mode(mode):
-                targets = [func.value]
-        elif name in {"write_text", "write_bytes", "symlink_to", "hardlink_to", "touch"} \
-                and isinstance(func, ast.Attribute) and not qualified.startswith(("zipfile.", "tarfile.")):
-            targets = [func.value]
+                targets = [obj]
+        elif method in _PATH_WRITE_METHODS and obj is not None and not qualified.startswith(("zipfile.", "tarfile.")):
+            targets = [obj]
+        elif method in _PATH_MOVE_METHODS and obj is not None and len(arguments) == 1 and keywords <= {"target"}:
+            targets = arguments                 # Path.rename(dst): str.replace takes two arguments
         elif name in _TEMPFILE_MAKERS and qualified.startswith("tempfile."):
             suffix_at, dir_at = _TEMPFILE_MAKERS[name]
-            suffix = _argument(node, suffix_at, "suffix") if suffix_at is not None else _argument(node, 99, "suffix")
-            folder = _argument(node, dir_at, "dir") if dir_at is not None else _argument(node, 99, "dir")
+            suffix, folder = _argument(node, suffix_at, "suffix"), _argument(node, dir_at, "dir")
             folded = self.fold(suffix) if suffix is not None else None
-            if (folded is not None and _suffix(folded) in _IMPORTABLE_SUFFIXES) or (
+            if (folded is not None and _suffix("x" + folded) in _IMPORTABLE_SUFFIXES) or (
                     folder is not None and (self.locate(folder) is not None or self.inside_plugin(folder))):
                 self.add("code_written", node)
             return
@@ -902,12 +973,48 @@ class _CodeReader:
             if target is None and name == "extractall":
                 return            # into the working directory: not importable from the plugin by itself
             targets = [target] if target is not None else []
+        elif self.is_process_call(qualified):
+            argv = self.argv_of(node, qualified) or []
+            run = self.runs_from(argv)
+            cwd = _argument(node, 99, "cwd")
+            targets = [a for i, a in enumerate(argv) if i not in run and not isinstance(a, ast.Starred)]
+            targets += [cwd] if cwd is not None else []
+            if any(self.inside_plugin(t) for t in targets):
+                self.add("code_written", node)
+            return
         for target in targets:
-            tail = self.tail(target)
-            if (tail is not None and _suffix(tail) in _IMPORTABLE_SUFFIXES) or self.locate(target) is not None \
-                    or (self.inside_plugin(target) and tail is None):
+            if self.writes_code(target):
                 self.add("code_written", node)
                 return
+
+    def writes_code(self, target: ast.AST) -> bool:
+        """A destination with an importable suffix, or in the plugin's own directory: located there,
+        or anchored there with a last part that is not one whole literal (``HERE / ('a.' + x)``)."""
+        tail = self.tail(target)
+        if tail is not None and _suffix(tail) in _IMPORTABLE_SUFFIXES:
+            return True
+        if self.locate(target) is not None:
+            return True
+        return self.inside_plugin(target) and self.fold(self.last_part(target)) is None
+
+    def last_part(self, node: ast.AST, depth: int = 0) -> ast.AST:
+        """The expression that names the last component of a path expression."""
+        if depth > _MAX_DEPTH:
+            return node
+        if isinstance(node, ast.Name):
+            value = self.single_value(node)
+            return self.last_part(value, depth + 1) if value is not None else node
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            return node.right
+        if isinstance(node, ast.Call):
+            name = self.call_name(node.func)
+            if name in {"join", "Path", "PurePath", "joinpath"} and node.args:
+                return node.args[-1]
+            if name in {"str", "fspath", "abspath", "realpath", "normpath"} and node.args:
+                return self.last_part(node.args[0], depth + 1)
+            if name in {"resolve", "absolute"} and isinstance(node.func, ast.Attribute):
+                return self.last_part(node.func.value, depth + 1)
+        return node
 
     def writes_mode(self, mode: Optional[ast.AST]) -> bool:
         """Whether an open() mode writes: absent is read, a mode the scan cannot fold may write."""
@@ -928,34 +1035,161 @@ class _CodeReader:
 
     # ── shells ──────────────────────────────────────────────────────────────────────────────
 
-    def is_shell(self, node: ast.AST) -> bool:
+    def text(self, item) -> Optional[str]:
+        """An argv item's constant text (*item* is an expression, or a str split out of ``env -S``)."""
+        return item if isinstance(item, str) else self.fold(item)
+
+    def program(self, node) -> str:
+        """The base name of a program an argv item names (``/bin/bash`` -> ``bash``), through a name
+        assigned once and ``shutil.which``; "" when unknown."""
+        if isinstance(node, str):
+            return _basename(node)
+        if isinstance(node, ast.Name):
+            node = self.single_value(node) or node
         text = self.fold(node)
         if text is None and isinstance(node, ast.Call) and self.qual(node.func) == "shutil.which" and node.args:
             text = self.fold(node.args[0])
-        return text is not None and re.split(r"[\\/]", text)[-1] in _SHELLS
+        return _basename(text)
 
-    def shell_command(self, items: List[ast.AST]) -> Optional[ast.AST]:
-        """In argv *items*, the command a shell is given with ``-c`` (``sh -c cmd``, ``bash -ec cmd``,
-        ``env bash -lc cmd``), or None when the argv does not run a shell on a command."""
-        i = 0
-        if items and _basename(self.fold(items[0])) == "env":
-            i = 1
-            while i < len(items) and ((self.fold(items[i]) or "").startswith("-") or "=" in (self.fold(items[i]) or "")):
-                i += 1
-        if i >= len(items) or not self.is_shell(items[i]):
-            return None
-        for j in range(i + 1, len(items)):
-            flag = self.fold(items[j])
-            if flag is None or not flag.startswith("-") or flag.startswith("--"):
+    def is_shell(self, node: ast.AST) -> bool:
+        return self.program(node) in _SHELLS
+
+    def is_process_call(self, qualified: str) -> bool:
+        return qualified.startswith(_PROCESS_PREFIXES) or qualified == "pty.spawn"
+
+    def argv_of(self, node: ast.Call, qualified: str) -> Optional[List[ast.AST]]:
+        """The argv a process call runs, as expressions: a list or tuple literal, a name assigned one
+        (``argv += [...]`` included), or the call's own arguments (``os.execl``/``os.spawnl``)."""
+        short = qualified.rsplit(".", 1)[-1]
+        if qualified.startswith("os.") and short.startswith(("execl", "spawnl")):
+            skip = 2 if short.startswith("spawn") else 1
+            return [a for a in node.args[skip:] if not (short.endswith("e") and a is node.args[-1])]
+        if qualified.startswith("os.") and short.startswith(("execv", "spawnv", "posix_spawn")):
+            index = 2 if short.startswith("spawn") else 1
+            return self.expand(node.args[index]) if len(node.args) > index else None
+        if qualified == "asyncio.create_subprocess_exec":
+            return list(node.args)
+        argv = node.args[0] if node.args else _argument(node, 0, "args")
+        return self.expand(argv) if argv is not None else None
+
+    def expand(self, node: ast.AST) -> Optional[List[ast.AST]]:
+        if isinstance(node, (ast.List, ast.Tuple)):
+            return list(node.elts)
+        if isinstance(node, ast.Name):
+            found = self.lookup(node)
+            if found is None or found.other or found.imported or found.iters or not found.values:
                 return None
-            if "c" in flag[1:]:
-                return items[j + 1] if j + 1 < len(items) else None
-        return None
+            items: List[ast.AST] = []
+            for value in found.values:
+                value = value.value if isinstance(value, ast.AugAssign) else value
+                if not isinstance(value, (ast.List, ast.Tuple)):
+                    return None
+                items.extend(value.elts)
+            return items
+        return [node]
 
-    def check_shell(self, items: List[ast.AST], where: ast.AST) -> None:
-        command = self.shell_command(items)
-        if command is not None and self.fold(command) is None:
+    def runs_from(self, argv: List[ast.AST]) -> Set[int]:
+        """Indexes of the argv items that name what runs (the program, and the script or module an
+        interpreter or shell is given): those are read, not written."""
+        run = {0}
+        if argv and (self.is_interpreter(argv[0]) or self.is_shell(argv[0])):
+            for i, item in enumerate(argv[1:], start=1):
+                flag = self.fold(item)
+                if flag is None or not flag.startswith("-"):
+                    run.add(i)
+                    break
+        return run
+
+    def shell_target(self, argv: List[ast.AST]) -> Tuple[str, Optional[ast.AST]]:
+        """What a shell in *argv* runs: ``("command", node)`` for ``-c``, ``("script", node)`` for a
+        script path, ``("stdin", None)`` when it reads its commands from stdin; ``("", None)`` when
+        *argv* does not run a shell. Handles ``env [opts] [VAR=x] [-S 'sh -c']``, ``busybox sh``,
+        options with an argument (``-o pipefail``), long options and ``--``."""
+        items = list(argv)
+        i = 0
+        while i < len(items) and self.program(items[i]) in {"env", "busybox"}:
+            if self.program(items[i]) == "busybox":
+                i += 1
+                continue
+            i += 1
+            while i < len(items):
+                text = self.text(items[i]) or ""
+                if text in {"-S", "--split-string"} and i + 1 < len(items) and self.text(items[i + 1]):
+                    items = items[:i] + self.text(items[i + 1]).split() + items[i + 2:]
+                    break
+                if text.startswith("-") or "=" in text:
+                    i += 1 + (text in {"-u", "--unset", "-C", "--chdir"})
+                    continue
+                break
+        if i >= len(items) or not self.is_shell(items[i]):
+            return "", None
+        j = i + 1
+        while j < len(items):
+            flag = self.text(items[j])
+            if flag == "--":
+                return ("script", items[j + 1]) if j + 1 < len(items) else ("stdin", None)
+            if flag is None or not flag.startswith(("-", "+")):
+                return "script", items[j]
+            if flag in _SHELL_OPTIONS_WITH_ARGUMENT:
+                j += 2
+                continue
+            if flag.startswith("--"):
+                j += 1
+                continue
+            if "c" in flag[1:]:
+                return ("command", items[j + 1]) if j + 1 < len(items) else ("", None)
+            if "s" in flag[1:]:
+                return "stdin", None
+            j += 1
+        return "stdin", None
+
+    def check_shell(self, argv: List[ast.AST], where: ast.AST, call: Optional[ast.Call] = None) -> None:
+        kind, target = self.shell_target(argv)
+        if kind == "command" and self.text(target) is None:
             self.add("shell_code", where)
+        elif kind == "script" and self.text(target) is None and self.locate(target) is None:
+            self.add("shell_code", where)
+        elif kind == "stdin" and call is not None and _argument(call, 99, "input") is not None \
+                and self.fold(_argument(call, 99, "input")) is None:
+            self.add("shell_code", where)
+
+    def check_code_flags(self, argv: List[ast.AST], where: ast.AST) -> None:
+        """``perl -e``, ``node -e``, ``ruby -e`` ... with a computed script."""
+        for i, item in enumerate(argv):
+            flags = _CODE_FLAGS.get(self.program(item))
+            if flags is None:
+                continue
+            for j in range(i + 1, len(argv) - 1):
+                if self.fold(argv[j]) in flags and self.fold(argv[j + 1]) is None:
+                    self.add("interpreter_code", where)
+                    return
+            if not flags and i + 1 < len(argv) and self.fold(argv[i + 1]) is None:
+                self.add("interpreter_code", where)    # awk/tclsh: the first argument is the program
+            return
+
+    def check_process(self, node: ast.Call, qualified: str) -> None:
+        """A shell or another interpreter run on something the scan cannot read."""
+        if qualified in _SHELL_STRING_CALLS:
+            command = _argument(node, 0, "cmd") or _argument(node, 0, "command")
+            if command is not None and self.fold(command) is None:
+                self.add("shell_code", node)
+            return
+        if not self.is_process_call(qualified):
+            return
+        shell = _argument(node, 99, "shell")
+        if shell is not None and not (isinstance(shell, ast.Constant) and not shell.value):
+            command = node.args[0] if node.args else _argument(node, 0, "args")
+            if isinstance(command, (ast.List, ast.Tuple)):
+                command = command.elts[0] if command.elts else None
+            if command is not None and self.fold(command) is None:
+                self.add("shell_code", node)
+            return
+        argv = self.argv_of(node, qualified)
+        if argv:
+            self.check_shell(argv, node, node)
+            self.check_code_flags(argv, node)
+            if self.is_interpreter(argv[0]) and len(argv) == 1 and _argument(node, 99, "input") is not None:
+                self.add("interpreter_code", node)    # python reading its program from input=
 
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.Module)
 
@@ -1057,6 +1291,12 @@ def _call_refs(reader: "_CodeReader", node: ast.Call, refs: ModuleRefs) -> None:
         source = _argument(node, 0, "source")
         if source is None or not _is_literal(source):
             refs.dynamic = True
+    elif qualified in _SHELL_STRING_CALLS or (qualified.startswith(_PROCESS_PREFIXES) and any(
+            kw.arg == "shell" and not (isinstance(kw.value, ast.Constant) and not kw.value.value)
+            for kw in node.keywords)):
+        command = node.args[0] if node.args else (_argument(node, 0, "args") or _argument(node, 0, "cmd"))
+        if not constant(command):
+            refs.dynamic = True           # a shell string the scan cannot read
     elif qualified.startswith(_PROCESS_PREFIXES):
         argv = node.args[0] if node.args else _argument(node, 0, "args")
         if isinstance(argv, ast.Name):
@@ -1069,9 +1309,13 @@ def _call_refs(reader: "_CodeReader", node: ast.Call, refs: ModuleRefs) -> None:
         if not reader.is_interpreter(items[0]):
             if not constant(items[0]):
                 refs.dynamic = True       # the program itself is computed
-            command = reader.shell_command(items)
-            if command is not None and not constant(command):
-                refs.dynamic = True       # a shell runs a command the scan cannot read
+            kind, target = reader.shell_target(items)
+            if kind == "stdin" or (kind in {"command", "script"} and not isinstance(target, str)
+                                    and not constant(target)):
+                refs.dynamic = True       # a shell runs commands the scan cannot read
+            if _CODE_FLAGS.get(reader.program(items[0])) is not None and any(
+                    reader.fold(i) is None for i in items[1:]):
+                refs.dynamic = True       # perl -e / node -e on something computed
             return
         # A Python interpreter: what it runs is the first argument that is not an option.
         rest = iter(items[1:])
@@ -1096,6 +1340,10 @@ def _call_refs(reader: "_CodeReader", node: ast.Call, refs: ModuleRefs) -> None:
                 refs.dynamic = True
             return
         refs.dynamic = True               # an interpreter with no script reads stdin
+
+
+def _is_none(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
 
 
 def _basename(text: Optional[str]) -> str:

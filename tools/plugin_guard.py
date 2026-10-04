@@ -19,7 +19,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, List, Optional, Tuple
 
-from tools.plugin_guard_code import _OPTIONAL_IMPORT as OPTIONAL_IMPORT_NOTE
 from tools.plugin_guard_code import (
     PYTHON_SOURCE_EXTENSIONS, ROUTE_PATTERN_IDS, ModuleRefs, module_refs, python_code_findings)
 from tools.plugin_guard_context import (
@@ -30,7 +29,7 @@ from tools.skills_guard import (
     Finding, ScanResult, SCANNABLE_EXTENSIONS, SUSPICIOUS_BINARY_EXTENSIONS, SourceText, _determine_verdict,
     decode_python_source, format_scan_report, read_source_text, scan_text)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-fork-14"
+PLUGIN_SCANNER_VERSION = "plugin-guard-fork-15"
 
 # Caches and vendored environments a checkout makes for itself. Skipped only when nothing in
 # them is tracked by git: a TRACKED ``venv/evil.py`` or ``__pycache__/x.pyc`` ships with the
@@ -521,8 +520,10 @@ def _unreached_dev_files(refs: dict, manifest_strings: set, other_files: Iterabl
 
 
 def _package_names(sources: dict) -> dict:
-    """The names each package's ``__init__.py`` binds at top level, by package directory: what
-    ``from . import name`` can find without a module file."""
+    """The names each package's ``__init__.py`` defines at MODULE level, by package directory: what
+    ``from . import name`` can find without a module file. Not a name bound inside a function or
+    class, under ``if False:``/``if TYPE_CHECKING:``, in an ``except`` handler (``_speedups =
+    None``), by ``from . import name`` itself, or by a ``name = None`` placeholder."""
     out: dict = {}
     for rel, source in sources.items():
         if source is None or rel.rsplit("/", 1)[-1] not in ("__init__.py", "__init__.pyw"):
@@ -532,22 +533,43 @@ def _package_names(sources: dict) -> dict:
         except (SyntaxError, ValueError, RecursionError, MemoryError):
             continue
         names: set = set()
-        # A fallback bound in an ``except`` handler (``_speedups = None``) does not make the module
-        # the try imports exist.
-        fallbacks = {id(n) for handler in ast.walk(tree) if isinstance(handler, ast.ExceptHandler)
-                     for n in ast.walk(handler)}
-        for node in ast.walk(tree):
-            if id(node) in fallbacks:
-                continue
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                names.add(node.name)
-            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-                names.add(node.id)
-            elif isinstance(node, (ast.Import, ast.ImportFrom)) and not (
-                    isinstance(node, ast.ImportFrom) and node.level == 1 and not node.module):
-                names.update((a.asname or a.name).split(".")[0] for a in node.names)
+        _module_level_names(tree.body, names)
         out[rel.rsplit("/", 1)[0] if "/" in rel else ""] = names
     return out
+
+
+def _never_runs(test: ast.AST) -> bool:
+    """An ``if`` test that is false when the module runs: a false constant, or TYPE_CHECKING."""
+    if isinstance(test, ast.Constant):
+        return not test.value
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")
+
+
+def _module_level_names(body: list, names: set) -> None:
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            if node.value is None or (isinstance(node.value, ast.Constant) and node.value.value is None):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                names.update(n.id for n in ast.walk(target) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+        elif isinstance(node, ast.Import):
+            names.update((a.asname or a.name).split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if not (node.level == 1 and not node.module):
+                names.update(a.asname or a.name for a in node.names)
+        elif isinstance(node, ast.If):
+            if not _never_runs(node.test):
+                _module_level_names(node.body, names)
+            if not (isinstance(node.test, ast.Constant) and node.test.value):
+                _module_level_names(node.orelse, names)
+        elif isinstance(node, ast.Try) or (hasattr(ast, "TryStar") and isinstance(node, ast.TryStar)):
+            _module_level_names(node.body + node.orelse + node.finalbody, names)
+        elif isinstance(node, (ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While)):
+            _module_level_names(node.body, names)
 
 
 def _is_defensive_documentation(finding: Finding, rel_path: str, suffix: str = "") -> bool:
@@ -900,12 +922,6 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
                     python_code_findings(view.text, rel, line_fallback=suffix in PYTHON_SOURCE_EXTENSIONS,
                                          tree_files=tree_files, package_names=package_names),
                     rel, f, js, from_ast=True, **judged))
-        # An optional import of a module the plugin does not ship is a note, unless the plugin also
-        # writes code at run time: then the missing module is likely what it writes.
-        if any(f.pattern_id == "code_written" for f in all_findings):
-            for f in all_findings:
-                if f.pattern_id == "missing_module" and f.description.endswith(OPTIONAL_IMPORT_NOTE):
-                    f.severity = "medium" if f.file in unreached else "high"
     verdict = _determine_verdict(all_findings)
     if all_findings:
         categories = sorted({f.category for f in all_findings})

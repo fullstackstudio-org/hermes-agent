@@ -4,11 +4,12 @@ audit, limits), the post-settle file verification and the review register's hand
 
 What is pinned here: every builder cleans, bounds and refuses (over-long, empty and control text never goes out, a
 draft is checked verbatim, a bad field definition says which field); the params the builders make are valid frames
-of the contract; ``upload.dir`` lies under the session's working directory; an answered request returns what the
-person entered and nothing the client claimed (``edited`` is the gateway's); every way of not getting an answer is
-``unavailable`` or ``timeout``; files are checked on disk after the request settled (missing, size, hash, escape,
-not a regular file, total) and become ``unavailable (bad_upload)``, never an answer; ``ref_text`` is what
-``file.attach`` gives; one open request and twelve per window per conversation, apart from ``confirm``; the hooks
+of the contract; ``upload.dir`` lies under the session's working directory and is created there without following
+a link (a link below the working directory is ``unavailable (upload_dir_unsafe)``); an answered request returns what
+the person entered and nothing the client claimed (``edited`` is the gateway's); every way of not getting an answer
+is ``unavailable`` or ``timeout``; files are checked on disk after the request settled without following a link
+(missing, size, hash, escape, a link, a swapped parent, not a regular file, total) and become ``unavailable
+(bad_upload)``, never an answer; ``ref_text`` is what ``file.attach`` gives; one open request and twelve per window per conversation, apart from ``confirm``; the hooks
 are fired once, by ``send_gated``; the audit records name ids, never text; no logger ever sees a title, value,
 path or draft. Every payload is a harmless marker.
 """
@@ -47,11 +48,13 @@ def audit_records(monkeypatch):
 
 
 @pytest.fixture()
-def build(server):
-    """``interactive``'s builders bound to a live session ``s1`` (creator ROBIN), cwd a temp dir."""
+def build(server, tmp_path):
+    """``interactive``'s builders bound to a live session ``s1`` (creator ROBIN), cwd a temp dir (the file builder
+    creates ``uploads/hermie/<date>`` there)."""
     from tui_gateway import interactive
     robin = _WS("robin", ROBIN)
     _session(server, "s1", robin, creator=ROBIN)
+    server._sessions["s1"]["cwd"] = str(tmp_path)
     return interactive
 
 
@@ -285,6 +288,63 @@ def test_the_upload_dir_has_the_working_directorys_symlinks_resolved(server, bui
     link.symlink_to(real)
     server._sessions["s1"]["cwd"] = str(link)
     assert _file(build)["upload"]["dir"].startswith(real.resolve().as_posix() + "/uploads/hermie/")
+
+
+def test_the_upload_dir_is_created_private_by_the_builder(server, build, tmp_path):
+    params = _file(build)
+    root = Path(params["upload"]["dir"])
+    for folder in (tmp_path / "uploads", tmp_path / "uploads" / "hermie", root):
+        assert folder.is_dir() and not folder.is_symlink()
+        assert folder.stat().st_mode & 0o777 == 0o700
+    assert _file(build)["upload"]["dir"] == params["upload"]["dir"], "an existing directory is reused"
+
+
+@pytest.mark.parametrize("link", ["uploads", "uploads/hermie", "uploads/hermie/{day}"])
+def test_a_symlink_below_the_working_directory_refuses_the_upload_dir(server, build, tmp_path, link):
+    """An agent that can write its workspace links a component of uploads/hermie/<date> elsewhere: the builder
+    refuses instead of handing the client a directory that lands the person's files outside the workspace, and
+    creates nothing through the link."""
+    day = time.strftime("%Y-%m-%d")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    path = tmp_path / link.format(day=day)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(build.UploadDirUnavailable) as caught:
+        _file(build)
+    assert caught.value.reason == "upload_dir_unsafe"
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_a_file_where_a_folder_belongs_refuses_the_upload_dir(server, build, tmp_path):
+    (tmp_path / "uploads").write_bytes(b"MARKER")
+    with pytest.raises(build.UploadDirUnavailable) as caught:
+        _file(build)
+    assert caught.value.reason == "upload_dir_unsafe"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_an_upload_dir_that_cannot_be_created_is_unavailable(server, build, tmp_path):
+    tmp_path.chmod(0o500)
+    try:
+        with pytest.raises(build.UploadDirUnavailable) as caught:
+            _file(build)
+    finally:
+        tmp_path.chmod(0o700)
+    assert caught.value.reason == "upload_dir_unavailable"
+
+
+def test_the_tool_bridge_reports_an_unsafe_upload_dir_as_unavailable_with_nothing_sent(server, build, tmp_path,
+                                                                                        audit_records):
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+    server._sessions["s1"]["cwd"] = str(tmp_path)
+    (tmp_path / "uploads").symlink_to(tmp_path.parent, target_is_directory=True)
+    outcome = build.request_from_tool("s1", "input.file", summary="Send the receipt.", accept="image")
+    assert (outcome.status, outcome.reason) == ("unavailable", "upload_dir_unsafe")
+    assert phone.requests("input.file") == []
+    assert [event for event, _ in audit_records] == ["interactive_outcome"]
+    assert audit_records[-1][1]["reason"] == "upload_dir_unsafe"
 
 
 @pytest.mark.parametrize("kwargs, message", [
@@ -747,7 +807,7 @@ def test_the_hook_audit_events_exist_in_the_dashboard_audit_log():
 
 def _upload(tmp_path: Path, **limits) -> tuple[dict, Path]:
     root = tmp_path / "uploads" / "hermie" / "2026-10-04"
-    root.mkdir(parents=True)
+    root.mkdir(parents=True, exist_ok=True)
     upload = {"dir": root.resolve().as_posix(), "max_bytes": 100, "max_total_bytes": 150, "max_files": 3,
               "strip_metadata": True, **limits}
     return {"upload": upload}, root
@@ -807,20 +867,58 @@ def test_verify_files_refuses_paths_that_escape_through_the_disk(build, tmp_path
     params, root = _upload(tmp_path)
     outside = tmp_path / "secret.txt"
     outside.write_bytes(b"secret")
-    # a symlink in the dir to a file outside it, a ".." lexically fine but really outside, a symlinked directory
+    # a symlink in the dir to a file outside it: never followed
     (root / "0123456789abcdef-link.txt").symlink_to(outside)
-    assert build.verify_files(params, [_entry(root / "0123456789abcdef-link.txt", b"secret")])[0] == "file:0:outside_dir"
+    assert build.verify_files(params, [_entry(root / "0123456789abcdef-link.txt", b"secret")])[0] == "file:0:link"
+    # a ".." lexically fine but really outside, and a file in a subdirectory: not directly in the dir
     sibling = tmp_path / "uploads" / "hermie" / "other"
     sibling.mkdir()
     (sibling / "x.txt").write_bytes(b"x")
     assert build.verify_files(params, [_entry(root / ".." / "other" / "x.txt", b"x")])[0] == "file:0:outside_dir"
     (root / "jump").symlink_to(tmp_path, target_is_directory=True)
     assert build.verify_files(params, [_entry(root / "jump" / "secret.txt", b"secret")])[0] == "file:0:outside_dir"
-    # a symlink that stays inside the dir is still refused at the file itself (never followed)
+    (root / "sub").mkdir()
+    (root / "sub" / "0123456789abcdef-x.txt").write_bytes(b"x")
+    assert build.verify_files(params, [_entry(root / "sub" / "0123456789abcdef-x.txt", b"x")])[0] == "file:0:outside_dir"
+
+
+def test_verify_files_refuses_a_link_that_stays_inside_the_dir(build, tmp_path):
+    """A link is refused at the file itself even when it points to a real file in the same directory: the check
+    never follows a link, so what it hashed is always the entry the answer named."""
+    params, root = _upload(tmp_path)
     real = _put(root, "0123456789abcdef-real.txt", b"real")
     (root / "0123456789abcdef-alias.txt").symlink_to(real)
-    problem, paths = build.verify_files(params, [_entry(root / "0123456789abcdef-alias.txt", b"real")])
-    assert problem == "" and paths == [str(real.resolve())]  # resolved to the real file under the dir
+    assert build.verify_files(params, [_entry(root / "0123456789abcdef-alias.txt", b"real")]) == ("file:0:link", [])
+    assert build.verify_files(params, [_entry(real, b"real")]) == ("", [f"{params['upload']['dir']}/{real.name}"])
+
+
+@pytest.mark.parametrize("swap", ["uploads", "uploads/hermie", "uploads/hermie/2026-10-04"])
+def test_verify_files_refuses_a_parent_swapped_for_a_link_after_the_request_was_built(build, tmp_path, swap):
+    """The directory was real when the request was built; by the time the answer is checked a component was
+    replaced by a link to a look-alike tree elsewhere, with a file that matches the answer. Refused, unread."""
+    params, root = _upload(tmp_path)
+    decoy = tmp_path / "decoy"
+    (decoy / "uploads" / "hermie" / "2026-10-04").mkdir(parents=True)
+    _put(decoy / "uploads" / "hermie" / "2026-10-04", "0123456789abcdef-a.txt", b"alpha")
+    moved = tmp_path / swap
+    moved.rename(tmp_path / "moved-away")
+    moved.symlink_to(decoy / swap, target_is_directory=True)
+    entry = _entry(root / "0123456789abcdef-a.txt", b"alpha")
+    assert Path(entry["path"]).read_bytes() == b"alpha", "the lexical path reaches the decoy through the link"
+    assert build.verify_files(params, [entry]) == ("dir:unsafe", [])
+
+
+def test_verify_files_refuses_an_upload_dir_that_is_not_a_real_path(build, tmp_path):
+    params, root = _upload(tmp_path)
+    real = _put(root, "0123456789abcdef-a.txt", b"alpha")
+    alias = tmp_path / "alias"
+    alias.symlink_to(root, target_is_directory=True)
+    linked = {"upload": {**params["upload"], "dir": alias.as_posix()}}
+    assert build.verify_files(linked, [_entry(alias / real.name, b"alpha")]) == ("dir:unsafe", [])
+    trailing = {"upload": {**params["upload"], "dir": params["upload"]["dir"] + "/"}}
+    assert build.verify_files(trailing, [_entry(real, b"alpha")]) == ("dir:unsafe", [])
+    gone = {"upload": {**params["upload"], "dir": (tmp_path / "uploads" / "hermie" / "1999-01-01").resolve().as_posix()}}
+    assert build.verify_files(gone, [_entry(real, b"alpha")])[0] == "file:0:missing"
 
 
 def test_verify_files_refuses_names_with_control_or_format_characters(build, tmp_path):
@@ -846,7 +944,7 @@ def test_an_uploaded_file_round_trip_gives_path_and_the_same_ref_text_as_file_at
     server._sessions["s1"]["cwd"] = str(tmp_path)
     params = _file(build, multiple=True, accept="any")
     root = Path(params["upload"]["dir"])
-    root.mkdir(parents=True)
+    assert root.is_dir()
     one, two = _put(root, "0123456789abcdef-my receipt.pdf", b"%PDF-marker"), _put(
         root, "fedcba9876543210-notes.txt", b"hello")
     answer = {"status": "answered", "text": "Voice‮ note\n\n\n\nhere", "files": [
@@ -874,7 +972,7 @@ def test_a_file_that_does_not_check_out_is_unavailable_bad_upload_never_an_answe
     server._sessions["s1"]["cwd"] = str(tmp_path)
     params = _file(build)
     root = Path(params["upload"]["dir"])
-    root.mkdir(parents=True)
+    assert root.is_dir()
     path = _put(root, "0123456789abcdef-a.txt", b"alpha")
     rid, outcome = _ask(server, build, "input.file", params, peer=phone, answer={
         "status": "answered", "files": [_entry(path, b"alpha", sha256="0" * 64)]})

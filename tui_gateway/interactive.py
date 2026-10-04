@@ -11,15 +11,17 @@ turn acts for; ``send_gated`` parks the request until a capable device attaches 
   :func:`build_draft_params`): text the person will see is cleaned (``request_text.clean_text``) or, for a draft,
   checked verbatim; over-long or empty text is refused with :class:`InteractiveParamsError`, never truncated; the
   gateway sets ``expires_at``, ``optional``, ``acting_user`` and the upload directory (under the session's working
-  directory, ``<cwd>/uploads/hermie/<date>``);
+  directory, ``<cwd>/uploads/hermie/<date>``, created by the builder without following a symbolic link: a link
+  anywhere below the working directory makes the request ``unavailable (upload_dir_unsafe)`` with nothing sent);
 - every answer is checked by a pure validator (``interactive_validate``) against the request's own params while the
   request is open; the answer that settles it is the first that passes;
 - :func:`request` returns an :class:`Outcome`: ``answered``, ``skipped``, ``approved``, ``rejected``,
   ``unavailable`` (nobody can show it, the app answered an error, withdrawn, a rate limit, turn isolation, a bad
   upload, ...; NOT an answer) or ``timeout`` (300 s). A client's claim never decides an outcome: the gateway reads
   the validated answer, computes ``edited`` itself, and checks uploaded files on disk;
-- ``input.file`` answers name files by reference. After the request settled, outside every lock, each file is
-  opened (no symlink followed), its real path must lie under the upload directory, and its size and SHA-256 must
+- ``input.file`` answers name files by reference. After the request settled, outside every lock, the upload
+  directory is opened from ``/`` without following a symbolic link anywhere, each file is opened inside it by name
+  (it must sit directly in the directory, and a link is refused, never followed), and its size and SHA-256 must
   match what the client declared (:func:`verify_files`); anything else is ``unavailable (bad_upload)`` and nothing is
   deleted;
 - an approved draft's final text goes into ``review_register`` under a ``draft_id`` (the gateway's copy, what a
@@ -41,7 +43,9 @@ import datetime as _dt
 import hashlib
 import hmac
 import logging
+import errno
 import os
+import posixpath
 import re
 import stat
 import time
@@ -50,7 +54,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from tui_gateway import interactive_fields, interactive_validate, request_limits, review_register, server_requests
+from tui_gateway import (
+    interactive_fields, interactive_validate, request_limits, review_register, server_requests, upload_dirs)
 from tui_gateway.contracts.server_requests import (
     DRAFT_TEXT_MAX, INTERACTIVE_METHODS, INTERACTIVE_SUMMARY_MAX, INTERACTIVE_TITLE_MAX, UPLOAD_MAX_FILES,
     DraftKind, FileAccept, FileCapture)
@@ -89,6 +94,17 @@ _limiter = request_limits.Limiter(MAX_PENDING, MAX_PER_WINDOW, WINDOW_SECONDS)
 class InteractiveParamsError(ValueError):
     """The agent's text or definition cannot be shown as given (empty, over a bound, hidden characters, an
     inconsistent field). Nothing was sent; the message says what to fix."""
+
+
+class UploadDirUnavailable(Exception):
+    """The upload directory cannot be made safely: a symbolic link or a non-directory below the working directory
+    (``reason`` ``upload_dir_unsafe``) or the directory cannot be created (``upload_dir_unavailable``). Not the
+    agent's text to fix, so not an :class:`InteractiveParamsError`: :func:`request_from_tool` reports it as
+    ``unavailable (<reason>)``, audited, with nothing sent."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -183,15 +199,32 @@ def build_form_params(sid: str, *, summary: object, fields: object, title: objec
 
 
 def _upload_dir(sid: str, *, today: _dt.date | None = None) -> str:
-    """``<session cwd>/uploads/hermie/<YYYY-MM-DD>``: absolute, with the symlinks of the working directory
-    resolved, so the real path of an uploaded file can be compared with it."""
+    """``<session cwd>/uploads/hermie/<YYYY-MM-DD>``: absolute and a REAL path (the working directory's own
+    symlinks resolved), so :func:`verify_files` can open it from ``/`` without following a link.
+
+    The working directory is the agent's, so nothing below it is trusted: the directory is walked from ``/`` one
+    component at a time without following a link (``upload_dirs.walk``), and ``uploads``, ``hermie`` and the date
+    are created when missing (mode 0700) inside their parent's descriptor. A symbolic link (or a non-directory) at
+    any of them, or anywhere on the resolved working directory by the time of the walk, raises
+    :class:`UploadDirUnavailable` ``upload_dir_unsafe``; a directory that cannot be created raises it with
+    ``upload_dir_unavailable``."""
     from tui_gateway import server
     cwd = str(server._session_cwd(server._sessions.get(sid)) or "")
     root = Path(os.path.expanduser(cwd)).resolve().as_posix() if cwd else ""
     if not root.startswith("/"):
         raise InteractiveParamsError("this session has no absolute working directory to receive files in")
     day = (today or _dt.date.today()).isoformat()
-    return f"{root.rstrip('/')}/uploads/hermie/{day}"
+    if not upload_dirs.supported():
+        raise UploadDirUnavailable("upload_dir_unavailable")
+    try:
+        parts = upload_dirs.components(root)
+        fd = upload_dirs.walk([*parts, *upload_dirs.UPLOAD_SEGMENTS, day], create_from=len(parts))
+    except upload_dirs.UnsafePath:
+        raise UploadDirUnavailable("upload_dir_unsafe") from None
+    except OSError:
+        raise UploadDirUnavailable("upload_dir_unavailable") from None
+    os.close(fd)
+    return "/".join(["", *parts, *upload_dirs.UPLOAD_SEGMENTS, day])
 
 
 def build_file_params(sid: str, *, summary: object, accept: object, capture: object = None, multiple: object = False,
@@ -261,54 +294,89 @@ def _unprintable(path: str) -> bool:
     return "\x00" in path or any(unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Co", "Zl", "Zp") for ch in path)
 
 
+def _open_upload_dir(directory: str) -> tuple[int | None, str]:
+    """``(descriptor, "")`` of the upload directory, opened from ``/`` without following a link anywhere and
+    checked to be the very directory ``lstat`` names; ``(None, problem)`` otherwise."""
+    if not upload_dirs.supported() or os.path.realpath(directory) != directory:
+        return None, "dir:unsafe"
+    try:
+        fd = upload_dirs.open_real_dir(directory)
+    except FileNotFoundError:
+        return None, "file:0:missing"
+    except OSError:  # a link or a non-directory on the way (UnsafePath), or unreadable
+        return None, "dir:unsafe"
+    try:
+        opened, named = os.fstat(fd), os.lstat(directory)
+    except OSError:
+        os.close(fd)
+        return None, "dir:unsafe"
+    if not stat.S_ISDIR(named.st_mode) or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+        os.close(fd)
+        return None, "dir:unsafe"
+    return fd, ""
+
+
 def verify_files(params: dict, files: list[dict]) -> tuple[str, list[str]]:
-    """Check on disk what an ``input.file`` answer claims, OUTSIDE every lock: each file exists, is a regular file
-    reached without following a symlink at its last component, its real path lies under the upload directory's
-    real path, its size is the declared one (at most ``max_bytes``, all together at most ``max_total_bytes``) and
-    its SHA-256 matches. Returns ``("", real paths)`` or ``("file:<n>:<problem>" | "files:too_large", [])``; the
-    problems: ``path`` (a control or format character), ``outside_dir``, ``missing``, ``not_a_file``, ``size``,
-    ``hash``. Nothing is read beyond the declared size, and nothing is deleted."""
+    """Check on disk what an ``input.file`` answer claims, OUTSIDE every lock, without following a symbolic link
+    anywhere. ``upload.dir`` must be a real path (``realpath(dir) == dir``); it is opened from ``/`` one component
+    at a time with ``O_NOFOLLOW`` and its descriptor must be the directory ``lstat(dir)`` names (device and inode).
+    Each answered path must sit DIRECTLY in it (its lexical parent is ``dir``: the layout is flat,
+    ``<dir>/<16 hex>-<name>``) and is opened by name inside that descriptor with ``O_NOFOLLOW``: it must be a
+    regular file, not a link (a link is refused even when it points inside the directory), its size the declared
+    one (at most ``max_bytes``, all together at most ``max_total_bytes``) and its SHA-256 the declared one, all
+    read from that descriptor. Returns ``("", paths)`` (``<dir>/<name>``, real by construction) or
+    ``("file:<n>:<problem>" | "files:too_large" | "dir:unsafe", [])``; the file problems: ``path`` (a control or
+    format character), ``outside_dir`` (not directly in the directory), ``missing``, ``link``, ``not_a_file``,
+    ``size``, ``hash``; ``dir:unsafe`` when the directory itself is not a real path, is reached through a link or
+    changed under the check. Nothing is read beyond the declared size, and nothing is deleted."""
     upload = params["upload"]
-    root = os.path.realpath(upload["dir"]).rstrip("/") + "/"
+    directory = str(upload["dir"])
+    dir_fd, problem = _open_upload_dir(directory)
+    if dir_fd is None:
+        return problem, []
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
     real_paths: list[str] = []
     total = 0
-    for number, entry in enumerate(files):
-        path = str(entry["path"])
-        if _unprintable(path):
-            return f"file:{number}:path", []
-        real = os.path.realpath(path)
-        if not real.startswith(root):
-            return f"file:{number}:outside_dir", []
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
-        try:
-            fd = os.open(real, flags)
-        except FileNotFoundError:
-            return f"file:{number}:missing", []
-        except OSError:
-            return f"file:{number}:not_a_file", []
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                return f"file:{number}:not_a_file", []
-            declared = int(entry["bytes"])
-            if info.st_size != declared or declared > int(upload["max_bytes"]):
-                return f"file:{number}:size", []
-            total += info.st_size
-            if total > int(upload["max_total_bytes"]):
-                return "files:too_large", []
-            digest, read = hashlib.sha256(), 0
-            while chunk := os.read(fd, min(_HASH_CHUNK, declared + 1 - read)):
-                read += len(chunk)
-                digest.update(chunk)
-                if read > declared:
-                    break
-            if read != declared:
-                return f"file:{number}:size", []
-            if not hmac.compare_digest(digest.hexdigest(), str(entry["sha256"])):
-                return f"file:{number}:hash", []
-        finally:
-            os.close(fd)
-        real_paths.append(real)
+    try:
+        for number, entry in enumerate(files):
+            path = str(entry["path"])
+            if _unprintable(path):
+                return f"file:{number}:path", []
+            lexical = interactive_validate.lexical_path(path)
+            name = posixpath.basename(lexical) if lexical else ""
+            if lexical is None or posixpath.dirname(lexical) != directory or name in ("", ".", ".."):
+                return f"file:{number}:outside_dir", []
+            try:
+                fd = os.open(name, flags, dir_fd=dir_fd)
+            except FileNotFoundError:
+                return f"file:{number}:missing", []
+            except OSError as exc:
+                return f"file:{number}:{'link' if exc.errno in (errno.ELOOP, errno.EMLINK) else 'not_a_file'}", []
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    return f"file:{number}:not_a_file", []
+                declared = int(entry["bytes"])
+                if info.st_size != declared or declared > int(upload["max_bytes"]):
+                    return f"file:{number}:size", []
+                total += info.st_size
+                if total > int(upload["max_total_bytes"]):
+                    return "files:too_large", []
+                digest, read = hashlib.sha256(), 0
+                while chunk := os.read(fd, min(_HASH_CHUNK, declared + 1 - read)):
+                    read += len(chunk)
+                    digest.update(chunk)
+                    if read > declared:
+                        break
+                if read != declared:
+                    return f"file:{number}:size", []
+                if not hmac.compare_digest(digest.hexdigest(), str(entry["sha256"])):
+                    return f"file:{number}:hash", []
+            finally:
+                os.close(fd)
+            real_paths.append(f"{directory}/{name}")
+    finally:
+        os.close(dir_fd)
     return "", real_paths
 
 
@@ -492,7 +560,11 @@ def request_from_tool(sid: str, method: str, **kwargs: Any) -> Outcome:
         raise ValueError(f"{method!r} is not an interactive request method")
     if not sid or sid not in server._sessions:
         return _Audit(sid or "-", method).outcome(Outcome("unavailable", reason="no_session"))
-    return request(sid, method, BUILDERS[method](sid, **kwargs))
+    try:
+        params = BUILDERS[method](sid, **kwargs)
+    except UploadDirUnavailable as exc:
+        return _Audit(sid, method).outcome(Outcome("unavailable", reason=exc.reason))
+    return request(sid, method, params)
 
 
 def reset_for_tests() -> None:

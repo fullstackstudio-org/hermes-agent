@@ -245,9 +245,11 @@ gateway's existing HTTP upload route, with the credentials it already uses for a
 The answer is checked in two steps. While the request is open: shape, `not_optional`, the file count
 (`files:too_many`), then each file in order (`file:<n>:outside_dir`, `file:<n>:too_large`), then the
 total (`files:too_large`). After it
-settled, the gateway checks every file on disk (it exists, its size and SHA-256 match, its real path is
-under `upload.dir`); a mismatch makes the request `unavailable (bad_upload)` for the agent, and the
-client is not asked again.
+settled, the gateway checks every file on disk without following a symbolic link anywhere (`upload.dir`
+is the real path of a directory, the file sits directly in it and is a regular file, not a link, and
+its size and SHA-256 match); a mismatch makes the request `unavailable (bad_upload)` for the agent, and
+the client is not asked again. The upload route writes below the `uploads/hermie` part of a path
+without following a symbolic link either: a client gets an error instead of a file stored elsewhere.
 
 ## 6. `review.draft`
 

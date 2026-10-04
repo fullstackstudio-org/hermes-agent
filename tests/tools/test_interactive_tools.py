@@ -182,7 +182,8 @@ def test_a_session_the_gateway_does_not_host_is_no_session(server):
 
 REASONS = ("no_capable_client", "write_failed", "error_response", "no_session", "no_acting_user", "already_pending",
            "rate_limited", "turn_isolation", "cancelled:interrupted", "cancelled:session_closed",
-           "cancelled:shutdown", "too_many_attempts", "bad_upload", "something_new", "")
+           "cancelled:shutdown", "too_many_attempts", "bad_upload", "upload_dir_unsafe", "upload_dir_unavailable",
+           "something_new", "")
 METHODS = ("input.form", "input.file", "review.draft")
 
 
@@ -304,7 +305,7 @@ def test_ask_file_round_trip_gives_path_and_ref_text(server, tmp_path):
         rid = _wait_open("input.file")
         upload = phone.requests("input.file")[0]["params"]["upload"]
         root = Path(upload["dir"])
-        root.mkdir(parents=True)
+        assert root.is_dir(), "the gateway creates the upload directory before it asks"
         path = root / "0123456789abcdef-receipt.jpg"
         path.write_bytes(b"JPEGMARKER")
         _frame(server, phone, rid, result={"status": "answered", "files": [{
@@ -334,3 +335,22 @@ def test_a_timeout_and_a_missing_app_reach_the_model_as_not_an_answer(server, mo
         release()
     assert (data["outcome"], data["reason"]) == ("unavailable", "no_capable_client")
     assert "do not retry at once" in data["message"] and old.frames == []
+
+
+def test_a_symlinked_upload_folder_is_unavailable_with_nothing_sent(server, tmp_path):
+    phone = _WS("phone", ROBIN)
+    _session(server, "s1", phone, creator=ROBIN)
+    workspace, elsewhere = tmp_path / "work", tmp_path / "elsewhere"
+    workspace.mkdir()
+    elsewhere.mkdir()
+    (workspace / "uploads").symlink_to(elsewhere, target_is_directory=True)
+    server._sessions["s1"]["cwd"] = str(workspace)
+    _caps(server, phone, requests=list(ALL))
+    release = _bind_ui_session("s1")
+    try:
+        data = json.loads(tool.ask_file_tool(summary="Send the receipt.", accept="image"))
+    finally:
+        release()
+    assert (data["outcome"], data["reason"]) == ("unavailable", "upload_dir_unsafe")
+    assert "symbolic link" in data["message"] and phone.requests("input.file") == []
+    assert list(elsewhere.iterdir()) == [], "nothing is created through the link"

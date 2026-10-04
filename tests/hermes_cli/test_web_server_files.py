@@ -458,3 +458,97 @@ def test_git_branch_decodes_utf8_under_a_gbk_default_codec(tmp_path, monkeypatch
     monkeypatch.setattr(subprocess, "_text_encoding", lambda: "gbk")
 
     assert _rt_files._fs_git_branch(str(tmp_path)) == branch
+
+
+# ---------------------------------------------------------------------------
+# Uploads below uploads/hermie never follow a symbolic link (the Hermie apps' attachments and the upload.dir of
+# an input.file request: <session cwd>/uploads/hermie/<date>/<16 hex>-<name>; the cwd is the agent's).
+# ---------------------------------------------------------------------------
+
+_DAY = "2026-10-04"
+
+
+def _upload_json(client, path, *, overwrite=False):
+    return client.post("/api/files/upload", json={
+        "path": str(path), "data_url": "data:text/plain;base64,TUFSS0VS", "overwrite": overwrite})
+
+
+def _upload_stream(client, path, *, overwrite=False):
+    return client.post("/api/files/upload-stream", data={"path": str(path), "overwrite": str(overwrite).lower()},
+                       files={"file": ("x.txt", b"MARKER", "text/plain")})
+
+
+_UPLOADS = {"json": _upload_json, "stream": _upload_stream}
+
+
+@pytest.mark.parametrize("route", sorted(_UPLOADS))
+@pytest.mark.parametrize("link", ["uploads", "uploads/hermie", f"uploads/hermie/{_DAY}"])
+def test_an_upload_below_uploads_hermie_never_follows_a_symlink(local_files_client, route, link):
+    """An agent links a component of its workspace's uploads/hermie/<date> to a folder elsewhere (an autostart
+    folder, say): the person's upload is refused instead of landing there, and nothing is created through it."""
+    client, home = local_files_client
+    workspace, elsewhere = home / "work", home / "elsewhere"
+    workspace.mkdir()
+    elsewhere.mkdir()
+    linked = workspace / link
+    linked.parent.mkdir(parents=True, exist_ok=True)
+    linked.symlink_to(elsewhere, target_is_directory=True)
+    response = _UPLOADS[route](client, workspace / "uploads" / "hermie" / _DAY / "0123456789abcdef-x.txt")
+    assert response.status_code == 400, response.text
+    assert list(elsewhere.rglob("*")) == []
+
+
+@pytest.mark.parametrize("route", sorted(_UPLOADS))
+def test_an_upload_below_uploads_hermie_never_writes_through_a_symlinked_file(local_files_client, route):
+    client, home = local_files_client
+    folder = home / "work" / "uploads" / "hermie" / _DAY
+    folder.mkdir(parents=True)
+    victim = home / "victim.txt"
+    victim.write_bytes(b"untouched")
+    (folder / "0123456789abcdef-x.txt").symlink_to(victim)
+    response = _UPLOADS[route](client, folder / "0123456789abcdef-x.txt", overwrite=True)
+    assert response.status_code == 400, response.text
+    assert victim.read_bytes() == b"untouched"
+    assert (folder / "0123456789abcdef-x.txt").is_symlink()
+
+
+@pytest.mark.parametrize("route", sorted(_UPLOADS))
+def test_an_upload_below_uploads_hermie_creates_private_folders_and_the_file(local_files_client, route):
+    """The ordinary case still works: missing folders are created (0700), a symlink ABOVE uploads (a workspace
+    reached through a link, /tmp on macOS) is fine, and the response names the stored file."""
+    client, home = local_files_client
+    real_workspace = home / "real-work"
+    real_workspace.mkdir()
+    (home / "work").symlink_to(real_workspace, target_is_directory=True)
+    target = home / "work" / "uploads" / "hermie" / _DAY / "0123456789abcdef-x.txt"
+    response = _UPLOADS[route](client, target)
+    assert response.status_code == 200, response.text
+    stored = real_workspace / "uploads" / "hermie" / _DAY / "0123456789abcdef-x.txt"
+    assert stored.read_bytes() == b"MARKER" and not stored.is_symlink()
+    assert response.json()["path"] == str(stored.resolve())
+    for folder in (stored.parent, stored.parent.parent, stored.parent.parent.parent):
+        assert folder.stat().st_mode & 0o777 == 0o700
+    assert [p.name for p in stored.parent.iterdir()] == [stored.name], "no temp file left behind"
+    # overwrite rules are unchanged
+    assert _UPLOADS[route](client, target).status_code == 409
+    assert _UPLOADS[route](client, target, overwrite=True).status_code == 200
+
+
+def test_an_upload_into_an_existing_private_upload_dir_works(local_files_client):
+    """The directory the gateway made for an input.file request (``interactive._upload_dir``) takes the upload."""
+    client, home = local_files_client
+    folder = home / "work" / "uploads" / "hermie" / _DAY
+    folder.mkdir(parents=True, mode=0o700)
+    response = _upload_stream(client, folder / "0123456789abcdef-receipt.txt")
+    assert response.status_code == 200, response.text
+    assert (folder / "0123456789abcdef-receipt.txt").read_bytes() == b"MARKER"
+
+
+def test_an_upload_elsewhere_keeps_following_links_as_before(local_files_client):
+    """Only the uploads/hermie part of a path is held to no-follow: the file browser's other writes are as before."""
+    client, home = local_files_client
+    real = home / "real"
+    real.mkdir()
+    (home / "alias").symlink_to(real, target_is_directory=True)
+    assert _upload_json(client, home / "alias" / "notes.txt").status_code == 200
+    assert (real / "notes.txt").read_bytes() == b"MARKER"

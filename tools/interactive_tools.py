@@ -63,6 +63,11 @@ def _reason_head(method: str, reason: str, result: dict) -> str:
                              f"now. They need to open {_APP_KIND[method]} and be attached to this conversation.",
         "write_failed": f"The {thing} could not be delivered to any connected app.",
         "error_response": f"The connected app could not show the {thing}.",
+        "upload_dir_unsafe": "The upload folder in the workspace (uploads/hermie) is or passes through a symbolic "
+                             "link or something that is not a folder, so no file can be received safely. Nothing "
+                             "was sent to the person.",
+        "upload_dir_unavailable": "The upload folder in the workspace (uploads/hermie) could not be created, so no "
+                                  "file can be received. Nothing was sent to the person.",
         "no_session": f"A {thing} is not available in this conversation (no interactive app session).",
         "no_acting_user": f"This conversation is shared and this turn does not say which person it is for, so a "
                           f"{thing} cannot be put to anyone.",
@@ -74,7 +79,8 @@ def _reason_head(method: str, reason: str, result: dict) -> str:
         "cancelled:shutdown": f"The {thing} was withdrawn because the gateway is shutting down.",
         "too_many_attempts": f"The app kept sending answers that did not fit the {thing}, so it was withdrawn.",
         "bad_upload": "The uploaded file did not check out on the gateway (it is missing, the wrong size or "
-                      "content, or not where it should be), so it is not available to you. Nothing was deleted.",
+                      "content, a link, or not where it should be), so it is not available to you. Nothing was "
+                      "deleted.",
     }.get(reason, f"The {thing} got no answer.")
 
 

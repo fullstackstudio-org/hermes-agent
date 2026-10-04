@@ -17,9 +17,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -27,11 +28,13 @@ from fastapi.responses import FileResponse
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.web_deps import late
 from hermes_cli.web_server_files import (
-    _fs_path, _managed_file_entry, _managed_response_meta, _resolve_managed_path,
+    _canonical_path, _fs_path, _managed_file_entry, _managed_response_meta, _path_is_under, _path_text,
+    _resolve_managed_path,
 )
 from hermes_cli.web_models import (
     ChatImageUpload, FsWriteText, ManagedDirectoryCreate, ManagedFileDelete, ManagedFileUpload,
 )
+from tui_gateway import upload_dirs
 
 router = APIRouter()
 
@@ -504,14 +507,108 @@ async def stream_managed_file(request: Request, path: str):
     return _managed_file_response(request, path, content_disposition_type="inline", media_only=True)
 
 
-def _managed_write_target(path: str, request: Request, overwrite: bool):
-    policy, target, display_path = _resolve_managed_path(path, request, for_write=True)
-    _refuse_passkey_store_write(target)
-    if target.exists() and target.is_dir():
+@dataclass(frozen=True)
+class _NoFollowTarget:
+    """A write below ``uploads/hermie``: *anchor* is the folder that holds ``uploads`` (its own symlinks resolved:
+    a workspace reached through a link, ``/tmp`` on macOS), *dirs* the folders from ``uploads`` down and *name* the
+    file, none of which may be a symbolic link."""
+
+    anchor: Path
+    dirs: tuple[str, ...]
+    name: str
+
+
+def _nofollow_target(raw_path: str, policy) -> "_NoFollowTarget | None":
+    """The no-follow split of a write path that runs through ``uploads/hermie`` (``tui_gateway.upload_dirs``), else
+    None (every other write follows links as before).
+
+    The Hermie apps upload attachments, and the files an ``input.file`` request asks for, to
+    ``<session cwd>/uploads/hermie/<date>/<16 hex>-<name>``. The working directory is the agent's: a sandboxed
+    agent with a bind-mounted workspace can link ``uploads`` (or ``hermie``, or the date) to a folder elsewhere,
+    and a write that follows it lands the person's file there. So that part of the path is created and written
+    through directory descriptors with ``O_NOFOLLOW`` (:func:`_nofollow_parent`), never resolved."""
+    candidate = Path(_path_text(raw_path)).expanduser()
+    if not candidate.is_absolute():
+        if policy.locked_root is None:
+            return None
+        candidate = policy.locked_root / candidate
+    parts = candidate.parts[1:]
+    index = upload_dirs.anchor_index(parts[:-1])
+    if index is None:
+        return None
+    return _NoFollowTarget(_canonical_path(Path(candidate.parts[0], *parts[:index])), tuple(parts[index:-1]),
+                           parts[-1])
+
+
+@contextlib.contextmanager
+def _nofollow_parent(target: _NoFollowTarget) -> Iterator[int]:
+    """A descriptor of the folder *target*'s file goes in: the anchor (created as before when missing), then each
+    folder from ``uploads`` down opened, or created with mode 0700, inside its parent's descriptor without
+    following a link. A link or a non-folder on the way is 400; nothing is created through it."""
+    if not upload_dirs.supported():
+        raise HTTPException(status_code=500, detail="Uploads into uploads/hermie are not supported on this platform")
+    try:
+        target.anchor.mkdir(parents=True, exist_ok=True)
+        anchor = target.anchor.resolve(strict=True)
+        parts = upload_dirs.components(str(anchor))
+        fd = upload_dirs.walk([*parts, *target.dirs], create_from=len(parts))
+    except upload_dirs.UnsafePath:
+        raise HTTPException(status_code=400, detail="Upload path passes through a symbolic link or a non-folder")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="File is not writable")
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Could not create parent directory: {exc}")
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _nofollow_refuse_existing(dir_fd: int, name: str, overwrite: bool) -> None:
+    """The final component inside *dir_fd*, never followed: a link is 400, a folder 409, a file 409 unless
+    *overwrite* (a replace swaps the entry itself, so a file is never written through)."""
+    try:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if stat.S_ISLNK(info.st_mode):
+        raise HTTPException(status_code=400, detail="Upload path is a symbolic link")
+    if stat.S_ISDIR(info.st_mode):
         raise HTTPException(status_code=409, detail="A directory already exists at that path")
-    if target.exists() and not overwrite:
+    if not overwrite:
         raise HTTPException(status_code=409, detail="File already exists")
-    return policy, target, display_path
+
+
+_NOFOLLOW_TMP_FLAGS = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                       | getattr(os, "O_CLOEXEC", 0))
+
+
+def _nofollow_temp(dir_fd: int, name: str) -> tuple[int, str]:
+    """A new private temp file beside *name* inside *dir_fd*: ``(fd, temp name)``."""
+    tmp_name = f".{name}.{secrets.token_hex(6)}.upload"
+    return os.open(tmp_name, _NOFOLLOW_TMP_FLAGS, 0o600, dir_fd=dir_fd), tmp_name
+
+
+def _managed_write_target(path: str, request: Request, overwrite: bool):
+    """``(policy, target, display_path, nofollow)``. *nofollow* is set for a path through ``uploads/hermie``
+    (:func:`_nofollow_target`): its target is the anchor's real path plus the rest as written, and the existence
+    checks happen on the descriptors at write time."""
+    policy, target, display_path = _resolve_managed_path(path, request, for_write=True)
+    nofollow = _nofollow_target(path, policy)
+    if nofollow is not None:
+        target = nofollow.anchor.joinpath(*nofollow.dirs, nofollow.name)
+        if policy.locked_root is not None and not _path_is_under(policy.locked_root, target):
+            raise HTTPException(status_code=403, detail="Path outside managed files root")
+        display_path = str(target)
+    _refuse_passkey_store_write(target)
+    if nofollow is None:
+        if target.exists() and target.is_dir():
+            raise HTTPException(status_code=409, detail="A directory already exists at that path")
+        if target.exists() and not overwrite:
+            raise HTTPException(status_code=409, detail="File already exists")
+    return policy, target, display_path, nofollow
 
 
 def _managed_write_result(policy, target: Path, display_path: str) -> dict:
@@ -525,11 +622,27 @@ def _managed_write_result(policy, target: Path, display_path: str) -> dict:
 
 @router.post("/api/files/upload")
 async def upload_managed_file(payload: ManagedFileUpload, request: Request):
-    policy, target, display_path = _managed_write_target(payload.path, request, payload.overwrite)
+    policy, target, display_path, nofollow = _managed_write_target(payload.path, request, payload.overwrite)
     data, _mime_type = _decode_data_url(payload.data_url)
-    with _io_errors("File is not writable", "Could not write file"):
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
+    if nofollow is None:
+        with _io_errors("File is not writable", "Could not write file"):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        return _managed_write_result(policy, target, display_path)
+    with _nofollow_parent(nofollow) as dir_fd:
+        _nofollow_refuse_existing(dir_fd, nofollow.name, payload.overwrite)
+        with _io_errors("File is not writable", "Could not write file"):
+            fd, tmp_name = _nofollow_temp(dir_fd, nofollow.name)
+            renamed = False
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    out.write(data)
+                os.replace(tmp_name, nofollow.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                renamed = True
+            finally:
+                if not renamed:
+                    with contextlib.suppress(OSError):
+                        os.unlink(tmp_name, dir_fd=dir_fd)
     return _managed_write_result(policy, target, display_path)
 
 
@@ -540,6 +653,7 @@ async def stream_upload_to_path(
     too_large: str,
     not_writable: str,
     write_failed: str,
+    dir_fd: Optional[int] = None,
 ) -> int:
     """Stream a multipart upload to ``target`` in chunks; returns bytes written.
 
@@ -548,10 +662,29 @@ async def stream_upload_to_path(
     ``too_large``), then atomically renames into place. The temp file is
     removed on EVERY non-success exit — including asyncio.CancelledError when a
     browser aborts a large upload mid-stream.
+
+    With *dir_fd* (a descriptor of ``target``'s folder from :func:`_nofollow_parent`) the temp file is created,
+    renamed and removed relative to it, so no path is resolved again after the folder was opened.
     """
     from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES, _UPLOAD_CHUNK_BYTES
-    tmp_fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".upload", dir=str(target.parent))
-    tmp_path = Path(tmp_name)
+    if dir_fd is None:
+        tmp_fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".upload", dir=str(target.parent))
+        tmp_path = Path(tmp_name)
+
+        def promote() -> None:
+            os.replace(tmp_path, target)
+
+        def discard() -> None:
+            tmp_path.unlink(missing_ok=True)
+    else:
+        tmp_fd, tmp_name = _nofollow_temp(dir_fd, target.name)
+
+        def promote() -> None:
+            os.replace(tmp_name, target.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+
+        def discard() -> None:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp_name, dir_fd=dir_fd)
     total = 0
     renamed = False
     try:
@@ -564,7 +697,7 @@ async def stream_upload_to_path(
                 if total > _MANAGED_FILE_MAX_BYTES:
                     raise HTTPException(status_code=413, detail=too_large)
                 out.write(chunk)
-        os.replace(tmp_path, target)
+        promote()
         renamed = True
     except PermissionError:
         raise HTTPException(status_code=403, detail=not_writable)
@@ -572,7 +705,7 @@ async def stream_upload_to_path(
         raise HTTPException(status_code=500, detail=f"{write_failed}: {exc}")
     finally:
         if not renamed:
-            tmp_path.unlink(missing_ok=True)
+            discard()
         await file.close()
     return total
 
@@ -586,15 +719,27 @@ async def upload_managed_file_stream(
 ):
     """Chunked multipart upload: constant memory and no base64 inflation, unlike
     the JSON data-URL endpoint that trips proxy body-size limits on large archives."""
-    policy, target, display_path = _managed_write_target(path, request, overwrite)
-    with _io_errors("File is not writable", "Could not create parent directory"):
-        target.parent.mkdir(parents=True, exist_ok=True)
-    await stream_upload_to_path(
-        file, target,
-        too_large="File is too large",
-        not_writable="File is not writable",
-        write_failed="Could not write file",
-    )
+    policy, target, display_path, nofollow = _managed_write_target(path, request, overwrite)
+    if nofollow is None:
+        with _io_errors("File is not writable", "Could not create parent directory"):
+            target.parent.mkdir(parents=True, exist_ok=True)
+        await stream_upload_to_path(
+            file, target,
+            too_large="File is too large",
+            not_writable="File is not writable",
+            write_failed="Could not write file",
+        )
+        return _managed_write_result(policy, target, display_path)
+    with _nofollow_parent(nofollow) as dir_fd:
+        _nofollow_refuse_existing(dir_fd, nofollow.name, overwrite)
+        with _io_errors("File is not writable", "Could not write file"):
+            await stream_upload_to_path(
+                file, target,
+                too_large="File is too large",
+                not_writable="File is not writable",
+                write_failed="Could not write file",
+                dir_fd=dir_fd,
+            )
     return _managed_write_result(policy, target, display_path)
 
 

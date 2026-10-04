@@ -117,6 +117,8 @@ class BasicAuthProvider(NonInteractiveMixin, DashboardAuthProvider):
     name = "basic"
     display_name = "Username & Password"
     supports_password = True
+    # The form always checks the password, so every password login is a fresh authentication.
+    supports_reauth = True
     _NOT_INTERACTIVE = "BasicAuthProvider is password-only; use complete_password_login."
     _NO_START_LOGIN = (
         "BasicAuthProvider is password-only; there is no OAuth redirect flow. "
@@ -144,7 +146,9 @@ class BasicAuthProvider(NonInteractiveMixin, DashboardAuthProvider):
         password_ok = _verify_password(password, self._password_hash if username_ok else _DUMMY_HASH)
         if not (username_ok and password_ok):
             raise InvalidCredentialsError("invalid username or password")
-        return self._mint_session(self._username)
+        # This provider verified the password itself, just now: that is the authentication time.
+        # Only this path sets it; a refreshed or re-verified session carries 0 (not an authentication).
+        return self._mint_session(self._username, auth_time=int(time.time()))
 
     # ---- session lifecycle -------------------------------------------------
 
@@ -168,18 +172,19 @@ class BasicAuthProvider(NonInteractiveMixin, DashboardAuthProvider):
 
     # ---- internals ---------------------------------------------------------
 
-    def _mint_session(self, user_id: str) -> Session:
+    def _mint_session(self, user_id: str, *, auth_time: int = 0) -> Session:
         now = int(time.time())
         exp = now + self._ttl
         return self._session(
             user_id, exp,
             _sign({"sub": user_id, "kind": "access", "exp": exp}, self._secret),
-            _sign({"sub": user_id, "kind": "refresh", "exp": now + _REFRESH_TTL_SECONDS}, self._secret))
+            _sign({"sub": user_id, "kind": "refresh", "exp": now + _REFRESH_TTL_SECONDS}, self._secret),
+            auth_time=auth_time)
 
-    def _session(self, user_id: str, exp: int, access_token: str, refresh_token: str) -> Session:
+    def _session(self, user_id: str, exp: int, access_token: str, refresh_token: str, *, auth_time: int = 0) -> Session:
         return Session(
             user_id=user_id, email="", display_name=user_id, org_id="", provider=self.name,
-            expires_at=exp, access_token=access_token, refresh_token=refresh_token)
+            expires_at=exp, access_token=access_token, refresh_token=refresh_token, auth_time=auth_time)
 
 
 # ---- Plugin entry point ----

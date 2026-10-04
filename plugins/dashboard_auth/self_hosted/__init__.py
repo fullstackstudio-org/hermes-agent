@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import math
 import threading
 import time
 import urllib.parse
@@ -53,6 +54,16 @@ _DEFAULT_SCOPES = "openid profile email"
 # public-client model and is a JWT algorithm-confusion footgun.
 _ALLOWED_ID_TOKEN_ALGS = ("RS256", "ES256", "RS384", "RS512", "ES384", "ES512")
 
+# A fresh authentication (passkey self-enrolment): ``prompt=login`` makes the IdP ask for the
+# person's credentials even when it holds a single-sign-on session, and ``max_age=0`` makes
+# ``auth_time`` REQUIRED in the ID token (OIDC Core §3.1.2.1). Whether the result is fresh enough
+# is decided by the caller from ``Session.auth_time``; this provider only reports it.
+_FRESH_LOGIN_PARAMS = {"prompt": "login", "max_age": "0"}
+
+# How far ``auth_time`` may lie after the token's own ``iat`` (both are the IdP's clock, so only
+# rounding); beyond that the claim is nonsense and the time is reported as unknown.
+_AUTH_TIME_AFTER_IAT_TOLERANCE_SEC = 60
+
 _DISCOVERY_TIMEOUT_SEC = 10.0
 # Discovery is effectively static; a soft TTL lets a long-running dashboard
 # pick up an IDP endpoint migration within the hour.
@@ -84,6 +95,7 @@ class SelfHostedOIDCProvider(JwtOAuthProvider):
 
     name = "self-hosted"
     display_name = "Self-Hosted OIDC"
+    supports_reauth = True
 
     def __init__(self, *, issuer: str, client_id: str, scopes: str = _DEFAULT_SCOPES, client_secret: str = "") -> None:
         if not issuer:
@@ -106,12 +118,13 @@ class SelfHostedOIDCProvider(JwtOAuthProvider):
         self._discovery_lock = threading.Lock()
         self._jwks_client: Any = None
 
-    def start_login(self, *, redirect_uri: str) -> LoginStart:
+    def start_login(self, *, redirect_uri: str, fresh: bool = False) -> LoginStart:
         # Validate the redirect before discovery so a bad redirect_uri surfaces even when the IDP is unreachable.
         validate_redirect_uri(redirect_uri)
         disco = self._get_discovery()
         return pkce_login_start(
-            disco["authorization_endpoint"], client_id=self._client_id, scope=self._scopes, redirect_uri=redirect_uri)
+            disco["authorization_endpoint"], client_id=self._client_id, scope=self._scopes, redirect_uri=redirect_uri,
+            extra_params=_FRESH_LOGIN_PARAMS if fresh else None)
 
     def revoke_session(self, *, refresh_token: str) -> None:
         # Best-effort RFC 7009 revocation when the IDP advertises an endpoint.
@@ -287,7 +300,26 @@ class SelfHostedOIDCProvider(JwtOAuthProvider):
             self.name, claims, access_token=id_token, refresh_token=refresh_token, label="ID token", email=email,
             display_name=str(claims.get("name") or claims.get("preferred_username") or claims.get("nickname") or email or ""),
             org_id=str(org_id or ""), picture=picture if isinstance(picture, str) else "",
-            profile=profile_from_claims(claims))
+            profile=profile_from_claims(claims), auth_time=_auth_time(claims))
+
+
+def _auth_time(claims: Dict[str, Any]) -> int:
+    """The verified ID token's ``auth_time`` (unix seconds), or ``0`` (unknown) when it is absent or
+    unusable: not a JSON number (a string or a boolean is refused), not positive, or later than the
+    token's own ``iat`` beyond rounding (an IdP cannot have authenticated the person after issuing the
+    token that says so). ``iat`` is required by ``verify_jwt``."""
+    raw, iat = claims.get("auth_time"), claims.get("iat")
+    if not _is_number(raw) or raw <= 0:
+        return 0
+    if _is_number(iat) and raw > iat + _AUTH_TIME_AFTER_IAT_TOLERANCE_SEC:
+        return 0
+    return int(raw)
+
+
+def _is_number(value: Any) -> bool:
+    """A finite JSON number (``bool`` is an ``int`` in Python and is refused; the JSON parser
+    accepts ``NaN`` and ``Infinity``, which are refused too)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _verified_email(claims: Dict[str, Any]) -> str:

@@ -461,6 +461,100 @@ class TestStartLogin:
         assert parts["state"] == params["state"]
 
 
+class TestFreshLogin:
+    """``start_login(fresh=True)`` asks the IdP to authenticate the person again now
+    (``prompt=login``, ``max_age=0``); an ordinary login sends neither."""
+
+    @pytest.fixture
+    def provider(self, rsa_keypair):
+        return _make_provider(rsa_keypair)
+
+    @staticmethod
+    def _params(result) -> Dict[str, str]:
+        return dict(urllib.parse.parse_qsl(urllib.parse.urlparse(result.redirect_url).query))
+
+    def test_supports_reauth(self):
+        assert oidc_plugin.SelfHostedOIDCProvider.supports_reauth is True
+
+    @pytest.mark.parametrize("kwargs", [{}, {"fresh": False}])
+    def test_ordinary_login_sends_no_prompt_or_max_age(self, provider, kwargs):
+        params = self._params(provider.start_login(redirect_uri="https://hermes.example/auth/callback", **kwargs))
+        assert "prompt" not in params and "max_age" not in params
+
+    def test_fresh_login_demands_a_new_authentication(self, provider):
+        params = self._params(provider.start_login(redirect_uri="https://hermes.example/auth/callback", fresh=True))
+        assert params["prompt"] == "login"
+        assert params["max_age"] == "0"
+        # Everything an ordinary login sends is still there.
+        assert params["response_type"] == "code" and params["client_id"] == _CLIENT_ID
+        assert params["code_challenge_method"] == "S256" and params["state"]
+
+
+class TestAuthTime:
+    """``Session.auth_time`` is what the verified ID token's ``auth_time`` claim says, on the
+    session a login produced; 0 when the claim is absent or unusable, and on a refreshed or
+    re-verified session (a refresh is not an authentication)."""
+
+    @pytest.fixture
+    def provider(self, rsa_keypair):
+        return _make_provider(rsa_keypair)
+
+    def _login(self, provider, rsa_keypair, **mint):
+        id_token = _mint_id_token(rsa_keypair, **mint)
+        with patch("plugins.dashboard_auth.self_hosted.httpx.post", return_value=_mock_post(
+                200, {"id_token": id_token, "token_type": "Bearer", "refresh_token": "rt"})):
+            return provider.complete_login(
+                code="abc", state="s", code_verifier="vfy", redirect_uri="https://hermes.example/auth/callback")
+
+    def test_login_copies_the_verified_claim(self, provider, rsa_keypair):
+        at = int(time.time()) - 5
+        assert self._login(provider, rsa_keypair, extra_claims={"auth_time": at}).auth_time == at
+
+    def test_absent_claim_is_unknown(self, provider, rsa_keypair):
+        assert self._login(provider, rsa_keypair).auth_time == 0
+
+    def test_float_claim_is_truncated(self, provider, rsa_keypair):
+        at = int(time.time()) - 5
+        assert self._login(provider, rsa_keypair, extra_claims={"auth_time": at + 0.75}).auth_time == at
+
+    @pytest.mark.parametrize("bad", [
+        "1759400000", True, False, -5, 0, None, [1759400000], {"t": 1}, float("nan"), float("inf")])
+    def test_unusable_claim_is_unknown(self, provider, rsa_keypair, bad):
+        assert self._login(provider, rsa_keypair, extra_claims={"auth_time": bad}).auth_time == 0
+
+    def test_claim_after_the_token_was_issued_is_unknown(self, provider, rsa_keypair):
+        # An IdP cannot have authenticated the person after it issued the token that says so.
+        future = int(time.time()) + 3600
+        assert self._login(provider, rsa_keypair, extra_claims={"auth_time": future}).auth_time == 0
+
+    def test_small_skew_after_iat_is_accepted(self, provider, rsa_keypair):
+        at = int(time.time()) + 30
+        assert self._login(provider, rsa_keypair, extra_claims={"auth_time": at}).auth_time == at
+
+    def test_unverifiable_token_never_yields_a_time(self, provider, rsa_keypair):
+        # Only the verified token counts: a token for another audience is refused outright.
+        with pytest.raises(ProviderError):
+            self._login(provider, rsa_keypair, aud="someone-else", extra_claims={"auth_time": int(time.time())})
+
+    def test_refresh_is_not_an_authentication(self, provider, rsa_keypair):
+        # A non-conforming IdP may stamp the refresh time as auth_time; the session still says unknown.
+        id_token = _mint_id_token(rsa_keypair, extra_claims={"auth_time": int(time.time())})
+        with patch("plugins.dashboard_auth.self_hosted.httpx.post", return_value=_mock_post(
+                200, {"id_token": id_token, "token_type": "Bearer", "refresh_token": "rt2"})):
+            session = provider.refresh_session(refresh_token="rt1")
+        assert session.user_id == "usr_abc" and session.auth_time == 0
+
+    def test_per_request_verify_carries_no_time(self, provider, rsa_keypair):
+        id_token = _mint_id_token(rsa_keypair, extra_claims={"auth_time": int(time.time())})
+        session = provider.verify_session(access_token=id_token)
+        assert session is not None and session.auth_time == 0
+
+    def test_auth_time_never_in_repr(self, provider, rsa_keypair):
+        at = int(time.time()) - 7
+        session = self._login(provider, rsa_keypair, extra_claims={"auth_time": at})
+        assert str(at) not in repr(session)
+
+
 # ---------------------------------------------------------------------------
 # complete_login
 # ---------------------------------------------------------------------------

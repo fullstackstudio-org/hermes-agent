@@ -1221,6 +1221,8 @@ def register(ctx):
 
 The login page lists all registered providers; multiple providers can be stacked and the user picks one at `/login`.
 
+A provider that can make the person sign in again on request sets `supports_reauth = True`. An OAuth provider then accepts `start_login(*, redirect_uri, fresh=False)` and, with `fresh=True`, makes its identity provider ask for the credentials again instead of reusing a single-sign-on session; every provider that sets the flag reports, in `Session.auth_time` (Unix seconds, `0` when unknown), when it verified that sign-in itself. Only the session a login produces carries it, never one from `refresh_session` or `verify_session`. A password provider sets the flag and the time of its password check. A provider without the flag keeps the old `start_login(*, redirect_uri)` signature and is never asked for a fresh sign-in. `assert_protocol_compliance` refuses the flag on a provider whose `start_login` does not accept `fresh` (unless it is a password provider).
+
 ### Non-interactive (bearer-token) auth
 
 Alongside interactive human login (session cookies + refresh), the `DashboardAuthProvider` ABC supports a **non-interactive, service-to-service** capability via `supports_token = True` + `verify_token(token=...)`. When a provider opts in, an inbound `Authorization: Bearer <token>` is verified and, on success, a `TokenPrincipal` is attached to the request (`request.state.token_principal`) for the endpoints that provider marks token-authable — no cookie, no redirect, no refresh.

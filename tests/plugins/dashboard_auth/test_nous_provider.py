@@ -137,6 +137,14 @@ class TestConstruction:
 
 
 
+    def test_no_reauth(self):
+        # Whether Portal honours prompt/max_age and sends auth_time is unverified: self-enrolment
+        # is unavailable on nous, and a fresh login is never silently downgraded to an ordinary one.
+        assert nous_plugin.NousDashboardAuthProvider.supports_reauth is False
+        provider = nous_plugin.NousDashboardAuthProvider(client_id="agent:abc", portal_url="https://portal.example")
+        with pytest.raises(TypeError):
+            provider.start_login(redirect_uri="https://h/auth/callback", fresh=True)
+
     def test_rejects_malformed_client_id(self):
         with pytest.raises(ValueError, match="agent:"):
             nous_plugin.NousDashboardAuthProvider(

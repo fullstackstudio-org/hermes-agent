@@ -42,6 +42,10 @@ class NousDashboardAuthProvider(JwtOAuthProvider):
 
     name = "nous"
     display_name = "Nous Research"
+    # Whether Portal honours ``prompt=login`` / ``max_age`` and sends ``auth_time`` is unverified, so
+    # this provider cannot vouch for a fresh sign-in: passkey self-enrolment is unavailable here.
+    # ``start_login`` deliberately keeps no ``fresh`` parameter, so a fresh request fails loudly.
+    supports_reauth = False
 
     def __init__(self, *, client_id: str, portal_url: str) -> None:
         # Defense-in-depth: register() filters too, but a malformed id must never construct a provider.

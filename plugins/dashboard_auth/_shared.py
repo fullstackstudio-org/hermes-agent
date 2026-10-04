@@ -8,12 +8,13 @@ bookkeeping, PKCE login start, token-endpoint exchange and JWT verification live
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import logging
 import os
 import secrets
 import urllib.parse
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 
 import httpx
 
@@ -101,17 +102,25 @@ def validate_redirect_uri(redirect_uri: str) -> None:
         raise ProviderError(f"redirect_uri path must end with '/auth/callback', got {redirect_uri!r}")
 
 
-def pkce_login_start(authorize_url: str, *, client_id: str, scope: str, redirect_uri: str) -> LoginStart:
+def pkce_login_start(
+    authorize_url: str, *, client_id: str, scope: str, redirect_uri: str,
+    extra_params: Optional[Mapping[str, str]] = None) -> LoginStart:
     """Build the authorization-code + PKCE (S256) redirect and cookie payload. Callers
     validate ``redirect_uri`` first. The auth-route layer expects
     ``cookie_payload["hermes_session_pkce"]`` as a flat ``state=…;verifier=…`` string
-    (it prepends ``provider=``)."""
+    (it prepends ``provider=``). ``extra_params`` are appended to the authorize request
+    (``prompt``/``max_age`` for a fresh authentication); one that would replace a parameter
+    built here raises ``ValueError``, so a caller can never weaken the state or PKCE binding."""
     code_verifier = b64url_no_pad(secrets.token_bytes(64))  # ~86 chars
     state = b64url_no_pad(secrets.token_bytes(32))
     params = {
         "response_type": "code", "client_id": client_id, "redirect_uri": redirect_uri, "scope": scope, "state": state,
         "code_challenge": b64url_no_pad(hashlib.sha256(code_verifier.encode("ascii")).digest()),
         "code_challenge_method": "S256"}
+    for key, value in (extra_params or {}).items():
+        if key in params:
+            raise ValueError(f"extra_params may not replace the authorize parameter {key!r}")
+        params[key] = value
     return LoginStart(
         redirect_url=f"{authorize_url}?{urllib.parse.urlencode(params)}",
         cookie_payload={"hermes_session_pkce": f"state={state};verifier={code_verifier}"})
@@ -172,16 +181,17 @@ def refresh_token_from(payload: Dict[str, Any], fallback: str = "") -> str:
 def session_from_claims(
     provider: str, claims: Dict[str, Any], *, access_token: str, refresh_token: str,
     label: str = "token", email: str = "", display_name: str = "", org_id: str = "",
-    picture: str = "", profile: Any = None) -> Session:
+    picture: str = "", profile: Any = None, auth_time: int = 0) -> Session:
     """Map verified JWT claims onto a Session; ``sub`` is mandatory. ``profile`` is the person's profile
-    (``hermes_cli.dashboard_auth.profile.profile_from_claims``), ``{}`` when the provider builds none."""
+    (``hermes_cli.dashboard_auth.profile.profile_from_claims``), ``{}`` when the provider builds none;
+    ``auth_time`` what the provider says about when the person authenticated (``Session.auth_time``)."""
     user_id = str(claims.get("sub", ""))
     if not user_id:
         raise ProviderError(f"{label} missing 'sub' (user_id) claim")
     return Session(
         user_id=user_id, email=email, display_name=display_name, org_id=org_id, provider=provider,
         expires_at=int(claims["exp"]), access_token=access_token, refresh_token=refresh_token,
-        picture=picture, profile=dict(profile or {}))
+        picture=picture, profile=dict(profile or {}), auth_time=auth_time)
 
 
 # ---- JWT verification ----
@@ -246,7 +256,7 @@ class NonInteractiveMixin:
     _NOT_INTERACTIVE: str = ""
     _NO_START_LOGIN: str = ""
 
-    def start_login(self, *, redirect_uri: str) -> LoginStart:
+    def start_login(self, *, redirect_uri: str, fresh: bool = False) -> LoginStart:
         raise NotImplementedError(self._NO_START_LOGIN or self._NOT_INTERACTIVE)
 
     def complete_login(self, *, code: str, state: str, code_verifier: str, redirect_uri: str) -> Session:
@@ -260,7 +270,12 @@ class JwtOAuthProvider(DashboardAuthProvider):
     ``InvalidCodeError`` on expiry/foreign token, ``ProviderError`` otherwise);
     ``_grant(data, *, bad_request_exc, headers=None, previous_refresh_token="") -> Session``;
     ``_refresh_request(refresh_token) -> (form_data, extra_headers)``;
-    ``_session(token, refresh_token, claims) -> Session``."""
+    ``_session(token, refresh_token, claims) -> Session``.
+
+    Only ``complete_login`` (an interactive authentication) keeps the ``auth_time`` a subclass's
+    ``_session`` reads from the token; ``refresh_session`` and ``verify_session`` return it as 0.
+    OIDC Core §12.2 has a refreshed ID token repeat the ORIGINAL ``auth_time``, but an IdP that
+    stamps the refresh time instead must not make a refreshed session look like a fresh sign-in."""
 
     _jwks_client: Any = None
     _client_id: str = ""
@@ -281,8 +296,8 @@ class JwtOAuthProvider(DashboardAuthProvider):
         if not refresh_token:
             raise RefreshExpiredError("no refresh token present in session")
         data, headers = self._refresh_request(refresh_token)
-        return self._grant(
-            data, headers=headers, bad_request_exc=RefreshExpiredError, previous_refresh_token=refresh_token)
+        return _without_auth_time(self._grant(
+            data, headers=headers, bad_request_exc=RefreshExpiredError, previous_refresh_token=refresh_token))
 
     def verify_session(self, *, access_token: str) -> Optional[Session]:
         # None on expiry/invalidity (middleware then tries refresh); a ProviderError
@@ -291,4 +306,10 @@ class JwtOAuthProvider(DashboardAuthProvider):
             claims = self._claims_for(access_token)
         except InvalidCodeError:
             return None
-        return self._session(access_token, "", claims)
+        return _without_auth_time(self._session(access_token, "", claims))
+
+
+def _without_auth_time(session: Session) -> Session:
+    """``session`` with ``auth_time`` 0: what a session not produced by an interactive
+    authentication carries (see :class:`JwtOAuthProvider`)."""
+    return dataclasses.replace(session, auth_time=0) if session.auth_time else session

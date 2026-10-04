@@ -1,6 +1,7 @@
 """Abstract base + dataclasses + exceptions for dashboard auth providers."""
 from __future__ import annotations
 
+import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
@@ -20,7 +21,15 @@ class Session:
     ``profile`` is the rest of what the verified token says about the person (email, job title, groups,
     locale, ...), already reduced by ``agent.person_profile.coerce_profile`` (``dashboard_auth.profile``
     builds it from claims). ``{}`` when the provider builds none. It rides into the WS credential beside
-    the login so each turn can tell the model who it is for; out of ``repr``, hashing and equality."""
+    the login so each turn can tell the model who it is for; out of ``repr``, hashing and equality.
+
+    ``auth_time`` (unix seconds) is when the provider itself verified the person's primary
+    authentication for THIS session: the verified ID token's ``auth_time`` claim, or the moment a
+    password provider checked the password. ``0`` means unknown, and it is ``0`` on every session
+    that did not come from an interactive authentication (``refresh_session``, ``verify_session``):
+    a refresh is not an authentication. It decides whether a sign-in counts as fresh for a passkey
+    self-enrolment, so it is only ever the provider's statement, never a client-supplied time. Out of
+    ``repr``."""
     user_id: str
     email: str
     display_name: str
@@ -31,6 +40,7 @@ class Session:
     refresh_token: str
     picture: str = field(default="", repr=False)
     profile: Mapping[str, Any] = field(default_factory=dict, repr=False, hash=False, compare=False)
+    auth_time: int = field(default=0, repr=False)
 
 
 @dataclass(frozen=True)
@@ -117,16 +127,24 @@ class DashboardAuthProvider(ABC):
     Subclasses MUST set ``name`` (stable lowercase id) and ``display_name``. Capability flags:
     ``supports_password`` (credential form + ``complete_password_login``; OAuth methods may be
     ``NotImplementedError`` stubs), ``supports_token`` (``verify_token`` for the token-auth seam),
-    ``supports_session`` (False for token-only credentials such as drain, never offered a login).
+    ``supports_session`` (False for token-only credentials such as drain, never offered a login),
+    ``supports_reauth`` (the provider can authenticate the person AGAIN on request and report when
+    that happened in ``Session.auth_time``: an OAuth provider through ``start_login(..., fresh=True)``,
+    a password provider because its form always checks the password; it gates passkey
+    self-enrolment). ``fresh`` is passed only to a provider that sets ``supports_reauth``, so a
+    provider written before it existed keeps its ``start_login(*, redirect_uri)`` signature.
     """
     name: str = ""
     display_name: str = ""
     supports_password: bool = False
     supports_token: bool = False
     supports_session: bool = True
+    supports_reauth: bool = False
 
     @abstractmethod
-    def start_login(self, *, redirect_uri: str) -> LoginStart: ...
+    def start_login(self, *, redirect_uri: str, fresh: bool = False) -> LoginStart:
+        """``fresh=True`` (only when ``supports_reauth``): make the IdP authenticate the person again
+        now, not reuse its single-sign-on session, and report ``auth_time``."""
 
     @abstractmethod
     def complete_login(
@@ -173,3 +191,22 @@ def assert_protocol_compliance(cls: type) -> None:
     if getattr(cls, "__abstractmethods__", None):
         raise TypeError(
             f"{cls.__name__} has unimplemented abstract methods: {sorted(cls.__abstractmethods__)}")
+    if getattr(cls, "supports_reauth", False):
+        # A re-authentication is a sign-in: a provider that never gives a session cannot give one.
+        if not getattr(cls, "supports_session", True):
+            raise TypeError(f"{cls.__name__} sets supports_reauth without supports_session")
+        # A password provider re-authenticates through its form; any other one through
+        # ``start_login(..., fresh=True)``, which must therefore accept ``fresh``.
+        if not getattr(cls, "supports_password", False) and not _accepts_keyword(cls.start_login, "fresh"):
+            raise TypeError(f"{cls.__name__} sets supports_reauth but start_login does not accept 'fresh'")
+
+
+def _accepts_keyword(func: Any, name: str) -> bool:
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+    param = params.get(name)
+    if param is not None:
+        return param.kind in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())

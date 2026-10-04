@@ -9,6 +9,7 @@ import path as a package) and exercises the provider behaviour + the
 from __future__ import annotations
 
 import secrets
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -123,6 +124,26 @@ class TestProvider:
         s = p1.complete_password_login(username="admin", password="hunter2")
         assert p2.verify_session(access_token=s.access_token) is None
 
+
+    def test_supports_reauth(self, basic):
+        assert basic.BasicAuthProvider.supports_reauth is True
+
+    def test_password_login_is_a_fresh_authentication(self, basic):
+        p = self._make(basic)
+        before = int(time.time())
+        s = p.complete_password_login(username="admin", password="hunter2")
+        assert before <= s.auth_time <= int(time.time())
+
+    def test_refresh_and_verify_are_not_authentications(self, basic):
+        p = self._make(basic)
+        s = p.complete_password_login(username="admin", password="hunter2")
+        assert p.verify_session(access_token=s.access_token).auth_time == 0
+        assert p.refresh_session(refresh_token=s.refresh_token).auth_time == 0
+
+    def test_fresh_start_login_still_not_implemented(self, basic):
+        # Re-authentication for a password provider is the password form, never a redirect.
+        with pytest.raises(NotImplementedError):
+            self._make(basic).start_login(redirect_uri="https://x/auth/callback", fresh=True)
 
     def test_oauth_methods_raise_not_implemented(self, basic):
         p = self._make(basic)

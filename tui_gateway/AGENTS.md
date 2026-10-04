@@ -96,6 +96,102 @@ profile's does not, and that `os.environ` is unchanged afterwards.
 | Theming | `theme.ts` + `branding.tsx` | `gateway.ready` carries skin data |
 | Plugin compat notice | — | `plugins.compat_report` (see `plugins/AGENTS.md`) |
 | Connection operations (desktop card) | desktop `store/connection-request.ts` | `connection.request` → `connection.update`* → `connection.respond {op_id}`; `connectors.operation.status`. The op lives in `tools/connectors/live.py`; the card never parks the tool thread (`methods_connectors.py`). |
+| Confirm (fork) | the apps' own confirm sheet | server→client request `confirm` (levels `plain`, `passkey`), gated on `client.capabilities {confirm: [...]}`; tool `confirm_action`. Guide: `website/docs/guides/confirm-sensitive-actions.md`. |
+| Interactive requests (fork) | the apps' own form, file and draft sheets | server→client requests `input.form`, `input.file`, `review.draft`, gated on `client.capabilities {requests: [...]}`; tools `ask_form`, `ask_file`, `review_draft`. See "Interactive requests" below. |
+
+## Interactive requests (fork)
+
+Three server→client requests beyond `clarify`, `approval` and `confirm`: `input.form` (typed fields, 1-12),
+`input.file` (files, uploaded) and `review.draft` (approve, edit or reject a draft). Code: `server_requests.py`
+(the gate and the parking), `interactive.py` (the builders, the validators' bridge, the outcomes, the audit),
+`interactive_validate.py` / `interactive_fields.py` (pure checks), `review_register.py`, `upload_dirs.py`,
+`request_hooks.py`; the agent's side is `tools/interactive_tools.py`. The wire is declared in
+`contracts/server_requests.py` (`INTERACTIVE_METHODS`) like every other request.
+
+**The written contract is `contract/requests/`** (`README.md`, `schema.json`, `examples.json`, `SHA256SUMS`).
+It is NORMATIVE and this repository is its source of truth (the gateway validates every answer); the apps carry
+a byte-identical copy. `schema.json` and `SHA256SUMS` are rendered, never edited by hand:
+`python scripts/gen_gateway_contracts.py` writes them, `--check` compares them, and
+`tests/tui_gateway/contracts/test_requests_contract.py` runs every example against the models. Change a model, a
+rule or an example, regenerate, and expect the copies in the app repositories to follow. A new `cannot_show` reason
+or an optional key is additive (`v: 1` stays).
+
+**Method gate.** `send_gated(level=None)` qualifies a connection on the METHOD: it must have listed it under
+`client.capabilities {requests: [...]}` (a second call, after the first call's result lists the method under
+`server_requests`; a gateway that does not know the key answers `4000` for the whole call). The frame goes only to
+qualifying connections attached right now. An answer is accepted only from one (`4033` otherwise, `4034` for a
+result the validator refuses, with `data.reason`; the request stays open, and the tenth refusal withdraws it:
+`unavailable (too_many_attempts)`). An error response from every connection the frame went to settles
+`unavailable (error_response)`. The first valid answer wins and the others get `request.cancel {reason: resolved}`.
+A connection whose `auth_identity` carries `agent` (an agent acting through MCP) never qualifies: its advertisement
+is ignored and it can answer none of these.
+
+**Acting user.** The target predicate is `acting_user_target`: only connections signed in as the login the turn
+acts for. When the gateway cannot name one: with no auth provider every capable connection qualifies; in a shared
+(ambiguous) session `input.*` goes to every capable connection and the outcome names `answered_by`, but `review.*`
+goes to NOBODY and ends `unavailable (no_acting_user)` at once (`STRICT_ACTING_USER_PREFIXES`); a failure reading
+the login also fails closed. A request for the wrong person is worse than none: do not widen this.
+
+**Parking.** When no qualifying connection is attached the request is registered open with no targets, `on_open`
+runs with 0 connections reached and `pre_server_request` fires with `reached: 0` (the push that brings the
+person's phone). A qualifying connection that attaches later gets it from `open_requests` (or from
+`deliver_late`, when it advertises the method while already attached) and becomes a target. One rule decides the
+wait: while the request has a target it waits for its `timeout` (300 s); while it has none it waits for the park
+window (`min(timeout, park_seconds)`, 120 s) and then settles `unavailable (no_capable_client)`. A target is lost
+by a failed write, a disconnect (`forget`) or an advertisement that no longer lists the method. A request that was
+shown and then lost its last target gets a FRESH window from that moment, never past its `timeout`
+(`_drop_target_locked`): a phone sent to the background may come back to it. `request.cancel {reason: timeout}`
+goes out with `no_capable_client` only when some connection was ever shown the request. `confirm` keeps declining
+at once; parking is for method-gated requests only. Turn isolation (`HERMES_COMPUTE_HOST_CHILD`) fails closed
+(`unavailable (turn_isolation)`), as for `confirm`.
+
+**Envelope.** The gateway builds every params object and the agent never passes one through (`build_form_params`,
+`build_file_params`, `build_draft_params`). All share `v`, `title` (1-80), `summary` (1-500), `detail` (at most
+2,000), `expires_at`, `optional` (`input.*`: true unless the agent says otherwise; `review.*`: false) and
+`acting_user`. Text is cleaned and refused, never truncated, when empty or over a bound; a draft is not cleaned
+but must be showable verbatim (line-end whitespace is removed, a tab, control, format or bidi character is refused).
+Params and results are never logged; the audit log gets `interactive_request` and `interactive_outcome` (session,
+request id, method, acting user, connections reached, outcome, reason, answering login and peer; never a title,
+summary, value, path, name or draft).
+
+**Toolsets and tools.** `interactive` holds `ask_form`, `ask_file` and `review_draft`. It is in
+`_DEFAULT_OFF_TOOLSETS` (`hermes_cli/tools_config.py`), like `confirm`, so a new install has it off; `hermes tools`
+turns it on per platform. `device` is reserved in the same set for a later phase and has no tools yet. The tools
+are withheld outside the interactive gateway (CLI, messaging, cron: the bridge is not installed) and a call that
+still arrives is `unavailable (no_session)`. Every tool result is JSON `{outcome, ..., reason?, message}` where
+`message` is one sentence that says only what is known; `unavailable` and `timeout` are never an answer (for a
+draft never an approval) and the agent is told to tell the person and not retry at once. One open request per
+conversation and 12 sent per 10 minutes (`interactive._limiter`, separate from `confirm`'s); a request that
+reached nobody does not count. An approved draft's final text goes into `review_register` under a `draft_id`
+(memory only, 1 hour, 20 per conversation, 256 conversations); no tool consumes the id yet.
+
+**Uploads.** `input.file` answers name files by reference; the bytes never travel in the answer. The app uploads
+through the existing upload route to `upload.dir`, which the gateway builds as the flat
+`<session cwd>/uploads/hermie/<YYYY-MM-DD>` and creates 0700 (files 0600). Everything from `uploads` down is walked
+one component at a time with `O_NOFOLLOW` (`upload_dirs.py`): a symbolic link or a non-directory at any component
+is `unavailable (upload_dir_unsafe)` with nothing sent (`upload_dir_unavailable` when the folder cannot be made).
+Links ABOVE `uploads`, the working directory included, are followed by design (read the `upload_dirs` docstring for
+what that assumes of a sandbox). While the request is open the validator checks the file count, each file's
+declared size and that it sits directly in `upload.dir` (no subdirectory); after it settled, outside every lock,
+`verify_files` opens each file by name under the directory's descriptor, refuses a link, and checks regular file,
+size and SHA-256 against the declaration. A mismatch is `unavailable (bad_upload)`; nothing is deleted. The upload
+routes (`hermes_cli/web_routers/files.py`) follow no link at or below `uploads/hermie` either and never replace an
+existing file when the client said not to overwrite.
+
+**`4041 cannot_show`.** An app that cannot show a request answers a JSON-RPC error `4041` with
+`data.reason`, never a made-up `skipped` or `rejected`. The reasons the contract lists (`no_camera`,
+`not_supported_on_device`, `permission_denied`, `upload_failed`, `unsupported_version`, `shutting_down`) reach the
+agent and the audit record as `unavailable (cannot_show:<reason>)`, each with a sentence of its own
+(`interactive.CANNOT_SHOW_REASONS`). Any other reason (the set is open) is plain `error_response`: only a short
+machine word from a `4041` is ever read, so nothing else of the client's reaches the agent.
+
+**Hooks.** `send_gated` itself fires `pre_server_request` / `post_server_request`; nothing in `interactive.py`
+calls a hook. The interactive methods are listed under `pre_server_request` in `website/docs/user-guide/features/
+hooks.md`, with `reached` possibly 0, and `tests/tui_gateway/test_request_hooks.py` pins that table against
+`request_hooks.METHODS`. Add a method to one and the test fails until the other follows.
+
+Tests: `tests/tui_gateway/test_interactive_request.py`, `test_interactive_validate.py`, `test_request_hooks.py`,
+`tests/tui_gateway/contracts/test_requests_contract.py`, `tests/tools/test_interactive_tools.py`.
 
 ## Shared subagent snapshots
 

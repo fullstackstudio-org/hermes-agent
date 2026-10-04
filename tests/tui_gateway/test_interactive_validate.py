@@ -337,6 +337,54 @@ def test_strip_line_ends():
     assert v.strip_line_ends("  a") == "  a"
 
 
+# ── diff reviews ────────────────────────────────────────────────────────────────────────────────
+
+
+def _diff(*ids):
+    return {"session_id": "s", "v": 1, "title": "T", "summary": "S", "expires_at": 0, "optional": False,
+            "hunks": [{"id": hunk_id, "header": "@@ -1 +1 @@", "lines": ["-a", "+b"]} for hunk_id in ids]}
+
+
+def _decided(decision, **hunks):
+    return {"decision": decision, "hunks": hunks}
+
+
+def test_a_diff_review_decides_every_hunk_once_and_agrees_with_itself():
+    params = _diff("h1", "h2", "h3")
+    ok = v.validate_answer
+    assert ok("review.diff", params, _decided("approved", h1="approved", h2="rejected", h3="rejected")) is None
+    assert ok("review.diff", params, _decided("approved", h1="approved", h2="approved", h3="approved")) is None
+    assert ok("review.diff", params, _decided("rejected", h1="rejected", h2="rejected", h3="rejected")) is None
+    assert ok("review.diff", params, _decided("approved", h1="approved", h2="rejected")) == "hunk:h3:missing"
+    assert ok("review.diff", params, _decided("rejected", h1="rejected", h2="rejected", h3="rejected",
+                                              h4="rejected")) == "hunk:h4:unknown"
+    assert ok("review.diff", params, _decided("approved", h1="rejected", h2="rejected",
+                                              h3="rejected")) == "decision:inconsistent"
+    assert ok("review.diff", params, _decided("rejected", h1="rejected", h2="approved",
+                                              h3="rejected")) == "decision:inconsistent"
+
+
+def test_a_diff_review_reports_unknown_ids_before_missing_ones_and_those_before_the_decision():
+    params = _diff("h1", "h2")
+    answer = _decided("rejected", h1="approved", h7="rejected", h9="rejected")
+    assert v.validate_answer("review.diff", params, answer) == "hunk:h7:unknown"       # first in the answer's order
+    assert v.validate_answer("review.diff", params, _decided("rejected", h1="approved")) == "hunk:h2:missing"
+    assert v.validate_answer("review.diff", _diff("h1", "h2", "h3"), _decided("approved", h3="approved")) == \
+        "hunk:h1:missing"                                                               # first in the request's order
+
+
+def test_a_diff_review_is_judged_by_the_gateways_hunks_never_the_answers():
+    params = _diff("h1")
+    for bad in ({"decision": "approved", "hunks": {"h1": "approved"}, "text": "x"},
+                {"decision": "approved", "hunks": {"h1": "approved"}, "approved_patch": "x"},
+                {"decision": "approved", "hunks": {"h1": "approved", "x": "approved"}},
+                {"decision": "approved", "hunks": []}, {"decision": "skipped", "hunks": {"h1": "approved"}}):
+        assert v.validate_answer("review.diff", params, bad) == "bad_shape", bad
+    # A request that somehow has no hunks of its own never lets a decision through as consistent.
+    assert v.validate_answer("review.diff", {}, _decided("approved", h1="approved")) == "hunk:h1:unknown"
+    assert v.validate_answer("review.diff", {"hunks": None}, _decided("approved", h1="approved")) == "hunk:h1:unknown"
+
+
 # ── the validator never raises under the request lock ───────────────────────────────────────────
 
 
@@ -349,6 +397,8 @@ def test_garbage_is_refused_never_raised():
         assert isinstance(v.validate_answer("input.form", params, result), str)
     assert isinstance(v.validate_answer("input.file", {}, {"status": "skipped"}), (str, type(None)))
     assert v.validate_answer("review.draft", {}, {"decision": "approved", "text": "x"}) is None
+    assert isinstance(v.validate_answer("review.diff", {"hunks": [5, None, {}]}, _decided("approved", h1="approved")), str)
+    assert v.validate_answer("review.diff", _diff("h1"), None) == "bad_shape"
 
 
 def test_the_examples_are_not_mutated_by_checking_them():

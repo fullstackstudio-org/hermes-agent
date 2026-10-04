@@ -2,13 +2,14 @@
 
 This directory is the written definition of the interactive server→client requests: questions the
 agent asks the person through a connected client, beyond `clarify`, `approval` and `confirm`. Phase 1
-defines three methods:
+defines three methods and phase 2 adds a fourth:
 
 | Method | Asks for | Result |
 | --- | --- | --- |
 | `input.form` | typed fields (1–12) | `{status: answered, values}` or `{status: skipped}` |
 | `input.file` | one or more files, uploaded | `{status: answered, files, text?}` or `{status: skipped}` |
 | `review.draft` | approval of a draft, optionally edited | `{decision: approved, text}` or `{decision: rejected, comment?}` |
+| `review.diff` | approval of the changes to a file, hunk by hunk | `{decision, hunks: {<id>: approved or rejected}}` |
 
 Files:
 
@@ -40,7 +41,7 @@ A connection receives a method only after it advertised it. The second `client.c
 carries `requests`, the methods this connection can SHOW on this device:
 
 ```json
-{"server_requests": true, "confirm": ["plain"], "requests": ["input.form", "input.file", "review.draft"]}
+{"server_requests": true, "confirm": ["plain"], "requests": ["input.form", "input.file", "review.draft", "review.diff"]}
 ```
 
 - Send `requests` only after the FIRST call's result lists at least one of these methods under
@@ -89,7 +90,8 @@ arrives later is not an answer (`request.answer` reports `expired`). The two clo
 Every result starts with a closed enum:
 
 - `input.*`: `status` ∈ `answered`, `skipped`. `skipped` only when the request is `optional`.
-- `review.*`: `decision` ∈ `approved`, `rejected`. There is no skip: the person rejects.
+- `review.*`: `decision` ∈ `approved`, `rejected`. There is no skip: the person rejects. (`review.diff` also
+  decides every hunk, §7.)
 
 A client answers with a JSON-RPC response to the request frame, or with `request.answer {id, result}`
 from a connection that did not receive the frame. Both are accepted.
@@ -135,9 +137,12 @@ withdrawn (`request.cancel {reason: too_many_attempts}`) and the agent is told i
 | `file:<n>:too_large` | `input.file` | File `n` declares more `bytes` than `upload.max_bytes`. |
 | `text:not_verbatim` | `review.draft` | The approved text contains something that cannot be shown as it is (§6). |
 | `text:edited` | `review.draft` | The text differs from the draft while `editable` is false. |
+| `hunk:<id>:unknown` | `review.diff` | `hunks` has an id the request does not (§7). |
+| `hunk:<id>:missing` | `review.diff` | A hunk of the request has no entry in `hunks` (§7). |
+| `decision:inconsistent` | `review.diff` | `approved` with no hunk approved, or `rejected` with one approved (§7). |
 
 The reason is the FIRST problem found, in this order: shape; `not_optional`; then per method as in §4,
-§5 and §6.
+§5, §6 and §7.
 
 ## 4. `input.form`
 
@@ -396,7 +401,74 @@ stricter: a text the client refuses and the gateway accepts is a text the person
 they could. The gateway re-checks everything: an approval refused with `text:not_verbatim` is shown the
 same way, and the request stays open.
 
-## 7. Versioning
+## 7. `review.diff`
+
+The agent shows the changes it wants to make to ONE file, hunk by hunk, and the person approves or rejects each
+hunk. Params: the envelope (`optional` is false: there is no skip) plus
+
+| Key | Type |
+| --- | --- |
+| `path` | string, 1–300, one line, optional: the file's relative path, display only. A renamed file shows `old -> new`. |
+| `hunks` | 1–200 hunks (below), `id` unique within the request |
+
+A hunk:
+
+| Key | Type |
+| --- | --- |
+| `id` | `h1`, `h2`, … numbered by the gateway in the diff's order (`^h[1-9][0-9]{0,2}$`) |
+| `header` | string, at most 200: `@@ -a,b +c,d @@`, optionally followed by a space and the section text (the function the hunk is in); one line. A count left out is 1. |
+| `lines` | 1–400 strings of at most 500 code points |
+
+A line is one line of the hunk, in the order of the diff. Its first character is its marker: a space (context,
+unchanged), `+` (added) or `-` (removed). The rest is the line's text. The one other line there is, git's note that
+the file has no final newline, is exactly `\ No newline at end of file`; it belongs to the line before it. The
+header's counts say how many old (` ` and `-`) and new (` ` and `+`) lines the hunk has, and the gateway built the
+hunk so that they agree with `lines`. The starting line numbers are as the agent's diff gave them.
+
+The gateway reads the agent's unified diff itself (at most 64 KiB, at most 200 hunks, at most 400 lines in a hunk)
+and numbers the hunks; the agent never passes a hunk. A diff of several files, a binary diff and a diff the gateway
+cannot show as it is are refused to the agent, and nothing is sent.
+
+### 7.1 What is shown
+
+Every line is shown verbatim: the person sees exactly what would be written. The gateway refuses to build the
+request when a line does not pass, so a client only ever receives lines that do. The rule, per line: take the marker
+off; the rest, as a text of one line, must pass §6.2 (characters) and §6.3 (layout: the indent, a run of spaces
+and the length of a line; the limits for blank lines in a row do not come into play on one line) with the same
+numbers, and no whitespace at its end (§6.1 does not strip here: a line with whitespace at its end is refused, not
+rewritten, because a change that only adds or removes it would be invisible). A blank context line is a single
+space. A tab, a carriage return that is part of a line, a bidi or zero-width character, a long run of spaces or a
+line of more than 500 code points refuses the diff. The header must pass the same rule as a whole.
+
+A client shows a hunk monospaced, one row per line, with the marker in a gutter apart from the text, added and
+removed lines distinguished by more than colour, and scrolls long rows sideways instead of wrapping them into a
+hidden break. It never trims, re-wraps, expands tabs in or re-orders a line, and never opens anything in it as a
+link. `path` and `header` are display text like a subject (§6): shown apart from the lines.
+
+### 7.2 The result
+
+`{"decision": "approved" | "rejected", "hunks": {"<id>": "approved" | "rejected", ...}}`: `hunks` has an entry for
+EVERY hunk of the request, keyed by its `id` (at least one entry, at most 200; a key that is not of the form `h<n>`
+fails the model). There is no skip and no comment, and the person does not edit a hunk. The gateway refuses, as the
+FIRST problem found:
+
+1. `hunk:<id>:unknown`: a key of `hunks` that is no hunk of the request (in the order of the answer);
+2. `hunk:<id>:missing`: a hunk of the request that has no entry (in the order of the request);
+3. `decision:inconsistent`: `decision` is `approved` and every hunk is rejected, or `decision` is `rejected` and
+   some hunk is approved. So `approved` means "apply what I approved" (some, or all) and `rejected` means "apply
+   nothing".
+
+The request stays open after a refusal (§3). A client disables Approve while no hunk is approved.
+
+### 7.3 What the agent receives
+
+The gateway keeps its own copy of the hunks. When the request settles, it writes the patch of exactly the approved
+hunks from that copy, never from anything in the answer: the agent gets `approved_patch` (git's form, for
+`git apply`; it names `path`) and the decision of each hunk. A rejected hunk before an approved one moves the latter's
+new-side start back by the net change of the rejected one. The client's answer carries no text, so there is nothing
+of the client's to put in the patch.
+
+## 8. Versioning
 
 Additive changes (a new method, a new optional key, a new `cannot_show` reason) keep `v: 1`. A client
 never drops what it does not understand without saying so: it declines an unknown method with `-32601`

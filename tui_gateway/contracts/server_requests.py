@@ -349,9 +349,9 @@ server_request("confirm", params=ConfirmRequestParams, result=ConfirmResult,
 #   (``field:<id>:<problem>`` for a form). The request stays open; after ten refusals it is withdrawn
 #   (``request.cancel`` with reason ``too_many_attempts``).
 
-#: Server→client request methods that carry ``InteractiveRequestParams`` (phase 1). A connection gets one
+#: Server→client request methods that carry ``InteractiveRequestParams`` (phases 1 and 2). A connection gets one
 #: only after it listed it under ``client.capabilities`` ``requests``.
-INTERACTIVE_METHODS: tuple[str, ...] = ("input.form", "input.file", "review.draft")
+INTERACTIVE_METHODS: tuple[str, ...] = ("input.form", "input.file", "review.draft", "review.diff")
 
 #: JSON-RPC error code a client answers when it cannot show an interactive request (``data.reason``).
 CANNOT_SHOW = 4041
@@ -869,6 +869,70 @@ class ReviewDraftResult(RootModel[Annotated[ReviewDraftApproved | ReviewDraftRej
 server_request("review.draft", params=ReviewDraftRequestParams, result=ReviewDraftResult,
                doc="The agent shows the person a draft (mail, post, message, document) to approve, edit or "
                    "reject before it acts on it. 300 s.")
+
+
+# ── review.diff ───────────────────────────────────────────────────────────────────────────────
+
+DIFF_HUNKS_MAX = 200
+DIFF_HUNK_LINES_MAX = 400
+DIFF_LINE_MAX = 500
+DIFF_HEADER_MAX = 200
+DIFF_PATH_MAX = 300
+DIFF_HUNK_ID = r"^h[1-9][0-9]{0,2}$"
+#: ``@@ -a,b +c,d @@`` and, after a space, the section text git adds; one line.
+DIFF_HEADER = "^@@ -[0-9]{1,9}(,[0-9]{1,9})? \\+[0-9]{1,9}(,[0-9]{1,9})? @@( [^\r\n\x0b\x0c\x85\u2028\u2029]*)?$"
+#: A hunk line: its marker (space = context, ``+`` added, ``-`` removed) and one line of text, or git's marker for a
+#: missing final newline. Literal characters, as in :data:`ONE_LINE`.
+DIFF_LINE = "^([ +-][^\r\n\x0b\x0c\x85\u2028\u2029]*|\\\\ No newline at end of file)$"
+
+
+class DiffHunk(Params):
+    """One hunk of the diff: ``id`` (``h1``, ``h2``, ... as the gateway numbered them), the ``@@ -a,b +c,d @@`` line
+    and the hunk's lines, each with its marker. The gateway built it from the agent's diff and keeps its own copy:
+    what the person approves is that copy."""
+
+    id: str = Field(pattern=DIFF_HUNK_ID)
+    header: str = Field(min_length=1, max_length=DIFF_HEADER_MAX, pattern=DIFF_HEADER)
+    lines: list[Annotated[str, Field(min_length=1, max_length=DIFF_LINE_MAX, pattern=DIFF_LINE)]] = Field(
+        min_length=1, max_length=DIFF_HUNK_LINES_MAX)
+
+
+class ReviewDiffRequestParams(InteractiveRequestParams):
+    """The changes to one file, hunk by hunk, for the person to approve or reject each (``contract/requests``
+    §7). ``path`` is the file's relative path, display only (a rename shows ``old -> new``); ``hunks``: 1-200, ids
+    unique. Every line of every hunk is shown verbatim (the rules of §6 on the line without its marker)."""
+
+    path: str | None = Field(default=None, min_length=1, max_length=DIFF_PATH_MAX, pattern=ONE_LINE)
+    hunks: list[DiffHunk] = Field(min_length=1, max_length=DIFF_HUNKS_MAX)
+
+    @model_validator(mode="after")
+    def _unique_hunk_ids(self) -> ReviewDiffRequestParams:
+        ids = [hunk.id for hunk in self.hunks]
+        if len(set(ids)) != len(ids):
+            raise ValueError("review.diff: two hunks have the same id")
+        return self
+
+
+class HunkDecision(WireEnum):
+    approved = "approved"
+    rejected = "rejected"
+
+
+class ReviewDiffResult(Result):
+    """``decision`` and one entry in ``hunks`` for EVERY hunk of the request, keyed by its id. A key that is not a
+    well-formed hunk id fails the model (``bad_shape``: no text of the client's goes into a reason). The gateway
+    refuses the first problem against the request: ``hunk:<id>:unknown`` (an id the request lacks),
+    ``hunk:<id>:missing`` (an id of the request left out), then ``decision:inconsistent`` (``approved`` with no hunk
+    approved, or ``rejected`` with one approved)."""
+
+    decision: ReviewDecision
+    hunks: dict[Annotated[str, Field(pattern=DIFF_HUNK_ID)], HunkDecision] = Field(
+        min_length=1, max_length=DIFF_HUNKS_MAX, json_schema_extra=_field_id_keys)
+
+
+server_request("review.diff", params=ReviewDiffRequestParams, result=ReviewDiffResult,
+               doc="The agent shows the person the changes to a file, hunk by hunk, to approve or reject each "
+                   "before it applies them. 300 s.")
 
 
 # ── withdrawal ────────────────────────────────────────────────────────────────────────────────

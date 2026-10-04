@@ -1750,6 +1750,736 @@
           "reason": "text:not_verbatim"
         }
       ]
+    },
+    "review.diff": {
+      "frames": [
+        {
+          "jsonrpc": "2.0",
+          "id": "req_diff_settings",
+          "method": "review.diff",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "path": "app/settings.py",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ -3,4 +3,4 @@ class Settings:",
+                "lines": [
+                  "     name = \"booking\"",
+                  "-    currency = \"USD\"",
+                  "+    currency = \"EUR\"",
+                  "     locale = \"nl-NL\"",
+                  "     debug = False"
+                ]
+              },
+              {
+                "id": "h2",
+                "header": "@@ -20,3 +20,4 @@ def retry():",
+                "lines": [
+                  "     attempts = 0",
+                  "-    limit = 3",
+                  "+    limit = 5",
+                  "+    backoff = 2",
+                  "     return attempts"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_diff_new_file",
+          "method": "review.diff",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "New file: docs/notes.txt",
+            "summary": "I would add this file with two lines of notes.",
+            "path": "docs/notes.txt",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ -0,0 +1,2 @@",
+                "lines": [
+                  "+First line",
+                  "+Second line",
+                  "\\ No newline at end of file"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "invalid_frames": [
+        {
+          "name": "hunk_id_not_numbered",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "path": "app/settings.py",
+            "hunks": [
+              {
+                "id": "intro",
+                "header": "@@ -3,4 +3,4 @@ class Settings:",
+                "lines": [
+                  "     name = \"booking\"",
+                  "-    currency = \"USD\"",
+                  "+    currency = \"EUR\"",
+                  "     locale = \"nl-NL\"",
+                  "     debug = False"
+                ]
+              },
+              {
+                "id": "h2",
+                "header": "@@ -20,3 +20,4 @@ def retry():",
+                "lines": [
+                  "     attempts = 0",
+                  "-    limit = 3",
+                  "+    limit = 5",
+                  "+    backoff = 2",
+                  "     return attempts"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "hunk_id_zero",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "path": "app/settings.py",
+            "hunks": [
+              {
+                "id": "h0",
+                "header": "@@ -3,4 +3,4 @@ class Settings:",
+                "lines": [
+                  "     name = \"booking\"",
+                  "-    currency = \"USD\"",
+                  "+    currency = \"EUR\"",
+                  "     locale = \"nl-NL\"",
+                  "     debug = False"
+                ]
+              },
+              {
+                "id": "h2",
+                "header": "@@ -20,3 +20,4 @@ def retry():",
+                "lines": [
+                  "     attempts = 0",
+                  "-    limit = 3",
+                  "+    limit = 5",
+                  "+    backoff = 2",
+                  "     return attempts"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "header_is_not_a_hunk_header",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "path": "app/settings.py",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ nonsense @@",
+                "lines": [
+                  "     name = \"booking\"",
+                  "-    currency = \"USD\"",
+                  "+    currency = \"EUR\"",
+                  "     locale = \"nl-NL\"",
+                  "     debug = False"
+                ]
+              },
+              {
+                "id": "h2",
+                "header": "@@ -20,3 +20,4 @@ def retry():",
+                "lines": [
+                  "     attempts = 0",
+                  "-    limit = 3",
+                  "+    limit = 5",
+                  "+    backoff = 2",
+                  "     return attempts"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "header_with_a_line_break",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "path": "app/settings.py",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ -3,4 +3,4 @@ class\nSettings:",
+                "lines": [
+                  "     name = \"booking\"",
+                  "-    currency = \"USD\"",
+                  "+    currency = \"EUR\"",
+                  "     locale = \"nl-NL\"",
+                  "     debug = False"
+                ]
+              },
+              {
+                "id": "h2",
+                "header": "@@ -20,3 +20,4 @@ def retry():",
+                "lines": [
+                  "     attempts = 0",
+                  "-    limit = 3",
+                  "+    limit = 5",
+                  "+    backoff = 2",
+                  "     return attempts"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "line_without_a_marker",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "path": "app/settings.py",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ -3,4 +3,4 @@ class Settings:",
+                "lines": [
+                  "name = \"booking\""
+                ]
+              },
+              {
+                "id": "h2",
+                "header": "@@ -20,3 +20,4 @@ def retry():",
+                "lines": [
+                  "     attempts = 0",
+                  "-    limit = 3",
+                  "+    limit = 5",
+                  "+    backoff = 2",
+                  "     return attempts"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "line_with_a_line_break",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "path": "app/settings.py",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ -3,4 +3,4 @@ class Settings:",
+                "lines": [
+                  "+one\ntwo"
+                ]
+              },
+              {
+                "id": "h2",
+                "header": "@@ -20,3 +20,4 @@ def retry():",
+                "lines": [
+                  "     attempts = 0",
+                  "-    limit = 3",
+                  "+    limit = 5",
+                  "+    backoff = 2",
+                  "     return attempts"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "line_with_a_paragraph_separator",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "path": "app/settings.py",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ -3,4 +3,4 @@ class Settings:",
+                "lines": [
+                  "+one\u2029two"
+                ]
+              },
+              {
+                "id": "h2",
+                "header": "@@ -20,3 +20,4 @@ def retry():",
+                "lines": [
+                  "     attempts = 0",
+                  "-    limit = 3",
+                  "+    limit = 5",
+                  "+    backoff = 2",
+                  "     return attempts"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "hunk_without_lines",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "path": "app/settings.py",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ -3,4 +3,4 @@ class Settings:",
+                "lines": []
+              },
+              {
+                "id": "h2",
+                "header": "@@ -20,3 +20,4 @@ def retry():",
+                "lines": [
+                  "     attempts = 0",
+                  "-    limit = 3",
+                  "+    limit = 5",
+                  "+    backoff = 2",
+                  "     return attempts"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "no_hunks",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "path": "app/settings.py",
+            "hunks": []
+          }
+        },
+        {
+          "name": "path_with_a_line_break",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "path": "app/set\ntings.py",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ -3,4 +3,4 @@ class Settings:",
+                "lines": [
+                  "     name = \"booking\"",
+                  "-    currency = \"USD\"",
+                  "+    currency = \"EUR\"",
+                  "     locale = \"nl-NL\"",
+                  "     debug = False"
+                ]
+              },
+              {
+                "id": "h2",
+                "header": "@@ -20,3 +20,4 @@ def retry():",
+                "lines": [
+                  "     attempts = 0",
+                  "-    limit = 3",
+                  "+    limit = 5",
+                  "+    backoff = 2",
+                  "     return attempts"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "unknown_key_on_a_hunk",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "path": "app/settings.py",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ -3,4 +3,4 @@ class Settings:",
+                "lines": [
+                  "     name = \"booking\"",
+                  "-    currency = \"USD\"",
+                  "+    currency = \"EUR\"",
+                  "     locale = \"nl-NL\"",
+                  "     debug = False"
+                ],
+                "approved": true
+              },
+              {
+                "id": "h2",
+                "header": "@@ -20,3 +20,4 @@ def retry():",
+                "lines": [
+                  "     attempts = 0",
+                  "-    limit = 3",
+                  "+    limit = 5",
+                  "+    backoff = 2",
+                  "     return attempts"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "two_hunks_with_one_id",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "path": "app/settings.py",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ -3,4 +3,4 @@ class Settings:",
+                "lines": [
+                  "     name = \"booking\"",
+                  "-    currency = \"USD\"",
+                  "+    currency = \"EUR\"",
+                  "     locale = \"nl-NL\"",
+                  "     debug = False"
+                ]
+              },
+              {
+                "id": "h1",
+                "header": "@@ -20,3 +20,4 @@ def retry():",
+                "lines": [
+                  "     attempts = 0",
+                  "-    limit = 3",
+                  "+    limit = 5",
+                  "+    backoff = 2",
+                  "     return attempts"
+                ]
+              }
+            ]
+          },
+          "note": "Ids are unique within the request; JSON Schema cannot compare two items."
+        }
+      ],
+      "answers": [
+        {
+          "name": "approved_every_hunk",
+          "request": "req_diff_settings",
+          "result": {
+            "decision": "approved",
+            "hunks": {
+              "h1": "approved",
+              "h2": "approved"
+            }
+          }
+        },
+        {
+          "name": "approved_one_hunk",
+          "request": "req_diff_settings",
+          "note": "The agent gets a patch with the approved hunks only.",
+          "result": {
+            "decision": "approved",
+            "hunks": {
+              "h1": "approved",
+              "h2": "rejected"
+            }
+          }
+        },
+        {
+          "name": "rejected_every_hunk",
+          "request": "req_diff_settings",
+          "result": {
+            "decision": "rejected",
+            "hunks": {
+              "h1": "rejected",
+              "h2": "rejected"
+            }
+          }
+        },
+        {
+          "name": "approved_the_new_file",
+          "request": "req_diff_new_file",
+          "result": {
+            "decision": "approved",
+            "hunks": {
+              "h1": "approved"
+            }
+          }
+        },
+        {
+          "name": "rejected_the_new_file",
+          "request": "req_diff_new_file",
+          "result": {
+            "decision": "rejected",
+            "hunks": {
+              "h1": "rejected"
+            }
+          }
+        }
+      ],
+      "invalid_answers": [
+        {
+          "name": "approved_without_hunks",
+          "request": "req_diff_settings",
+          "layer": "model",
+          "result": {
+            "decision": "approved"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "empty_hunks",
+          "request": "req_diff_settings",
+          "layer": "model",
+          "result": {
+            "decision": "rejected",
+            "hunks": {}
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "hunk_decided_skipped",
+          "request": "req_diff_settings",
+          "layer": "model",
+          "result": {
+            "decision": "approved",
+            "hunks": {
+              "h1": "approved",
+              "h2": "skipped"
+            }
+          },
+          "reason": "bad_shape",
+          "note": "A hunk is approved or rejected; there is no skip."
+        },
+        {
+          "name": "decision_skipped",
+          "request": "req_diff_settings",
+          "layer": "model",
+          "result": {
+            "decision": "skipped",
+            "hunks": {
+              "h1": "rejected",
+              "h2": "rejected"
+            }
+          },
+          "reason": "bad_shape",
+          "note": "review.* results have no skip."
+        },
+        {
+          "name": "hunk_key_that_is_no_id",
+          "request": "req_diff_settings",
+          "layer": "model",
+          "result": {
+            "decision": "approved",
+            "hunks": {
+              "intro": "approved",
+              "h2": "approved"
+            }
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "rejected_with_a_comment",
+          "request": "req_diff_settings",
+          "layer": "model",
+          "result": {
+            "decision": "rejected",
+            "comment": "No.",
+            "hunks": {
+              "h1": "rejected",
+              "h2": "rejected"
+            }
+          },
+          "reason": "bad_shape",
+          "note": "A diff review carries no comment."
+        },
+        {
+          "name": "hunk_left_out",
+          "request": "req_diff_settings",
+          "layer": "validator",
+          "result": {
+            "decision": "approved",
+            "hunks": {
+              "h1": "approved"
+            }
+          },
+          "reason": "hunk:h2:missing",
+          "note": "Every hunk of the request is decided."
+        },
+        {
+          "name": "hunk_the_request_lacks",
+          "request": "req_diff_settings",
+          "layer": "validator",
+          "result": {
+            "decision": "approved",
+            "hunks": {
+              "h1": "approved",
+              "h2": "approved",
+              "h3": "approved"
+            }
+          },
+          "reason": "hunk:h3:unknown"
+        },
+        {
+          "name": "unknown_is_judged_before_missing",
+          "request": "req_diff_settings",
+          "layer": "validator",
+          "result": {
+            "decision": "approved",
+            "hunks": {
+              "h1": "approved",
+              "h3": "approved"
+            }
+          },
+          "reason": "hunk:h3:unknown",
+          "note": "h2 is missing as well; an id the request lacks is reported first."
+        },
+        {
+          "name": "approved_with_no_hunk_approved",
+          "request": "req_diff_settings",
+          "layer": "validator",
+          "result": {
+            "decision": "approved",
+            "hunks": {
+              "h1": "rejected",
+              "h2": "rejected"
+            }
+          },
+          "reason": "decision:inconsistent"
+        },
+        {
+          "name": "rejected_with_a_hunk_approved",
+          "request": "req_diff_settings",
+          "layer": "validator",
+          "result": {
+            "decision": "rejected",
+            "hunks": {
+              "h1": "approved",
+              "h2": "rejected"
+            }
+          },
+          "reason": "decision:inconsistent"
+        }
+      ]
     }
   },
   "form_fields": [
@@ -2404,7 +3134,8 @@
           "requests": [
             "input.form",
             "input.file",
-            "review.draft"
+            "review.draft",
+            "review.diff"
           ]
         }
       },

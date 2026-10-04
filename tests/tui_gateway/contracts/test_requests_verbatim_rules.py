@@ -21,7 +21,7 @@ from tui_gateway import request_text
 from tui_gateway.interactive_validate import strip_line_ends
 
 README = (Path(__file__).resolve().parents[3] / "contract" / "requests" / "README.md").read_text(encoding="utf-8")
-SECTION = README[README.index("## 6. `review.draft`"):README.index("## 7. Versioning")]
+SECTION = README[README.index("## 6. `review.draft`"):README.index("## 7. `review.diff`")]
 
 
 def _limits() -> dict[str, int]:

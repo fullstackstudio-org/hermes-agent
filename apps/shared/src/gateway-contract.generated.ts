@@ -4543,6 +4543,33 @@ export interface ReviewDraftRejected {
   decision: 'rejected'
   comment?: string | null
 }
+/** The changes to one file, hunk by hunk, for the person to approve or reject each (``contract/requests`` §7). ``path`` is the file's relative path, display only (a rename shows ``old -> new``); ``hunks``: 1-200, ids unique. Every line of every hunk is shown verbatim (the rules of §6 on the line without its marker). */
+export interface ReviewDiffRequestParams {
+  session_id: string
+  v: 1
+  title: string
+  summary: string
+  detail?: string | null
+  expires_at: number
+  optional: boolean
+  acting_user?: RequestActingUser | null
+  path?: string | null
+  hunks: DiffHunk[]
+}
+/** One hunk of the diff: ``id`` (``h1``, ``h2``, ... as the gateway numbered them), the ``@@ -a,b +c,d @@`` line and the hunk's lines, each with its marker. The gateway built it from the agent's diff and keeps its own copy: what the person approves is that copy. */
+export interface DiffHunk {
+  id: string
+  header: string
+  lines: string[]
+}
+/** ``decision`` and one entry in ``hunks`` for EVERY hunk of the request, keyed by its id. A key that is not a well-formed hunk id fails the model (``bad_shape``: no text of the client's goes into a reason). The gateway refuses the first problem against the request: ``hunk:<id>:unknown`` (an id the request lacks), ``hunk:<id>:missing`` (an id of the request left out), then ``decision:inconsistent`` (``approved`` with no hunk approved, or ``rejected`` with one approved). */
+export interface ReviewDiffResult {
+  decision: ReviewDecision
+  hunks: Record<string, HunkDecision>
+}
+/** First key of every ``review.*`` result. */
+export type ReviewDecision = 'approved' | 'rejected'
+export type HunkDecision = 'approved' | 'rejected'
 export interface DisplayInstallSudoParams {
   session_id: string
   profile_key: string
@@ -5745,6 +5772,8 @@ export interface ServerRequestMap {
   'preview.act': { params: PreviewActRequestParams; result: ValueResult }
   /** Read the in-app browser preview's text (JSON text answer). */
   'preview.read': { params: ReadRangeRequestParams; result: ValueResult }
+  /** The agent shows the person the changes to a file, hunk by hunk, to approve or reject each before it applies them. 300 s. */
+  'review.diff': { params: ReviewDiffRequestParams; result: ReviewDiffResult }
   /** The agent shows the person a draft (mail, post, message, document) to approve, edit or reject before it acts on it. 300 s. */
   'review.draft': { params: ReviewDraftRequestParams; result: ReviewDraftResult }
   /** Masked value for a named env var (skills / setup flows). */
@@ -5774,6 +5803,7 @@ export const SERVER_REQUEST_METHODS = [
   'input.form',
   'preview.act',
   'preview.read',
+  'review.diff',
   'review.draft',
   'secret',
   'sudo',

@@ -12447,6 +12447,43 @@
         "title": "DiagnosticsShareNousResult",
         "type": "object"
       },
+      "DiffHunk": {
+        "additionalProperties": false,
+        "description": "One hunk of the diff: ``id`` (``h1``, ``h2``, ... as the gateway numbered them), the ``@@ -a,b +c,d @@`` line\nand the hunk's lines, each with its marker. The gateway built it from the agent's diff and keeps its own copy:\nwhat the person approves is that copy.",
+        "properties": {
+          "id": {
+            "pattern": "^h[1-9][0-9]{0,2}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "header": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^@@ -[0-9]{1,9}(,[0-9]{1,9})? \\+[0-9]{1,9}(,[0-9]{1,9})? @@( [^\r\n\u000b\f\u0085\u2028\u2029]*)?$",
+            "title": "Header",
+            "type": "string"
+          },
+          "lines": {
+            "items": {
+              "maxLength": 500,
+              "minLength": 1,
+              "pattern": "^([ +-][^\r\n\u000b\f\u0085\u2028\u2029]*|\\\\ No newline at end of file)$",
+              "type": "string"
+            },
+            "maxItems": 400,
+            "minItems": 1,
+            "title": "Lines",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "header",
+          "lines"
+        ],
+        "title": "DiffHunk",
+        "type": "object"
+      },
       "DiscoveredRepo": {
         "additionalProperties": false,
         "description": "``methods_projects._discover_repos_payload`` row: a git root with session totals.",
@@ -16599,6 +16636,14 @@
         ],
         "title": "HeartbeatSnapshot",
         "type": "object"
+      },
+      "HunkDecision": {
+        "enum": [
+          "approved",
+          "rejected"
+        ],
+        "title": "HunkDecision",
+        "type": "string"
       },
       "ImageAttachBytesParams": {
         "additionalProperties": false,
@@ -28078,6 +28123,138 @@
         ],
         "title": "ResumePhaseStatus",
         "type": "string"
+      },
+      "ReviewDecision": {
+        "description": "First key of every ``review.*`` result.",
+        "enum": [
+          "approved",
+          "rejected"
+        ],
+        "title": "ReviewDecision",
+        "type": "string"
+      },
+      "ReviewDiffRequestParams": {
+        "additionalProperties": false,
+        "description": "The changes to one file, hunk by hunk, for the person to approve or reject each (``contract/requests``\n\u00a77). ``path`` is the file's relative path, display only (a rename shows ``old -> new``); ``hunks``: 1-200, ids\nunique. Every line of every hunk is shown verbatim (the rules of \u00a76 on the line without its marker).",
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "v": {
+            "const": 1,
+            "title": "V",
+            "type": "integer"
+          },
+          "title": {
+            "maxLength": 80,
+            "minLength": 1,
+            "pattern": "^[^\r\n\u000b\f\u0085\u2028\u2029]+$",
+            "title": "Title",
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Detail"
+          },
+          "expires_at": {
+            "minimum": 0,
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "optional": {
+            "title": "Optional",
+            "type": "boolean"
+          },
+          "acting_user": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RequestActingUser"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "path": {
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "minLength": 1,
+                "pattern": "^[^\r\n\u000b\f\u0085\u2028\u2029]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Path"
+          },
+          "hunks": {
+            "items": {
+              "$ref": "#/components/schemas/DiffHunk"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Hunks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "session_id",
+          "v",
+          "title",
+          "summary",
+          "expires_at",
+          "optional",
+          "hunks"
+        ],
+        "title": "ReviewDiffRequestParams",
+        "type": "object"
+      },
+      "ReviewDiffResult": {
+        "additionalProperties": false,
+        "description": "``decision`` and one entry in ``hunks`` for EVERY hunk of the request, keyed by its id. A key that is not a\nwell-formed hunk id fails the model (``bad_shape``: no text of the client's goes into a reason). The gateway\nrefuses the first problem against the request: ``hunk:<id>:unknown`` (an id the request lacks),\n``hunk:<id>:missing`` (an id of the request left out), then ``decision:inconsistent`` (``approved`` with no hunk\napproved, or ``rejected`` with one approved).",
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/ReviewDecision"
+          },
+          "hunks": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/HunkDecision"
+            },
+            "maxProperties": 200,
+            "minProperties": 1,
+            "propertyNames": {
+              "pattern": "^h[1-9][0-9]{0,2}$"
+            },
+            "title": "Hunks",
+            "type": "object"
+          }
+        },
+        "required": [
+          "decision",
+          "hunks"
+        ],
+        "title": "ReviewDiffResult",
+        "type": "object"
       },
       "ReviewDraftApproved": {
         "additionalProperties": false,
@@ -39914,6 +40091,24 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/ValueResult"
+        }
+      }
+    },
+    {
+      "name": "review.diff",
+      "summary": "The agent shows the person the changes to a file, hunk by hunk, to approve or reject each before it applies them. 300 s.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/ReviewDiffRequestParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/ReviewDiffResult"
         }
       }
     },

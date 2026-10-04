@@ -57,12 +57,14 @@ REASONS: dict[str, re.Pattern[str]] = {
     "input.file": re.compile(r"^(bad_shape|not_optional|files:(too_many|too_large)|"
                              r"file:(0|[1-9][0-9]*):(outside_dir|too_large))$"),
     "review.draft": re.compile(r"^(bad_shape|text:(not_verbatim|edited))$"),
+    "review.diff": re.compile(r"^(bad_shape|hunk:h[1-9][0-9]{0,2}:(unknown|missing)|decision:inconsistent)$"),
 }
 #: The discriminator of each method's result and the values every one must have a valid example of.
 STATUSES = {
     "input.form": ("status", {s.value for s in InputStatus}),
     "input.file": ("status", {s.value for s in InputStatus}),
     "review.draft": ("decision", {d.value for d in ReviewDecision}),
+    "review.diff": ("decision", {d.value for d in ReviewDecision}),
 }
 
 
@@ -204,6 +206,14 @@ def test_validator_cases_are_consistent_with_their_frames():
             assert sum(f["bytes"] for f in result["files"]) > params["upload"]["max_total_bytes"], reason
         elif reason == "text:edited":
             assert params["editable"] is False and result["text"] != params["text"], reason
+        elif reason.startswith("hunk:"):
+            _, hunk_id, problem = reason.split(":")
+            ids = {h["id"] for h in params["hunks"]}
+            assert (hunk_id not in ids and hunk_id in result["hunks"]) if problem == "unknown" else \
+                (hunk_id in ids and hunk_id not in result["hunks"]), reason
+        elif reason == "decision:inconsistent":
+            approved = "approved" in result["hunks"].values()
+            assert approved == (result["decision"] == "rejected"), reason
 
 
 # ── form fields ─────────────────────────────────────────────────────────────────────────────────
@@ -356,3 +366,91 @@ def test_sha256sums_pin_the_directory():
     assert set(pinned) == {"README.md", "examples.json", "schema.json"}
     for name, digest in pinned.items():
         assert hashlib.sha256((DIR / name).read_bytes()).hexdigest() == digest, f"{name}: run the generator"
+
+
+# ── review.diff ─────────────────────────────────────────────────────────────────────────────────
+
+
+def _diff_params(hunks: list[dict], **extra) -> dict:
+    return {"session_id": "s_example", "v": 1, "title": "Diff", "summary": "A diff.", "expires_at": 0,
+            "optional": False, **extra, "hunks": hunks}
+
+
+def _hunk(hunk_id: str = "h1", header: str = "@@ -1 +1 @@", lines: list[str] | None = None) -> dict:
+    return {"id": hunk_id, "header": header, "lines": lines if lines is not None else ["-a", "+b"]}
+
+
+def test_example_hunks_are_what_the_gateway_builds():
+    """Every hunk of an example frame is one ``diff_hunks`` could have produced: ids ``h1..`` in order, the header's
+    counts agree with the lines, and every line and header passes the rules the gateway applies to a diff."""
+    from tui_gateway import diff_hunks
+    for frame in EXAMPLES["methods"]["review.diff"]["frames"]:
+        hunks = frame["params"]["hunks"]
+        assert [h["id"] for h in hunks] == [f"h{n}" for n in range(1, len(hunks) + 1)], frame["id"]
+        for hunk in hunks:
+            assert diff_hunks.header_problem(hunk["header"]) == "", hunk["id"]
+            assert all(diff_hunks.line_problem(line) == "" for line in hunk["lines"]), hunk["id"]
+            match = diff_hunks.HEADER.fullmatch(hunk["header"])
+            body = [line for line in hunk["lines"] if line != diff_hunks.NO_NEWLINE]
+            assert (sum(1 for line in body if line[0] in " -"), sum(1 for line in body if line[0] in " +")) == (
+                diff_hunks._count(match.group(2)), diff_hunks._count(match.group(4))), hunk["id"]
+        if frame["params"].get("path"):
+            assert diff_hunks.path_problem(frame["params"]["path"]) == ""
+
+
+def test_diff_params_are_bounded():
+    model = SERVER_REQUESTS["review.diff"].params
+    assert _parses(model, _diff_params([_hunk()]))
+    assert _parses(model, _diff_params([_hunk(f"h{n}") for n in range(1, 201)]))
+    assert not _parses(model, _diff_params([_hunk(f"h{n}") for n in range(1, 202)]))
+    assert not _parses(model, _diff_params([]))
+    assert _parses(model, _diff_params([_hunk(lines=[" x"] * 400)]))
+    assert not _parses(model, _diff_params([_hunk(lines=[" x"] * 401)]))
+    assert not _parses(model, _diff_params([_hunk(lines=[])]))
+    assert _parses(model, _diff_params([_hunk(lines=["+" + "x" * 499])]))
+    assert not _parses(model, _diff_params([_hunk(lines=["+" + "x" * 500])]))
+    header = "@@ -1 +1 @@ " + "f" * (200 - len("@@ -1 +1 @@ "))
+    assert _parses(model, _diff_params([_hunk(header=header)]))
+    assert not _parses(model, _diff_params([_hunk(header=header + "f")]))
+    assert _parses(model, _diff_params([_hunk()], path="p" * 300))
+    assert not _parses(model, _diff_params([_hunk()], path="p" * 301))
+    assert not _parses(model, _diff_params([_hunk()], path=""))
+
+
+@pytest.mark.parametrize("hunk_id, ok", [("h1", True), ("h200", True), ("h999", True), ("h0", False), ("h01", False),
+                                         ("h1000", False), ("H1", False), ("h", False), ("h1\n", False), ("1", False)])
+def test_a_hunk_id_is_h_and_a_number(hunk_id, ok):
+    model = SERVER_REQUESTS["review.diff"]
+    assert _parses(model.params, _diff_params([_hunk(hunk_id)])) is ok
+    assert _parses(model.result, {"decision": "approved", "hunks": {hunk_id: "approved"}}) is ok
+
+
+@pytest.mark.parametrize("line, ok", [
+    (" ", True), ("+", True), ("-", True), ("+x", True), ("\\ No newline at end of file", True),
+    ("\\ No newline", False), ("", False), ("x", False), ("?x", False), ("+a\nb", False), ("+a\rb", False),
+    ("+a\x0bb", False), ("+a\x0cb", False), ("+a\x85b", False), ("+a b", False), ("+a b", False),
+    ("+a\n", False),
+])
+def test_a_hunk_line_is_a_marker_and_one_line(line, ok):
+    assert _parses(SERVER_REQUESTS["review.diff"].params, _diff_params([_hunk(lines=[line])])) is ok
+
+
+@pytest.mark.parametrize("header, ok", [
+    ("@@ -1 +1 @@", True), ("@@ -1,2 +3,4 @@", True), ("@@ -0,0 +1,2 @@ def f(x):", True), ("@@ -1 +1 @@ ", True),
+    ("@@ -1 +1 @@x", False), ("@@ -1 +1", False), ("@@@ -1 -1 +1 @@@", False), ("@@ -a +1 @@", False),
+    ("@@ -1 +1 @@ a\nb", False), ("@@ -1 +1 @@\n", False), (" @@ -1 +1 @@", False),
+])
+def test_a_hunk_header_is_a_hunk_header(header, ok):
+    assert _parses(SERVER_REQUESTS["review.diff"].params, _diff_params([_hunk(header=header)])) is ok
+
+
+def test_a_diff_result_has_every_key_closed():
+    result = SERVER_REQUESTS["review.diff"].result
+    good = {"decision": "approved", "hunks": {"h1": "approved"}}
+    assert _parses(result, good)
+    for bad in ({**good, "comment": "x"}, {**good, "text": "x"}, {"decision": "approved"}, {"hunks": good["hunks"]},
+                {"decision": "approved", "hunks": {}}, {"decision": "approved", "hunks": {"h1": True}},
+                {"decision": "approved", "hunks": {"h1": "approved", "h2": "approved\n"}},
+                {"decision": "approved", "hunks": {f"h{n}": "approved" for n in range(1, 202)}}):
+        assert not _parses(result, bad), bad
+    assert _parses(result, {"decision": "rejected", "hunks": {f"h{n}": "rejected" for n in range(1, 201)}})

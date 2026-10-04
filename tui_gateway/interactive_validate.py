@@ -1,23 +1,25 @@
-"""The answer checks of the interactive requests (``input.form``, ``input.file``, ``review.draft``).
+"""The answer checks of the interactive requests (``input.form``, ``input.file``, ``review.draft``, ``review.diff``).
 
 :func:`validate_answer` is the ``validate`` ``server_requests.send_gated`` runs on every answer: it returns the
-FIRST problem as the reason string ``contract/requests/README.md`` §3-§6 names (``bad_shape``, ``not_optional``,
-``field:<id>:<problem>``, ``files:too_many``, ``file:<n>:outside_dir``, ``text:not_verbatim``, ...), or None for an
-answer that may settle the request. It runs under ``server_requests``' lock, so it is PURE and cheap: string,
-number and date arithmetic on the answer and the frame's own params, no I/O, no logging, no state. (The one
-exception is a datetime answer's time zone: a zone is read from its tzdata file the first time this process looks
-it up and then kept in :data:`_zones` for good, a cache bounded by the zones the host knows. The set of known
-zones and a field's own ``tz`` are loaded by :func:`prepare` before the request opens, and the zone an answer names
-by the validator's :meth:`_Validator.warm`, which ``server_requests`` runs outside its lock before it judges a
-response frame; ``request.answer`` already judges outside the lock first. So a zone file is read under the lock
-only if a race beats both.) Checks that need the disk (a file exists, its size and hash) are the caller's, after
-the request settled (``interactive.verify_files``).
+FIRST problem as the reason string ``contract/requests/README.md`` §3-§7 names (``bad_shape``, ``not_optional``,
+``field:<id>:<problem>``, ``files:too_many``, ``file:<n>:outside_dir``, ``text:not_verbatim``,
+``hunk:<id>:missing``, ...), or None for an answer that may settle the request. It runs under ``server_requests``'
+lock, so it is PURE and cheap: string, number and date arithmetic on the answer and the frame's own params, no I/O,
+no logging, no state. (The one exception is a datetime answer's time zone: a zone is read from its tzdata file the
+first time this process looks it up and then kept in :data:`_zones` for good, a cache bounded by the zones the host
+knows. The set of known zones and a field's own ``tz`` are loaded by :func:`prepare` before the request opens, and
+the zone an answer names by the validator's :meth:`_Validator.warm`, which ``server_requests`` runs outside its lock
+before it judges a response frame; ``request.answer`` already judges outside the lock first. So a zone file is read
+under the lock only if a race beats both.) Checks that need the disk (a file exists, its size and hash) are the
+caller's, after the request settled (``interactive.verify_files``).
 
 The order is the README's: the result model (``bad_shape``), ``not_optional``, then per method. Within a form,
 the ``values`` keys first (``unknown``), then each field in the form's order; within a field the structural
 problems (``missing``, ``type``, ``format``, ``too_long``, ``zone``, ``offset``, ``order``, ``not_an_option``,
 ``duplicate``) before the range ones (``below_min`` / ``above_max``, ``not_integer``, ``step``, ``too_few`` /
-``too_many``), because a range can only be judged on a value that is well-formed.
+``too_many``), because a range can only be judged on a value that is well-formed. A diff review: the hunk ids the
+request lacks (``hunk:<id>:unknown``), then the ones it has that the answer left out (``hunk:<id>:missing``), then
+the decision against the hunks (``decision:inconsistent``).
 
 Every regular expression that validates a WHOLE value is applied with ``re.fullmatch``: Python's ``$`` also matches
 before a final newline, so ``re.match("^x$", "x\\n")`` succeeds.
@@ -386,6 +388,28 @@ def _draft_problem(params: dict, result: dict) -> str | None:
     return None
 
 
+# ── review.diff ────────────────────────────────────────────────────────────────────────────────
+
+
+def _diff_problem(params: dict, result: dict) -> str | None:
+    """Every hunk of the request decided exactly once, and a decision that agrees with them. The ids are the
+    GATEWAY's (``params["hunks"]``); a key the result model let through is a well-formed id, so a reason never
+    carries text of the client's."""
+    ids = [hunk.get("id") for hunk in params.get("hunks") or [] if isinstance(hunk, dict)]
+    known = set(ids)
+    decided = result["hunks"]
+    for key in decided:
+        if key not in known:
+            return f"hunk:{key}:unknown"
+    for hunk_id in ids:
+        if hunk_id not in decided:
+            return f"hunk:{hunk_id}:missing"
+    approved = any(value == "approved" for value in decided.values())
+    if (result["decision"] == "approved") != approved:
+        return "decision:inconsistent"
+    return None
+
+
 # ── entry point ────────────────────────────────────────────────────────────────────────────────
 
 
@@ -396,6 +420,8 @@ def validate_answer(method: str, params: dict, result: Any) -> str | None:
         return "bad_shape"
     try:
         model = SERVER_REQUESTS[method].result.model_validate(result)
+        if method == "review.diff":
+            return _diff_problem(params, model.model_dump(mode="python"))
         body = model.root.model_dump(mode="python")
         if method in ("input.form", "input.file"):
             if body["status"] == "skipped":

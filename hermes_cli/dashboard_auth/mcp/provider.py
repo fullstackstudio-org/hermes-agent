@@ -60,7 +60,8 @@ from starlette.requests import Request
 from agent.turn_sender import NAME_LIMIT, clean_value
 from hermes_cli.dashboard_auth.mcp.settings import SCOPES, MCPSettings
 from hermes_cli.dashboard_auth.mcp.store import (
-    BY_CLIENT, Chat, ClientRecord, CodeInvalid, ConsentInvalid, Grant, Issued, LimitReached, MCPStore, TokenInvalid)
+    BY_CLIENT, Chat, ClientRecord, CodeInvalid, ConsentInvalid, Grant, Issued, LimitReached, MCPStore, Reused,
+    TokenInvalid)
 
 UNNAMED_CLIENT = "MCP client"
 TOKEN_AUTH_METHODS = ("none", "client_secret_post", "client_secret_basic")
@@ -219,6 +220,10 @@ class MCPProvider(OAuthAuthorizationServerProvider[MCPAuthorizationCode, MCPRefr
     async def _run(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
 
+    def reused(self, exc: Reused) -> None:
+        """A code or refresh token presented again just revoked ``exc.grant`` (``exc.by``). The SDK hears
+        only ``invalid_grant``; the route layer overrides this to audit and announce the revocation."""
+
     def resource_matches(self, resource: Optional[str]) -> bool:
         """True when *resource* is absent or names this endpoint (for a token request's ``resource``,
         which the SDK's token handler does not pass on)."""
@@ -363,7 +368,11 @@ class MCPProvider(OAuthAuthorizationServerProvider[MCPAuthorizationCode, MCPRefr
                                       authorization_code: str) -> Optional[MCPAuthorizationCode]:
         # Taking marks the code used: the SDK checks the PKCE verifier only after this, so a wrong
         # verifier burns the code, and of two concurrent exchanges only one gets it.
-        taken = await self._run(self.store.take_code, authorization_code, client_id=client.client_id)
+        try:
+            taken = await self._run(self.store.take_code, authorization_code, client_id=client.client_id)
+        except Reused as exc:
+            self.reused(exc)
+            return None
         if taken is None:
             return None
         return MCPAuthorizationCode(
@@ -399,7 +408,11 @@ class MCPProvider(OAuthAuthorizationServerProvider[MCPAuthorizationCode, MCPRefr
 
     async def load_refresh_token(self, client: OAuthClientInformationFull,
                                  refresh_token: str) -> Optional[MCPRefreshToken]:
-        found = await self._run(self.store.load_refresh, refresh_token, client_id=client.client_id)
+        try:
+            found = await self._run(self.store.load_refresh, refresh_token, client_id=client.client_id)
+        except Reused as exc:
+            self.reused(exc)
+            return None
         if found is None:
             return None
         return MCPRefreshToken(token=refresh_token, client_id=found.grant.client_id, scopes=list(found.scopes),
@@ -412,6 +425,8 @@ class MCPProvider(OAuthAuthorizationServerProvider[MCPAuthorizationCode, MCPRefr
             issued = await self._run(self.store.rotate_refresh, refresh_token.token, client_id=client.client_id,
                                      scopes=scopes, access_ttl=s.access_token_ttl, refresh_ttl=s.refresh_token_ttl)
         except TokenInvalid as exc:
+            if isinstance(exc, Reused):
+                self.reused(exc)
             if exc.reason == "scope":
                 raise TokenError("invalid_scope", "cannot widen the scopes of a refresh token") from exc
             raise TokenError("invalid_grant", "refresh token is invalid") from exc

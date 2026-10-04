@@ -38,7 +38,10 @@ What the route layer adds to the SDK's handlers:
   authentication methods (public clients use it);
 - audit lines (``mcp_client_registered``, ``mcp_authorize_start``, ``mcp_token_issued``,
   ``mcp_token_refreshed``, ``mcp_token_rejected``, ``mcp_grant_revoked``, ``mcp_rate_limited``) with ids,
-  names, the address and an outcome; never a token, code, secret, state or nonce.
+  names, the address and an outcome; never a token, code, secret, state or nonce;
+- ``mcp.changed`` to the person: ``granted`` when a code is exchanged, ``revoked`` when a code or refresh
+  token presented again made the store revoke a grant
+  (``mcp_grant_revoked`` with ``by`` ``code_reuse`` / ``refresh_reuse``; the client hears ``invalid_grant``).
 
 ``POST /mcp`` is the MCP server (``tui_gateway.mcp_bridge.server``) behind the SDK's bearer check against this
 store: a missing or invalid token gets the SDK's 401 with
@@ -122,6 +125,7 @@ class CallNotes:
     grant_id: str = ""
     user_id: str = ""
     extra: dict = field(default_factory=dict)
+    revoked_by_reuse: list = field(default_factory=list)  # store.Reused: grants a reused code/token revoked
 
 
 _notes: ContextVar[Optional[CallNotes]] = ContextVar("dashboard_mcp_call_notes", default=None)
@@ -145,6 +149,11 @@ class RouteProvider(MCPProvider):
             if notes is not None and not isinstance(exc, _REFUSALS):
                 notes.store_down = True
             raise
+
+    def reused(self, exc) -> None:
+        notes = _note()
+        if notes is not None:
+            notes.revoked_by_reuse.append(exc)
 
     async def get_client(self, client_id: str):
         info = await super().get_client(client_id)
@@ -394,6 +403,18 @@ def authorize_refusal(request: Request, code: str, description: Any) -> Response
     return error(status, code, detail, headers=headers)
 
 
+async def report_reuse_revocations(request: Request, notes: CallNotes, store: MCPStore) -> None:
+    """A code or refresh token presented again revoked a grant during this request: audit it
+    (``mcp_grant_revoked`` with ``by`` ``code_reuse`` / ``refresh_reuse``) and tell the person
+    (``mcp.changed {revoked}``), as a revoke from Settings › MCP does. The client only heard ``invalid_grant``."""
+    for reuse in notes.revoked_by_reuse:
+        grant = reuse.grant
+        audit_log(AuditEvent.MCP_GRANT_REVOKED, by=reuse.by, grant_id=grant.id, user_id=grant.user_id,
+                  client_id=grant.client_id, client_name=grant.client_name, ip=client_ip(request))
+        await anyio.to_thread.run_sync(api_routes.announce, grant.user_id, "revoked", grant,
+                                       grant.revoked_at or store.now())
+
+
 def announce_granted(store: MCPStore, grant_id: str) -> None:
     """``mcp.changed {granted}`` to the person's live connections, so an open Settings › MCP page lists the new
     client. After the exchange committed; never fails or delays the token response."""
@@ -424,6 +445,7 @@ async def token_endpoint(request: Request) -> Response:
                   reason="invalid_target", status=400)
         return error(400, "invalid_target", "resource is not this gateway's MCP endpoint")
     response, notes = await provider_call(request, partial(rt.token_handler.handle, request))
+    await report_reuse_revocations(request, notes, rt.store)
     if response.status_code == 200 and notes.grant_id:
         event = AuditEvent.MCP_TOKEN_REFRESHED if grant_type == "refresh_token" else AuditEvent.MCP_TOKEN_ISSUED
         audit_log(event, user_id=notes.user_id, grant_id=notes.grant_id, client_id=client_id, ip=ip)
@@ -493,7 +515,8 @@ async def revoke_endpoint(request: Request) -> Response:
                       user_id=found.subject or "", client_id=client.client_id, by="client", ip=client_ip(request))
         return Response(status_code=200, headers=_NO_STORE)
 
-    response, _ = await provider_call(request, call)
+    response, notes = await provider_call(request, call)
+    await report_reuse_revocations(request, notes, rt.store)
     return response
 
 

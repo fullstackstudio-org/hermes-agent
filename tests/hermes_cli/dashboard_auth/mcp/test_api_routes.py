@@ -21,6 +21,7 @@ import pytest
 
 from hermes_cli import web_server
 from hermes_cli.dashboard_auth.mcp import api_routes, mount
+from hermes_cli.dashboard_auth.mcp import store as store_mod
 from hermes_cli.dashboard_auth.mcp.settings import MCPSettings, server_label, slug
 from hermes_cli.dashboard_auth.mcp.store import StoreError
 from tests.hermes_cli.dashboard_auth.mcp.test_routes import (  # noqa: F401 - the fixture is used by name
@@ -471,8 +472,9 @@ def test_a_new_client_is_announced_when_its_code_is_exchanged(gw, transports):
     assert event == {"change": "granted", "grant": {"id": grant["id"], "client_name": "Claude Code"},
                      "at": grant["created_at"]}
     assert bobs.changes() == []
-    assert gw.token(flow).status_code == 400  # a code is single use: the replay announces nothing
-    assert len(mine.changes()) == 1
+    assert gw.token(flow).status_code == 400  # a code is single use: the replay revokes, and says so
+    assert [c["change"] for c in mine.changes()] == ["granted", "revoked"]
+    assert bobs.changes() == []
 
 
 def test_a_refresh_does_not_announce(gw, transports):
@@ -511,3 +513,67 @@ def test_the_event_has_a_contract():
     contract = registry.EVENTS["mcp.changed"]
     assert set(contract.payload.model_fields) == {"change", "grant", "at"}
     registry.check_payload("mcp.changed", {"change": "revoked", "grant": {"id": "g", "client_name": "n"}, "at": 1})
+
+
+# ── mcp.changed: revoked by the gateway ────────────────────────────────────────────────────────
+
+
+def _revocations() -> list[dict]:
+    return [x for x in audit_lines() if x["event"] == "mcp_grant_revoked"]
+
+
+def test_a_replayed_code_revokes_audits_and_announces_once(gw, transports):
+    mine, bobs = transports(ALICE_ID), transports(BOB_ID)
+    flow = gw.connect(ALICE)
+    [grant] = grants_of(gw)
+    mine.frames.clear()
+    for _ in range(2):
+        r = gw.token(flow)
+        assert (r.status_code, r.json()["error"]) == (400, "invalid_grant")
+    assert gw.call(flow.tokens["access_token"]).status_code == 401
+    [line] = _revocations()
+    assert (line["by"], line["grant_id"], line["user_id"], line["client_id"], line["client_name"]) == \
+        ("code_reuse", grant["id"], ALICE_ID, flow.client_id, "Claude Code")
+    assert mine.changes() == [{"change": "revoked", "grant": {"id": grant["id"], "client_name": "Claude Code"},
+                               "at": gw.store.grant(grant["id"]).revoked_at}]
+    assert bobs.changes() == []
+    assert flow.code not in json.dumps(audit_lines())
+
+
+def test_a_reused_refresh_token_revokes_audits_and_announces_once(gw, transports, clock):
+    mine = transports(ALICE_ID)
+    flow = gw.connect(ALICE)
+    [grant] = grants_of(gw)
+    assert gw.refresh(flow).status_code == 200
+    mine.frames.clear()
+    clock.advance(store_mod.REFRESH_RACE_GRACE)  # past the parallel-refresh grace: a reuse
+    for _ in range(2):
+        assert gw.refresh(flow).status_code == 400
+    [line] = _revocations()
+    assert (line["by"], line["grant_id"], line["user_id"]) == ("refresh_reuse", grant["id"], ALICE_ID)
+    [event] = mine.changes()
+    assert event["change"] == "revoked" and event["grant"]["id"] == grant["id"]
+    assert grants_of(gw) == []
+
+
+def test_a_rotated_refresh_token_sent_to_revoke_is_a_reuse_too(gw, transports, clock):
+    mine = transports(ALICE_ID)
+    flow = gw.connect(ALICE)
+    assert gw.refresh(flow).status_code == 200
+    mine.frames.clear()
+    clock.advance(store_mod.REFRESH_RACE_GRACE)
+    r = gw.client.post("/mcp/revoke", data={"token": flow.tokens["refresh_token"], "client_id": flow.client_id,
+                                            "token_type_hint": "refresh_token"})
+    assert r.status_code == 200
+    [line] = _revocations()
+    assert line["by"] == "refresh_reuse"
+    assert [c["change"] for c in mine.changes()] == ["revoked"]
+
+
+def test_a_parallel_refresh_announces_nothing(gw, transports):
+    mine = transports(ALICE_ID)
+    flow = gw.connect(ALICE)
+    mine.frames.clear()
+    assert gw.refresh(flow).status_code == 200
+    assert gw.refresh(flow).status_code == 400  # the same refresh token again within the grace
+    assert mine.changes() == [] and _revocations() == []

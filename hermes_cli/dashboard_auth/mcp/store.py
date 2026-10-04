@@ -196,6 +196,18 @@ class TokenInvalid(StoreError):
         self.reason = reason
 
 
+class Reused(TokenInvalid):
+    """A spent code or a rotated refresh token was presented again and its grant has been revoked by this
+    call (committed before the raise). ``by``: :data:`BY_CODE_REUSE` or :data:`BY_REFRESH_REUSE`; ``grant``:
+    the grant as revoked. Only for a revocation this call made: a reuse that finds the grant already ended
+    (or not minted yet) is answered as before, without this. ``reason`` is ``reused``."""
+
+    def __init__(self, by: str, grant: "Grant"):
+        super().__init__("reused")
+        self.by = by
+        self.grant = grant
+
+
 @dataclass(frozen=True)
 class ClientRecord:
     client_id: str
@@ -635,31 +647,35 @@ class MCPStore:
         """Mark the code used and return it for the exchange, or None. Any presentation consumes it (a
         code presented by another client, or after it expired, is burnt as well). A code presented again
         after it was taken is marked reused (:meth:`exchange_code` then refuses it, so a grant its taker
-        has not minted yet never is), revokes the grant it minted if there is one (``code_reuse``), and
-        returns None."""
+        has not minted yet never is) and revokes the grant it minted if there is one (``code_reuse``):
+        :class:`Reused` when this call revoked it, else None."""
         if not code:
             return None
         code_hash = hash_secret(code)
         now = self.now()
+        revoked: Optional[Grant] = None
         with self._write() as db:
             row = db.execute("SELECT * FROM codes WHERE code_hash = ?", (code_hash,)).fetchone()
             if row is None or not hmac.compare_digest(bytes(row["code_hash"]), code_hash):
                 return None
             if row["used_at"] is not None:
                 db.execute("UPDATE codes SET reused_at = ? WHERE code_hash = ? AND reused_at IS NULL", (now, code_hash))
-                if row["grant_id"]:
-                    self._revoke(db, row["grant_id"], BY_CODE_REUSE, now)
-                return None
-            grant_id = _new_id()
-            db.execute("UPDATE codes SET used_at = ?, grant_id = ? WHERE code_hash = ? AND used_at IS NULL",
-                       (now, grant_id, code_hash))
-            if row["expires_at"] <= now or row["client_id"] != client_id:
-                return None
-            return TakenCode(
-                code_hash=code_hash, grant_id=grant_id, client_id=row["client_id"], user_id=row["user_id"],
-                user_name=row["user_name"], provider=row["provider"], scopes=_scopes(row["scopes"]),
-                code_challenge=row["code_challenge"], redirect_uri=row["redirect_uri"], resource=row["resource"],
-                created_at=row["created_at"], expires_at=row["expires_at"])
+                if row["grant_id"] and self._revoke(db, row["grant_id"], BY_CODE_REUSE, now):
+                    revoked = self._grant_row(db, row["grant_id"], now)
+                if revoked is None:
+                    return None
+            else:
+                grant_id = _new_id()
+                db.execute("UPDATE codes SET used_at = ?, grant_id = ? WHERE code_hash = ? AND used_at IS NULL",
+                           (now, grant_id, code_hash))
+                if row["expires_at"] <= now or row["client_id"] != client_id:
+                    return None
+                return TakenCode(
+                    code_hash=code_hash, grant_id=grant_id, client_id=row["client_id"], user_id=row["user_id"],
+                    user_name=row["user_name"], provider=row["provider"], scopes=_scopes(row["scopes"]),
+                    code_challenge=row["code_challenge"], redirect_uri=row["redirect_uri"],
+                    resource=row["resource"], created_at=row["created_at"], expires_at=row["expires_at"])
+        raise Reused(BY_CODE_REUSE, revoked)
 
     def exchange_code(self, *, code: str, grant_id: str, client_id: str, access_ttl: int, refresh_ttl: int,
                       grant_max_age: int, max_grants: int, created_ip: str = "",
@@ -712,24 +728,30 @@ class MCPStore:
 
     def load_refresh(self, token: str, *, client_id: str) -> Optional[TokenGrant]:
         """The refresh token if it can be rotated by *client_id*, else None. A rotated token presented
-        again revokes its grant (``refresh_reuse``), unless it is a parallel refresh (:meth:`_raced`)."""
+        again revokes its grant (``refresh_reuse``; :class:`Reused` when this call revoked it), unless it is
+        a parallel refresh (:meth:`_raced`)."""
         if not token:
             return None
         now = self.now()
+        revoked: Optional[Grant] = None
         with self._write() as db:
             row = self._token_row(db, token, "refresh")
             if row is None:
                 return None
             if row["rotated_at"] is not None:
-                if not self._raced(db, row, client_id, now):
-                    self._revoke(db, row["grant_id"], BY_REFRESH_REUSE, now)
-                return None
-            grant = self._grant_row(db, row["grant_id"], now)
-            if grant is None or grant.client_id != client_id or row["revoked_at"] is not None \
-                    or row["expires_at"] <= now or grant.revoked_at is not None or grant.expires_at <= now:
-                return None
-            return TokenGrant(kind="refresh", scopes=_scopes(row["scopes"]), expires_at=row["expires_at"],
-                              family=row["family"], grant=grant)
+                if not self._raced(db, row, client_id, now) \
+                        and self._revoke(db, row["grant_id"], BY_REFRESH_REUSE, now):
+                    revoked = self._grant_row(db, row["grant_id"], now)
+                if revoked is None:
+                    return None
+            else:
+                grant = self._grant_row(db, row["grant_id"], now)
+                if grant is None or grant.client_id != client_id or row["revoked_at"] is not None \
+                        or row["expires_at"] <= now or grant.revoked_at is not None or grant.expires_at <= now:
+                    return None
+                return TokenGrant(kind="refresh", scopes=_scopes(row["scopes"]), expires_at=row["expires_at"],
+                                  family=row["family"], grant=grant)
+        raise Reused(BY_REFRESH_REUSE, revoked)
 
     def rotate_refresh(self, token: str, *, client_id: str, scopes: Optional[list[str]], access_ttl: int,
                        refresh_ttl: int) -> Issued:
@@ -737,10 +759,12 @@ class MCPStore:
         token's; None = all of them) and a new refresh token (the token's scopes, the sliding lifetime
         again, never past the grant's end) are minted in the same family.
 
-        Raises :class:`TokenInvalid`; with ``reused`` the grant has been revoked (and that is committed); with
-        ``raced`` (a parallel refresh, :meth:`_raced`) nothing changed."""
+        Raises :class:`TokenInvalid`; with ``reused`` the grant has been revoked (and that is committed; a
+        :class:`Reused` when this call revoked it); with ``raced`` (a parallel refresh, :meth:`_raced`)
+        nothing changed."""
         now = self.now()
         reused = False
+        revoked: Optional[Grant] = None
         with self._write() as db:
             row = self._token_row(db, token, "refresh") if token else None
             if row is None:
@@ -748,7 +772,8 @@ class MCPStore:
             if row["rotated_at"] is not None:
                 if self._raced(db, row, client_id, now):
                     raise TokenInvalid("raced")
-                self._revoke(db, row["grant_id"], BY_REFRESH_REUSE, now)
+                if self._revoke(db, row["grant_id"], BY_REFRESH_REUSE, now):
+                    revoked = self._grant_row(db, row["grant_id"], now)
                 reused = True
             else:
                 grant = self._grant_row(db, row["grant_id"], now)
@@ -774,6 +799,8 @@ class MCPStore:
                 assert after is not None
                 return Issued(grant=after, issued_at=now, access_token=access, access_expires_at=access_exp,
                               refresh_token=refresh, refresh_expires_at=refresh_exp, scopes=wanted)
+        if revoked is not None:
+            raise Reused(BY_REFRESH_REUSE, revoked)
         if reused:
             raise TokenInvalid("reused")
         raise TokenInvalid("unknown")  # unreachable

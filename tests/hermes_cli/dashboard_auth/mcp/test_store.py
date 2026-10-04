@@ -16,8 +16,8 @@ from hermes_cli.dashboard_auth.mcp.store import (
     BY_CLIENT, BY_CODE_REUSE, BY_REFRESH_REUSE, CHAT_IDLE_KEEP, CLIENT_UNUSED_TTL, CODE_TTL, CONSENT_TTL,
     CONSENTS_PER_ADDRESS, GRANT_KEEP_AFTER_END, LAST_USED_EVERY, METADATA_MAX_BYTES, OPERATOR,
     REFRESH_RACE_GRACE,
-    TOKEN_KEEP_AFTER_EXPIRY, CodeInvalid, ConsentInvalid, LimitReached, MCPStore, StoreError, TokenInvalid,
-    hash_secret)
+    TOKEN_KEEP_AFTER_EXPIRY, CodeInvalid, ConsentInvalid, LimitReached, MCPStore, Reused, StoreError,
+    TokenInvalid, hash_secret)
 
 ALICE = "self_hosted:alice"
 BOB = "self_hosted:bob"
@@ -285,10 +285,14 @@ def test_code_is_single_use_and_reuse_revokes_its_grant(store):
     issued = store.exchange_code(code=code, grant_id=taken.grant_id, client_id="client-1",
                                  grant_max_age=90 * 86400, max_grants=5, **TTL)
     assert store.verify_access(issued.access_token) is not None
-    assert store.take_code(code, client_id="client-1") is None  # second presentation
+    with pytest.raises(Reused) as reused:  # second presentation: the grant is revoked, and that is reported
+        store.take_code(code, client_id="client-1")
+    assert (reused.value.by, reused.value.grant.id, reused.value.reason) == (BY_CODE_REUSE, issued.grant.id, "reused")
     grant = store.grant(issued.grant.id)
     assert grant is not None and grant.revoked_by == BY_CODE_REUSE and not grant.live
+    assert reused.value.grant.revoked_at == grant.revoked_at
     assert store.verify_access(issued.access_token) is None
+    assert store.take_code(code, client_id="client-1") is None  # already revoked: nothing new to report
 
 
 def test_a_code_presented_again_before_its_exchange_is_never_exchanged(store):
@@ -521,11 +525,14 @@ def test_reuse_of_a_rotated_refresh_token_revokes_the_grant(store, clock):
     issued = _grant(store)
     rotated = store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
     clock.t += REFRESH_RACE_GRACE  # past the parallel-refresh grace
-    with pytest.raises(TokenInvalid) as reused:
+    with pytest.raises(Reused) as reused:
         store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
-    assert reused.value.reason == "reused"
+    assert reused.value.reason == "reused" and reused.value.by == BY_REFRESH_REUSE
     g = store.grant(issued.grant.id)
     assert g.revoked_by == BY_REFRESH_REUSE and not g.live  # committed, despite the raise
+    with pytest.raises(TokenInvalid) as again:  # already revoked: refused, nothing new to report
+        store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
+    assert again.value.reason == "reused" and not isinstance(again.value, Reused)
     assert store.verify_access(rotated.access_token) is None
     assert store.load_refresh(rotated.refresh_token, client_id="client-1") is None
 
@@ -535,9 +542,12 @@ def test_loading_a_rotated_refresh_token_revokes_the_grant(store, clock):
     issued = _grant(store)
     rotated = store.rotate_refresh(issued.refresh_token, client_id="client-1", scopes=None, **TTL)
     clock.t += REFRESH_RACE_GRACE
-    assert store.load_refresh(issued.refresh_token, client_id="client-1") is None
+    with pytest.raises(Reused) as reused:
+        store.load_refresh(issued.refresh_token, client_id="client-1")
+    assert (reused.value.by, reused.value.grant.id) == (BY_REFRESH_REUSE, issued.grant.id)
     assert store.grant(issued.grant.id).revoked_by == BY_REFRESH_REUSE
     assert store.verify_access(rotated.access_token) is None
+    assert store.load_refresh(issued.refresh_token, client_id="client-1") is None  # reported once
 
 
 @pytest.mark.parametrize("with_load", [False, True])
@@ -608,7 +618,8 @@ def test_a_rotated_token_outside_the_grace_still_revokes(store, clock, how):
                    (int(clock.t), hash_secret(rotated.refresh_token)))
         db.commit()
         db.close()
-    assert store.load_refresh(issued.refresh_token, client_id=presenter) is None
+    with pytest.raises(Reused):
+        store.load_refresh(issued.refresh_token, client_id=presenter)
     assert store.grant(issued.grant.id).revoked_by == BY_REFRESH_REUSE
 
 

@@ -358,6 +358,28 @@ def test_the_audit_names_a_chat_only_once_it_is_a_known_chat(bridge, monkeypatch
     assert keys == ["", "", known]
 
 
+def test_a_full_draft_store_never_evicts_another_grants_new_chat(bridge):
+    from tui_gateway.mcp_bridge.transport import AgentTransport
+
+    from .conftest import identity
+
+    def draft(grant):
+        return tools._Draft(AgentTransport(identity(grant=grant)), grant, threading.Timer(3600, lambda: None))
+
+    others = {("oidc:user-b", f"chat-{i}"): draft("grant-g2") for i in range(tools.DRAFTS_MAX)}
+    tools._drafts.update(others)
+    # The store is full of another grant's drafts and this grant holds none: refused, nothing evicted.
+    assert _fail(tools.chat_new, bridge, ROBIN, "default").code == "busy"
+    assert set(tools._drafts) == set(others)
+    # With one draft of its own in the full store, this grant's oldest makes room, nobody else's.
+    tools._drafts.pop(("oidc:user-b", "chat-0"))
+    mine = ("oidc:user-a", "chat-mine")
+    tools._drafts[mine] = draft(ROBIN.grant_id)
+    new = tools.chat_new(bridge, ROBIN, "default")["chat_id"]
+    assert mine not in tools._drafts and (ROBIN.login, new) in tools._drafts
+    assert sum(1 for d in tools._drafts.values() if d.grant == "grant-g2") == tools.DRAFTS_MAX - 1
+
+
 def test_without_a_verified_token_a_tool_is_unauthenticated(bridge, monkeypatch):
     monkeypatch.setattr(bridge_server, "caller_from_token", lambda: None)
     result = anyio.run(lambda: bridge_server.Endpoint(bridge).run(None, "whoami", None, tools.whoami))

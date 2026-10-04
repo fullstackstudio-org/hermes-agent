@@ -47,6 +47,8 @@ NAME_MAX = 200
 #: A chat made by ``chat_new`` has no stored row until its first prompt; the endpoint keeps it open this long.
 DRAFT_HOLD_S = 600.0
 DRAFTS_PER_GRANT = 5
+#: New chats held open across all grants. Reaching it evicts the calling grant's own oldest draft, or refuses
+#: (``busy``) a grant that holds none: never another grant's.
 DRAFTS_MAX = 100
 BOTS_CACHE_S = 5.0
 
@@ -298,17 +300,30 @@ def _hold_draft(caller: Caller, chat_id: str, transport: AgentTransport) -> None
     timer = threading.Timer(DRAFT_HOLD_S, _drop_draft, args=(key,))
     timer.daemon = True
     released: list[_Draft] = []
+    full = False
     with _drafts_lock:
+        # Both caps evict only this grant's own drafts, oldest first: one connection never ends another's.
         same_grant = [k for k, d in _drafts.items() if d.grant == caller.grant_id]
-        while len(same_grant) >= DRAFTS_PER_GRANT:
+        while same_grant and (len(same_grant) >= DRAFTS_PER_GRANT or len(_drafts) >= DRAFTS_MAX):
             released.append(_drafts.pop(same_grant.pop(0)))
-        while len(_drafts) >= DRAFTS_MAX:
-            released.append(_drafts.popitem(last=False)[1])
-        _drafts[key] = _Draft(transport, caller.grant_id, timer)
-    timer.start()
+        if len(_drafts) >= DRAFTS_MAX:
+            full = True
+        else:
+            _drafts[key] = _Draft(transport, caller.grant_id, timer)
     for draft in released:
         draft.timer.cancel()
         _release(draft.transport)
+    if full:
+        _release(transport)
+        raise ToolFailure("busy", "the gateway holds too many new chats waiting for a first prompt; try again "
+                          "later, or use bot_prompt without chat_id", retry_after_seconds=60)
+    timer.start()
+
+
+def _draft_room(caller: Caller) -> bool:
+    """Whether :func:`_hold_draft` could take a new draft of this grant now (checked before a chat is made)."""
+    with _drafts_lock:
+        return len(_drafts) < DRAFTS_MAX or any(d.grant == caller.grant_id for d in _drafts.values())
 
 
 def _drop_draft(key: tuple[str, str]) -> None:
@@ -417,6 +432,9 @@ def chats_list(bridge: Bridge, caller: Caller, bot: Any = None, limit: Any = CHA
 
 def chat_new(bridge: Bridge, caller: Caller, bot: Any, title: Any = None) -> dict:
     name = _bot(caller, bot)
+    if not _draft_room(caller):
+        raise ToolFailure("busy", "the gateway holds too many new chats waiting for a first prompt; try again "
+                          "later, or use bot_prompt without chat_id", retry_after_seconds=60)
     params: dict[str, Any] = {"profile": name}
     if isinstance(title, str) and title.strip():
         params["title"] = title.strip()[:TITLE_MAX]
@@ -430,8 +448,8 @@ def chat_new(bridge: Bridge, caller: Caller, bot: Any, title: Any = None) -> dic
     if not chat_id:
         _release(transport)
         raise ToolFailure("gateway_error", "the gateway did not name the new chat")
+    _hold_draft(caller, chat_id, transport)  # busy (and the connection released) when the gateway is full
     _record(bridge, caller, bot=name, chat_id=chat_id, how="new")
-    _hold_draft(caller, chat_id, transport)
     return {"chat_id": chat_id, "bot": name, "title": params.get("title", "")}
 
 

@@ -53,6 +53,9 @@ def _(rid, params: dict) -> dict:
     turned on later) and the user asks again. The user's click is the one attempt that may run
     inside the mint memo's cooldown. ``{has_guest, enabled}``, plus
     ``{error, error_code, retryable, retry_after}`` when the portal refused."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "set up the free tier")) is not None:
+        return refused
     try:
         from hermes_cli import anon_auth
         from hermes_cli import free_tier_bootstrap

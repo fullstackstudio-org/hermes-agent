@@ -337,11 +337,13 @@ def test_the_child_binds_what_the_frame_says(room):
 
 
 def test_an_agents_mid_turn_steer_row_and_clause_say_it_was_the_agent(room):
-    """The carrier itself, in-process: a steer handed in with the marker lands as the agent's row and clause."""
+    """The carrier itself, in-process: ``session.steer`` refuses an agent's connection (4033), but a steer handed
+    in with the marker still lands as the agent's row and clause."""
     from tui_gateway.row_author import deliver_correction
     agent, call, _peers = room
 
     def steer():
+        assert call("agent", "session.steer", text="marker steer")["error"]["code"] == 4033
         assert deliver_correction(agent, "steer", "marker steer", ROBIN, VIA)
         agent.deliver_mid_turn()
 

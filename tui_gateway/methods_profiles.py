@@ -653,6 +653,9 @@ def _(rid, params: dict) -> dict:
     """Editor Save: ``name`` plus any of ``ui_meta`` (+ ``ui_meta_expected_revisions``), ``soul``,
     ``description``, ``model`` + ``provider`` (+ ``confirm_expensive_model``), ``disabled_skills``,
     ``enabled_toolsets``, ``enabled_mcp_servers``; sections are independent, ``applied`` reports each."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "change a bot's settings")) is not None:
+        return refused
     _name, profile_dir, err = _resolve_profile(rid, params)
     if err is not None:
         return err
@@ -689,6 +692,9 @@ def _unlink_asset_files(assets_dir, asset) -> int:
 def _(rid, params: dict) -> dict:
     """Store ``assets/<asset>.<ext>`` atomically. Params: ``name``, ``asset`` (``"avatar"`` only),
     ``data`` (data URL or base64; PNG/JPEG/WebP ≤2MB, format sniffed) or ``clear: true``."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "change a bot's avatar")) is not None:
+        return refused
     asset = str(params.get("asset") or "avatar").strip().lower()
     if not str(params.get("name") or "").strip():
         return _err(rid, 4063, "name required")

@@ -1092,6 +1092,9 @@ def _(rid, params: dict, session: dict) -> dict:
 @method("session.delete")
 def _(rid, params: dict) -> dict:
     """Delete a stored session + transcripts; refused while live here (FK trips on the agent's next flush)."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "delete a chat")) is not None:
+        return refused
     if not (target := params.get("session_id", "")):
         return _err(rid, 4006, "session_id required")
     snapshot, err = _snapshot_sessions(rid)
@@ -2083,6 +2086,9 @@ def _(rid, params: dict, session: dict) -> dict:
 
 @method("session.close")
 def _(rid, params: dict) -> dict:
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "close a chat")) is not None:
+        return refused
     if not _caller_may_access_session_id(str(params.get("session_id", "") or "")):
         return _ok(rid, {"closed": False})  # the answer for an unknown id: nothing closed, no oracle
     with _session_resume_lock:  # lock only the ownership claim; finalization must not block resumes
@@ -2270,6 +2276,10 @@ def _correction_method(name: str, verb: str, accepted_status: str, supported, un
     ``supported(agent)`` gates 4010."""
     @method(name)
     def _(rid, params: dict) -> dict:
+        from tui_gateway.agent_guard import refusal as _agent_refusal
+        # An agent's text never joins the person's running turn: it is queued as a turn of its own.
+        if (refused := _agent_refusal(rid, f"{verb} a running turn")) is not None:
+            return refused
         if not (text := (params.get("text") or "").strip()):
             return _err(rid, 4002, "text is required")
         session, err = _sess_nowait(params, rid)

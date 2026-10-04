@@ -1155,6 +1155,9 @@ def _side_agent_args(rid, params, prefix):
 
 @method("prompt.background")
 def _(rid, params: dict) -> dict:
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "start a background task in a chat")) is not None:
+        return refused
     session, text, parent, task_id, err = _side_agent_args(rid, params, "bg")
     if err:
         return err
@@ -1174,6 +1177,9 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Side question over a snapshot of the live conversation (``agent/side_question.py``);
     history, alternation and prompt cache stay untouched.  Answer: ``btw.complete``."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "ask a side question in a chat")) is not None:
+        return refused
     session, text, parent, task_id, err = _side_agent_args(rid, params, "btw")
     if err:
         return err

@@ -40,6 +40,17 @@ GUARDED = {
     "billing.step_up": {},
     "billing.charge": {"amount_usd": 1},
     "subscription.change": {"subscription_type_id": "marker"},
+    # Plan "Agent prompts": what would let an agent act as the person beside a prompt of its own.
+    "prompt.background": {"session_id": SID, "text": "marker"},
+    "prompt.btw": {"session_id": SID, "text": "marker"},
+    "session.steer": {"session_id": SID, "text": "marker"},
+    "session.redirect": {"session_id": SID, "text": "marker"},
+    "session.delete": {"session_id": "marker-other"},
+    "session.close": {"session_id": SID},
+    "profiles.configure": {"name": "marker", "description": "marker"},
+    "profiles.set_asset": {"name": "marker", "asset": "avatar", "clear": True},
+    "free_tier.provision": {},
+    "onboarding.reset_setup_profile": {},
 }
 
 
@@ -142,3 +153,14 @@ def test_the_person_may_still_send_without_queued(gateway, monkeypatch):
         == "queued"
     assert gateway.agent._interrupt_requested is True  # the person's own busy mode still applies to her
     gateway.agent.gate.set()
+
+
+def test_the_bridge_allowlist_is_pinned():
+    """Any method added to what the MCP bridge may dispatch is a security decision: change this list with a
+    review of what the method lets an agent do as the person (plan D6, "Agent prompts")."""
+    from tui_gateway.mcp_bridge import rpc
+
+    assert rpc.ALLOWED_METHODS == frozenset({
+        "gateway.capabilities", "client.capabilities", "profiles.list", "session.create", "session.resume",
+        "session.active_list", "session.events.since", "prompt.submit", "session.interrupt", "request.answer"})
+    assert rpc.PROMPT_SUBMIT_PARAMS == frozenset({"session_id", "text", "queued"})

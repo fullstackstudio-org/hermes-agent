@@ -26,6 +26,9 @@ def _(rid, params: dict) -> dict:
 @method("onboarding.reset_setup_profile")
 def _(rid, params: dict) -> dict:
     """Restore the setup profile to its created state in place; clears its session history."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "reset the setup profile")) is not None:
+        return refused
     from hermes_cli.setup_profile import find_setup_profile, reset_setup_profile
     found = find_setup_profile()
     if found is None:

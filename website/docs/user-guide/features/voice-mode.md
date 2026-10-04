@@ -220,6 +220,10 @@ How it works: pressing the voice button opens a WebRTC session from the desktop 
 
 Not supported in this mode: the Nous-managed audio proxy (direct key only), the CLI/TUI (`/voice` keeps the chained loop), and the `tts` tool (it keeps using `tts.provider`).
 
+### Native apps: live voice call (`voice-call` surface)
+
+A client that reads the reply aloud itself (the Hermie apps' hands-free voice mode: speech-to-text in, on-device text-to-speech out as the reply streams) sends `prompt.submit` with `surface: "voice-call"` and, optionally, `voice_context` (the recent spoken exchange, newest last; at most 6000 characters, longer text is cut). The gateway then prepends a per-turn note to the model input only (never the system prompt, never the stored transcript) that tells the bot it is in a live voice call: answer in short spoken sentences in the person's language, no markdown, lists, code or read-out URLs, say one short line before slow work such as a tool call (and another when continuing after it) so the person is never left in silence, ask confirmations out loud in one short question, say that an interactive request is waiting on the screen, and never claim success early. Any other `surface` value is ignored, and an agent connected through MCP cannot set it.
+
 ### Barge-in
 
 You can interrupt the agent at ANY point in its turn — the microphone stays live from the moment you finish speaking until the reply has fully played (full duplex):

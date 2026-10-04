@@ -21,6 +21,7 @@ class ClientSurface(WireEnum):
 
     hud = "hud"
     voice_live = "voice-live"
+    voice_call = "voice-call"
 
 
 class PromptSubmitParams(SessionParams):
@@ -34,7 +35,7 @@ class PromptSubmitParams(SessionParams):
     interrupted: bool | None = None  # client-side barge-in: the turn's model message carries the note
     queued: bool | None = None  # client queue drain — the busy path must hold it, never redirect/steer
     surface: str | None = None  # a ClientSurface value; unknown values clear the surface
-    voice_context: str | None = None  # recent spoken transcript, model input only (voice-live)
+    voice_context: str | None = None  # recent spoken transcript, model input only, capped at 6000 chars (voice-live, voice-call)
     # Desktop-generated large-paste preview (first ~1000 chars); TITLE input only, never the model turn.
     title_preview: str | None = None
     truncate_before_user_ordinal: int | None = None

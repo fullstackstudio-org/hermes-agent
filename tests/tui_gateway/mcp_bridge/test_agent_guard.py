@@ -228,13 +228,14 @@ def test_an_agents_submit_may_not_rewind_the_chat(gateway, extra, via):
 @pytest.mark.parametrize("extra", [
     {"display_kind": "hidden"},
     {"surface": "hud"},
+    {"surface": "voice-call", "voice_context": "marker spoken"},
     {"voice_context": "marker spoken"},
     {"title_preview": "marker preview"},
     {"interrupted": True},
     {"_turn_author": {"user_id": "marker"}},
     {"_replayed_turn": {"author": "marker"}},
     {"truncate_before_row_id": None},
-], ids=["display_kind", "surface", "voice_context", "title_preview", "interrupted", "turn_author", "replayed_turn",
+], ids=["display_kind", "surface", "voice_call_surface", "voice_context", "title_preview", "interrupted", "turn_author", "replayed_turn",
         "null_rewind"])
 @pytest.mark.parametrize("via", sorted(VIA))
 def test_an_agents_submit_carries_nothing_but_its_text(gateway, extra, via):

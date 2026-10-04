@@ -120,3 +120,74 @@ class TestVoiceLiveTurnNote:
 
         assert busy_session["client_surface"] == ""
         assert server._hud_surface_note(busy_session) == ""
+
+
+class TestVoiceCallTurnNote:
+    """``voice-call``: the app reads the reply aloud as it streams, so the model is told it is in a live call and
+    must announce slow work. The note rides the model input only (the same seam as the HUD and voice-live notes)."""
+
+    @pytest.fixture
+    def busy_session(self):
+        session = _session()
+        server._sessions["sid"] = session
+        yield session
+        server._sessions.pop("sid", None)
+
+    def _submit(self, **params):
+        return server._methods["prompt.submit"]("r1", {"session_id": "sid", "text": "what's the weather", "queued": True, **params})
+
+    def test_surface_is_accepted_and_stored(self, busy_session):
+        self._submit(surface="voice-call")
+
+        assert busy_session["client_surface"] == "voice-call"
+        assert "voice-call" in server._CLIENT_SURFACES
+
+    def test_note_names_the_call_and_the_announce_rule(self, busy_session):
+        self._submit(surface="voice-call")
+
+        note = server._hud_surface_note(busy_session)
+        assert note == voice_live.VOICE_CALL_TURN_NOTE
+        assert "live voice call" in note and "spoken aloud" in note
+        assert "BEFORE you use a tool" in note
+        assert "on their screen" in note
+        assert "Recent spoken conversation" not in note
+
+    def test_spoken_context_joins_the_note(self, busy_session):
+        self._submit(surface="voice-call", voice_context="Bot: Hi\nUser: what's the weather")
+
+        note = server._hud_surface_note(busy_session)
+        assert note.startswith(voice_live.VOICE_CALL_TURN_NOTE)
+        assert "User: what's the weather" in note
+
+    def test_spoken_context_is_capped(self, busy_session):
+        self._submit(surface="voice-call", voice_context="x" * 9000)
+
+        assert len(busy_session["voice_live_context"]) == 6000
+
+    def test_context_without_the_surface_is_dropped(self, busy_session):
+        self._submit(voice_context="User: smuggled")
+
+        assert busy_session["voice_live_context"] == ""
+        assert server._hud_surface_note(busy_session) == ""
+
+    def test_unknown_surfaces_are_still_dropped(self, busy_session):
+        self._submit(surface="voice-calls", voice_context="User: smuggled")
+
+        assert busy_session["client_surface"] == ""
+        assert busy_session["voice_live_context"] == ""
+        assert server._hud_surface_note(busy_session) == ""
+
+    def test_next_plain_submit_clears_the_call_surface(self, busy_session):
+        self._submit(surface="voice-call", voice_context="User: hi")
+        self._submit()
+
+        assert busy_session["client_surface"] == ""
+        assert busy_session["voice_live_context"] == ""
+
+    def test_note_reaches_the_model_input_only(self, busy_session):
+        """The note is prepended to the run message; the prompt (what is persisted as the user's row) is untouched."""
+        self._submit(surface="voice-call")
+        note = server._hud_surface_note(busy_session)
+
+        assert server._prepend_note("what's the weather", note) == f"{note}\n\nwhat's the weather"
+        assert note not in "what's the weather"

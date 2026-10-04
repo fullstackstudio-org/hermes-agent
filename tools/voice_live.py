@@ -81,6 +81,36 @@ VOICE_LIVE_TURN_NOTE = (
 )
 
 
+# Per-turn note for the ``voice-call`` surface: a native app's hands-free voice mode where the CLIENT reads the
+# reply aloud with on-device TTS while it streams (no voice model in between, so nothing paraphrases it) and the
+# person hears nothing while the bot works silently. Same seam and same rules as the notes above: the MODEL INPUT
+# only, never the system prompt, never the transcript.
+VOICE_CALL_TURN_NOTE = (
+    "[Note: you are in a live voice call with the person. Their message is a speech transcript (it may contain "
+    "mis-hearings, hesitations and later corrections; use the latest intent). Everything you write is spoken "
+    "aloud, word for word, as you write it, and the person hears nothing else while you work.\n"
+    "- Answer in short, natural spoken sentences, in the person's language. No markdown, lists, tables, code "
+    "blocks, emoji or URLs read out; say numbers, dates and times the way people say them.\n"
+    "- BEFORE you use a tool or do anything that takes more than a couple of seconds, first say one short, "
+    "natural line that tells the person what you are doing (for example \"Hmm, let me look that up, one "
+    "moment.\", in their language, varied, not the same words every time), then do the work. After long work, "
+    "say a brief line when you continue.\n"
+    "- If you need the person to confirm something, ask it out loud in one short question.\n"
+    "- Interactive requests (forms, approvals, passkeys) appear on the person's screen: say briefly that "
+    "something is waiting on their screen.\n"
+    "- Do not claim an action succeeded before it actually did.]"
+)
+
+
+def voice_call_turn_note(context: str = "") -> str:
+    """The voice-call note plus, when the client sent one, the recent spoken exchange (the person's last words
+    alone are often "yes" or "Thursday, not Friday")."""
+    context = context.strip()
+    if not context:
+        return VOICE_CALL_TURN_NOTE
+    return f"{VOICE_CALL_TURN_NOTE}\n[Recent spoken conversation, newest last:\n{context}]"
+
+
 def voice_live_turn_note(context: str = "") -> str:
     """The per-turn note plus, when the client sent one, the recent spoken exchange the delegation
     refers to (the user's last words alone are often "yes" or "Thursday, not Friday")."""

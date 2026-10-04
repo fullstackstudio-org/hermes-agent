@@ -22,8 +22,11 @@ A re-authentication grant (self-enrolment without a code) is a third enrolment a
 kinds of code. A session opens it (``open``), a sign-in of the same person that the provider reports as
 fresh completes it once (``fresh`` or ``failed``), and the enrolment it authorises spends it in the
 credential insert's own transaction (``spent``): one grant, at most one credential, never after
-:data:`GRANT_TTL`. A web grant is bound to the browser that opened it by a secret only its cookie holds
-(stored as SHA-256); a native grant is bound by the gateway's PKCE round trip and has no secret.
+:data:`GRANT_TTL`. The binding holds until the grant is spent, not only until it is completed: a web grant is
+bound to the browser that opened it by a secret only its cookie holds, needed to complete it and again to use
+it; a native grant is completed through the gateway's PKCE round trip, and the completion hands the app a
+``use_secret`` that it needs to use it. Both are stored as SHA-256 only, so the grant id alone (which can end
+up in an access log or a browser history) neither completes nor spends anything.
 
 A credential enrolled with a cooling-off period (``usable_from`` in the future) is listed by
 :meth:`PasskeyStore.credentials` and can be revoked, but it is in no :meth:`PasskeyStore.snapshot` and an
@@ -83,7 +86,7 @@ GRANT_KEEP_AFTER_EXPIRY = 24 * 60 * 60
 REAUTH_SKEW = 120  # a sign-in counts as fresh when ``auth_time >= grant.created_at - REAUTH_SKEW``
 GRANT_CLIENTS = ("web", "native")
 GRANT_STATES = ("open", "fresh", "failed", "spent")
-GRANT_FAILURES = ("client_mismatch", "provider_mismatch", "user_mismatch", "auth_time_missing", "auth_not_fresh")
+GRANT_FAILURES = ("provider_mismatch", "user_mismatch", "auth_time_missing", "auth_not_fresh")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);
@@ -158,13 +161,14 @@ CREATE TABLE IF NOT EXISTS reauth_grants (
     expires_at INTEGER NOT NULL,
     completed_at INTEGER,
     spent_at INTEGER,
-    credential_row INTEGER);
+    credential_row INTEGER,
+    use_secret_hash BLOB);
 CREATE INDEX IF NOT EXISTS reauth_grants_expires ON reauth_grants (expires_at);
 """
 
 # Columns added to a table that schema 1 created, without a version bump: each is nullable, so a build that
 # does not know it inserts by named columns and leaves it NULL. Added once, guarded by ``PRAGMA table_info``.
-_ADDED_COLUMNS = (("credentials", "usable_from", "INTEGER"),)
+_ADDED_COLUMNS = (("credentials", "usable_from", "INTEGER"), ("reauth_grants", "use_secret_hash", "BLOB"))
 
 
 class StoreError(Exception):
@@ -187,10 +191,10 @@ class GrantInvalid(StoreError):
     """A re-authentication grant cannot be used or completed; nothing changed.
 
     Using one (:meth:`PasskeyStore.fresh_grant`, :meth:`PasskeyStore.add_credential`): ``reason`` is
-    ``unknown`` (no such grant for this user, or expired), ``not_fresh`` (still open), ``spent`` or
-    ``failed`` (then ``failure`` is one of :data:`GRANT_FAILURES`).
-    Completing one (:meth:`PasskeyStore.complete_grant`): ``unknown`` (no such grant, expired, or a web
-    grant without its secret) or ``not_open`` (completed before; ``state`` says how)."""
+    ``unknown`` (no such grant for this user, expired, or presented without its use binding),
+    ``not_fresh`` (still open), ``spent`` or ``failed`` (then ``failure`` is one of :data:`GRANT_FAILURES`).
+    Completing one (:meth:`PasskeyStore.complete_grant`): ``unknown`` (no such grant, expired, the other kind
+    of client, or a web grant without its secret) or ``not_open`` (completed before; ``state`` says how)."""
 
     def __init__(self, reason: str, *, failure: str = "", state: str = ""):
         super().__init__(reason)
@@ -282,7 +286,7 @@ class Pending:
 
 @dataclass(frozen=True)
 class Grant:
-    """A re-authentication grant. The web secret's hash stays in the store."""
+    """A re-authentication grant. The hashes of its web secret and native use secret stay in the store."""
     id: str
     user_id: str  # "<provider>:<user id>" of the session that opened it
     provider: str
@@ -358,9 +362,20 @@ def _grant(row: sqlite3.Row) -> Grant:
                  credential_row=row["credential_row"])
 
 
-def _grant_unusable(row: Optional[sqlite3.Row], *, user_id: str, now: int) -> Optional[GrantInvalid]:
-    """Why *row* cannot authorise an enrolment for *user_id* now (None when it can)."""
-    if row is None or row["user_id"] != user_id or row["expires_at"] <= now:
+def _use_binding_holds(row: sqlite3.Row, secret: Optional[str]) -> bool:
+    """Whether *secret* is the grant's use binding: a ``web`` grant's cookie secret, or the ``use_secret`` a
+    ``native`` grant was given when it was completed fresh (none before that)."""
+    stored = row["secret_hash"] if row["client"] == "web" else row["use_secret_hash"]
+    return isinstance(secret, str) and bool(secret) and stored is not None \
+        and hmac.compare_digest(bytes(stored), reauth_secret_hash(secret))
+
+
+def _grant_unusable(row: Optional[sqlite3.Row], *, user_id: str, now: int, secret: Optional[str]
+                    ) -> Optional[GrantInvalid]:
+    """Why *row* cannot authorise an enrolment for *user_id*, who presents *secret*, now (None when it can).
+    Without the binding the answer is ``unknown`` whatever the state: the grant id alone (which can end up in
+    an access log or the browser history) proves nothing and reveals nothing."""
+    if row is None or row["user_id"] != user_id or row["expires_at"] <= now or not _use_binding_holds(row, secret):
         return GrantInvalid("unknown")  # one answer: nobody learns whether another user's grant exists
     if row["state"] == "open":
         return GrantInvalid("not_fresh")
@@ -568,14 +583,15 @@ class PasskeyStore:
         return [c for c in self.credentials(include_revoked=include_revoked) if c.id_b64u.startswith(prefix)]
 
     def add_credential(self, *, user_id: str, registration: RegistrationOk, code: Optional[str] = None,
-                       grant_id: Optional[str] = None, usable_from: Optional[int] = None, created_ip: str = ""
-                       ) -> CredentialRecord:
+                       grant_id: Optional[str] = None, grant_secret: Optional[str] = None,
+                       usable_from: Optional[int] = None, created_ip: str = "") -> CredentialRecord:
         """Enrol: take the open registration *registration* was verified against (its id, user and nonce),
         redeem the authority, and store the credential, all or nothing. *user_id* is the signed-in caller.
 
         The authority is exactly one of *code* (an enrolment code; ``created_via`` is ``operator`` or
-        ``passkey`` by who minted it) or *grant_id* (a ``fresh`` re-authentication grant of *user_id*, spent
-        here; ``created_via`` is ``self``). *usable_from* (Unix seconds, ignored unless in the future) starts
+        ``passkey`` by who minted it) or *grant_id* with its *grant_secret* (a ``fresh`` re-authentication
+        grant of *user_id* and its use binding: the web cookie secret or the native ``use_secret``, checked and
+        spent here in one transaction; ``created_via`` is ``self``). *usable_from* (Unix seconds, ignored unless in the future) starts
         a cooling-off period: the credential is listed but not usable until then.
 
         Raises :class:`PendingInvalid`, :class:`CodeInvalid` / :class:`GrantInvalid` or
@@ -592,7 +608,7 @@ class PasskeyStore:
             if pending.rp_id != registration.rp_id:
                 raise PendingInvalid("the registration was opened for another RP")
             if grant_id is not None:
-                self._spend_grant(db, str(grant_id), user_id=user_id, now=now)
+                self._spend_grant(db, str(grant_id), user_id=user_id, now=now, secret=grant_secret)
                 created_via = SELF
             else:
                 created_via = self._redeem_code(db, str(code), user_id=user_id, now=now)
@@ -629,10 +645,12 @@ class PasskeyStore:
         return OPERATOR if invite["minted_by"] == OPERATOR else "passkey"
 
     @staticmethod
-    def _spend_grant(db: sqlite3.Connection, grant_id: str, *, user_id: str, now: int) -> None:
-        """Spend *user_id*'s fresh grant (compare-and-set on its state). Raises :class:`GrantInvalid`."""
+    def _spend_grant(db: sqlite3.Connection, grant_id: str, *, user_id: str, now: int, secret: Optional[str]
+                     ) -> None:
+        """Spend *user_id*'s fresh grant, whose use binding is *secret* (compare-and-set on its state). Raises
+        :class:`GrantInvalid`."""
         row = db.execute("SELECT * FROM reauth_grants WHERE id = ?", (grant_id,)).fetchone()
-        refusal = _grant_unusable(row, user_id=user_id, now=now)
+        refusal = _grant_unusable(row, user_id=user_id, now=now, secret=secret)
         if refusal is not None:
             raise refusal
         if db.execute("UPDATE reauth_grants SET state = 'spent', spent_at = ? WHERE id = ? AND state = 'fresh'",
@@ -778,13 +796,14 @@ class PasskeyStore:
             return None
         return _grant(row)
 
-    def fresh_grant(self, grant_id: str, *, user_id: str) -> Grant:
-        """The grant when it can authorise an enrolment for *user_id* now (``fresh``, unexpired, unspent);
-        nothing is taken. Raises :class:`GrantInvalid` with the reason otherwise."""
+    def fresh_grant(self, grant_id: str, *, user_id: str, secret: Optional[str]) -> Grant:
+        """The grant when it can authorise an enrolment for *user_id*, who presents its use binding *secret*,
+        now (``fresh``, unexpired, unspent); nothing is taken. Raises :class:`GrantInvalid` with the reason
+        otherwise (``unknown`` without the binding)."""
         now = self.now()
         with self._read() as db:
             row = db.execute("SELECT * FROM reauth_grants WHERE id = ?", (str(grant_id),)).fetchone()
-        refusal = _grant_unusable(row, user_id=user_id, now=now)
+        refusal = _grant_unusable(row, user_id=user_id, now=now, secret=secret)
         if refusal is not None:
             raise refusal
         return _grant(row)
@@ -810,32 +829,37 @@ class PasskeyStore:
             and hmac.compare_digest(bytes(stored), reauth_secret_hash(secret))
 
     def complete_grant(self, grant_id: str, *, session_user: str, session_provider: str, auth_time: Optional[int],
-                       client: str, secret: Optional[str] = None, now: Optional[int] = None,
-                       accept_missing: bool = False) -> Grant:
+                       client: str, secret: Optional[str] = None, use_secret_hash: Optional[bytes] = None,
+                       now: Optional[int] = None, accept_missing: bool = False) -> Grant:
         """The one transition out of ``open``: the sign-in the grant asked for came back as *session_user*
         (``<provider>:<user id>``) of *session_provider*, who authenticated at *auth_time* (0 or None: the
-        provider did not say). *client* is how it came back (``web``: the callback, with the cookie *secret*;
-        ``native``: the token route). Returns the grant, now ``fresh`` or ``failed`` with its ``failure``:
+        provider did not say). *client* is how it came back (``web``: the callback, with the cookie *secret*,
+        which stays the grant's use binding; ``native``: the token route, with *use_secret_hash*, the hash of the
+        ``use_secret`` handed to the app with the answer, stored only when the grant turns fresh). Returns the
+        grant, now ``fresh`` or ``failed`` with its ``failure``:
 
-        ``client_mismatch``, ``provider_mismatch``, ``user_mismatch`` (checked in that order), then
-        ``auth_time_missing`` (unless *accept_missing*: then fresh with ``auth_time_assumed``) or
-        ``auth_not_fresh`` (``auth_time < created_at - REAUTH_SKEW``).
+        ``provider_mismatch``, ``user_mismatch`` (checked in that order), then ``auth_time_missing`` (unless
+        *accept_missing*: then fresh with ``auth_time_assumed``) or ``auth_not_fresh`` (``auth_time <
+        created_at - REAUTH_SKEW``).
 
-        Raises :class:`GrantInvalid` and changes nothing when there is no such unexpired grant, when a web
-        grant's *secret* does not match (whoever lacks the binding cannot fail the grant either), or when it
-        was completed before (``not_open``)."""
+        Raises :class:`GrantInvalid` and changes nothing when there is no such unexpired grant, when it comes
+        back over the other kind of client or a web grant's *secret* does not match (whoever lacks the binding
+        can neither complete nor fail the grant: ``unknown``), or when it was completed before
+        (``not_open``)."""
+        if client not in GRANT_CLIENTS:
+            raise ValueError(f"unknown client {client!r}")
+        if client == "native" and not (isinstance(use_secret_hash, bytes) and len(use_secret_hash) == 32):
+            raise ValueError("a native completion needs the 32-byte hash of the use secret it hands out")
         now = self.now() if now is None else int(now)
         with self._write() as db:
             row = db.execute("SELECT * FROM reauth_grants WHERE id = ?", (str(grant_id),)).fetchone()
-            if row is None or row["expires_at"] <= now \
+            if row is None or row["expires_at"] <= now or client != row["client"] \
                     or (row["client"] == "web" and not self._binding_holds(row, secret)):
                 raise GrantInvalid("unknown")
             if row["state"] != "open":
                 raise GrantInvalid("not_open", state=row["state"])
             assumed = False
-            if client != row["client"]:
-                failure = "client_mismatch"
-            elif session_provider != row["provider"]:
+            if session_provider != row["provider"]:
                 failure = "provider_mismatch"
             elif session_user != row["user_id"]:
                 failure = "user_mismatch"
@@ -847,9 +871,10 @@ class PasskeyStore:
                 failure = ""
             state = "failed" if failure else "fresh"
             reported = int(auth_time) if auth_time else 0
+            use_hash = use_secret_hash if state == "fresh" and client == "native" else None
             if db.execute("UPDATE reauth_grants SET state = ?, failure = ?, auth_time = ?, auth_time_assumed = ?,"
-                          " completed_at = ? WHERE id = ? AND state = 'open'",
-                          (state, failure, reported, int(assumed), now, row["id"])).rowcount != 1:
+                          " completed_at = ?, use_secret_hash = ? WHERE id = ? AND state = 'open'",
+                          (state, failure, reported, int(assumed), now, use_hash, row["id"])).rowcount != 1:
                 raise GrantInvalid("not_open")
             return _grant(db.execute("SELECT * FROM reauth_grants WHERE id = ?", (row["id"],)).fetchone())
 

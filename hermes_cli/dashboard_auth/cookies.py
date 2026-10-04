@@ -13,9 +13,12 @@ draft-west-cookie-prefixes: bare name over HTTP; ``__Host-`` on gated HTTPS with
 resolve the name via :func:`_resolved_name` — a mismatch silently breaks sessions.
 
 ``hermes_reauth`` (fork, passkey self-enrolment) binds a web re-authentication grant to the browser that
-opened it: the grant's secret, 10 min, the PKCE cookie's attributes. Unlike the others it is read under
-the ONE name the request shape resolves to, never a weaker variant: on HTTPS a bare or ``__Secure-``
-copy tossed in by a sibling host must not stand in for ``__Host-hermes_reauth``.
+opened it, from ``reauth/begin`` until the grant is spent: the grant's secret, 10 min. Unlike every other
+cookie here it has ONE shape whatever the prefix or the scheme the gateway sees: ``__Host-hermes_reauth``,
+``Secure``, ``Path=/``, host-only, ``SameSite=Lax``, HttpOnly, and it is read under that name only. A
+``__Secure-`` or bare variant could be tossed in by a sibling host (behind a proxy prefix, or when the
+gateway sees plain http behind a TLS terminator); ``__Host-`` cannot. The passkey routes refuse to open a
+web grant where the browser is not on https (or a loopback dev host), so the shape always works.
 """
 from __future__ import annotations
 
@@ -206,24 +209,29 @@ def parse_pkce_payload(raw: str) -> dict[str, str]:
     return dict(seg.split("=", 1) for seg in flat.split(";") if "=" in seg)
 
 
-def set_reauth_cookie(
-    response: Response, *, secret: str, use_https: bool, prefix: str = "") -> None:
+REAUTH_COOKIE_NAME = f"__Host-{REAUTH_COOKIE}"
+
+
+def _reauth_attrs() -> dict:
+    return {"httponly": True, "secure": True, "samesite": "lax", "path": "/"}
+
+
+def set_reauth_cookie(response: Response, *, secret: str) -> None:
     """Bind a web re-authentication grant to this browser (``secret`` from the store's
-    ``new_reauth_secret``). The PKCE cookie's attributes: the IdP's cross-site return carries it."""
-    _set(response, REAUTH_COOKIE, secret, max_age=_REAUTH_MAX_AGE, use_https=use_https,
-         prefix=prefix, attrs=_pkce_attrs(use_https=use_https, prefix=prefix))
+    ``new_reauth_secret``) until it is spent. Always ``__Host-``, ``Secure``, ``Path=/``, ``SameSite=Lax``:
+    the sign-in callback is a top-level GET, which carries a Lax cookie, and the passkey routes are
+    same-origin."""
+    response.set_cookie(REAUTH_COOKIE_NAME, secret, max_age=_REAUTH_MAX_AGE, **_reauth_attrs())
 
 
-def read_reauth_cookie(request: Request, *, use_https: bool, prefix: str = "") -> Optional[str]:
-    """The grant secret under the exact name this request shape resolves to (no fallback)."""
-    return request.cookies.get(_resolved_name(REAUTH_COOKIE, use_https=use_https, prefix=prefix)) or None
+def read_reauth_cookie(request: Request) -> Optional[str]:
+    """The grant secret, from ``__Host-hermes_reauth`` only (no weaker variant counts)."""
+    return request.cookies.get(REAUTH_COOKIE_NAME) or None
 
 
-def clear_reauth_cookie(response: Response, *, use_https: bool, prefix: str = "") -> None:
-    """Delete every reauth cookie variant (prefixed ones carry ``Secure; SameSite=None``)."""
-    _clear_cookie_variants(
-        response, REAUTH_COOKIE, prefix=prefix, https_samesite="none",
-        bare_attrs=_pkce_attrs(use_https=use_https, prefix=prefix))
+def clear_reauth_cookie(response: Response) -> None:
+    """Delete the reauth cookie (the same shape it was set with)."""
+    response.set_cookie(REAUTH_COOKIE_NAME, "", max_age=0, **_reauth_attrs())
 
 
 def set_sso_attempt_cookie(response: Response, *, use_https: bool, prefix: str = "") -> None:

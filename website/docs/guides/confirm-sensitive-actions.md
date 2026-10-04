@@ -158,7 +158,9 @@ On the gateway host, as the gateway's user:
 With `confirm.passkey.self_enrol.enabled: true` (the default), a signed-in person can add a passkey from
 the app's or the web client's settings without a code: they sign in again, the sign-in provider confirms
 it happened just now, and that one fresh sign-in authorises one passkey for that person, from the app or
-browser that asked (it expires after 10 minutes and is used up by the passkey). It needs a provider that
+browser that asked (it expires after 10 minutes and is used up by the passkey). The browser stays bound by
+an https-only cookie and the app by a one-time secret only its own sign-in receives, from the start until
+the passkey is added; so the web client needs the page on https. It needs a provider that
 can force a fresh sign-in: the password provider (`basic`) and OIDC (`self_hosted`, which asks the
 identity provider for `prompt=login` and `max_age=0` and checks the returned `auth_time`). Nous cannot,
 so people signed in with Nous need a code.

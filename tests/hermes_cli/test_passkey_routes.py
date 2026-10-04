@@ -695,6 +695,12 @@ def test_a_misbehaving_hook_never_fails_or_holds_the_change(gw, transports, monk
 
 # ── self-enrolment: a fresh sign-in instead of a code ────────────────────────────────────────────
 
+REAUTH_COOKIE = "__Host-hermes_reauth"
+#: grant id → its use binding (the web cookie secret, or the native use secret) and its client kind.
+SECRETS: dict[str, str] = {}
+KINDS: dict[str, str] = {}
+_MISSING = object()
+
 
 class ReauthStubProvider(StubAuthProvider):
     """The stub provider able to force a fresh sign-in (like ``basic`` and ``self_hosted``). Its sign-in
@@ -737,38 +743,76 @@ def sgw(make_self_gateway) -> Gateway:
     return make_self_gateway()
 
 
-def open_grant(gw: Gateway, user: str = ALICE, headers: dict | None = None) -> dict:
-    r = gw.post("/reauth/begin", {}, user, headers)
+def reauth_cookie_of(r) -> str:
+    cookie = next(c for c in r.headers.get_list("set-cookie") if c.startswith(f"{REAUTH_COOKIE}="))
+    return cookie.split(";", 1)[0].split("=", 1)[1]
+
+
+def web_headers(gw: Gateway, user: str = ALICE, secret: str | None = None, origin: str = BASE) -> dict:
+    headers = gw.cookie(user, origin)
+    if secret:
+        headers["Cookie"] += f"; {REAUTH_COOKIE}={secret}"
+    return headers
+
+
+def open_grant(gw: Gateway, user: str = ALICE, *, web: bool = False) -> dict:
+    r = gw.post("/reauth/begin", {}, user, web_headers(gw, user) if web else None)
     assert r.status_code == 200, r.text
-    return r.json()
+    body = r.json()
+    KINDS[body["grant_id"]] = "web" if web else "native"
+    if web:
+        SECRETS[body["grant_id"]] = reauth_cookie_of(r)
+    return body
 
 
-def fresh(gw: Gateway, grant_id: str, user: str = ALICE, *, client: str = "native", secret: str | None = None,
-          auth_time: int | None = None):
-    """What the sign-in routes do when the re-sign-in comes back (SE-3): complete the grant."""
-    return gw.store.complete_grant(grant_id, session_user=user, session_provider="stub",
-                                   auth_time=int(gw.clock.t) if auth_time is None else auth_time, client=client,
-                                   secret=secret)
+def fresh(gw: Gateway, grant_id: str, user: str = ALICE, *, auth_time: int | None = None):
+    """What the sign-in routes do when the re-sign-in comes back (SE-3): complete the grant; a native one
+    gets its use secret, as the token route hands it to the app."""
+    from hermes_cli.dashboard_auth.passkeys.store import new_reauth_secret, reauth_secret_hash
+
+    web = KINDS[grant_id] == "web"
+    use_secret = None if web else new_reauth_secret()
+    done = gw.store.complete_grant(grant_id, session_user=user, session_provider="stub",
+                                   auth_time=int(gw.clock.t) if auth_time is None else auth_time,
+                                   client=KINDS[grant_id], secret=SECRETS.get(grant_id) if web else None,
+                                   use_secret_hash=None if web else reauth_secret_hash(use_secret))
+    if not web and done.state == "fresh":
+        SECRETS[grant_id] = use_secret
+    return done
 
 
-def self_finish(gw: Gateway, auth: SoftAuthenticator, begin: dict, grant_id: str, user: str = ALICE) -> dict:
+def with_grant(gw: Gateway, path: str, body: dict, grant_id: str, user: str = ALICE, *, secret=_MISSING,
+               as_kind: str | None = None):
+    """POST *path* with *grant_id* the way its own client does: a browser with the cookie, the app with
+    ``use_secret``. *secret* overrides the binding presented; *as_kind* calls as the other kind of client."""
+    kind = as_kind or KINDS.get(grant_id, "native")
+    given = SECRETS.get(grant_id) if secret is _MISSING else secret
+    if kind == "web":
+        return gw.post(path, body | {"grant_id": grant_id}, user, web_headers(gw, user, given))
+    return gw.post(path, body | {"grant_id": grant_id} | ({"use_secret": given} if given else {}), user)
+
+
+def begin_with_grant(gw: Gateway, auth: SoftAuthenticator, grant_id: str, user: str = ALICE, **kw):
+    return with_grant(gw, "/register/begin", {"rp_id": auth.rp_id, "base_url": BASE, "name": "Laptop"}, grant_id,
+                      user, **kw)
+
+
+def finish_body(gw: Gateway, auth: SoftAuthenticator, begin: dict, user: str = ALICE) -> dict:
     body = gw.finish_body(auth, begin, "", user)
     del body["code"]
-    return body | {"grant_id": grant_id}
+    return body
 
 
-def begin_with_grant(gw: Gateway, auth: SoftAuthenticator, grant_id: str, user: str = ALICE,
-                     headers: dict | None = None):
-    return gw.post("/register/begin", {"rp_id": auth.rp_id, "base_url": BASE, "name": "Laptop",
-                                       "grant_id": grant_id}, user, headers)
+def finish_with_grant(gw: Gateway, auth: SoftAuthenticator, begin: dict, grant_id: str, user: str = ALICE, **kw):
+    return with_grant(gw, "/register/finish", finish_body(gw, auth, begin, user), grant_id, user, **kw)
 
 
-def self_enrol(gw: Gateway, auth: SoftAuthenticator, user: str = ALICE) -> dict:
-    grant = open_grant(gw, user)
-    fresh(gw, grant["grant_id"], user)
-    r = begin_with_grant(gw, auth, grant["grant_id"], user)
+def self_enrol(gw: Gateway, auth: SoftAuthenticator, user: str = ALICE, *, web: bool = False) -> dict:
+    grant_id = open_grant(gw, user, web=web)["grant_id"]
+    fresh(gw, grant_id, user)
+    r = begin_with_grant(gw, auth, grant_id, user)
     assert r.status_code == 200, r.text
-    r = gw.post("/register/finish", self_finish(gw, auth, r.json(), grant["grant_id"], user), user)
+    r = finish_with_grant(gw, auth, r.json(), grant_id, user)
     assert r.status_code == 200, r.text
     return r.json()["credential"]
 
@@ -802,16 +846,21 @@ def test_a_bearer_caller_opens_a_native_grant_without_a_cookie(sgw):
     assert body["grant_id"] not in json.dumps(audit_lines())
 
 
-def test_a_cookie_caller_gets_the_binding_cookie_and_a_login_path(sgw):
-    r = sgw.post("/reauth/begin", {}, headers=sgw.cookie(ALICE, BASE))
+def _assert_host_cookie(r) -> str:
+    cookie = next(c for c in r.headers.get_list("set-cookie") if "hermes_reauth" in c)
+    assert cookie.startswith(f"{REAUTH_COOKIE}=")
+    attributes = {a.strip().lower() for a in cookie.split(";")[1:]}
+    assert {"httponly", "max-age=600", "path=/", "samesite=lax", "secure"} <= attributes, attributes
+    assert not any(a.startswith("domain=") for a in attributes)  # host-only
+    return cookie.split(";", 1)[0].split("=", 1)[1]
+
+
+def test_a_cookie_caller_gets_the_host_only_binding_cookie_and_a_login_path(sgw):
+    r = sgw.post("/reauth/begin", {}, headers=web_headers(sgw))
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["login_path"] == f"/auth/login?provider=stub&reauth={body['grant_id']}"
-    cookie = r.headers["set-cookie"]
-    assert cookie.startswith("__Host-hermes_reauth=")
-    for attribute in ("HttpOnly", "Max-Age=600", "Path=/", "SameSite=none", "Secure"):
-        assert attribute.lower() in cookie.lower(), attribute
-    secret = cookie.split(";", 1)[0].split("=", 1)[1]
+    secret = _assert_host_cookie(r)
     grant = sgw.store.grant(body["grant_id"], user_id=ALICE)
     assert grant is not None and grant.client == "web"
     # Only the browser holding the cookie can complete it.
@@ -826,14 +875,51 @@ def test_a_cookie_caller_gets_the_binding_cookie_and_a_login_path(sgw):
                for line in audit_lines())
 
 
-def test_the_login_path_keeps_the_proxy_prefix(sgw):
-    headers = sgw.cookie(ALICE, BASE) | {"X-Forwarded-Prefix": "/hermes"}
+def test_behind_a_proxy_prefix_the_cookie_is_still_host_only_on_the_root(sgw):
+    headers = web_headers(sgw) | {"X-Forwarded-Prefix": "/hermes"}
     r = sgw.post("/reauth/begin", {}, headers=headers)
     assert r.status_code == 200, r.text
     assert r.json()["login_path"] == f"/hermes/auth/login?provider=stub&reauth={r.json()['grant_id']}"
-    # ``__Host-`` forbids a path; under a prefix the cookie is ``__Secure-`` and scoped to it.
-    cookie = r.headers["set-cookie"]
-    assert cookie.startswith("__Secure-hermes_reauth=") and "path=/hermes" in cookie.lower()
+    _assert_host_cookie(r)  # never __Secure-hermes_reauth with Path=/hermes: a sibling host could toss that
+
+
+def _http_gateway(make_self_gateway, origins: list[str]) -> tuple[Gateway, TestClient]:
+    gw = make_self_gateway({"base_urls": [BASE, *origins], "allow_private_base_urls": True})
+    return gw, TestClient(web_server.app, base_url="http://gw.example.com")
+
+
+def test_behind_a_tls_terminator_the_browsers_https_origin_counts(make_self_gateway):
+    """Traefik on :80 behind Cloudflare: the gateway sees http, the browser is on https. The Origin says so;
+    the cookie is the same ``__Host-`` one."""
+    gw, client = _http_gateway(make_self_gateway, [])
+    r = client.post(f"{routes.PREFIX}/reauth/begin", json={}, headers=web_headers(gw, origin=BASE))
+    assert r.status_code == 200, r.text
+    _assert_host_cookie(r)
+
+
+def test_a_browser_on_plain_http_cannot_open_a_web_grant(make_self_gateway):
+    gw, client = _http_gateway(make_self_gateway, ["http://gw.example.com"])
+    for extra in ({}, {"X-Forwarded-Proto": "https"}):  # a forwarded-proto header does not change the browser
+        r = client.post(f"{routes.PREFIX}/reauth/begin", json={},
+                        headers=web_headers(gw, origin="http://gw.example.com") | extra)
+        assert (r.status_code, r.json()["error"]) == (403, "insecure_binding"), extra
+        assert not any("hermes_reauth" in c for c in r.headers.get_list("set-cookie"))
+    assert gw.store.counts()["open_grants"] == 0
+    assert [line["reason"] for line in audit_lines() if line["event"] == "passkey_reauth_refused"] == [
+        "insecure_binding", "insecure_binding"]
+    # Codes still work there, and the app (a bearer caller, no cookie) can still self-enrol.
+    r = client.post(f"{routes.PREFIX}/register/begin", headers=web_headers(gw, origin="http://gw.example.com"),
+                    json={"rp_id": NATIVE_RP, "base_url": BASE, "name": "Phone"})
+    assert r.status_code == 200, r.text
+    assert client.post(f"{routes.PREFIX}/reauth/begin", json={}, headers=gw.bearer(ALICE)).status_code == 200
+
+
+def test_a_loopback_dev_host_may_open_a_web_grant(make_self_gateway):
+    gw, client = _http_gateway(make_self_gateway, ["http://localhost:9119"])
+    r = client.post(f"{routes.PREFIX}/reauth/begin", json={},
+                    headers=web_headers(gw, origin="http://localhost:9119"))
+    assert r.status_code == 200, r.text
+    _assert_host_cookie(r)
 
 
 def test_reauth_begin_is_refused_when_off_or_without_a_capable_provider(make_gateway, make_self_gateway):
@@ -864,7 +950,7 @@ def test_reauth_begin_per_user_limit_does_not_spend_the_address(sgw, monkeypatch
     assert sgw.post("/reauth/begin", {}, BOB).status_code == 200
 
 
-def test_a_fresh_sign_in_enrols_a_passkey_marked_self(sgw, transports, hooks):
+def test_the_app_enrols_with_its_use_secret_and_the_passkey_is_marked_self(sgw, transports, hooks):
     alice, bob = transports(ALICE), transports(BOB)
     laptop = native()
     grant = open_grant(sgw)
@@ -873,8 +959,9 @@ def test_a_fresh_sign_in_enrols_a_passkey_marked_self(sgw, transports, hooks):
     assert r.status_code == 200, r.text
     begin = r.json()
     assert begin["grant"] == {"expires_at": grant["expires_at"]}
-    r = sgw.post("/register/finish", self_finish(sgw, laptop, begin, grant["grant_id"]))
+    r = finish_with_grant(sgw, laptop, begin, grant["grant_id"])
     assert r.status_code == 200, r.text
+    assert "set-cookie" not in r.headers
     credential = r.json()["credential"]
     assert credential["created_via"] == "self" and "usable_from" not in credential
     assert [c["created_via"] for c in sgw.get().json()["credentials"]] == ["self"]
@@ -890,71 +977,102 @@ def test_a_fresh_sign_in_enrols_a_passkey_marked_self(sgw, transports, hooks):
     assert sgw.stepup("invite")["credentials"] == [{"rp_id": NATIVE_RP, "ids": [credential["id"]]}]
 
 
-def test_a_browser_enrols_with_its_own_web_grant(sgw):
-    headers = sgw.cookie(ALICE, BASE)
-    r = sgw.post("/reauth/begin", {}, headers=headers)
-    secret = r.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
-    grant_id = r.json()["grant_id"]
-    fresh(sgw, grant_id, client="web", secret=secret)
+def test_a_browser_enrols_with_its_cookie_which_is_cleared_once_the_grant_is_spent(sgw):
+    grant_id = open_grant(sgw, web=True)["grant_id"]
+    fresh(sgw, grant_id)
     browser = web_authenticator(BASE)
-    r = begin_with_grant(sgw, browser, grant_id, headers=headers)
+    r = begin_with_grant(sgw, browser, grant_id)
     assert r.status_code == 200, r.text
-    r = sgw.post("/register/finish", self_finish(sgw, browser, r.json(), grant_id), headers=headers)
+    r = finish_with_grant(sgw, browser, r.json(), grant_id)
     assert r.status_code == 200, r.text
     assert r.json()["credential"]["created_via"] == "self"
+    cleared = [c for c in r.headers.get_list("set-cookie") if c.startswith(f"{REAUTH_COOKIE}=")]
+    assert len(cleared) == 1 and "max-age=0" in cleared[0].lower() and "secure" in cleared[0].lower()
+
+
+@pytest.mark.parametrize("kind", ["native", "web"])
+def test_a_thief_with_the_session_and_the_grant_id_cannot_enrol(sgw, kind):
+    """The grant id can leak (a proxy's access log of /auth/login?reauth=…, the browser history). With the
+    victim's session and that id, but without the browser's cookie or the app's use secret, the thief's
+    authenticator is refused at begin and at finish; the victim's own client still enrols afterwards."""
+    grant_id = open_grant(sgw, web=kind == "web")["grant_id"]
+    fresh(sgw, grant_id)
+    thief = native()
+    attempts = [{"secret": None}, {"secret": "x" * 43}]
+    if kind == "web":
+        attempts.append({"secret": SECRETS[grant_id], "as_kind": "native"})  # the right secret, as a bearer
+    for attempt in attempts:
+        r = begin_with_grant(sgw, thief, grant_id, **attempt)
+        assert (r.status_code, r.json()["error"], r.json()["reason"]) == (403, "reauth_invalid", "unknown"), attempt
+        begin = sgw.begin_registration(thief)
+        r = finish_with_grant(sgw, thief, begin, grant_id, **attempt)
+        assert (r.status_code, r.json()["error"], r.json()["reason"]) == (403, "reauth_invalid", "unknown"), attempt
+    assert sgw.get().json()["credentials"] == []
+    assert sgw.store.grant(grant_id, user_id=ALICE).state == "fresh"
+    assert self_enrol_with(sgw, grant_id)["created_via"] == "self"
+
+
+def self_enrol_with(gw: Gateway, grant_id: str) -> dict:
+    own = native() if KINDS[grant_id] == "native" else web_authenticator(BASE)
+    r = begin_with_grant(gw, own, grant_id)
+    assert r.status_code == 200, r.text
+    r = finish_with_grant(gw, own, r.json(), grant_id)
+    assert r.status_code == 200, r.text
+    return r.json()["credential"]
 
 
 def test_register_finish_takes_exactly_one_authority(sgw):
     laptop = native()
-    grant = open_grant(sgw)
-    fresh(sgw, grant["grant_id"])
-    begin = begin_with_grant(sgw, laptop, grant["grant_id"]).json()
-    body = self_finish(sgw, laptop, begin, grant["grant_id"])
+    grant_id = open_grant(sgw)["grant_id"]
+    fresh(sgw, grant_id)
+    begin = begin_with_grant(sgw, laptop, grant_id).json()
+    body = finish_body(sgw, laptop, begin) | {"grant_id": grant_id, "use_secret": SECRETS[grant_id]}
     both = body | {"code": sgw.store.mint_code(user_id=ALICE).code}
     neither = {k: v for k, v in body.items() if k != "grant_id"}
-    for bad in (both, neither, body | {"grant_id": 7}, body | {"grant_id": ""}, body | {"grant_id": "g" * 65}):
+    for bad in (both, neither, body | {"grant_id": 7}, body | {"grant_id": ""}, body | {"grant_id": "g" * 65},
+                body | {"use_secret": 7}, body | {"use_secret": "s" * 65}):
         r = sgw.post("/register/finish", bad)
         assert (r.status_code, r.json()["error"]) == (400, "bad_request"), bad.get("grant_id")
     assert sgw.get().json()["credentials"] == []
     assert sgw.post("/register/finish", body).status_code == 200
 
 
+@pytest.mark.parametrize("kind", ["native", "web"])
 @pytest.mark.parametrize("case", ["open", "expired", "other_user", "spent", "failed", "other_client", "unknown"])
-def test_a_grant_that_cannot_authorise_is_refused_at_begin_and_finish(sgw, case):
+def test_a_grant_that_cannot_authorise_is_refused_at_begin_and_finish(sgw, case, kind):
     laptop = native()
     caller = ALICE
     expected: tuple = ("unknown", None)
+    as_kind = None
     if case == "unknown":
         grant_id = b64u(b"\x01" * 16)
-    elif case == "other_client":
-        r = sgw.post("/reauth/begin", {}, headers=sgw.cookie(ALICE, BASE))
-        grant_id = r.json()["grant_id"]
-        secret = r.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
-        fresh(sgw, grant_id, client="web", secret=secret)  # a fresh browser grant, used by the app
+        KINDS[grant_id] = kind
     else:
-        grant_id = open_grant(sgw)["grant_id"]
+        grant_id = open_grant(sgw, web=kind == "web")["grant_id"]
         if case == "open":
-            expected = ("not_fresh", None)
+            # A web grant shows its state to the browser holding the cookie; an open native grant has no use
+            # secret yet, so to the app it is unknown.
+            expected = ("not_fresh", None) if kind == "web" else ("unknown", None)
         elif case == "failed":
             fresh(sgw, grant_id, user=BOB)  # the re-sign-in came back as someone else
-            expected = ("failed", "user_mismatch")
+            expected = ("failed", "user_mismatch") if kind == "web" else ("unknown", None)
         else:
             fresh(sgw, grant_id)
         if case == "expired":
             sgw.clock.t += 601
         elif case == "other_user":
             caller = BOB
+        elif case == "other_client":
+            as_kind = "web" if kind == "native" else "native"  # its own binding, sent by the other kind of client
         elif case == "spent":
-            self_finish_ok = begin_with_grant(sgw, laptop, grant_id).json()
-            assert sgw.post("/register/finish", self_finish(sgw, laptop, self_finish_ok, grant_id)).status_code == 200
-            laptop = native()
+            self_enrol_with(sgw, grant_id)
             expected = ("spent", None)
-    r = begin_with_grant(sgw, laptop, grant_id, caller)
+    r = begin_with_grant(sgw, laptop, grant_id, caller, as_kind=as_kind)
     assert (r.status_code, r.json()["error"], r.json()["reason"], r.json().get("failure")) == (
         403, "reauth_invalid", *expected)
     # Finish re-checks it (a registration opened without the grant cannot borrow it either).
     begin = sgw.begin_registration(laptop, caller)
-    r = sgw.post("/register/finish", self_finish(sgw, laptop, begin, grant_id, caller), caller)
+    r = finish_with_grant(sgw, laptop, begin, grant_id, caller, as_kind=as_kind)
     assert (r.status_code, r.json()["error"], r.json()["reason"], r.json().get("failure")) == (
         403, "reauth_invalid", *expected)
     assert len(sgw.get(caller).json()["credentials"]) == (1 if case == "spent" else 0)
@@ -964,9 +1082,8 @@ def test_a_grant_that_cannot_authorise_is_refused_at_begin_and_finish(sgw, case)
 def test_failed_grants_count_like_failed_codes(sgw):
     laptop = native()
     begin = sgw.begin_registration(laptop)
-    grant_id = open_grant(sgw)["grant_id"]  # never completed: not fresh
-    statuses = [sgw.post("/register/finish", self_finish(sgw, laptop, begin, grant_id)).status_code
-                for _ in range(6)]
+    grant_id = open_grant(sgw)["grant_id"]  # never completed: no use secret
+    statuses = [finish_with_grant(sgw, laptop, begin, grant_id).status_code for _ in range(6)]
     assert statuses == [403] * 5 + [429]
 
 
@@ -979,7 +1096,7 @@ def test_self_enrolment_switched_off_refuses_a_grant_opened_before(make_self_gat
     gw.config["confirm"]["passkey"]["self_enrol"] = {"enabled": False}
     r = begin_with_grant(gw, native(), grant_id)
     assert (r.status_code, r.json()["error"]) == (403, "self_enrol_disabled")
-    r = gw.post("/register/finish", self_finish(gw, laptop, begin, grant_id))
+    r = finish_with_grant(gw, laptop, begin, grant_id)
     assert (r.status_code, r.json()["error"]) == (403, "self_enrol_disabled")
     assert gw.get().json()["credentials"] == []
     # Codes keep working.
@@ -1029,22 +1146,22 @@ def test_a_cooling_off_passkey_becomes_usable_when_the_period_ends(make_self_gat
 
 
 def test_no_grant_secret_or_id_reaches_the_audit_log(sgw, caplog):
-    headers = sgw.cookie(ALICE, BASE)
-    r = sgw.post("/reauth/begin", {}, headers=headers)
-    secret = r.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
-    grant_id = r.json()["grant_id"]
-    fresh(sgw, grant_id, client="web", secret=secret)
-    browser = web_authenticator(BASE)
-    begin = begin_with_grant(sgw, browser, grant_id, headers=headers).json()
-    sgw.post("/register/finish", self_finish(sgw, browser, begin, grant_id), headers=headers)
+    web_id = open_grant(sgw, web=True)["grant_id"]
+    fresh(sgw, web_id)
+    native_id = open_grant(sgw)["grant_id"]
+    fresh(sgw, native_id)
+    self_enrol_with(sgw, web_id)
+    self_enrol_with(sgw, native_id)
     text = json.dumps(audit_lines()) + caplog.text
-    assert secret not in text and grant_id not in text
-    assert grant_id[:8] in text
+    for secret in (SECRETS[web_id], SECRETS[native_id], web_id, native_id):
+        assert secret not in text
+    assert web_id[:8] in text and native_id[:8] in text
 
 
 def test_end_to_end_a_browser_signs_in_again_and_adds_a_self_passkey(sgw, transports, hooks):
     """Through the real sign-in routes: reauth/begin sets the binding cookie, /auth/login asks the provider
-    for a fresh sign-in, the callback completes the grant, and the grant enrols one passkey."""
+    for a fresh sign-in, the callback completes the grant and keeps the cookie, the grant enrols one passkey
+    with that cookie, and finish clears it."""
     alice = transports(ALICE)
     browser = TestClient(web_server.app, base_url=BASE, follow_redirects=False)
     browser.cookies.set("hermes_session_at", sgw.bearer(ALICE)["Authorization"].split(" ", 1)[1])
@@ -1059,21 +1176,23 @@ def test_end_to_end_a_browser_signs_in_again_and_adds_a_self_passkey(sgw, transp
     assert r.status_code in (302, 303, 307), r.text
     grant = sgw.store.grant(grant_id, user_id=ALICE)
     assert grant is not None and grant.state == "fresh"
+    assert browser.cookies.get(REAUTH_COOKIE)  # kept: the binding until the spend
     laptop = web_authenticator(BASE)
     r = browser.post(f"{routes.PREFIX}/register/begin", headers=origin,
                      json={"rp_id": laptop.rp_id, "base_url": BASE, "name": "Laptop", "grant_id": grant_id})
     assert r.status_code == 200, r.text
     r = browser.post(f"{routes.PREFIX}/register/finish", headers=origin,
-                     json=self_finish(sgw, laptop, r.json(), grant_id))
+                     json=finish_body(sgw, laptop, r.json()) | {"grant_id": grant_id})
     assert r.status_code == 200, r.text
     assert r.json()["credential"]["created_via"] == "self"
+    assert browser.cookies.get(REAUTH_COOKIE) is None  # cleared with the spend
     assert [e["change"] for e in alice.events()] == ["added"] and [h["via"] for h in hooks] == ["self"]
     events = [line["event"] for line in audit_lines()]
     assert events.index("passkey_reauth_opened") < events.index("passkey_reauth_fresh") \
         < events.index("passkey_registered")
 
 
-def test_end_to_end_a_stale_sign_in_cannot_enrol(sgw):
+def test_end_to_end_a_stale_sign_in_cannot_enrol_and_the_browser_learns_why(sgw):
     browser = TestClient(web_server.app, base_url=BASE, follow_redirects=False)
     browser.cookies.set("hermes_session_at", sgw.bearer(ALICE)["Authorization"].split(" ", 1)[1])
     r = browser.post(f"{routes.PREFIX}/reauth/begin", json={}, headers={"Origin": BASE})
@@ -1081,5 +1200,6 @@ def test_end_to_end_a_stale_sign_in_cannot_enrol(sgw):
     sgw.provider.auth_time = int(sgw.clock.t) - 3600  # type: ignore[attr-defined]  # the IdP reused an old sign-in
     r = browser.get(r.json()["login_path"])
     browser.get(r.headers["location"])
-    r = begin_with_grant(sgw, web_authenticator(BASE), grant_id, headers=sgw.cookie(ALICE, BASE))
+    r = browser.post(f"{routes.PREFIX}/register/begin", headers={"Origin": BASE},
+                     json={"rp_id": "gw.example.com", "base_url": BASE, "name": "Laptop", "grant_id": grant_id})
     assert (r.status_code, r.json()["reason"], r.json()["failure"]) == (403, "failed", "auth_not_fresh")

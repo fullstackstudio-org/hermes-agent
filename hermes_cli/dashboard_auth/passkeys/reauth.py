@@ -14,9 +14,12 @@ again. The flow, and who calls what here:
 3. The callback, the password login (web) and ``POST /auth/native/token`` (native): :func:`complete` with
    the session the provider returned. The grant becomes ``fresh`` when that session is the same person of
    the same provider and the provider reports a recent authentication, else ``failed``. The sign-in itself
-   always stands (S7): a grant's failure never undoes a login.
-4. ``register/begin`` and ``register/finish`` (the passkey routes) use the fresh grant; the store spends it
-   with the credential insert.
+   always stands (S7): a grant's failure never undoes a login. A fresh native grant gets a one-time
+   ``use_secret`` (stored hashed), returned only in the token route's answer.
+4. ``register/begin`` and ``register/finish`` (the passkey routes) use the fresh grant with its use binding
+   (the web cookie, or the native ``use_secret``); the store checks it and spends the grant with the
+   credential insert. The grant id alone, which can end up in an access log or a browser history, is never
+   enough.
 
 Everything here is tolerant of the level being off or self-enrolment being disabled: no grant is usable
 then (the answer is ``unknown``), and nothing touches the store. The audit lines name the user, provider,
@@ -28,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
@@ -42,8 +45,11 @@ _log = logging.getLogger(__name__)
 #: A grant id as the store mints it: 16 random bytes, base64url without padding.
 _GRANT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{22}$")
 
-#: Refusals of a ``reauth`` parameter on the public sign-in routes, per client address. A refused check is
-#: a store read; past this budget the routes answer 429 before reading anything.
+#: Refusals of a ``reauth`` parameter on the public sign-in routes, per client address AND grant id. A refused
+#: check is a store read; past this budget the routes answer 429 for that grant id before reading anything.
+#: Keyed by the pair so that one client behind a shared address (a proxy, a NAT) cannot use up everybody's
+#: budget; a malformed id is refused without a store read and never counted. Grant ids are 128-bit random,
+#: so trying other ids learns nothing either way.
 REFUSALS_PER_IP = SlidingWindowLimiter(20, 600)
 
 #: The page a browser gets for a dead or foreign grant at ``/auth/login`` (400, never a redirect).
@@ -79,12 +85,15 @@ class Outcome:
     state: str  # "fresh" | "failed"
     reason: str = ""
     expires_at: int = 0  # 0 when the grant is unknown
+    use_secret: str = field(default="", repr=False)  # a fresh native grant's use binding; never logged
 
     def body(self) -> dict[str, Any]:
         """The ``reauth`` object of the native token route's answer."""
         out: dict[str, Any] = {"grant_id": self.grant_id, "state": self.state, "expires_at": self.expires_at}
         if self.reason:
             out["reason"] = self.reason
+        if self.use_secret:
+            out["use_secret"] = self.use_secret
         return out
 
 
@@ -96,30 +105,23 @@ def _short(grant_id: str) -> str:
     return str(grant_id)[:8]
 
 
-def _flag(section: Mapping, name: str, default: bool) -> bool:
-    value = section.get(name) if isinstance(section, Mapping) else None
-    return value if isinstance(value, bool) else default
-
-
 def policy(cfg: Any = None) -> Policy:
-    """Read the policy from *cfg* (default: the gateway's config). ``self_enrol.enabled`` defaults to on and
-    ``accept_missing_auth_time`` to off; a value that is not ``true``/``false`` counts as its default. An
+    """Read the policy from *cfg* (default: the gateway's config) with the passkey settings' own parser
+    (``settings.settings_from_config``), so the sign-in routes and the passkey routes never disagree: an
+    unreadable flag, a ``self_enrol`` that is not a mapping or an unreadable cooling-off all mean off. An
     unreadable config never makes a grant usable."""
-    from hermes_cli.dashboard_auth.passkeys.settings import effective_section
+    from hermes_cli.dashboard_auth.passkeys.settings import settings_from_config
 
     try:
         if cfg is None:
             from hermes_cli.config import load_config
             cfg = load_config()
-        section = effective_section(cfg)
+        settings = settings_from_config(cfg)
     except Exception:  # noqa: BLE001 - an unreadable config never enables the level
         _log.warning("passkey self-enrolment: confirm.passkey could not be read", exc_info=False)
         return Policy()
-    self_enrol = section.get("self_enrol")
-    self_enrol = self_enrol if isinstance(self_enrol, Mapping) else {}
-    return Policy(level_enabled=section.get("enabled") is True,
-                  self_enrol=_flag(self_enrol, "enabled", True),
-                  accept_missing_auth_time=_flag(self_enrol, "accept_missing_auth_time", False))
+    return Policy(level_enabled=settings.enabled, self_enrol=settings.self_enrol.enabled,
+                  accept_missing_auth_time=settings.self_enrol.accept_missing_auth_time)
 
 
 def provider_reauth_reason(provider: Any) -> str:
@@ -162,8 +164,19 @@ def open_grant(*, store: PasskeyStore, user_id: str, provider: str, client: str,
 # ── 2. where a sign-in starts ────────────────────────────────────────────────────────────────────
 
 
-def refusals_exhausted(ip: str) -> bool:
-    return REFUSALS_PER_IP.exhausted(ip)
+def _refusal_key(ip: str, grant_id: str) -> str:
+    return f"{ip}|{grant_id}"
+
+
+def refusals_exhausted(ip: str, grant_id: str) -> bool:
+    """Whether this address has used up its refusals for *grant_id* (never for a malformed id: those cost
+    no store read and are refused anyway)."""
+    return is_grant_id(grant_id) and REFUSALS_PER_IP.exhausted(_refusal_key(ip, grant_id))
+
+
+def _count_refusal(ip: str, grant_id: str) -> None:
+    if is_grant_id(grant_id):
+        REFUSALS_PER_IP.check(_refusal_key(ip, grant_id))
 
 
 def _refused(*, grant_id: str, provider: str, client: str, reason: str, ip: str, where: str,
@@ -200,7 +213,7 @@ def grant_for_login(grant_id: str, *, provider: Any, client: str, secret: Option
         elif grant is not None and grant.client != client:
             grant, reason = None, "client_mismatch"
     if grant is None:
-        REFUSALS_PER_IP.check(ip)
+        _count_refusal(ip, grant_id)
         _refused(grant_id=grant_id if is_grant_id(grant_id) else "", provider=name, client=client, reason=reason,
                  ip=ip, where="start")
     return grant
@@ -221,7 +234,7 @@ def native_grant_for_login(grant_id: str, *, providers: list, ip: str = "",
                     return provider, grant
         except StoreError:
             _log.warning("passkey self-enrolment: the passkey store is unavailable", exc_info=False)
-    REFUSALS_PER_IP.check(ip)
+    _count_refusal(ip, grant_id)
     _refused(grant_id=grant_id if is_grant_id(grant_id) else "", provider="", client="native",
              reason="unknown" if is_grant_id(grant_id) else "malformed", ip=ip, where="start")
     return None, None
@@ -250,14 +263,18 @@ def complete(grant_id: str, session: Session, *, client: str, secret: Optional[s
         _refused(grant_id=grant_id, provider=provider, client=client, reason=reason, ip=ip, where="complete",
                  user_id=user)
         return Outcome(grant_id=grant_id, state="failed", reason=reason)
+    use_secret = new_reauth_secret() if client == "native" else ""
     try:
         grant = (store or _default_store()).complete_grant(
             grant_id, session_user=user, session_provider=provider, auth_time=int(session.auth_time or 0),
             client=client, secret=secret if client == "web" else None,
+            use_secret_hash=reauth_secret_hash(use_secret) if use_secret else None,
             accept_missing=pol.accept_missing_auth_time)
     except GrantInvalid as refusal:
-        # A web secret that does not match is "unknown" to the store; at this point it means this browser
-        # holds another grant's cookie (or a stale one): the binding failed.
+        # "unknown" to the store also covers a grant of the other kind of client and a web secret that does
+        # not match; at this point, for a web sign-in, it means this browser holds another grant's cookie (or a
+        # stale one), or the grant is the app's: the binding failed. Nothing changed either way, so a tossed
+        # PKCE cookie naming somebody's grant cannot fail it.
         reason = "client_mismatch" if client == "web" and refusal.reason == "unknown" else refusal.reason
         _refused(grant_id=grant_id, provider=provider, client=client, reason=reason, ip=ip, where="complete",
                  user_id=user)
@@ -271,7 +288,7 @@ def complete(grant_id: str, session: Session, *, client: str, secret: Optional[s
     if grant.state == "fresh":
         audit_log(AuditEvent.PASSKEY_REAUTH_FRESH, user_id=user, provider=provider, client=client,
                   grant=_short(grant.id), auth_time_assumed=grant.auth_time_assumed, ip=ip, **times)
-        return Outcome(grant_id=grant.id, state="fresh", expires_at=grant.expires_at)
+        return Outcome(grant_id=grant.id, state="fresh", expires_at=grant.expires_at, use_secret=use_secret)
     _refused(grant_id=grant.id, provider=provider, client=client, reason=grant.failure, ip=ip, where="complete",
              user_id=user, **times)
     return Outcome(grant_id=grant.id, state="failed", reason=grant.failure, expires_at=grant.expires_at)

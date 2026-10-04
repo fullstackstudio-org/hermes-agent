@@ -53,6 +53,7 @@ class ReauthIdP(DashboardAuthProvider):
         self.user = "alice"
         self.auth_time: int | None = None  # None: now
         self.starts: list[bool] = []
+        self.revoked: list[str] = []
         self._verifiers: dict[str, str] = {}
 
     def start_login(self, *, redirect_uri: str, fresh: bool = False) -> LoginStart:
@@ -83,7 +84,7 @@ class ReauthIdP(DashboardAuthProvider):
         raise NotImplementedError
 
     def revoke_session(self, *, refresh_token: str) -> None:
-        return None
+        self.revoked.append(refresh_token)
 
 
 class ReauthPassword(DashboardAuthProvider):
@@ -240,8 +241,9 @@ def test_web_reauth_round_trip_completes_the_grant_and_the_login(gw):
     assert done.status_code == 302 and done.headers["location"] == "/settings/passkeys"
     cookies = set_cookies(done)
     assert any(c.startswith("__Host-hermes_session_at=") and "Max-Age=0" not in c for c in cookies)
-    cleared = [c for c in cookies if c.startswith(f"{HOST_COOKIE}=")]
-    assert cleared and all("Max-Age=0" in c for c in cleared)
+    # A fresh grant keeps its cookie: it is the use binding until register/finish spends the grant.
+    assert not [c for c in cookies if c.startswith(f"{HOST_COOKIE}=")]
+    assert gw.client.cookies.get(HOST_COOKIE)
     assert gw.state(grant_id) == ("fresh", "")
     fresh = audit_lines("passkey_reauth_fresh")
     assert fresh[-1]["grant"] == grant_id[:8] and fresh[-1]["client"] == "web" and fresh[-1]["user_id"] == ALICE
@@ -289,9 +291,9 @@ def test_link_attack_callback_without_the_reauth_cookie_completes_the_login_not_
     assert gw.state(grant_id) == ("open", "")
     refused = audit_lines("passkey_reauth_refused")[-1]
     assert refused["reason"] == "client_mismatch" and refused["at"] == "complete"
-    with pytest.raises(Exception) as err:
-        gw.store.fresh_grant(grant_id, user_id=ALICE)
-    assert getattr(err.value, "reason", "") == "not_fresh"
+    with pytest.raises(Exception) as err:  # and the grant id alone uses nothing
+        gw.store.fresh_grant(grant_id, user_id=ALICE, secret=None)
+    assert getattr(err.value, "reason", "") == "unknown"
 
 
 def test_a_sign_in_as_someone_else_fails_the_grant_but_signs_them_in(gw):
@@ -300,7 +302,9 @@ def test_a_sign_in_as_someone_else_fails_the_grant_but_signs_them_in(gw):
     done = gw.callback(gw.web_login(grant_id))
     assert done.status_code == 302 and any(c.startswith("__Host-hermes_session_at=") for c in set_cookies(done))
     assert gw.state(grant_id) == ("failed", "user_mismatch")
-    assert any(c.startswith(f"{HOST_COOKIE}=") and "Max-Age=0" in c for c in set_cookies(done))
+    # The cookie stays until it expires (or a sign-out): with it the browser can learn why the grant failed;
+    # the grant itself can never be used.
+    assert not any(c.startswith(f"{HOST_COOKIE}=") for c in set_cookies(done))
 
 
 @pytest.mark.parametrize("offset, accept, expected", [
@@ -370,12 +374,18 @@ def test_a_provider_without_reauth_starts_no_grant(gw):
     assert audit_lines("passkey_reauth_refused")[-1]["reason"] == "provider_no_reauth"
 
 
-def test_refusals_are_rate_limited_per_address(gw):
+def test_refusals_are_rate_limited_per_address_and_grant_id(gw):
     for _ in range(reauth.REFUSALS_PER_IP.max_events):
         assert gw.web_login("A" * 22).status_code == 400
     assert gw.web_login("A" * 22).status_code == 429
     # A login without reauth is not affected.
     assert gw.client.get("/auth/login", params={"provider": "idp"}).status_code == 302
+    # Nor somebody else's grant behind the same address (a shared proxy or NAT): the budget is per grant id.
+    grant_id = gw.open_web()
+    assert gw.web_login(grant_id).status_code == 302
+    # A malformed id costs no store read and is never counted.
+    for _ in range(reauth.REFUSALS_PER_IP.max_events + 5):
+        assert gw.web_login("not a grant").status_code == 400
 
 
 def test_without_reauth_the_web_login_is_unchanged(gw):
@@ -425,7 +435,7 @@ def test_password_reauth_sets_the_pkce_cookie_and_the_login_completes_the_grant(
     cookies = set_cookies(ok)
     assert any(c.startswith("__Host-hermes_session_at=") for c in cookies)
     assert any(c.startswith("__Host-hermes_session_pkce=") and "Max-Age=0" in c for c in cookies)
-    assert any(c.startswith(f"{HOST_COOKIE}=") and "Max-Age=0" in c for c in cookies)
+    assert not any(c.startswith(f"{HOST_COOKIE}=") for c in cookies)  # kept: the grant is fresh, not spent
     assert gw.state(grant_id, "pw:admin") == ("fresh", "")
 
 
@@ -453,10 +463,19 @@ def test_native_reauth_returns_the_grant_state_and_no_tokens(gw):
     assert r.status_code == 200
     body = r.json()
     assert set(body) == {"reauth"}
+    use_secret = body["reauth"].pop("use_secret")
     assert body["reauth"] == {"grant_id": grant_id, "state": "fresh",
                               "expires_at": gw.store.grant(grant_id, user_id=ALICE).expires_at}
     assert "token" not in r.text and not set_cookies(r)
     assert gw.state(grant_id) == ("fresh", "")
+    # The one-time use secret is the grant's binding from here to the spend; never logged.
+    assert len(use_secret) == 43 and use_secret not in json.dumps(audit_lines())
+    assert gw.store.fresh_grant(grant_id, user_id=ALICE, secret=use_secret).state == "fresh"
+    with pytest.raises(Exception) as err:
+        gw.store.fresh_grant(grant_id, user_id=ALICE, secret=None)
+    assert getattr(err.value, "reason", "") == "unknown"
+    # The session the re-sign-in minted was never handed out: its refresh token is revoked at the IdP.
+    assert len(gw.idp.revoked) == 1
     # Single use: the code is gone.
     again = gw.client.post("/auth/native/token", json={"code": code, "code_verifier": verifier})
     assert again.status_code == 400
@@ -532,3 +551,16 @@ def test_redeem_code_refuses_and_consumes_a_reauth_code():
     with pytest.raises(native_flow.CodeInvalid):
         native_flow.redeem(code=code, code_verifier=verifier)
     native_flow._reset_for_tests()
+
+
+@pytest.mark.parametrize("self_enrol, usable", [
+    ({"enabled": True}, True),
+    ({"enabled": "yes"}, False),
+    ({"cooling_off_s": "10m"}, False),  # an unreadable cooling-off: off here too, like the passkey routes
+    (True, False),
+    ({"accept_missing_auth_time": "true"}, True),
+])
+def test_the_policy_is_read_with_the_passkey_settings_parser(self_enrol, usable):
+    cfg = {"confirm": {"passkey": {"enabled": True, "self_enrol": self_enrol}}}
+    assert reauth.policy(cfg).usable is usable
+    assert reauth.policy(cfg).accept_missing_auth_time is False

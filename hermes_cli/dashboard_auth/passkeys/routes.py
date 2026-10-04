@@ -402,8 +402,39 @@ def _refuse_self_enrol(call: _Call, event: AuditEvent, **fields: Any) -> None:
                                            "enrolment code.")
 
 
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1"})
+
+
+def _browser_on_https(request: Request) -> bool:
+    """Whether the browser behind a cookie call is on https (or a loopback dev host, which browsers treat as
+    a secure context), so that it keeps a ``__Host-`` cookie. The Origin is the browser's own view, whatever
+    the scheme a TLS-terminating proxy hands the gateway; the request scheme counts as evidence too."""
+    from urllib.parse import urlsplit
+
+    from hermes_cli.dashboard_auth.cookies import detect_https
+
+    origin = request.headers.get("origin", "")
+    try:
+        parts = urlsplit(origin)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        parts, host = None, ""
+    if parts is not None and parts.scheme == "https":
+        return True
+    if parts is not None and parts.scheme == "http" and (host in _LOOPBACK_HOSTS or host.endswith(".localhost")):
+        return True
+    return detect_https(request) and not origin.startswith("http://")
+
+
 def _reauth_begin(call: _Call, _body: dict) -> _WithCookies:
     _refuse_self_enrol(call, AuditEvent.PASSKEY_REAUTH_REFUSED)
+    if call.client == "web" and not _browser_on_https(call.request):
+        # The binding cookie is always ``__Host-`` (Secure): a browser on plain http would drop it, and any
+        # weaker cookie could be tossed in by a sibling host. Codes still work.
+        call.audit(AuditEvent.PASSKEY_REAUTH_REFUSED, provider=call.provider, client=call.client,
+                   reason="insecure_binding")
+        raise _Fail(403, "insecure_binding", "Adding a passkey by signing in again needs this page on https; "
+                                             "use an enrolment code.")
     with _REGISTER_BEGIN_LOCK:  # ask both, then record both: one refusal never spends the other budget
         allowed = not (REAUTH_BEGIN_PER_USER.exhausted(call.user_id) or REAUTH_BEGIN_PER_IP.exhausted(call.ip))
         allowed = allowed and REAUTH_BEGIN_PER_USER.check(call.user_id) is Verdict.ALLOWED
@@ -422,14 +453,12 @@ def _reauth_begin(call: _Call, _body: dict) -> _WithCookies:
         return _WithCookies(answer, lambda _response: None)
     from urllib.parse import urlencode
 
-    from hermes_cli.dashboard_auth.cookies import detect_https, set_reauth_cookie
+    from hermes_cli.dashboard_auth.cookies import set_reauth_cookie
     from hermes_cli.dashboard_auth.prefix import prefix_from_request
 
     prefix = prefix_from_request(call.request)
     answer["login_path"] = f"{prefix}/auth/login?" + urlencode({"provider": call.provider, "reauth": grant.id})
-    use_https = detect_https(call.request)
-    return _WithCookies(answer, lambda response: set_reauth_cookie(response, secret=secret, use_https=use_https,
-                                                                   prefix=prefix))
+    return _WithCookies(answer, lambda response: set_reauth_cookie(response, secret=secret))
 
 
 @router.post(f"{PREFIX}/reauth/begin", name="passkeys_reauth_begin")
@@ -448,11 +477,25 @@ def _reauth_invalid(call: _Call, exc: GrantInvalid, grant_id: str, **fields: Any
                  failure=exc.failure)
 
 
-def _usable_grant(call: _Call, grant_id: str) -> Grant:
-    """The caller's fresh grant, opened by this kind of client, or :class:`GrantInvalid`. A grant opened by
-    the other kind of client is ``unknown``, the same answer as another user's: its binding was to that
-    client."""
-    grant = call.store.fresh_grant(grant_id, user_id=call.user_id)
+def _grant_secret(call: _Call, body: dict) -> Optional[str]:
+    """The grant's use binding as this caller presents it: the browser's ``__Host-hermes_reauth`` cookie for a
+    cookie caller, the ``use_secret`` the token route gave the app for a bearer caller (body field)."""
+    if call.client == "web":
+        from hermes_cli.dashboard_auth.cookies import read_reauth_cookie
+        return read_reauth_cookie(call.request)
+    value = body.get("use_secret")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not 1 <= len(value) <= ID_MAX:
+        raise _Fail(400, "bad_request", f"use_secret must be a string of 1 to {ID_MAX} characters.")
+    return value
+
+
+def _usable_grant(call: _Call, grant_id: str, secret: Optional[str]) -> Grant:
+    """The caller's fresh grant, opened by this kind of client and presented with its use binding, or
+    :class:`GrantInvalid`. A grant opened by the other kind of client, or without its binding, is ``unknown``:
+    the same answer as another user's."""
+    grant = call.store.fresh_grant(grant_id, user_id=call.user_id, secret=secret)
     if grant.client != call.client:
         raise GrantInvalid("unknown")
     return grant
@@ -471,7 +514,7 @@ def _register_begin(call: _Call, body: dict) -> dict:
         grant_id = _grant_id(body)
         _refuse_self_enrol(call, AuditEvent.PASSKEY_REGISTER_REFUSED, grant=grant_id[:8])
         try:
-            grant = _usable_grant(call, grant_id)
+            grant = _usable_grant(call, grant_id, _grant_secret(call, body))
         except GrantInvalid as exc:
             raise _reauth_invalid(call, exc, grant_id, rp_id=rp_id, base_url=base_url) from None
     with _REGISTER_BEGIN_LOCK:  # ask both, then record both: one refusal never spends the other budget
@@ -523,7 +566,7 @@ def _record_code_failure(call: _Call) -> None:
         call.audit(AuditEvent.PASSKEY_REGISTER_REFUSED, reason="gateway_rate_limited")
 
 
-def _register_finish(call: _Call, body: dict) -> dict:
+def _register_finish(call: _Call, body: dict) -> Any:
     registration_id = _string(body, "registration_id", high=ID_MAX)
     code, grant_id = body.get("code"), body.get("grant_id")
     if (code is None) == (grant_id is None):
@@ -531,10 +574,12 @@ def _register_finish(call: _Call, body: dict) -> dict:
                                         "made again to add this passkey).")
     if code is not None and not isinstance(code, str):
         raise _Fail(400, "bad_request", "code must be a string (the enrolment code).")
+    grant_secret: Optional[str] = None
     if grant_id is not None:
         grant_id = _grant_id(body)
         _refuse_self_enrol(call, AuditEvent.PASSKEY_REGISTER_REFUSED, request_id=registration_id,
                            grant=grant_id[:8])
+        grant_secret = _grant_secret(call, body)
     _refuse_if_code_failures_exhausted(call, registration_id)
     pending = call.store.pending(registration_id, kind="register", user_id=call.user_id)
     if pending is None:
@@ -552,11 +597,13 @@ def _register_finish(call: _Call, body: dict) -> dict:
         usable_from = None
         try:
             if grant_id is not None:
-                _usable_grant(call, grant_id)  # the client kind; the store re-checks the rest as it spends it
+                # The client kind; the store checks the rest (the binding included) again as it spends it.
+                _usable_grant(call, grant_id, grant_secret)
                 cooling = call.settings.self_enrol.cooling_off_s
                 usable_from = call.store.now() + cooling if cooling > 0 else None
             record = call.store.add_credential(user_id=call.user_id, registration=verdict, code=code,
-                                               grant_id=grant_id, usable_from=usable_from, created_ip=call.ip)
+                                               grant_id=grant_id, grant_secret=grant_secret,
+                                               usable_from=usable_from, created_ip=call.ip)
         except PendingInvalid:
             call.audit(AuditEvent.PASSKEY_REGISTER_REFUSED, request_id=registration_id, reason="expired")
             raise _Fail(410, "expired", "The registration is unknown, used or expired; start again.") from None
@@ -582,7 +629,11 @@ def _register_finish(call: _Call, body: dict) -> dict:
     call.audit(AuditEvent.PASSKEY_REGISTERED, request_id=registration_id, rp_id=record.rp_id,
                base_url=pending.base_url, credential=record.id_b64u[:16], created_via=record.created_via, **extra)
     _announce(call, "added", record, via=record.created_via)
-    return {"ok": True, "credential": _credential_view(record, call.store.now())}
+    answer = {"ok": True, "credential": _credential_view(record, call.store.now())}
+    if grant_id is not None and call.client == "web":
+        from hermes_cli.dashboard_auth.cookies import clear_reauth_cookie
+        return _WithCookies(answer, clear_reauth_cookie)  # the grant is spent: its binding is done
+    return answer
 
 
 @router.post(f"{PREFIX}/register/finish", name="passkeys_register_finish")

@@ -226,10 +226,9 @@ async def _reauth_start_refusal(request: Request, p, grant_id: str, *, client: s
     browser's ``hermes_reauth`` cookie; a link to someone else's grant completes nothing."""
     from hermes_cli.dashboard_auth.passkeys import reauth
     ip = _client_ip(request)
-    if reauth.refusals_exhausted(ip):
+    if reauth.refusals_exhausted(ip, grant_id):
         return _reauth_page(429, "Too many attempts. Try again shortly.")
-    secret = (read_reauth_cookie(request, use_https=detect_https(request), prefix=_prefix(request))
-              if client == "web" else None)
+    secret = read_reauth_cookie(request) if client == "web" else None
     grant = await run_in_threadpool(
         reauth.grant_for_login, grant_id, provider=p, client=client, secret=secret, ip=ip)
     return None if grant is not None else _reauth_page(400, reauth.EXPIRED_TEXT)
@@ -254,7 +253,7 @@ async def _native_reauth_provider(request: Request, provider: str, grant_id: str
         refusal = await _reauth_start_refusal(request, p, grant_id, client="native")
     else:
         ip = _client_ip(request)
-        if reauth.refusals_exhausted(ip):
+        if reauth.refusals_exhausted(ip, grant_id):
             refusal = _reauth_page(429, "Too many attempts. Try again shortly.")
         else:
             p, _grant = await run_in_threadpool(
@@ -267,26 +266,37 @@ async def _native_reauth_provider(request: Request, provider: str, grant_id: str
 
 async def _finish_web_reauth(request: Request, resp, parts: dict[str, str], session: Session) -> bool:
     """After a web sign-in (callback or password login) whose PKCE cookie carries ``reauth``: complete
-    that grant with this browser's cookie secret, and clear the cookie whatever the outcome. The
-    sign-in stands either way. ``False`` (nothing done) without ``reauth`` or on a native flow."""
+    that grant with this browser's cookie secret. The cookie stays whatever the outcome: it is the grant's
+    use binding until ``register/finish`` spends it (or it expires, or the person signs out), and the
+    passkey routes need it to tell this browser why a failed grant failed. The sign-in stands either way.
+    ``False`` (nothing done) without ``reauth`` or on a native flow."""
     grant_id = parts.get("reauth", "")
     if not grant_id or parts.get("broker"):
         return False
     from hermes_cli.dashboard_auth.passkeys import reauth
-    https, prefix = detect_https(request), _prefix(request)
-    secret = read_reauth_cookie(request, use_https=https, prefix=prefix)
+    secret = read_reauth_cookie(request)
     await run_in_threadpool(
         reauth.complete, grant_id, session, client="web", secret=secret, ip=_client_ip(request))
-    clear_reauth_cookie(resp, use_https=https, prefix=prefix)
     return True
 
 
 async def _native_reauth_answer(request: Request, grant_id: str, session: Session) -> JSONResponse:
     """A native re-authentication code was redeemed: complete the grant (the PKCE verifier was the
-    binding) and answer ``{"reauth": {...}}`` with NO tokens; the app's own token set is untouched."""
+    binding) and answer ``{"reauth": {...}}`` with NO tokens; the app's own token set is untouched. A fresh
+    grant's answer carries its one-time ``use_secret``, which ``register/begin|finish`` require: only the
+    holder of the PKCE verifier ever sees it. The session the sign-in minted is not handed out, so its
+    refresh token is revoked at the provider (best effort)."""
     from hermes_cli.dashboard_auth.passkeys import reauth
     outcome = await run_in_threadpool(
         reauth.complete, grant_id, session, client="native", secret=None, ip=_client_ip(request))
+    if session.refresh_token:
+        p = get_provider(session.provider)
+        if p is not None:
+            try:
+                await run_in_threadpool(p.revoke_session, refresh_token=session.refresh_token)
+            except Exception as e:  # noqa: BLE001 - best effort: the token was never handed out
+                _log.warning("dashboard-auth: revoking a re-authentication session on %r failed: %s",
+                             p.name, type(e).__name__)
     return JSONResponse({"reauth": outcome.body()}, headers=_NO_STORE)
 
 
@@ -561,7 +571,7 @@ async def auth_logout(request: Request):
     resp = RedirectResponse(url=f"{prefix}/login", status_code=302)
     clear_session_cookies(resp, prefix=prefix)
     clear_pkce_cookie(resp, use_https=detect_https(request), prefix=prefix)
-    clear_reauth_cookie(resp, use_https=detect_https(request), prefix=prefix)
+    clear_reauth_cookie(resp)
     return resp
 
 

@@ -239,15 +239,19 @@ def test_no_subcommand_prints_usage(store):
 
 
 def _self_enrol_credential(store, credential_id: bytes, *, usable_from=None, user=U):
+    from hermes_cli.dashboard_auth.passkeys.store import new_reauth_secret, reauth_secret_hash
+
     grant = store.open_grant(user, user.split(":", 1)[0], "native")
+    use_secret = new_reauth_secret()
     store.complete_grant(grant.id, session_user=user, session_provider=user.split(":", 1)[0],
-                         auth_time=store.now(), client="native")
+                         auth_time=store.now(), client="native", use_secret_hash=reauth_secret_hash(use_secret))
     p = store.open_pending("register", user_id=user, rp_id="confirm.hermie.dev", base_url="https://gw.example.com",
                            subject="Laptop")
     reg = RegistrationOk(credential_id=credential_id, rp_id="confirm.hermie.dev", alg=-7, public_x=b"x" * 32,
                          public_y=b"y" * 32, sign_count=0, backup_eligible=True, backed_up=True, aaguid=b"\0" * 16,
                          transports=(), registration_id=p.id, user_id=user, nonce=p.nonce)
-    return store.add_credential(user_id=user, grant_id=grant.id, registration=reg, usable_from=usable_from)
+    return store.add_credential(user_id=user, grant_id=grant.id, grant_secret=use_secret, registration=reg,
+                                usable_from=usable_from)
 
 
 def test_status_says_which_providers_can_ask_to_sign_in_again(store):
@@ -306,3 +310,4 @@ def test_self_enrol_on_off_writes_the_protected_flag(store, _isolate_hermes_home
         ("operator", False), ("operator", True)]
     with pytest.raises(SystemExit):
         _parser().parse_args(["dashboard", "passkey", "self-enrol", "maybe"])
+

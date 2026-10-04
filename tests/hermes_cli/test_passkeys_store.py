@@ -665,9 +665,24 @@ def test_status_counts(store):
 # ── re-authentication grants (self-enrolment without a code) ─────────────────────────────────────
 
 
+#: grant id → its use binding (the web cookie secret, or a native grant's use secret), for the helpers.
+_SECRETS: dict[str, str] = {}
+
+
 def _web_grant(store: PasskeyStore, user: str = U, provider: str = "self_hosted"):
     secret = new_reauth_secret()
-    return store.open_grant(user, provider, "web", reauth_secret_hash(secret)), secret
+    grant = store.open_grant(user, provider, "web", reauth_secret_hash(secret))
+    _SECRETS[grant.id] = secret
+    return grant, secret
+
+
+def _native_fresh_grant(store: PasskeyStore, user: str = U, provider: str = "basic"):
+    grant = store.open_grant(user, provider, "native")
+    use_secret = new_reauth_secret()
+    done = store.complete_grant(grant.id, session_user=user, session_provider=provider, auth_time=store.now(),
+                                client="native", use_secret_hash=reauth_secret_hash(use_secret))
+    _SECRETS[grant.id] = use_secret
+    return done, use_secret
 
 
 def _fresh_grant(store: PasskeyStore, user: str = U, provider: str = "self_hosted"):
@@ -680,6 +695,7 @@ def _fresh_grant(store: PasskeyStore, user: str = U, provider: str = "self_hoste
 
 def _self_enrol(store: PasskeyStore, grant_id: str, user: str = U, credential_id: bytes = b"\x01" * 32, **kw):
     pending = store.open_pending("register", user_id=user, rp_id=NATIVE_RP, base_url=BASE, subject="Laptop")
+    kw.setdefault("grant_secret", _SECRETS.get(grant_id))
     return store.add_credential(user_id=user, grant_id=grant_id, registration=_reg(credential_id, pending=pending),
                                 **kw)
 
@@ -700,7 +716,7 @@ def test_a_grant_goes_open_fresh_spent_and_enrols_one_self_credential(store, clo
     assert len(grant.id) == 22  # 16 random bytes, base64url
     assert store.grant_for_login(grant.id, "self_hosted", secret) == grant
     with pytest.raises(GrantInvalid) as exc:
-        store.fresh_grant(grant.id, user_id=U)
+        store.fresh_grant(grant.id, user_id=U, secret=secret)
     assert exc.value.reason == "not_fresh"
     clock.t += 30
     fresh = store.complete_grant(grant.id, session_user=U, session_provider="self_hosted", auth_time=int(clock()),
@@ -708,7 +724,7 @@ def test_a_grant_goes_open_fresh_spent_and_enrols_one_self_credential(store, clo
     assert (fresh.state, fresh.failure, fresh.auth_time, fresh.auth_time_assumed) == ("fresh", "", int(clock()),
                                                                                        False)
     assert store.grant_for_login(grant.id, "self_hosted", secret) is None  # a completed grant starts no sign-in
-    assert store.fresh_grant(grant.id, user_id=U) == fresh
+    assert store.fresh_grant(grant.id, user_id=U, secret=secret) == fresh
     cred = _self_enrol(store, grant.id)
     assert cred.created_via == SELF == "self" and cred.usable_from is None and cred.usable(store.now())
     spent = store.grant(grant.id, user_id=U)
@@ -717,7 +733,7 @@ def test_a_grant_goes_open_fresh_spent_and_enrols_one_self_credential(store, clo
         _self_enrol(store, grant.id, credential_id=b"\x02" * 32)
     assert exc.value.reason == "spent"
     with pytest.raises(GrantInvalid) as exc:
-        store.fresh_grant(grant.id, user_id=U)
+        store.fresh_grant(grant.id, user_id=U, secret=secret)
     assert exc.value.reason == "spent"
     assert [c.credential_id for c in store.credentials(U)] == [cred.credential_id]
 
@@ -773,7 +789,6 @@ def test_a_login_finds_a_grant_only_through_its_binding(store, clock):
     ((U, "self_hosted", "web", -86400, True), ("failed", "auth_not_fresh", False)),  # a stated old time stays old
     ((V, "self_hosted", "web", 0, False), ("failed", "user_mismatch", False)),     # signed in as somebody else
     ((U, "basic", "web", 0, False), ("failed", "provider_mismatch", False)),
-    ((U, "self_hosted", "native", 0, False), ("failed", "client_mismatch", False)),
 ])
 def test_completion_rule_table(store, clock, given, expected):
     user, provider, client, offset, accept_missing = given
@@ -786,7 +801,7 @@ def test_completion_rule_table(store, clock, given, expected):
     assert done.completed_at == int(clock())
     if done.state == "failed":
         with pytest.raises(GrantInvalid) as exc:
-            store.fresh_grant(grant.id, user_id=U)
+            store.fresh_grant(grant.id, user_id=U, secret=secret)
         assert (exc.value.reason, exc.value.failure) == ("failed", expected[1])
         with pytest.raises(GrantInvalid) as exc:
             _self_enrol(store, grant.id)
@@ -830,12 +845,69 @@ def test_without_the_web_secret_a_grant_is_neither_completed_nor_failed(store):
                                 client="web", secret=secret).state == "fresh"
 
 
-def test_a_native_grant_completes_without_a_secret(store):
+def test_a_native_grant_completes_without_a_secret_and_is_used_with_its_use_secret(store):
     grant = store.open_grant(U, "basic", "native")
+    with pytest.raises(ValueError):  # a native completion always hands out a use secret
+        store.complete_grant(grant.id, session_user=U, session_provider="basic", auth_time=store.now(),
+                             client="native")
+    use_secret = new_reauth_secret()
     done = store.complete_grant(grant.id, session_user=U, session_provider="basic", auth_time=store.now(),
-                                client="native")
+                                client="native", use_secret_hash=reauth_secret_hash(use_secret))
     assert done.state == "fresh"
-    assert _self_enrol(store, grant.id).created_via == SELF
+    assert bytes(_grant_row(store, grant.id)["use_secret_hash"]) == reauth_secret_hash(use_secret)
+    for wrong in (None, "", new_reauth_secret()):
+        with pytest.raises(GrantInvalid) as exc:
+            _self_enrol(store, grant.id, grant_secret=wrong)
+        assert exc.value.reason == "unknown"
+    assert store.fresh_grant(grant.id, user_id=U, secret=use_secret).state == "fresh"
+    assert _self_enrol(store, grant.id, grant_secret=use_secret).created_via == SELF
+
+
+def test_a_failed_native_grant_gets_no_use_secret(store):
+    grant = store.open_grant(U, "basic", "native")
+    done = store.complete_grant(grant.id, session_user=V, session_provider="basic", auth_time=store.now(),
+                                client="native", use_secret_hash=reauth_secret_hash("x"))
+    assert (done.state, done.failure) == ("failed", "user_mismatch")
+    assert _grant_row(store, grant.id)["use_secret_hash"] is None
+
+
+def test_the_grant_id_alone_never_uses_a_grant(store):
+    """The binding holds until the grant is spent: a thief with the session and the grant id (from an access
+    log or the browser history) but without the cookie or the use secret gets ``unknown`` in every state."""
+    web, secret = _web_grant(store)
+    with pytest.raises(GrantInvalid) as exc:  # open: no state leaks without the binding
+        store.fresh_grant(web.id, user_id=U, secret=None)
+    assert exc.value.reason == "unknown"
+    store.complete_grant(web.id, session_user=U, session_provider="self_hosted", auth_time=store.now(),
+                         client="web", secret=secret)
+    native, use_secret = _native_fresh_grant(store)
+    for grant_id, wrong in ((web.id, None), (web.id, "not-it"), (web.id, use_secret),
+                            (native.id, None), (native.id, secret), (native.id, new_reauth_secret())):
+        with pytest.raises(GrantInvalid) as exc:
+            store.fresh_grant(grant_id, user_id=U, secret=wrong)
+        assert exc.value.reason == "unknown", (grant_id, wrong)
+        with pytest.raises(GrantInvalid) as exc:
+            _self_enrol(store, grant_id, grant_secret=wrong)
+        assert exc.value.reason == "unknown", (grant_id, wrong)
+    assert store.credentials(U) == []
+    assert _self_enrol(store, web.id, grant_secret=secret).created_via == SELF
+    assert _self_enrol(store, native.id, credential_id=b"\x02" * 32, grant_secret=use_secret).created_via == SELF
+
+
+def test_a_completion_over_the_other_client_changes_nothing(store):
+    """A tossed PKCE cookie naming somebody's grant cannot fail it: the other kind of client is ``unknown``
+    and the grant stays open."""
+    web, secret = _web_grant(store)
+    native = store.open_grant(U, "basic", "native")
+    with pytest.raises(GrantInvalid) as exc:
+        store.complete_grant(web.id, session_user=U, session_provider="self_hosted", auth_time=store.now(),
+                             client="native", use_secret_hash=reauth_secret_hash("x"))
+    assert exc.value.reason == "unknown"
+    with pytest.raises(GrantInvalid) as exc:
+        store.complete_grant(native.id, session_user=V, session_provider="basic", auth_time=store.now(),
+                             client="web", secret=secret)
+    assert exc.value.reason == "unknown"
+    assert store.grant(web.id, user_id=U).state == "open" and store.grant(native.id, user_id=U).state == "open"
 
 
 def test_an_expired_grant_is_unknown_everywhere_and_nothing_changes(store, clock):
@@ -852,10 +924,11 @@ def test_an_expired_grant_is_unknown_everywhere_and_nothing_changes(store, clock
     pending = store.open_pending("register", user_id=U, rp_id=NATIVE_RP, base_url=BASE, subject="Laptop")
     clock.t += 200
     with pytest.raises(GrantInvalid) as exc:
-        store.fresh_grant(fresh.id, user_id=U)
+        store.fresh_grant(fresh.id, user_id=U, secret=_SECRETS[fresh.id])
     assert exc.value.reason == "unknown"
     with pytest.raises(GrantInvalid) as exc:
-        store.add_credential(user_id=U, grant_id=fresh.id, registration=_reg(pending=pending))
+        store.add_credential(user_id=U, grant_id=fresh.id, grant_secret=_SECRETS[fresh.id],
+                             registration=_reg(pending=pending))
     assert exc.value.reason == "unknown"
     assert store.credentials(U) == [] and store.pending(pending.id, kind="register", user_id=U)
     assert _grant_row(store, fresh.id)["state"] == "fresh"
@@ -865,7 +938,7 @@ def test_a_grant_is_only_its_users(store):
     fresh = _fresh_grant(store, user=U)
     assert store.grant(fresh.id, user_id=V) is None
     with pytest.raises(GrantInvalid) as exc:
-        store.fresh_grant(fresh.id, user_id=V)
+        store.fresh_grant(fresh.id, user_id=V, secret=_SECRETS[fresh.id])
     assert exc.value.reason == "unknown"  # the same answer as for no grant at all
     with pytest.raises(GrantInvalid) as exc:
         _self_enrol(store, fresh.id, user=V)
@@ -881,7 +954,7 @@ def test_an_enrolment_takes_exactly_one_authority(store):
     for kw in ({}, {"code": code, "grant_id": fresh.id}):
         with pytest.raises(ValueError):
             store.add_credential(user_id=U, registration=_reg(pending=pending), **kw)
-    assert store.open_codes() == 1 and store.fresh_grant(fresh.id, user_id=U)
+    assert store.open_codes() == 1 and store.fresh_grant(fresh.id, user_id=U, secret=_SECRETS[fresh.id])
     assert store.pending(pending.id, kind="register", user_id=U)
 
 
@@ -892,9 +965,9 @@ def test_a_refused_enrolment_does_not_spend_the_grant(store):
         _self_enrol(store, fresh.id, credential_id=b"\x01" * 32)
     pending = store.open_pending("register", user_id=U, rp_id=NATIVE_RP, base_url=BASE, subject="x")
     with pytest.raises(PendingInvalid):  # verified for another ceremony
-        store.add_credential(user_id=U, grant_id=fresh.id,
+        store.add_credential(user_id=U, grant_id=fresh.id, grant_secret=_SECRETS[fresh.id],
                              registration=dataclasses.replace(_reg(b"\x02" * 32, pending=pending), nonce=b"x" * 32))
-    assert store.fresh_grant(fresh.id, user_id=U).state == "fresh"
+    assert store.fresh_grant(fresh.id, user_id=U, secret=_SECRETS[fresh.id]).state == "fresh"
     assert _self_enrol(store, fresh.id, credential_id=b"\x02" * 32).created_via == SELF
 
 
@@ -908,7 +981,8 @@ def test_two_finishes_racing_for_one_grant_have_one_winner(store, clock):
         own = PasskeyStore(store.path, clock=clock)  # its own connections, like another process
         barrier.wait()
         try:
-            own.add_credential(user_id=U, grant_id=fresh.id, registration=_reg(bytes([i + 1]) * 32, pending=pending))
+            own.add_credential(user_id=U, grant_id=fresh.id, grant_secret=_SECRETS[fresh.id],
+                               registration=_reg(bytes([i + 1]) * 32, pending=pending))
             results.append("won")
         except GrantInvalid as exc:
             results.append(exc.reason)
@@ -927,14 +1001,14 @@ _GRANT_SCRIPT = r"""
 import sys
 from hermes_cli.dashboard_auth.passkeys.store import GrantInvalid, PasskeyStore
 from hermes_cli.dashboard_auth.passkeys.webauthn import RegistrationOk
-path, grant_id, registration_id, nonce, marker = sys.argv[1:6]
+path, grant_id, secret, registration_id, nonce, marker = sys.argv[1:7]
 store = PasskeyStore(path)
 reg = RegistrationOk(credential_id=bytes([int(marker)]) * 32, rp_id="confirm.hermie.dev", alg=-7,
                      public_x=b"\x02" * 32, public_y=b"\x03" * 32, sign_count=0, backup_eligible=True,
                      backed_up=True, aaguid=b"\x00" * 16, transports=(), registration_id=registration_id,
                      user_id="self_hosted:alice", nonce=bytes.fromhex(nonce))
 try:
-    store.add_credential(user_id="self_hosted:alice", grant_id=grant_id, registration=reg)
+    store.add_credential(user_id="self_hosted:alice", grant_id=grant_id, grant_secret=secret, registration=reg)
     print("won")
 except GrantInvalid as exc:
     print(exc.reason)
@@ -947,7 +1021,8 @@ def test_two_finishes_racing_for_one_grant_have_one_winner_across_processes(tmp_
     pendings = [store.open_pending("register", user_id=U, rp_id=NATIVE_RP, base_url=BASE, subject=f"d{i}")
                 for i in range(6)]
     root = Path(__file__).resolve().parents[2]
-    procs = [subprocess.Popen([sys.executable, "-c", _GRANT_SCRIPT, str(store.path), fresh.id, p.id, p.nonce.hex(),
+    procs = [subprocess.Popen([sys.executable, "-c", _GRANT_SCRIPT, str(store.path), fresh.id, _SECRETS[fresh.id], p.id,
+                               p.nonce.hex(),
                                str(i + 1)],
                               cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                               env={**os.environ, "PYTHONPATH": str(root)})

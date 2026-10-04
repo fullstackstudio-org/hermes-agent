@@ -431,6 +431,10 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
 
 @method("session.create")
 def _(rid, params: dict) -> dict:
+    from tui_gateway.agent_guard import param_refusal
+    # An agent creates a plain chat (a bot, a title): never seeded, hidden, branched, room plumbing or on a model.
+    if (refused := param_refusal(rid, "session.create", params)) is not None:
+        return refused
     return _create_session(rid, params)
 
 
@@ -918,6 +922,10 @@ def _resume_eager(ctx: _Resume) -> dict:
 
 @method("session.resume")
 def _(rid, params: dict) -> dict:
+    from tui_gateway.agent_guard import param_refusal
+    # An agent resumes without the transcript: never closing the person's chat on its disconnect, never a build.
+    if (refused := param_refusal(rid, "session.resume", params)) is not None:
+        return refused
     if not (target := params.get("session_id", "")):
         return _err(rid, 4006, "session_id required")
     transport = current_transport()

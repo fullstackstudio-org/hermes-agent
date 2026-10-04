@@ -453,6 +453,10 @@ def _(rid, params: dict) -> dict:
     accepted only with a ``confirm_passkey {v, kind, rp_id}`` this gateway accepts, from a signed-in
     connection, while the level is enabled (``confirm_passkey.accept_advertisement``). Every result carries
     ``confirm_passkey``: the level as this connection sees it (contract §8)."""
+    from tui_gateway.agent_guard import param_refusal
+    # An agent receives the session's requests (read-only but clarify) and never advertises a confirm level.
+    if (refused := param_refusal(rid, "client.capabilities", params)) is not None:
+        return refused
     from tui_gateway import confirm_passkey, server_requests
     from tui_gateway.contracts import registry as contracts
     transport = _caller_transport()

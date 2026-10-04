@@ -85,7 +85,8 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery,
     GATEWAY via the one-turn ``hermes -p <profile> chat -c "Bot Chat"`` transport local DMs use →
     ``{reply}``. Blocking by design (Desktop relay worker; the RPC pool keeps it off the reader)."""
     # Its live-chat path dispatches ``prompt.submit`` as the gateway's own (``_internal_dispatch``, exempt from the
-    # agent rules there): never entered from an agent's connection, so an agent cannot reach that exemption.
+    # agent rules there; the hosted-room driver is the only other producer): never entered from an agent's
+    # connection, so an agent cannot reach that exemption through the relay.
     from tui_gateway.agent_guard import refusal as _agent_refusal
     if (refused := _agent_refusal(rid, "relay a bot's message into a Bot Chat")) is not None:
         return refused

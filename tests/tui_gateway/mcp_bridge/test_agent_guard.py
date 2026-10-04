@@ -257,3 +257,87 @@ def test_the_bridge_allowlist_is_pinned():
         "gateway.capabilities", "client.capabilities", "profiles.list", "session.create", "session.resume",
         "session.active_list", "session.events.since", "prompt.submit", "session.interrupt", "request.answer"})
     assert rpc.PROMPT_SUBMIT_PARAMS == frozenset({"session_id", "text", "queued"})
+
+
+def test_what_an_agent_may_send_to_each_method_is_pinned():
+    """The keys an agent may send to each allowed method (``agent_guard.AGENT_PARAMS``): exactly what the bridge
+    sends. Widening one is a security decision, like adding a method."""
+    from tui_gateway.agent_guard import AGENT_PARAMS
+    from tui_gateway.mcp_bridge import rpc
+
+    assert AGENT_PARAMS == {
+        "gateway.capabilities": frozenset(),
+        "client.capabilities": frozenset({"server_requests"}),
+        "profiles.list": frozenset({"include_sessions"}),
+        "session.create": frozenset({"profile", "title"}),
+        "session.resume": frozenset({"session_id", "profile", "omit_messages"}),
+        "session.active_list": frozenset(),
+        "session.events.since": frozenset({"session_id", "last_seen"}),
+        "prompt.submit": frozenset({"session_id", "text", "queued"}),
+        "session.interrupt": frozenset({"session_id"}),
+        "request.answer": frozenset({"id", "result"}),
+    }
+    assert rpc.ALLOWED_METHODS == frozenset(AGENT_PARAMS)
+
+
+@pytest.mark.parametrize("method, params", [
+    ("session.create", {"profile": "default", "messages": [{"role": "user", "content": "marker seeded"}]}),
+    ("session.create", {"profile": "default", "hidden": True}),
+    ("session.create", {"profile": "default", "parent_session_id": KEY}),
+    ("session.create", {"profile": "default", "room_plumbing": True}),
+    ("session.create", {"profile": "default", "model": "marker/model", "provider": "marker"}),
+    ("session.create", {"profile": "default", "close_on_disconnect": True}),
+    ("session.create", {"profile": "default", "follow_profile_config": True}),
+    ("session.resume", {"session_id": KEY, "profile": "default", "close_on_disconnect": True}),
+    ("session.resume", {"session_id": KEY, "eager_build": True}),
+    ("session.resume", {"session_id": KEY, "source": "marker"}),
+    ("client.capabilities", {"server_requests": True, "confirm": ["plain"]}),
+], ids=["messages", "hidden", "parent", "room_plumbing", "model", "create_close_on_disconnect",
+        "follow_profile_config", "resume_close_on_disconnect", "eager_build", "source", "confirm"])
+def test_an_agent_may_send_only_what_the_bridge_sends(gateway, monkeypatch, method, params):
+    """Past the bridge: the handler itself refuses an agent any key outside ``AGENT_PARAMS`` (4033), before it
+    creates, resumes or records anything."""
+    from tui_gateway import server_requests
+
+    created: list = []
+    monkeypatch.setattr(server, "_create_session", lambda rid, p, **_k: created.append(p) or {"result": {}})
+    sessions_before = dict(server._sessions)
+    advertised: list = []
+    real_advertise = server_requests.advertise
+    monkeypatch.setattr(server_requests, "advertise",
+                        lambda *a, **k: advertised.append(a) or real_advertise(*a, **k))
+    response = _dispatch(gateway.connect(), method, params)
+    assert response.get("error", {}).get("code") == 4033, response
+    assert "agent connected through MCP" in response["error"]["message"]
+    assert created == [] and advertised == [] and server._sessions == sessions_before
+
+
+def test_the_person_may_still_create_with_every_parameter(gateway, monkeypatch):
+    created: list = []
+    monkeypatch.setattr(server, "_create_session", lambda rid, p, **_k: created.append(p) or {
+        "jsonrpc": "2.0", "id": rid, "result": {"marker": True}})
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    token = bind_transport(gateway.app)
+    try:
+        server._methods["session.create"]("person", {"profile": "default", "hidden": True, "title": "marker"})
+    finally:
+        reset_transport(token)
+    assert created == [{"profile": "default", "hidden": True, "title": "marker"}]
+
+
+def test_the_gateways_own_create_on_an_agents_connection_is_not_the_agents(gateway, monkeypatch):
+    """A hosted room's ``session.create`` (hidden, room plumbing) under ``_internal_dispatch`` is the gateway's."""
+    from tui_gateway.session_transports import _internal_dispatch
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    created: list = []
+    monkeypatch.setattr(server, "_create_session", lambda rid, p, **_k: created.append(p) or {
+        "jsonrpc": "2.0", "id": rid, "result": {"marker": True}})
+    token = bind_transport(_agent(gateway))
+    try:
+        with _internal_dispatch():
+            server._methods["session.create"]("internal", {"profile": "default", "hidden": True, "room_plumbing": True})
+    finally:
+        reset_transport(token)
+    assert created == [{"profile": "default", "hidden": True, "room_plumbing": True}]

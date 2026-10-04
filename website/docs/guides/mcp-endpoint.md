@@ -111,6 +111,8 @@ restarts during a turn, the agent gets `restarted` and waits again; the turn con
 - Change settings, delete, rename or hide chats, or read chats it was not given: it sees the chats it opened
   and your live chats, not every stored conversation on the gateway. A chat you have only in your app can be
   opened by its id with `chat_open`; that is logged.
+- Undo, compress, branch, hide or rename a chat, or create one that is hidden, pre-filled or on another model:
+  the gateway refuses these from an agent even outside the MCP tools.
 - Answer or stop a turn the gateway ran in an isolated worker after it waited in the queue: with turn
   isolation on, such a turn leaves the gateway no record of who sent it, so the agent sees its question as
   not answerable (`answerable_via_mcp: false`, with the reason) and `bot_interrupt` says why it cannot stop

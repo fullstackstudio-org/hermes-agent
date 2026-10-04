@@ -138,6 +138,17 @@ def test_a_method_outside_the_allowlist_is_refused_before_dispatch(method, dispa
     ("prompt.submit", {"session_id": SID, "text": "marker", "interrupted": True}),
     ("prompt.submit", {"session_id": SID, "text": "marker", "surface": "hud"}),
     ("prompt.submit", {"session_id": SID, "text": "marker", "display_kind": "hidden"}),
+    ("session.create", {"profile": "default", "messages": [{"role": "user", "content": "marker"}]}),
+    ("session.create", {"profile": "default", "hidden": True}),
+    ("session.create", {"profile": "default", "parent_session_id": "marker"}),
+    ("session.create", {"profile": "default", "room_plumbing": True}),
+    ("session.create", {"profile": "default", "model": "marker/model"}),
+    ("session.resume", {"session_id": SID, "profile": "default", "close_on_disconnect": True}),
+    ("session.resume", {"session_id": SID, "eager_build": True}),
+    ("session.interrupt", {"session_id": SID, "expected_hosted_task_id": "marker"}),
+    ("session.active_list", {"current_session_id": SID}),
+    ("profiles.list", {"profile": "marker"}),
+    ("request.answer", {"id": "srq-1", "result": {"answer": "marker"}, "profile": "marker"}),
 ])
 def test_forbidden_parameters_are_refused_before_dispatch(method, params, dispatched):
     transport = AgentTransport(identity())

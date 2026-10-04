@@ -17,7 +17,9 @@ What is refused here, before anything is dispatched (:class:`DisallowedCall`, al
   neither may the bridge -- params are also round-tripped through JSON for that reason);
 * ``client.capabilities`` advertising anything but ``server_requests`` (an agent never performs a
   ``confirm`` level);
-* ``prompt.submit`` with any parameter beside :data:`PROMPT_SUBMIT_PARAMS`;
+* any parameter key outside what the bridge itself sends for that method (``agent_guard.AGENT_PARAMS``,
+  which the gateway enforces too): ``prompt.submit`` beside :data:`PROMPT_SUBMIT_PARAMS`, ``session.create``
+  beside ``{profile, title}``, ``session.resume`` beside ``{session_id, profile, omit_messages}``, ...;
 * ``request.answer`` with a result that is not a clarify answer (``{answer}`` or ``{answers}``). The
   gateway refuses every other method from an agent anyway (4033); this keeps the bridge from even trying.
 
@@ -33,7 +35,7 @@ import logging
 import uuid
 from typing import Any
 
-from tui_gateway.agent_guard import AGENT_SUBMIT_PARAMS
+from tui_gateway.agent_guard import AGENT_PARAMS, AGENT_SUBMIT_PARAMS
 from tui_gateway.mcp_bridge.transport import AgentTransport
 
 logger = logging.getLogger(__name__)
@@ -44,18 +46,7 @@ logger = logging.getLogger(__name__)
 #: from ``profiles.list`` (name, display name, description, model). Never: ``session.close/delete/title/
 #: set_hidden``, ``config.*``, ``profiles.describe/configure/create/set_asset``, ``slash.exec``,
 #: ``approval.respond``, ``clarify.lock``, ``fs.*``, console, ``prompt.background``.
-ALLOWED_METHODS = frozenset({
-    "gateway.capabilities",
-    "client.capabilities",
-    "profiles.list",
-    "session.create",
-    "session.resume",
-    "session.active_list",
-    "session.events.since",
-    "prompt.submit",
-    "session.interrupt",
-    "request.answer",
-})
+ALLOWED_METHODS = frozenset(AGENT_PARAMS)
 
 #: An agent's ``prompt.submit``: its text, queued behind a running turn. Never a rewind (``truncate_before_*``,
 #: ``rebind_survivor_row_ids``), a voice barge-in, a surface or a hidden row; the gateway refuses every other
@@ -148,8 +139,9 @@ def check_call(method: str, params: Any) -> dict:
         raise DisallowedCall(f"{method}: parameter {key!r} is in-process only")
     if method == "client.capabilities" and params != {"server_requests": True}:
         raise DisallowedCall("client.capabilities: an agent advertises {server_requests: true} and nothing else")
-    if method == "prompt.submit" and set(params) - PROMPT_SUBMIT_PARAMS:
-        raise DisallowedCall("prompt.submit: an agent sends {session_id, text, queued} and nothing else")
+    if extra := set(params) - AGENT_PARAMS[method]:
+        raise DisallowedCall(f"{method}: an agent sends {sorted(AGENT_PARAMS[method])} and nothing else, "
+                             f"not {sorted(extra)}")
     if method == "request.answer" and (set(params) - {"id", "result"} or not _clarify_result(params.get("result"))):
         raise DisallowedCall("request.answer: an agent answers clarify only ({answer} or {answers})")
     return params

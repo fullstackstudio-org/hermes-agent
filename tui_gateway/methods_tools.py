@@ -774,10 +774,11 @@ def _cmd_retry(rid, params, session, name, arg):
             return err
         content = cc.retryable_user_text(rewound[1].get("content"))
     # WHO PRESSED Retry, read here on the presser's own request context and carried explicitly.
-    return _submit_retried_turn(rid, params, session, content, rewound[3], _submitting_auth_user())
+    return _submit_retried_turn(rid, params, session, content, rewound[3], _submitting_auth_user(),
+                                _submitting_agent())
 
 
-def _submit_retried_turn(rid, params, session, content, author, presser):
+def _submit_retried_turn(rid, params, session, content, author, presser, presser_agent=None):
     """Run the retried turn on the gateway: WRITTEN by the rewound row's own author (or nobody), RUN as
     the presser.
 
@@ -786,12 +787,13 @@ def _submit_retried_turn(rid, params, session, content, author, presser):
     the presser's name, for good. The words never travel back through a client now. The turn acts as the
     presser -- memory, tools, approvals, who the model is told is asking -- because somebody having sent
     words once is not consent to run them again at another time on somebody else's action; the row names
-    the presser as ``replayed_by`` when that is not its author. The reply is a plain ``exec`` line, which
-    every client renders and none resubmits."""
+    the presser as ``replayed_by`` when that is not its author, or when an agent pressed it for them through
+    MCP (``presser_agent``: ``replayed_by.via``). The reply is a plain ``exec`` line, which every client
+    renders and none resubmits."""
     from tui_gateway.row_author import ReplayedTurn
     response = _methods["prompt.submit"](rid, {
         "session_id": params.get("session_id") or "", "text": content,
-        "_replayed_turn": ReplayedTurn(author, presser)})
+        "_replayed_turn": ReplayedTurn(author, presser, presser_agent)})
     if "error" in response:
         return response
     return _exec_out(rid, "Retrying the last message.")
@@ -809,7 +811,7 @@ def _cmd_steer(rid, params, session, name, arg):
     if agent and hasattr(agent, "steer"):
         from tui_gateway.row_author import deliver_correction
         with contextlib.suppress(Exception):
-            if deliver_correction(agent, "steer", arg, _submitting_auth_user()):
+            if deliver_correction(agent, "steer", arg, _submitting_auth_user(), _submitting_agent()):
                 return _exec_out(rid, f"⏩ Steer queued — arrives after the next tool call: {shown}")
     return _ok(rid, {"type": "send", "message": arg})  # turn still building / steer refused: next-turn message
 

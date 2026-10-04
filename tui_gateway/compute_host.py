@@ -46,6 +46,16 @@ def _frame_turn_auth_user(frame: dict[str, Any]) -> tuple[str | None, str] | Non
                     coerce_profile(frame.get("turn_auth_user_profile")) if user_id else None)
 
 
+def _frame_turn_agent(frame: dict[str, Any]) -> dict | None:
+    """The agent marker the gateway resolved beside the frame's submitter (``turn_agent``), re-checked on
+    this side of the pipe; None when the frame carries none, or no submitter to carry it beside. A parent
+    that predates the key sends none."""
+    if not str(frame.get("turn_auth_user_id") or ""):
+        return None
+    from tui_gateway.row_author import agent_marker
+    return agent_marker(frame.get("turn_agent"))
+
+
 def now_ns() -> int:
     return time.perf_counter_ns()
 
@@ -281,7 +291,8 @@ class ComputeHost:
                 request_id, sid, session, text, display_kind=frame.get("display_kind") or None,
                 display_metadata=(frame.get("display_metadata")
                                   if isinstance(frame.get("display_metadata"), dict) else None),
-                turn_auth_user=_frame_turn_auth_user(frame), origin=str(frame.get("turn_origin") or ""),
+                turn_auth_user=_frame_turn_auth_user(frame), turn_agent=_frame_turn_agent(frame),
+                origin=str(frame.get("turn_origin") or ""),
                 contributors=frame.get("turn_contributors") if isinstance(frame.get("turn_contributors"), list) else ())
             run_thread = session.get("_run_thread")
             if run_thread is not None and hasattr(run_thread, "join"):

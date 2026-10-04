@@ -13799,6 +13799,18 @@
             "default": null,
             "title": "Per Message Author"
           },
+          "per_message_author_via": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Per Message Author Via"
+          },
           "transcript_row_identity": {
             "anyOf": [
               {

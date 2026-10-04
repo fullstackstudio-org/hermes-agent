@@ -51,7 +51,7 @@ def _compute_host_turn_frame(
     rid: str, sid: str, session: dict, text: Any, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None, display_kind: str | None = None,
     display_metadata: dict | None = None, turn_auth_user: tuple[str, str] | None = None,
-    origin: str = "", contributors: Any = ()) -> dict:
+    origin: str = "", contributors: Any = (), turn_agent: dict | None = None) -> dict:
     with session["history_lock"]:
         history = list(session.get("history", []))
         history_version = int(session.get("history_version", 0))
@@ -66,6 +66,10 @@ def _compute_host_turn_frame(
     # child keeps its old behaviour.
     auth_user_id, auth_user_name = _session_auth_user(session)
     turn_user_profile: dict = {}
+    # An agent acting for that submitter through MCP rides beside them as ``turn_agent``, so the child's
+    # note, tool variables and rows say what an inline turn says. Only beside a named submitter.
+    from tui_gateway.row_author import agent_marker
+    turn_agent = agent_marker(turn_agent) if turn_auth_user and turn_auth_user[0] else None
     if turn_auth_user:
         turn_user_id, turn_user_name = turn_auth_user
         # The submitter's profile rides with the submitter, so the child can tell the model the same
@@ -97,6 +101,7 @@ def _compute_host_turn_frame(
         "auth_user_id": auth_user_id, "auth_user_name": auth_user_name,
         "turn_auth_user_id": turn_user_id or "", "turn_auth_user_name": turn_user_name,
         **({"turn_auth_user_profile": turn_user_profile} if turn_user_profile else {}),
+        **({"turn_agent": turn_agent} if turn_agent else {}),
         # How the turn came about. The pair above is the SCOPE the parent resolved (a turn nobody submitted
         # falls back to the owner there, for tools); this is what keeps the child from telling the model
         # that the owner sent it.
@@ -204,9 +209,21 @@ def _compute_host_request_session(request_id: str) -> tuple[str, dict] | None:
     return None
 
 
+def _compute_host_request_method(request_id: str) -> str | None:
+    """The method of a host-owned open request, from the parent's mirror (None when no child owns it)."""
+    located = _compute_host_request_session(request_id)
+    if located is None:
+        return None
+    with _history_lock(located[1]):
+        mirrored = located[1].get("_compute_host_open_request")
+        return str(mirrored.get("method") or "") if _open_request_matches(located[1], request_id) else None
+
+
 def _relay_compute_host_response(frame: dict) -> bool:
     """Forward a client's response frame to the compute-host child that owns the request. False when no
-    child owns that id."""
+    child owns that id. An agent's connection is held to the parent's rules here, where its identity is
+    still known (the child sees only the pipe): any method but clarify is refused (True: handled, not
+    relayed), and a clarify answer is marked as the agent's before it is relayed."""
     located = _compute_host_request_session(str(frame.get("id") or ""))
     if located is None or not _session_uses_compute_host(located[1]):
         return False
@@ -214,6 +231,18 @@ def _relay_compute_host_response(frame: dict) -> bool:
     if not _transport_may_access_session(session, current_transport(), sid=sid):
         logger.warning("compute-host response refused: the connection may not act on session %s", sid)
         return False
+    from tui_gateway import server_requests
+    caller, request_id = current_transport(), str(frame.get("id") or "")
+    method = _compute_host_request_method(request_id) or ""
+    if (refusal := server_requests.agent_answer_refusal(method, caller)) is not None:
+        logger.warning("compute-host response refused: an agent may not answer %s requests", method or "these")
+        server_requests.audit_agent_answer(caller, sid=sid, request_id=request_id, method=method,
+                                           outcome="refused", reason="agent")
+        return True
+    if "result" in frame:
+        frame = {**frame, "result": server_requests.mark_agent_answer(method, frame.get("result"), caller)}
+    server_requests.audit_agent_answer(caller, sid=sid, request_id=request_id, method=method,
+                                       outcome="answered" if "result" in frame else "declined")
     with _history_lock(session):
         session.pop("_compute_host_open_request", None)
     try:
@@ -297,12 +326,13 @@ def _submit_prompt_to_compute_host(
     rid: str, sid: str, session: dict, text: Any, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None, display_kind: str | None = None,
     display_metadata: dict | None = None, turn_auth_user: tuple[str, str] | None = None,
-    origin: str = "", contributors: Any = ()) -> dict:
+    origin: str = "", contributors: Any = (), turn_agent: dict | None = None) -> dict:
     cfg = _load_dashboard_process_isolation_config()
     frame = _compute_host_turn_frame(rid, sid, session, text, image_paths=image_paths,
                                      queued_prompt_generation=queued_prompt_generation,
                                      display_kind=display_kind, display_metadata=display_metadata,
-                                     turn_auth_user=turn_auth_user, origin=origin, contributors=contributors)
+                                     turn_auth_user=turn_auth_user, origin=origin, contributors=contributors,
+                                     turn_agent=turn_agent)
     # Caller JSON-RPC ids may repeat across sockets and turns. Use an opaque
     # dispatch lifetime token, installed before a fast child can send activity.
     turn_id = frame["turn_id"] = frame["request_id"] = uuid.uuid4().hex

@@ -216,6 +216,13 @@ def _submit_auth_user(params: dict) -> tuple[str, str] | None:
     return None if _is_internal_submit(params) else _submitting_auth_user()
 
 
+def _submit_agent(params: dict) -> dict | None:
+    """The agent beside :func:`_submit_auth_user`'s answer: the marker of an agent that sent this submit for
+    its signed-in person through MCP (``server._submitting_agent``), None for a person's own submit and for
+    every internal one. Same source, same rule, so the two can never come from different connections."""
+    return None if _is_internal_submit(params) else _submitting_agent()
+
+
 def _hosted_submit_error(rid, session, hosted_task, hosted_terminal_callback):
     """Validate the hosted-room turn proof carried by an internal submit."""
     if session.get("source") != "bot_room":
@@ -519,7 +526,7 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None, 
 
 def _run_after_agent_ready(
     rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None,
-    turn_auth_user=None, origin=""
+    turn_auth_user=None, origin="", turn_agent=None
 ):
     """Turn thread body: patient wait for a deferred build (a slow build must not eat the
     accepted in-flight message), then run."""
@@ -561,7 +568,7 @@ def _run_after_agent_ready(
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
         terminal_callback=hosted_terminal_callback, turn_author=turn_author, turn_auth_user=turn_auth_user,
-        origin=origin)
+        origin=origin, turn_agent=turn_agent)
 
 
 _TRUNCATION_PARAMS = (
@@ -646,14 +653,19 @@ def _(rid, params: dict) -> dict:
     # room) arrives on a socket that belongs to whoever relayed it, not to the author, and names nobody.
     submitter = _submit_auth_user(params)
     row_submitter = submitter
+    # An AGENT acting for that person through MCP, from the same connection: the turn is still the
+    # person's (scope, memory, limits), and the marker rides beside them -- on the row as ``via``, into the
+    # note, the tool variables, the queue envelope and the compute-host frame.
+    submit_agent = row_agent = _submit_agent(params)
     # A stored row's own words run again (``/retry``): the row is its author's, the turn acts as whoever
     # pressed Retry. Built in-process only; a client value is refused.
-    from tui_gateway.row_author import ReplayedTurn, auth_user_from_row_author
+    from tui_gateway.row_author import ReplayedTurn, agent_from_row_author, auth_user_from_row_author
     replayed = params.get("_replayed_turn")
     if replayed is not None:
         if not isinstance(replayed, ReplayedTurn):
             return _err(rid, 4124, "a replayed turn's author is stamped by the gateway, never by a client")
         submitter, row_submitter = replayed.presser, auth_user_from_row_author(replayed.author)
+        submit_agent, row_agent = replayed.presser_agent, agent_from_row_author(replayed.author)
     # WHO WROTE IT, on the row itself. The live path cannot say: message.start carries no payload and
     # two clients on one session share a FanoutTransport, so a client never learns from the socket
     # that somebody else typed anything -- it reads the row back afterwards, by which time every live
@@ -665,8 +677,9 @@ def _(rid, params: dict) -> dict:
     # told someone typed it, not that the gateway started it. A gateway that attributes nothing records nothing.
     origin = ("unsigned" if submitter is None and not _is_internal_submit(params)
               and _session_auth_user_id(session) is not None else "")
-    display_metadata = (replayed_row_metadata(display_metadata, row_submitter, submitter) if replayed is not None
-                        else with_row_author(display_metadata, submitter))
+    display_metadata = (replayed_row_metadata(display_metadata, row_submitter, submitter, agent=submit_agent,
+                                              author_agent=row_agent) if replayed is not None
+                        else with_row_author(display_metadata, submitter, submit_agent))
     hosted_task = params.get("_hosted_task")
     hosted_terminal_callback = params.get("_hosted_terminal_callback")
     internal_hosted_submit = hosted_task is not None or hosted_terminal_callback is not None
@@ -733,7 +746,7 @@ def _(rid, params: dict) -> dict:
         # carrying its row's metadata apart from the presser who is its scope.
         busy_response = _handle_busy_submit(
             rid, sid, session, text, busy_transport, queued=bool(params.get("queued")) or replayed is not None,
-            turn_author=turn_author, turn_auth_user=submitter,
+            turn_author=turn_author, turn_auth_user=submitter, turn_agent=submit_agent,
             row_metadata=display_metadata if replayed is not None else None, origin=origin)
         if busy_response is not None:
             return busy_response
@@ -751,9 +764,11 @@ def _(rid, params: dict) -> dict:
         # A rewind / edit / regenerate replaced a stored row. Its own words sent again are that row's
         # author's, whoever pressed the button (``resubmitted_row_identity``).
         from tui_gateway.row_author import resubmitted_row_identity
-        submitter, row_submitter, replay = resubmitted_row_identity(
-            text, replaced["row"], replaced["live_view"], submitter)
-        display_metadata = replayed_row_metadata(display_metadata, row_submitter, submitter if replay else None)
+        submitter, row_submitter, replay, row_agent = resubmitted_row_identity(
+            text, replaced["row"], replaced["live_view"], submitter, submit_agent)
+        display_metadata = replayed_row_metadata(
+            display_metadata, row_submitter, submitter if replay else None,
+            agent=submit_agent if replay else None, author_agent=row_agent)
     # ONE id for this turn, minted here so the row persisted below carries it (``display_metadata`` is what
     # ``_persist_submit_user_row`` writes) and the turn that runs next stamps it on every frame. Always
     # overwritten: nothing a client sent is ever the id.
@@ -771,7 +786,7 @@ def _(rid, params: dict) -> dict:
                          turn_author.get("id"))
         isolated_response = _submit_prompt_to_compute_host(
             rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
-            turn_auth_user=submitter, origin=origin)
+            turn_auth_user=submitter, origin=origin, turn_agent=submit_agent)
         if not isolated_response.get("error"):
             # The truncation already happened inline above (memory + DB).
             isolated_response["result"].update(survivor_fields)
@@ -800,7 +815,7 @@ def _(rid, params: dict) -> dict:
     run_thread = threading.Thread(
         target=lambda: _run_after_agent_ready(
             rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author,
-            submitter, origin),
+            submitter, origin, submit_agent),
         daemon=True)
     # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
     session["_run_thread"] = run_thread
@@ -1260,9 +1275,25 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4002, "request_id and question_id required")
     answer = params.get("answer", "")
     answer = answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=False)
-    if (proxied := _lock_compute_host_clarify(rid, request_id, question_id, answer)) is not None:
-        return proxied
     from tui_gateway import server_requests
+    # An agent's connection (MCP): only when the operator allows clarify answers through MCP, and the
+    # answer is marked as the agent's here, before the request (or the child that owns it) stores it.
+    caller = current_transport()
+    if (refusal := server_requests.agent_answer_refusal("clarify", caller)) is not None:
+        server_requests.audit_agent_answer(caller, sid=server_requests.request_session(request_id) or "",
+                                           request_id=request_id, method="clarify", outcome="refused",
+                                           reason="agent")
+        return _err(rid, *refusal)
+    answer = server_requests.mark_agent_answer_text(answer, caller)
+
+    def locked(response: dict, sid: str = "") -> dict:
+        if (response.get("result") or {}).get("status") == "ok":
+            server_requests.audit_agent_answer(caller, sid=sid, request_id=request_id, method="clarify",
+                                               outcome="answered")
+        return response
+
+    if (proxied := _lock_compute_host_clarify(rid, request_id, question_id, answer)) is not None:
+        return locked(proxied)
     if (sid := server_requests.request_session(request_id)) is not None and not _caller_may_access_session_id(sid):
         return _err(rid, 4033, "this connection may not answer requests of that session")
     try:
@@ -1272,7 +1303,7 @@ def _(rid, params: dict) -> dict:
     if remaining is None:
         # The wait already ended (timeout / cancel) while the card was still visible: not an error.
         return _ok(rid, {"status": "expired"})
-    return _ok(rid, {"status": "ok", "remaining": remaining})
+    return locked(_ok(rid, {"status": "ok", "remaining": remaining}), sid or "")
 
 
 @method("request.answer")
@@ -1290,6 +1321,11 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4002, "id and an object result required")
     from tui_gateway import server_requests
     if (refusal := server_requests.answer_problem(request_id, result)) is not None:
+        return _err(rid, *refusal)
+    # A request an isolated child owns is not open here, so ``answer_problem`` cannot see its method: an
+    # agent's connection is checked against the parent's mirror of it (the relay marks a clarify answer).
+    if server_requests.request_method(request_id) is None and (refusal := server_requests.agent_answer_refusal(
+            _compute_host_request_method(request_id) or "", current_transport())) is not None:
         return _err(rid, *refusal)
     frame = {"jsonrpc": "2.0", "id": request_id, "result": result}
     if server_requests.resolve_response(frame) or _relay_compute_host_response(frame):

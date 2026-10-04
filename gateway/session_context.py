@@ -36,6 +36,8 @@ def session_context_engaged() -> bool:
 #   dashboard gateway only for a turn a signed-in connection submitted; "" everywhere else. GROUPS is a
 #   JSON array string (``["admin"]``) so a comma inside a group name stays unambiguous. Each value is
 #   one cleaned line.
+# * AGENT: ``mcp:<client>`` when the turn was sent for that person by an agent through MCP
+#   (``tui_gateway.server._acting_agent``); "" for a person's own turn and everywhere else.
 _SESSION_VARS = (
     _SESSION_PLATFORM, _SESSION_SOURCE, _SESSION_CHAT_ID, _SESSION_CHAT_TYPE,
     _SESSION_CHAT_NAME, _SESSION_THREAD_ID, _SESSION_USER_ID, _SESSION_USER_ID_ALT,
@@ -43,6 +45,7 @@ _SESSION_VARS = (
     _SESSION_UI_SESSION_ID, _SESSION_MESSAGE_ID, _SESSION_PROFILE,
     _BROWSER_CONTROL_PRINCIPAL, _BROWSER_CONTROL_TRANSPORT_FAMILY, _CRON_SESSION, _SESSION_PARENT_CHAT_ID,
     _SESSION_USER_EMAIL, _SESSION_USER_LOCALE, _SESSION_USER_TIMEZONE, _SESSION_USER_GROUPS,
+    _SESSION_AGENT,
 ) = tuple(ContextVar(name, default=_UNSET) for name in (
     "HERMES_SESSION_PLATFORM", "HERMES_SESSION_SOURCE", "HERMES_SESSION_CHAT_ID",
     "HERMES_SESSION_CHAT_TYPE", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID",
@@ -52,7 +55,7 @@ _SESSION_VARS = (
     "HERMES_BROWSER_CONTROL_PRINCIPAL", "HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY",
     "HERMES_CRON_SESSION", "HERMES_SESSION_PARENT_CHAT_ID",
     "HERMES_SESSION_USER_EMAIL", "HERMES_SESSION_USER_LOCALE", "HERMES_SESSION_USER_TIMEZONE",
-    "HERMES_SESSION_USER_GROUPS",
+    "HERMES_SESSION_USER_GROUPS", "HERMES_SESSION_AGENT",
 ))
 
 # Whether this channel can route an ASYNC completion back AFTER the turn ends (see
@@ -128,7 +131,7 @@ def set_session_vars(
     browser_control_transport_family: str = "", cwd: str = "", async_delivery: bool = True,
     ui_session_id: str = "", cron_session: Any = _UNSET, parent_chat_id: str = "",
     session_history_delivery: str | None = None, user_email: str = "", user_locale: str = "",
-    user_timezone: str = "", user_groups: str = "",
+    user_timezone: str = "", user_groups: str = "", session_agent: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.  Call
     ``clear_session_vars(tokens)`` in a ``finally``; not nestable, clearing resets every var
@@ -145,7 +148,7 @@ def set_session_vars(
         platform, source, chat_id, chat_type, chat_name, thread_id, user_id, user_id_alt,
         user_name, scope_id, session_key, session_id, ui_session_id, message_id, profile,
         browser_control_principal, browser_control_transport_family, cron_session, parent_chat_id,
-        user_email, user_locale, user_timezone, user_groups,
+        user_email, user_locale, user_timezone, user_groups, session_agent,
     )
     tokens = [var.set(value) for var, value in zip(_SESSION_VARS, values)]
     tokens.append(_SESSION_ASYNC_DELIVERY.set(bool(async_delivery)))

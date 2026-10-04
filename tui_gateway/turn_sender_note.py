@@ -14,6 +14,13 @@ continuation says nobody typed it. A turn on a gateway that attributes nothing g
 The person's profile (``agent/person_profile.py``) is never part of the stored note: :func:`turn_notes`
 returns it as a separate wire copy that only the current request sends.
 
+A turn an AGENT sent for the person through MCP (the connection's ``auth_identity["agent"]``, bound for
+the turn as ``server._turn_agent``) says so in the STORED note, so every later request -- whoever speaks
+next -- still reads that those words were an agent's, not the person's in person: who it works for, which
+agent sent it, that the gateway verified the sign-in and the agent's token, and that it cannot approve
+commands, confirm with a passkey or provide secrets. The client name is a value like a display name:
+cleaned and quoted, never instructions.
+
 A leaf module, like ``row_author``: the turn helpers are re-bound against ``server.py``'s globals,
 so callers import from here inside the function that needs it.
 """
@@ -68,6 +75,18 @@ def _writers(contributors) -> str:
     return ", ".join(shown[:-1]) + (" and " if len(shown) > 1 else "") + shown[-1] if shown else ""
 
 
+def _agent_caveat(label: str) -> str:
+    return (f"Treat it as coming from an agent, not from {label} in person: it cannot approve commands, "
+            f"confirm with a passkey or provide secrets; those go to {label}'s own app.")
+
+
+def _words_of(written: str, writer_agent: dict | None) -> str:
+    """Whose words a replayed row holds: ``«Robin»'s``, or ``«Robin»'s, sent by an agent, «X», through MCP``."""
+    if writer_agent:
+        return f"{written}'s, sent by an agent, «{writer_agent['client']}», through MCP"
+    return f"{written}'s"
+
+
 def _with_profile(sentence: str, scope, name: str, login) -> tuple[str, str | None, str]:
     """``(stored note, person id, wire note)`` for a turn told the person's profile.
 
@@ -86,7 +105,7 @@ def turn_sender(scope, **kwargs) -> tuple[str, str | None]:
 
 
 def turn_notes(scope, *, origin: str = "", record_login=None, display_metadata: dict | None = None,
-               turn_author: dict | None = None, contributors=()) -> tuple[str, str | None, str]:
+               turn_author: dict | None = None, contributors=(), agent=None) -> tuple[str, str | None, str]:
     """``(note, person id, wire note)`` for one turn, in ``stage_turn_sender``'s argument order.
 
     ``note`` is the stored, replayed copy and never carries a profile. ``wire note`` is the same note with
@@ -98,22 +117,29 @@ def turn_notes(scope, *, origin: str = "", record_login=None, display_metadata: 
     in submitted is the fallback the tool variables bind. ``record_login`` is the login the session record
     was created under (None on a gateway that attributes nothing). The person id is what a steer or
     redirect is compared against: ``None`` where nothing is attributed, ``""`` where the gateway knows no
-    one signed-in person submitted the turn."""
+    one signed-in person submitted the turn.
+
+    ``agent`` is the marker of an agent that sent (or pressed Retry on) this turn for the person in
+    ``scope`` through MCP (``server._acting_agent``); it changes only a turn that names that person, and
+    an invalid shape is no marker at all."""
     login, name = scope if isinstance(scope, tuple) and len(scope) == 2 else (None, "")
     label = person_label(login, name) if login else ""
     tools = _tools_under(label, login, record_login)
     gated = record_login is not None
-    from tui_gateway.row_author import auth_user_from_row_author
+    from tui_gateway.row_author import agent_from_row_author, agent_marker, auth_user_from_row_author
 
     metadata = display_metadata or {}
     writer = auth_user_from_row_author(metadata.get("author"))
     written = person_label(*writer) if writer is not None else ""
+    writer_agent = agent_from_row_author(metadata.get("author")) if written else None
+    via = agent_marker(agent) if login else None
+    client = f"«{via['client']}»" if via else ""
     if origin == "unsigned":
         if not gated:
             return "", None, ""
         if written:  # a /retry pressed on a connection without a login: the words stay their writer's
-            return _note(f"Its words are {written}'s; someone on a connection that is not signed in asked "
-                         "for it to run again.", tools), "", ""
+            return _note(f"Its words are {_words_of(written, writer_agent)}; someone on a connection that is "
+                         "not signed in asked for it to run again.", tools), "", ""
         return _note("Someone typed this turn from a connection that is not signed in; the gateway cannot "
                      "name them.", tools), "", ""
     if origin == "several" and (writers := _writers(contributors)):
@@ -130,12 +156,25 @@ def turn_notes(scope, *, origin: str = "", record_login=None, display_metadata: 
     # pair is the same submitter's); never for an unsigned, several-writer, gateway-started or replayed
     # turn, and never in the stored note.
     if origin == "continuation":
+        if via:
+            return _with_profile(f"Nobody typed this turn; the gateway started it to continue work for {label} "
+                                 f"that an agent, {client}, asked for through MCP.", scope, name, login)
         return _with_profile(
             f"Nobody typed this turn; the gateway started it to continue work for {label}.", scope, name, login)
-    if "replayed_by" not in metadata and (writer is None or writer[0] == login):
+    if "replayed_by" not in metadata and (writer is None or (writer[0] == login and writer_agent == via)):
+        if via:
+            # D5: the person is who the turn works for; the agent is who sent it, and the model is told so.
+            return _with_profile(
+                f"In this turn you are working for {label}. This message was sent by an agent, {client}, "
+                f"through MCP on {label}'s behalf; the gateway verified {label}'s sign-in and the agent's "
+                f"token. {_agent_caveat(label)}", scope, name, login)
         return _with_profile(f"In this turn you are working for {label}, who sent this message; "
                              "the gateway verified this sign-in.", scope, name, login)
-    words = (f"Its words, including 'I' and 'me', are {written}'s; you act for {label}." if written
-             else f"Its words were written by someone the gateway cannot name; you act for {label}.")
+    words = (f"Its words, including 'I' and 'me', are {_words_of(written, writer_agent)}; you act for {label}."
+             if written else f"Its words were written by someone the gateway cannot name; you act for {label}.")
+    if via:
+        return _note(f"In this turn you are working for {label}; an agent, {client}, asked through MCP for this "
+                     f"message to run again on {label}'s behalf; the gateway verified {label}'s sign-in and the "
+                     "agent's token.", words, _agent_caveat(label)), login, ""
     return _note(f"In this turn you are working for {label}, who asked for this message to run again; "
                  "the gateway verified this sign-in.", words), login, ""

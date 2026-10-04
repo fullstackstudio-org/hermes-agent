@@ -436,10 +436,11 @@ def _(rid, params: dict) -> dict:
     """What THIS BUILD enforces (a client withholds unless advertised), sourced from the enforcing
     module, never config: a believed-but-absent capability is worse."""
     from hermes_cli.active_sessions import PER_SESSION_EXCLUSIVE_SUBMIT
-    from tui_gateway.row_author import PER_MESSAGE_AUTHOR
+    from tui_gateway.row_author import PER_MESSAGE_AUTHOR, PER_MESSAGE_AUTHOR_VIA
     from tui_gateway.row_identity import TRANSCRIPT_ROW_IDENTITY
     return _ok(rid, {"per_session_exclusive_submit": bool(PER_SESSION_EXCLUSIVE_SUBMIT),
                      "per_message_author": bool(PER_MESSAGE_AUTHOR),
+                     "per_message_author_via": bool(PER_MESSAGE_AUTHOR_VIA),
                      "transcript_row_identity": bool(TRANSCRIPT_ROW_IDENTITY)})
 
 

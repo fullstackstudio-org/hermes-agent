@@ -1333,7 +1333,7 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
         source = _resolve_session_platform()
         profile = _current_profile_name()
         browser_control_principal = browser_control_transport_family = ""
-        user_id = user_name = ""
+        user_id = user_name = session_agent = ""
         profile_vars: dict = {}
         # Live conversation id for subprocess HERMES_SESSION_ID: an explicitly empty contextvar is authoritative
         # (no os.environ fallback), so never leave it "" — agent's durable session_id, then session_key.
@@ -1361,13 +1361,17 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
             # never a name from another identity. Without one, the provider-scoped login id is still the
             # only human-facing label available.
             user_name = display_name or (user_id.split(":", 1)[1] if user_id else "")
+            # An agent acting for that person through MCP, as ``mcp:<client>``: tools that attribute work
+            # may say so. Only beside a named person, from the same resolver.
+            agent = _acting_agent(sess) if user_id else None
+            session_agent = f"{agent['kind']}:{agent['client']}" if agent else ""
             identity = getattr(sess.get("transport"), "auth_identity", None)
             if _methods_browser_control._is_authenticated_identity(identity):
                 browser_control_principal = _methods_browser_control._principal_digest(identity)
                 browser_control_transport_family = _methods_browser_control._CLOUD_TRANSPORT_FAMILY
         return set_session_vars(
             session_key=session_key, session_id=session_id, source=source,
-            user_id=user_id, user_name=user_name, **profile_vars,
+            user_id=user_id, user_name=user_name, session_agent=session_agent, **profile_vars,
             profile=profile,
             browser_control_principal=browser_control_principal,
             browser_control_transport_family=browser_control_transport_family, cwd=resolved,
@@ -2500,6 +2504,21 @@ def _transport_auth_user_id(transport) -> str | None:
     return _transport_auth_user(transport)[0]
 
 
+def _transport_agent(transport) -> dict | None:
+    """``{"kind": "mcp", "client": ...}`` when ``transport`` is an agent acting for its signed-in person
+    through MCP (``auth_identity["agent"]``, minted by the MCP bridge from a verified grant, never from RPC
+    params), else None. The person half stays :func:`_transport_auth_user`'s answer, unchanged.
+
+    A transport that carries an ``agent`` entry at all IS an agent: an entry whose shape does not clean to a
+    marker is still marked, under the unnamed-client label, because failing to "no marker" would show the
+    agent's words as the person's own."""
+    identity = getattr(transport, "auth_identity", None)
+    if not isinstance(identity, dict) or identity.get("agent") is None:
+        return None
+    from tui_gateway.row_author import AGENT_KIND, UNNAMED_AGENT, agent_marker
+    return agent_marker(identity["agent"]) or {"kind": AGENT_KIND, "client": UNNAMED_AGENT}
+
+
 def _transport_auth_record_fields(transport) -> dict:
     """The identity fields a session record is stamped with at creation. Always written as this ONE pair (never
     field by field), so no record can hold a display name belonging to another login."""
@@ -2542,6 +2561,13 @@ _UNATTRIBUTED_TURN: Any = object()
 _turn_auth_user: contextvars.ContextVar[tuple[str | None, str] | None] = contextvars.ContextVar(
     "hermes_gateway_turn_auth_user", default=None)
 
+#: The agent marker (``row_author.agent_marker``) of the connection that submitted the RUNNING turn when
+#: it was an agent acting for the person through MCP; None for a person's own turn and for one nobody
+#: submitted. Bound by ``_run_prompt_submit`` in the same try/finally as :data:`_turn_auth_user`, and read
+#: only through :func:`_acting_agent`, which keys "inside a turn" off that variable, so the two always
+#: answer from the same source. Defined in the leaf ``row_author`` (see there).
+from tui_gateway.row_author import TURN_AGENT as _turn_agent  # noqa: E402
+
 
 def _submitting_auth_user() -> tuple[str, str] | None:
     """The signed-in identity of the connection handling THIS request, or None when it names no login
@@ -2550,6 +2576,22 @@ def _submitting_auth_user() -> tuple[str, str] | None:
     session's slot, not the submitter's socket."""
     acting = _transport_auth_user(current_transport())
     return acting if acting[0] is not None else None
+
+
+def _submitting_agent() -> dict | None:
+    """The agent marker of the connection handling THIS request, beside :func:`_submitting_auth_user`: None
+    whenever that names no person (a marker without a person is nothing)."""
+    transport = current_transport()
+    return _transport_agent(transport) if _transport_auth_user(transport)[0] is not None else None
+
+
+def _acting_agent(session: dict | None) -> dict | None:
+    """The agent marker beside :func:`_acting_auth_user`'s answer, from the same source: inside a turn the
+    marker the turn was submitted with (bound with the person), otherwise the connection handling this
+    request. The record fallback names a person and never an agent."""
+    if _turn_auth_user.get() is not None:
+        return _turn_agent.get()
+    return _submitting_agent()
 
 
 def _acting_auth_user(session: dict | None) -> tuple[str | None, str]:

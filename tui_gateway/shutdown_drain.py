@@ -60,9 +60,10 @@ _shutdown_draining = threading.Event()
 # Set once at boot by a backend whose stops are restarts (see the module docstring).
 _resumable_shutdown = threading.Event()
 # The JSON-safe part of a queued-prompt envelope (``_enqueue_prompt``). The transport is a live socket
-# and is re-pinned to whoever resumes the session.
+# and is re-pinned to whoever resumes the session. ``turn_agent`` (an agent's marker beside the person) is
+# kept with the person it belongs to, so a prompt an agent queued still says so after the restart.
 _JOURNALED_QUEUE_KEYS = ("text", "image_paths", "turn_author", "turn_auth_user", "row_metadata", "origin",
-                         "contributors")
+                         "contributors", "turn_agent")
 
 
 def enable_resumable_shutdown() -> None:

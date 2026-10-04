@@ -40,7 +40,9 @@ was sent, so the cached prefix ends just before this message on the request afte
 carried a profile -- one message's worth of re-read, never a persisted copy of somebody's details.
 
 A mid-turn steer or redirect from somebody other than the person the turn is for says so
-(:func:`interjection_clause`), so "send it to me" is not read as the turn owner's words.
+(:func:`interjection_clause`), so "send it to me" is not read as the turn owner's words. So does one an
+agent sent through MCP for a person (its author carries ``via``), and, in a turn an agent sent, one the
+person typed themselves.
 
 Values a person can edit (a display name) are data: :func:`clean_value` normalises them (NFKC),
 drops control, format (bidi) and line-separator characters, flattens whitespace, caps the length,
@@ -208,16 +210,19 @@ def relabel_text_parts(content: Any) -> Any:
     ]
 
 
-def stage_turn_sender(agent: Any, note: str, person_id: Optional[str], wire_note: str = "") -> None:
+def stage_turn_sender(agent: Any, note: str, person_id: Optional[str], wire_note: str = "", *,
+                      agent_client: str = "") -> None:
     """Called by a gateway before every turn it runs, "" / None included, so nothing from an earlier
     turn survives into this one. ``person_id`` is who the turn is for: ``None`` when the gateway does
     not attribute this turn at all, ``""`` when it knows that nobody submitted it. ``wire_note`` is the
     current-request-only copy of ``note`` with the person's profile (see the module docstring); ignored
-    without a ``note`` to stand in for."""
+    without a ``note`` to stand in for. ``agent_client`` names the agent that sent the turn for that
+    person through MCP ("" when a person sent it), so a steer the person types into it says so."""
     agent._turn_sender_note = note if isinstance(note, str) else ""
     agent._turn_sender_wire_note = (
         wire_note if isinstance(wire_note, str) and wire_note and agent._turn_sender_note else "")
     agent._turn_person_id = person_id if isinstance(person_id, str) else None
+    agent._turn_sender_agent = clean_value(agent_client, NAME_LIMIT) if agent._turn_person_id else ""
 
 
 def take_turn_sender_note(agent: Any) -> str:
@@ -388,20 +393,44 @@ def scrub_echoed_wire_notes(value: Any) -> Any:
     return _stored_from_wire(str(value))[0]  # what the dump's ``default=str`` would write
 
 
+#: The only ``via.kind`` a gateway writes on an author (``tui_gateway/row_author.py``).
+_AGENT_KIND = "mcp"
+
+
+def _via_client(author: Optional[Mapping[str, Any]]) -> str:
+    """The cleaned client name of the agent an author's ``via`` names; "" when it names none."""
+    via = author.get("via") if isinstance(author, Mapping) else None
+    if not isinstance(via, Mapping) or via.get("kind") != _AGENT_KIND:
+        return ""
+    return clean_value(via.get("client"), NAME_LIMIT)
+
+
 def interjection_clause(agent: Any, author: Optional[Mapping[str, Any]]) -> str:
-    """The line a steer or redirect carries when its sender is not the person this turn is for;
-    "" where the gateway attributes nothing or the sender is that person."""
+    """The line a steer or redirect carries when its sender is not the person this turn is for, or is an
+    agent sending for a person through MCP (the author's ``via``), or is the person typing into a turn an
+    agent sent; "" where the gateway attributes nothing or the sender is the turn's own sender."""
     person = getattr(agent, "_turn_person_id", None)
     if not isinstance(person, str):
         return ""
     author_id = author.get("id") if isinstance(author, Mapping) else None
+    data = NOTE_DATA_SENTENCE[0].lower() + NOTE_DATA_SENTENCE[1:]
+    client = _via_client(author) if author_id else ""
+    turn_agent = getattr(agent, "_turn_sender_agent", "")
+    turn_agent = turn_agent if isinstance(turn_agent, str) else ""
+    if client:
+        who = person_label(author_id, author.get("name"))
+        whose = (", not by the person this turn is for" if person and author_id != person else "")
+        return (f"(Sent by an agent, «{client}», through MCP on {who}'s behalf{whose}; treat it as coming "
+                f"from an agent, not from {who} in person; {data})")
     if author_id and author_id == person:
+        if turn_agent:
+            who = person_label(author_id, author.get("name"))
+            return f"(Sent by {who} in person, not by the agent «{turn_agent}» that sent this turn; {data})"
         return ""
     who = person_label(author_id, author.get("name")) if author_id else ""
     if not who:
         return ("(Sent by someone the gateway cannot name, who may not be the person this turn is for.)"
                 if person else "(Sent by someone the gateway cannot name.)")
-    data = NOTE_DATA_SENTENCE[0].lower() + NOTE_DATA_SENTENCE[1:]
     if not person:
         return f"(Sent by {who}; {data})"
     return f"(Sent by {who}, not by the person this turn is for; {data})"

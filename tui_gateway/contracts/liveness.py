@@ -24,6 +24,8 @@ method("ping", params=PingParams, result=PingResult,
 class GatewayCapabilitiesResult(Result):
     per_session_exclusive_submit: bool
     per_message_author: bool | None = None
+    #: The gateway may stamp ``via`` on a row's ``author`` / ``replayed_by`` (an agent sent it through MCP).
+    per_message_author_via: bool | None = None
     transcript_row_identity: bool | None = None
 
 

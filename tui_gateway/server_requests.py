@@ -47,6 +47,16 @@ answer paths) and who sees it in ``open_requests``; ``detail`` is what the conne
 level (``client.capabilities {confirm_passkey: ...}``). It may also cap refused answers (``max_refusals``):
 each refused answer from a connection allowed to answer counts, and the last one settles the request
 ``unavailable (too_many_attempts)``; ``request.answer`` then reports refusals as 4034 with ``data.reason``.
+
+AGENTS (a connection whose ``auth_identity`` carries ``agent``: an agent acting for its signed-in person
+through MCP). Such a connection still receives every frame its session fans out, and :func:`open_requests`
+still lists the ungated ones to it, read-only, so it can say what the person is being asked. It may answer
+``clarify`` and nothing else (:func:`agent_answer_refusal`, on every answer path: the response frame, the
+``request.answer`` proxy, ``clarify.lock`` and the compute-host relays); approvals, sudo, secrets and vault
+prompts are the person's own, and a gated request never reaches it at all. A clarify answer it gives has
+every non-empty answer prefixed (:func:`mark_agent_answer`) before it reaches the tool, so the model reads
+it as the agent's and not the person's; ``dashboard.mcp.answer_clarify: false`` refuses clarify too. Each
+answer and each refusal is an audit line naming the grant.
 """
 
 from __future__ import annotations
@@ -255,6 +265,104 @@ def _may_answer(req: ServerRequest, transport: Any) -> bool:
     if req.level is None:
         return True
     return _qualifies(req, transport) and any(peer is transport for peer in _peers(req.sid))
+
+
+#: The server requests an agent acting through MCP may answer: a clarify answer is words, the capability a
+#: prompt already is, and is marked as the agent's. An approval is consent to run something, and a sudo,
+#: secret or vault prompt is the person's own: those go to the person's app.
+AGENT_ANSWERABLE = frozenset({"clarify"})
+
+
+def _agent_identity(transport: Any) -> dict | None:
+    """``transport``'s identity when it is an agent's (it carries ``agent`` at all, whatever its shape), else None."""
+    identity = getattr(transport, "auth_identity", None)
+    return identity if isinstance(identity, dict) and identity.get("agent") is not None else None
+
+
+def _agent_clarify_allowed() -> bool:
+    """``dashboard.mcp.answer_clarify`` (default true). An unreadable config refuses: the operator may have
+    turned it off, and a refused clarify only waits for the person's own app."""
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.dashboard_auth.mcp.settings import from_config
+        return bool(from_config(load_config()).answer_clarify)
+    except Exception:  # noqa: BLE001 - refuse rather than guess
+        logger.warning("dashboard.mcp.answer_clarify unreadable; refusing clarify answers from agents", exc_info=True)
+        return False
+
+
+def agent_answer_refusal(method: str, transport: Any) -> tuple[int, str] | None:
+    """Why ``transport`` may not answer a ``method`` request because it is an agent, as ``(4033, message)``;
+    None when it is not an agent, or may (``clarify``, unless the operator turned that off)."""
+    if _agent_identity(transport) is None:
+        return None
+    if method not in AGENT_ANSWERABLE:
+        return 4033, (f"an agent connected through MCP cannot answer {method} requests; "
+                      "they are answered in the person's own app")
+    if not _agent_clarify_allowed():
+        return 4033, "answering clarify questions through MCP is turned off on this gateway"
+    return None
+
+
+def _agent_answer_prefix(transport: Any) -> str:
+    """``[Answered by the agent «<client>» through MCP, not by «<person>»] ``. Both names are cleaned and
+    quoted like the turn note's values."""
+    from agent.turn_sender import person_label
+    from tui_gateway.row_author import UNNAMED_AGENT, agent_marker
+
+    identity = _agent_identity(transport) or {}
+    client = (agent_marker(identity.get("agent")) or {}).get("client") or UNNAMED_AGENT
+    login = (f"{str(identity.get('provider') or '').strip()}:{str(identity.get('user_id') or '').strip()}"
+             if identity.get("provider") and identity.get("user_id") else "")
+    person = person_label(login, identity.get("user_name")) or "the person"
+    return f"[Answered by the agent «{client}» through MCP, not by {person}] "
+
+
+def mark_agent_answer(method: str, result: Any, transport: Any) -> Any:
+    """``result`` with every non-empty clarify answer prefixed as the agent's (:func:`_agent_answer_prefix`)
+    when ``transport`` is an agent; unchanged otherwise. An empty answer stays a skip."""
+    if method not in AGENT_ANSWERABLE or _agent_identity(transport) is None or not isinstance(result, dict):
+        return result
+    prefix = _agent_answer_prefix(transport)
+    out = dict(result)
+    if isinstance(out.get("answer"), str) and out["answer"]:
+        out["answer"] = prefix + out["answer"]
+    if isinstance(out.get("answers"), dict):
+        out["answers"] = {qid: prefix + answer if isinstance(answer, str) and answer else answer
+                          for qid, answer in out["answers"].items()}
+    return out
+
+
+def mark_agent_answer_text(answer: str, transport: Any) -> str:
+    """One clarify answer (a ``clarify.lock``) marked as :func:`mark_agent_answer` marks a result."""
+    return mark_agent_answer("clarify", {"answer": answer}, transport)["answer"]
+
+
+def audit_agent_answer(transport: Any, *, sid: str, request_id: str, method: str, outcome: str,
+                       reason: str = "") -> None:
+    """One audit line for an answer from an agent's connection; nothing for anyone else. Never the answer."""
+    identity = _agent_identity(transport)
+    if identity is None:
+        return
+    try:
+        from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
+        from tui_gateway.row_author import agent_marker
+
+        agent = identity.get("agent")
+        audit_log(AuditEvent.MCP_REQUEST_ANSWERED if outcome == "answered" else AuditEvent.MCP_REQUEST_ANSWER_REFUSED,
+                  user_id=f"{identity.get('provider') or ''}:{identity.get('user_id') or ''}",
+                  grant_id=str(agent.get("grant") or "") if isinstance(agent, dict) else "",
+                  client_name=(agent_marker(agent) or {}).get("client", ""), session=sid,
+                  request_id=request_id, method=method, outcome=outcome, reason=reason)
+    except Exception:  # noqa: BLE001 - an audit line must not fail the answer path
+        logger.debug("server request %s: agent answer audit failed", request_id, exc_info=True)
+
+
+def request_method(request_id: str) -> str | None:
+    """The method of the open request ``request_id`` (None when it is not open here)."""
+    with _lock:
+        req = _open.get(request_id)
+        return req.method if req is not None else None
 
 
 def _unanswerable(method: str, sid: str) -> bool:
@@ -481,8 +589,14 @@ def answer_problem(request_id: str, result: Any) -> tuple[int, str] | tuple[int,
     (gated requests) is not attached to it, did not advertise the level or fails its target predicate; 4034:
     the result is not a valid answer for this gated request. A request with ``max_refusals`` counts the
     refusal here and answers ``(4034, "answer refused", {"reason": ...})``; the refusal that reaches the cap
-    settles the request and its reason is ``too_many_attempts``."""
+    settles the request and its reason is ``too_many_attempts``. An agent's connection is refused 4033 for
+    every method but ``clarify`` (:func:`agent_answer_refusal`)."""
     transport = _caller()
+    if _agent_identity(transport) is not None and (method := request_method(request_id)) is not None:
+        if (refusal := agent_answer_refusal(method, transport)) is not None:
+            audit_agent_answer(transport, sid=request_session(request_id) or "", request_id=request_id,
+                               method=method, outcome="refused", reason="agent")
+            return refusal
     with _lock:
         req = _open.get(request_id)
         if req is None:
@@ -549,6 +663,19 @@ def resolve_response(frame: dict) -> bool:
         return False
     transport = _caller()
     exhausted = False
+    agent_answer: tuple[str, str] | None = None
+    if _agent_identity(transport) is not None and (method := request_method(rid)) is not None:
+        # An agent: refused for every method but clarify (an error frame too -- it would settle an approval
+        # as unanswered); a clarify answer is marked as the agent's before anything can read it. Returns
+        # True for a refusal: the request IS here, so no other process may be handed the frame.
+        sid = request_session(rid) or ""
+        if (refusal := agent_answer_refusal(method, transport)) is not None:
+            logger.warning("server request %s (%s): answer refused, an agent may not answer it", rid, method)
+            audit_agent_answer(transport, sid=sid, request_id=rid, method=method, outcome="refused", reason="agent")
+            return True
+        if "result" in frame:
+            frame = {**frame, "result": mark_agent_answer(method, frame.get("result"), transport)}
+        agent_answer = (sid, method)
     with _lock:
         req = _open.get(rid)
         if req is None:
@@ -590,6 +717,9 @@ def resolve_response(frame: dict) -> bool:
         # A bare response frame gets no reply; the refusal is still counted and reported to the owner.
         _after_refusal(req, transport, problem, frame.get("result"), exhausted)
         return exhausted
+    if agent_answer is not None:
+        audit_agent_answer(transport, sid=agent_answer[0], request_id=rid, method=agent_answer[1],
+                           outcome="answered" if req.answered else "declined")
     if req.on_result is not None:
         req.on_result(req.result)
     req.event.set()

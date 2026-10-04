@@ -2235,7 +2235,7 @@ def _apply_correction(rid, session: dict, verb: str, text: str, accepted_status:
     # the final answer -- names the connection that sent it, not whoever's turn it arrived in.
     from tui_gateway.row_author import deliver_correction
     try:
-        accepted = deliver_correction(session["agent"], verb, text, _submitting_auth_user())
+        accepted = deliver_correction(session["agent"], verb, text, _submitting_auth_user(), _submitting_agent())
     except Exception as exc:
         return _err(rid, 5000, f"{verb} failed: {exc}")
     if accepted:
@@ -2266,7 +2266,7 @@ def _correction_method(name: str, verb: str, accepted_status: str, supported, un
         if verb == "redirect" and agent is None and session.get("running"):
             submitter = _submitting_auth_user()
             _enqueue_prompt(session, text, current_transport() or _stdio_transport,
-                            turn_auth_user=submitter,
+                            turn_auth_user=submitter, turn_agent=_submitting_agent(),
                             origin="unsigned" if not submitter and _session_auth_user_id(session) else "")
             session["last_active"] = time.time()
             return _ok(rid, {"status": "queued", "text": text})

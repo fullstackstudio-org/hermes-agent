@@ -81,6 +81,12 @@ class AuditEvent(enum.Enum):
     MCP_TOOL_CALL = "mcp_tool_call"
     MCP_CHAT_OPENED = "mcp_chat_opened"
     MCP_RATE_LIMITED = "mcp_rate_limited"
+    # A server request answered from an agent's connection (tui_gateway/server_requests.py): a clarify answer
+    # it gave (marked as the agent's before it reached the tool), or an answer refused because an agent may
+    # answer nothing else. User, grant, client name, session, request id, method, outcome and reason; never
+    # the question or the answer.
+    MCP_REQUEST_ANSWERED = "mcp_request_answered"
+    MCP_REQUEST_ANSWER_REFUSED = "mcp_request_answer_refused"
 
 
 def _resolve_log_path() -> Path:

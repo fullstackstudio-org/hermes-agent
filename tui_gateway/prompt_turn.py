@@ -432,7 +432,7 @@ def _after_complete_turn(sid: str, session: dict, st: _TurnRun, raw: Any) -> Non
 
 
 def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str, *,
-                            on_done=None, on_error=None, turn_auth_user=None) -> None:
+                            on_done=None, on_error=None, turn_auth_user=None, turn_agent=None) -> None:
     """Chain one follow-up turn (caller set ``running``); on failure run ``on_error``, log,
     release ``running``. The chained turn continues the work of whoever submitted the turn it follows,
     so it is SCOPED to them (memory, tools, permissions) and not re-resolved from the session record.
@@ -442,7 +442,8 @@ def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str
         # The turn's id exists before its first frame: ``message.start`` goes out before ``_run_prompt_submit``.
         begin_turn_id(session)
         _emit("message.start", sid)
-        _run_prompt_submit(rid, sid, session, prompt, turn_auth_user=turn_auth_user, origin="continuation")
+        _run_prompt_submit(rid, sid, session, prompt, turn_auth_user=turn_auth_user, origin="continuation",
+                           **({"turn_agent": turn_agent} if turn_agent else {}))
         if on_done is not None:
             on_done()
     except Exception as exc:
@@ -456,7 +457,7 @@ def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str
 
 def _run_post_turn_followups(
     rid, sid: str, session: dict, result: Any, goal_followup: str | None, *,
-    turn_auth_user: tuple[str, str] | None = None) -> None:
+    turn_auth_user: tuple[str, str] | None = None, turn_agent: dict | None = None) -> None:
     """Chain whatever should run after ``running`` was released.  Order: a mid-turn user
     prompt wins over every auto follow-up (drain it, skip the rest); a leftover /steer is
     requeued first so it isn't dropped; then goal continuation, then completion
@@ -468,15 +469,17 @@ def _run_post_turn_followups(
         # and in a shared chat a colleague steering somebody else's turn is the ordinary case. Text more
         # than one person, or a connection naming no login, contributed to comes back with no author and
         # is requeued under nobody's identity.
-        from tui_gateway.row_author import auth_user_from_row_author
+        from tui_gateway.row_author import agent_from_row_author, auth_user_from_row_author
         steerer = auth_user_from_row_author(result.get("pending_steer_author"))
+        # An agent's steer handed back keeps its marker: the turn it becomes was sent by that agent.
+        steerer_agent = agent_from_row_author(result.get("pending_steer_author")) if steerer else None
         # Several people's words joined in one slot are nobody's alone: the turn says who wrote them.
         contributors = [] if steerer else list(result.get("pending_steer_contributors") or [])
         origin = ("" if steerer else "several" if contributors
                   else "unsigned" if _session_auth_user_id(session) else "")
         with session["history_lock"]:
             _enqueue_prompt(session, steer, session.get("transport"), turn_auth_user=steerer,
-                            origin=origin, contributors=contributors)
+                            turn_agent=steerer_agent, origin=origin, contributors=contributors)
     if _drain_queued_prompt(rid, sid, session):
         return
     if goal_followup:
@@ -486,7 +489,7 @@ def _run_post_turn_followups(
             from tui_gateway.session_lifecycle import _claim_turn_running
             _claim_turn_running(session)
         _dispatch_followup_turn(rid, sid, session, goal_followup, "goal continuation dispatch",
-                                turn_auth_user=turn_auth_user)
+                                turn_auth_user=turn_auth_user, turn_agent=turn_agent)
     # Safety net for completion events that arrived mid-turn.  Ownership is positive-proof
     # and compression-chain aware (same fail-closed gate as the poller): session B must
     # not consume session A's event.  Unclaimable events are requeued for the poller.
@@ -730,11 +733,15 @@ def _invoke_agent(
     # Whom this turn works for, from the resolver HERMES_SESSION_USER_* was bound from; the agent sends it
     # as the last block of the turn's user message, on the wire only. Staged every turn, "" included, so
     # nothing staged for a turn that died before its prologue reaches the next person's turn.
+    # An agent that sent the turn for that person through MCP is named in the same note, from the same
+    # resolver (``_acting_agent``: the marker bound beside the person).
     from agent.turn_sender import stage_turn_sender
     from tui_gateway.turn_sender_note import turn_notes
+    acting_agent = _acting_agent(session)
     stage_turn_sender(agent, *turn_notes(
         _acting_auth_user(session), origin=origin, record_login=_session_auth_user_id(session),
-        display_metadata=display_metadata, turn_author=turn_author, contributors=contributors))
+        display_metadata=display_metadata, turn_author=turn_author, contributors=contributors,
+        agent=acting_agent), agent_client=(acting_agent or {}).get("client", ""))
     # Live-rename hook: auto-titling fires inside the turn prologue.
     _title_key = session.get("session_key") or sid
     agent._on_session_title = lambda t, _src, _k=_title_key: _emit(
@@ -1065,17 +1072,22 @@ def _run_prompt_submit(
     terminal_callback: Callable[[dict[str, Any]], None] | None = None,
     turn_author: dict | None = None,
     turn_auth_user: tuple[str, str] | None = None,
-    row_auth_user: tuple[str, str] | None = None, origin: str = "", contributors: Any = ()) -> bool:
+    row_auth_user: tuple[str, str] | None = None, origin: str = "", contributors: Any = (),
+    turn_agent: dict | None = None, row_agent: dict | None = None) -> bool:
     # TWO identities. ``turn_auth_user`` is who the turn works FOR -- memory, tools, permissions -- and a
     # turn nobody typed (the /goal continuation) still carries the person whose work it continues.
     # ``row_auth_user`` is who TYPED this exact text, passed only by a caller that holds it beside the
     # text: a prompt queued while the session was busy, drained with its envelope's own submitter. The
     # row's author comes from that alone, never from the scope. prompt.submit merged its author into
     # ``display_metadata`` already (and an isolated child receives it there, stamped by the parent).
-    from tui_gateway.row_author import with_row_author
+    # ``turn_agent`` / ``row_agent`` are the agent markers beside each (an agent sent it for that person
+    # through MCP): the scope's marker is bound for the turn, the row's goes on the row as ``via``. Only a
+    # valid marker beside a person counts; anything else (a sentinel, a junk shape) is no marker.
+    from tui_gateway.row_author import TURN_AGENT, agent_marker, with_row_author
     from tui_gateway.row_identity import (
         bind_emitting_turn, mint_turn_id, release_turn_identity, turn_id_of, unbind_emitting_turn, with_turn_id)
-    display_metadata = with_row_author(display_metadata, row_auth_user)
+    display_metadata = with_row_author(display_metadata, row_auth_user, row_agent)
+    turn_agent = agent_marker(turn_agent) if isinstance(turn_auth_user, tuple) and turn_auth_user[0] else None
     # THIS turn's id. ``prompt.submit`` minted one and persisted it on the user row; a turn the gateway starts
     # itself (queued drain, continuation, auto-continue, wake-up) arrives without one, and a caller that has
     # to emit ``message.start`` before it gets here pre-minted it for exactly this hand-off
@@ -1144,7 +1156,7 @@ def _run_prompt_submit(
         # on to drain notifications and dispatch follow-ups, and a leaked transport is not merely stale
         # bookkeeping -- ``_acting_auth_user`` reads the bound transport when no turn is in scope, so a
         # leaked one makes later work name whoever that socket belonged to.
-        transport_token = auth_user_token = runtime_session_token = emitting_turn_token = None
+        transport_token = auth_user_token = agent_token = runtime_session_token = emitting_turn_token = None
         try:
             # THIS turn's own id for every frame this thread emits, whatever the session says by then.
             emitting_turn_token = bind_emitting_turn(sid, turn_id)
@@ -1157,6 +1169,9 @@ def _run_prompt_submit(
             # hands it down; a turn nobody submitted (crash continuation, wake-up, cron, a relayed DM)
             # binds the sentinel, so nothing downstream mistakes a watching peer for the person who asked.
             auth_user_token = _turn_auth_user.set(turn_auth_user or _UNATTRIBUTED_TURN)
+            # The agent beside that person, when one sent the turn through MCP (None otherwise): the note,
+            # HERMES_SESSION_AGENT and every row this turn writes read it from here.
+            agent_token = TURN_AGENT.set(turn_agent)
             runtime_session_token = _current_runtime_session_record.set(session)
             prepared = _prepare_turn_input(sid, session, st, text, images)
             if prepared is None:
@@ -1188,6 +1203,8 @@ def _run_prompt_submit(
                 _current_runtime_session_record.reset(runtime_session_token)
             if emitting_turn_token is not None:
                 unbind_emitting_turn(emitting_turn_token)
+            if agent_token is not None:
+                TURN_AGENT.reset(agent_token)
             if auth_user_token is not None:
                 _turn_auth_user.reset(auth_user_token)
             if transport_token is not None:
@@ -1236,7 +1253,8 @@ def _run_prompt_submit(
         with notification_policy_snapshot(agent, "tui", notification_config), notification_turn(agent, muted=muted, session_id=sid):
             followup = run_body()
         if followup is not None:
-            _run_post_turn_followups(rid, sid, session, *followup, turn_auth_user=turn_auth_user)
+            _run_post_turn_followups(rid, sid, session, *followup, turn_auth_user=turn_auth_user,
+                                     turn_agent=turn_agent)
     # The handle is resolved BEFORE _sessions_lock: a profile session opens its own SessionDB through the
     # state registry, and _sessions_lock gates every create/close/prompt on this backend.
     with _routing_provenance_db(session) as routing_db, _sessions_lock:

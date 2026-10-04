@@ -1,0 +1,418 @@
+"""A unified diff as the bounded hunks of a ``review.diff`` request, and the patch put back together from the hunks the
+person approved (plan ``request-types-v2``, contract ``contract/requests`` §7).
+
+:func:`parse` reads the agent's diff of ONE file and returns a :class:`ParsedDiff`: the file's head (what the diff
+says about the file: modified, new, deleted or renamed) and the hunks, ids ``h1``, ``h2``, ... Nothing is guessed and
+nothing is repaired; a diff that cannot be shown as it is raises :class:`DiffError` with a sentence for the agent:
+
+- bounds: at most :data:`MAX_DIFF_BYTES` (64 KiB) of text, :data:`MAX_HUNKS` hunks, :data:`MAX_HUNK_LINES` lines in
+  one, :data:`MAX_LINE_CHARS` characters in a line (its marker included), :data:`MAX_HEADER_CHARS` in a hunk header;
+- a hunk is read by its header's counts (``@@ -a,b +c,d @@``: ``b`` old and ``d`` new lines), the way ``patch`` does,
+  so a removed line that looks like ``--- x`` is content; counts that do not match the lines refuse the diff. Starting
+  line numbers are not checked;
+- every line passes the verbatim rules of README §6.2 and §6.3 (:func:`line_problem`): the marker (space, ``+`` or
+  ``-``) is taken off first and the rest is checked as one line of text, so a tab, a carriage return that is part of
+  the line (CRLF content), a hidden character, whitespace at the end of a line or a long run of spaces refuses the
+  diff, never rewrites it. A blank context line is one space (an empty line inside a hunk is read as that);
+- the line ending of the DIFF itself may be CRLF (every line, the last one aside, ends in CR: they are all removed);
+  a CR on only some lines is a CR in the content and refused;
+- ``\\ No newline at end of file`` is kept as a line of its hunk (exactly that text, after a line, never first);
+- a binary diff (``Binary files ... differ``, ``GIT binary patch``), a diff of several files, a diff without a hunk and
+  header lines this module does not know (mode changes, copies) are refused.
+
+The file head is read into a structure and put back by :func:`compose_patch` from that structure and the hunks the
+GATEWAY stored, never from the agent's own header text: the person is shown ``path`` and the hunks, so the patch the
+agent gets back names exactly that path (paths are relative, without ``..``) and contains exactly the approved
+hunks. Its form is git's (``diff --git a/<path> b/<path>``, ``--- a/``, ``+++ b/``; apply it with ``git apply``).
+Rejecting an earlier hunk shifts the new-side start of the hunks after it; :func:`compose_patch` corrects it.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass
+
+from tui_gateway.request_text import verbatim_problem
+
+MAX_DIFF_BYTES = 65_536
+MAX_HUNKS = 200
+MAX_HUNK_LINES = 400
+MAX_LINE_CHARS = 500
+MAX_HEADER_CHARS = 200
+MAX_PATH_CHARS = 300
+NO_NEWLINE = "\\ No newline at end of file"
+#: ``@@ -a,b +c,d @@`` and, after a space, the section text git adds (the function the hunk is in). A count left out is 1.
+HEADER = re.compile(r"@@ -(\d{1,9})(?:,(\d{1,9}))? \+(\d{1,9})(?:,(\d{1,9}))? @@((?: .*)?)")
+_MODE = re.compile(r"[0-7]{6}")
+_SIMILARITY = re.compile(r"(\d{1,3})%")
+_SHORT = 60
+
+
+class DiffError(ValueError):
+    """The diff cannot be reviewed as given: the message says what to change (it is shown to the agent)."""
+
+
+@dataclass(frozen=True)
+class FileHead:
+    """What the diff says about its one file. ``kind`` is ``modify``, ``new``, ``deleted`` or ``rename``; ``old`` and
+    ``new`` are relative paths (``None`` for the side that does not exist, and both ``None`` for a diff of bare hunks
+    without a path); ``mode`` is a new or deleted file's mode, ``similarity`` a rename's index (percent)."""
+
+    kind: str = "modify"
+    old: str | None = None
+    new: str | None = None
+    mode: str | None = None
+    similarity: int | None = None
+
+    @property
+    def path(self) -> str | None:
+        """The path the person is shown: the file's own, for a rename ``<old> -> <new>``."""
+        if self.kind == "rename":
+            return f"{self.old} -> {self.new}"
+        return self.new or self.old
+
+
+@dataclass(frozen=True)
+class Hunk:
+    id: str
+    header: str
+    lines: tuple[str, ...]
+
+    def as_dict(self) -> dict:
+        return {"id": self.id, "header": self.header, "lines": list(self.lines)}
+
+
+@dataclass(frozen=True)
+class ParsedDiff:
+    head: FileHead
+    hunks: tuple[Hunk, ...]
+
+    @property
+    def path(self) -> str | None:
+        return self.head.path
+
+
+# ── one line ──────────────────────────────────────────────────────────────────────────────────
+
+
+def line_problem(line: str) -> str:
+    """Why the hunk line *line* (marker included) cannot be shown as it is, or "". The rule of README §7: at most
+    :data:`MAX_LINE_CHARS` code points; the line is the ``\\ No newline at end of file`` marker or starts with a space,
+    ``+`` or ``-``; the rest, taken as one line of text, passes ``verbatim_problem`` (§6.2 and §6.3)."""
+    if len(line) > MAX_LINE_CHARS:
+        return f"it is {len(line)} characters (at most {MAX_LINE_CHARS})"
+    if line == NO_NEWLINE:
+        return ""
+    if line[:1] not in (" ", "+", "-"):
+        return "it does not start with a space, + or -"
+    return verbatim_problem(line[1:])
+
+
+def header_problem(header: str) -> str:
+    """Why the hunk header *header* is not one this module shows, or ""."""
+    if len(header) > MAX_HEADER_CHARS:
+        return f"it is {len(header)} characters (at most {MAX_HEADER_CHARS})"
+    if HEADER.fullmatch(header) is None:
+        return "it is not of the form @@ -a,b +c,d @@"
+    return verbatim_problem(header)
+
+
+def _short(line: str) -> str:
+    return repr(line if len(line) <= _SHORT else line[:_SHORT] + "...")
+
+
+# ── paths ─────────────────────────────────────────────────────────────────────────────────────
+
+
+def path_problem(path: str) -> str:
+    """Why *path* is not a path to name a file by, or "": it must be relative, without empty, ``.`` or ``..``
+    segments, at most :data:`MAX_PATH_CHARS` characters, and text that can be shown as it is."""
+    if not path:
+        return "it is empty"
+    if len(path) > MAX_PATH_CHARS:
+        return f"it is {len(path)} characters (at most {MAX_PATH_CHARS})"
+    if path.startswith("/"):
+        return "it is absolute: use a path relative to the repository"
+    if any(segment in ("", ".", "..") for segment in path.split("/")):
+        return "it has an empty, . or .. segment"
+    if "\\" in path:
+        return "it has a backslash"
+    return verbatim_problem(path)
+
+
+def _file_name(token: str, what: str) -> str | None:
+    """The path a ``---`` or ``+++`` line names (``None`` for ``/dev/null``), without the tab and timestamp some
+    tools append."""
+    name = token.split("\t", 1)[0]
+    if name.startswith('"'):
+        raise DiffError(f"{what}: a quoted file name is not supported; use a plain relative path.")
+    return None if name == "/dev/null" else name
+
+
+def _checked(path: str, what: str) -> str:
+    if problem := path_problem(path):
+        raise DiffError(f"{what} {_short(path)} cannot be used: {problem}.")
+    return path
+
+
+# ── the head ──────────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class _Preamble:
+    git: bool = False
+    old_name: str | None = None
+    new_name: str | None = None
+    has_files: bool = False
+    new_mode: str | None = None
+    deleted_mode: str | None = None
+    similarity: int | None = None
+    rename_from: str | None = None
+    rename_to: str | None = None
+
+
+def _read_preamble(lines: list[str]) -> tuple[_Preamble, int]:
+    """The header lines before the first hunk, and the index of that hunk's header."""
+    pre, i = _Preamble(), 0
+    while i < len(lines) and not lines[i].startswith("@@"):
+        line = lines[i]
+        number = i + 1
+        if line.startswith("diff --git "):
+            if pre.git or pre.has_files:
+                raise DiffError("The diff names more than one file; review one file at a time (one call each).")
+            pre.git = True
+        elif line.startswith("index "):
+            pass
+        elif line.startswith("new file mode "):
+            pre.new_mode = _mode(line[len("new file mode "):], number)
+        elif line.startswith("deleted file mode "):
+            pre.deleted_mode = _mode(line[len("deleted file mode "):], number)
+        elif line.startswith("similarity index "):
+            match = _SIMILARITY.fullmatch(line[len("similarity index "):])
+            if match is None or int(match.group(1)) > 100:
+                raise DiffError(f"Line {number}: a similarity index looks like 'similarity index 90%'.")
+            pre.similarity = int(match.group(1))
+        elif line.startswith("rename from "):
+            pre.rename_from = _checked(line[len("rename from "):], f"Line {number}: the path")
+        elif line.startswith("rename to "):
+            pre.rename_to = _checked(line[len("rename to "):], f"Line {number}: the path")
+        elif line.startswith("--- "):
+            if pre.has_files or not (i + 1 < len(lines) and lines[i + 1].startswith("+++ ")):
+                raise DiffError(f"Line {number}: a '--- ' line must be followed by a '+++ ' line, once.")
+            pre.old_name = _file_name(line[4:], f"Line {number}")
+            pre.new_name = _file_name(lines[i + 1][4:], f"Line {number + 1}")
+            pre.has_files = True
+            i += 1
+        elif line.startswith("Binary files ") or line.startswith("GIT binary patch"):
+            raise DiffError("A binary diff cannot be reviewed: only text hunks can be shown to the person.")
+        else:
+            raise DiffError(f"Line {number} is not part of a unified diff of one file: {_short(line)}. Send the "
+                            "diff as it is (git diff or diff -u), without anything around it.")
+        i += 1
+    return pre, i
+
+
+def _mode(text: str, number: int) -> str:
+    if _MODE.fullmatch(text) is None:
+        raise DiffError(f"Line {number}: a file mode is six octal digits (100644).")
+    return text
+
+
+def _head(pre: _Preamble, path: str | None) -> FileHead:
+    """The :class:`FileHead` the header lines and the agent's ``path`` say; refuses what contradicts."""
+    if path is not None:
+        _checked(path, "path")
+    if not pre.has_files:
+        if pre.git or pre.new_mode or pre.deleted_mode or pre.rename_from or pre.rename_to:
+            raise DiffError("The diff has file header lines but no '--- ' and '+++ ' lines.")
+        return FileHead("modify", path, path)
+    old, new = pre.old_name, pre.new_name
+    # git writes a/ and b/ in front of both names; strip them as a pair (or from the one that exists).
+    if (old is None or old.startswith("a/")) and (new is None or new.startswith("b/")):
+        old = old[2:] if old else None
+        new = new[2:] if new else None
+    for name, side in ((old, "'---'"), (new, "'+++'")):
+        if name is not None:
+            _checked(name, f"The {side} path")
+    if old is None and new is None:
+        raise DiffError("The diff has /dev/null on both sides.")
+    if old is None:
+        if pre.deleted_mode or pre.rename_from or pre.rename_to:
+            raise DiffError("The header says the file is new but also deleted or renamed.")
+        head = FileHead("new", None, new, mode=pre.new_mode)
+    elif new is None:
+        if pre.new_mode or pre.rename_from or pre.rename_to:
+            raise DiffError("The header says the file is deleted but also new or renamed.")
+        head = FileHead("deleted", old, None, mode=pre.deleted_mode)
+    elif old == new:
+        if pre.new_mode or pre.deleted_mode or pre.rename_from or pre.rename_to:
+            raise DiffError("The header says the file is new, deleted or renamed but names one path on both sides.")
+        head = FileHead("modify", old, new)
+    else:
+        if (pre.rename_from, pre.rename_to) != (old, new):
+            raise DiffError("The diff names two different files without 'rename from' and 'rename to' lines that "
+                            "say so; review one file at a time.")
+        head = FileHead("rename", old, new, similarity=pre.similarity)
+    if path is not None and path != (head.old if head.kind == "deleted" else head.new):
+        raise DiffError(f"path {_short(path)} is not the file the diff changes ({_short(head.path or '')}); leave "
+                        "path out or name that file.")
+    return head
+
+
+# ── the hunks ─────────────────────────────────────────────────────────────────────────────────
+
+
+def _count(text: str | None) -> int:
+    return 1 if text is None else int(text)
+
+
+def _read_hunk(lines: list[str], i: int, number: int) -> tuple[Hunk, int]:
+    """The hunk whose header is ``lines[i]`` and the index of the line after it."""
+    hid = f"h{number}"
+    header = lines[i]
+    if problem := header_problem(header):
+        raise DiffError(f"Hunk {hid} (line {i + 1}): the header {_short(header)} cannot be shown: {problem}.")
+    match = HEADER.fullmatch(header)
+    old_left, new_left = _count(match.group(2)), _count(match.group(4))
+    body: list[str] = []
+    i += 1
+
+    def fail(message: str) -> DiffError:
+        return DiffError(f"Hunk {hid}: {message}")
+
+    while old_left > 0 or new_left > 0:
+        if i >= len(lines):
+            raise fail(f"the header counts {_count(match.group(2))} old and {_count(match.group(4))} new lines but "
+                       "the diff ends first.")
+        line = lines[i]
+        if line == "":
+            line = " "  # an editor may have stripped the space of a blank context line
+        if line == NO_NEWLINE:
+            if not body or body[-1] == NO_NEWLINE:
+                raise fail(f"line {i + 1}: '{NO_NEWLINE}' must follow a line.")
+        elif line[0] == " " and old_left > 0 and new_left > 0:
+            old_left, new_left = old_left - 1, new_left - 1
+        elif line[0] == "-" and old_left > 0:
+            old_left -= 1
+        elif line[0] == "+" and new_left > 0:
+            new_left -= 1
+        else:
+            raise fail(f"line {i + 1} {_short(line)} does not fit the header's counts "
+                       f"({_count(match.group(2))} old and {_count(match.group(4))} new lines).")
+        _check_line(line, hid, len(body) + 1, i + 1)
+        body.append(line)
+        i += 1
+        if len(body) > MAX_HUNK_LINES:
+            raise fail(f"it has more than {MAX_HUNK_LINES} lines; split the change into smaller hunks.")
+    if i < len(lines) and lines[i] == NO_NEWLINE and body and body[-1] != NO_NEWLINE:
+        body.append(NO_NEWLINE)
+        i += 1
+        if len(body) > MAX_HUNK_LINES:
+            raise fail(f"it has more than {MAX_HUNK_LINES} lines; split the change into smaller hunks.")
+    if not body:
+        raise fail("it has no lines.")
+    return Hunk(hid, header, tuple(body)), i
+
+
+def _check_line(line: str, hid: str, index: int, number: int) -> None:
+    if problem := line_problem(line):
+        raise DiffError(f"Hunk {hid}, line {index} (line {number} of the diff) {_short(line)} cannot be shown as it "
+                        f"is: {problem}.")
+
+
+def parse(diff: object, path: str | None = None) -> ParsedDiff:
+    """The one-file unified diff *diff* as a :class:`ParsedDiff`; *path* is the agent's name for the file (a diff of
+    bare hunks has no other). Raises :class:`DiffError`, the sentence to give the agent."""
+    if not isinstance(diff, str):
+        raise DiffError("diff is required: a unified diff of one file, as text.")
+    try:
+        size = len(diff.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise DiffError("The diff is not valid text (it has a lone surrogate).") from None
+    if size > MAX_DIFF_BYTES:
+        raise DiffError(f"The diff is {size} bytes; the limit is {MAX_DIFF_BYTES} (64 KiB). Review a smaller change.")
+    if not diff.strip():
+        raise DiffError("diff is required: a unified diff of one file, as text.")
+    lines = diff.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    if len(lines) > 1 and all(line.endswith("\r") for line in lines[:-1]):
+        # The diff's own line ending is CRLF: take it off every line.
+        lines = [line[:-1] if line.endswith("\r") else line for line in lines]
+    pre, i = _read_preamble(lines)
+    head = _head(pre, path)
+    hunks: list[Hunk] = []
+    while i < len(lines):
+        if not lines[i].startswith("@@"):
+            if lines[i].startswith("diff --git ") or (
+                    lines[i].startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ ")):
+                raise DiffError("The diff names more than one file; review one file at a time (one call each).")
+            if all(line == "" for line in lines[i:]):
+                break
+            raise DiffError(f"Line {i + 1} is not part of a hunk: {_short(lines[i])}. After a hunk's last line "
+                            "only another hunk may follow.")
+        if len(hunks) >= MAX_HUNKS:
+            raise DiffError(f"The diff has more than {MAX_HUNKS} hunks; review a smaller change.")
+        hunk, i = _read_hunk(lines, i, len(hunks) + 1)
+        hunks.append(hunk)
+    if not hunks:
+        raise DiffError("The diff has no hunk (a line starting with @@): there is nothing to review.")
+    return ParsedDiff(head, tuple(hunks))
+
+
+# ── the patch the person approved ─────────────────────────────────────────────────────────────
+
+
+def _head_lines(head: FileHead | None, path: str | None) -> list[str]:
+    """The header of the recomposed patch, from the stored head (or, without one, from the displayed *path*)."""
+    if head is None:
+        head = FileHead("modify", path, path)
+    old, new = head.old, head.new
+    if head.kind == "modify":
+        if old is None:
+            return []  # bare hunks and no path: nothing to name
+        return [f"diff --git a/{old} b/{new}", f"--- a/{old}", f"+++ b/{new}"]
+    if head.kind == "new":
+        return [f"diff --git a/{new} b/{new}", f"new file mode {head.mode or '100644'}", "--- /dev/null",
+                f"+++ b/{new}"]
+    if head.kind == "deleted":
+        return [f"diff --git a/{old} b/{old}", f"deleted file mode {head.mode or '100644'}", f"--- a/{old}",
+                "+++ /dev/null"]
+    similarity = [] if head.similarity is None else [f"similarity index {head.similarity}%"]
+    return [f"diff --git a/{old} b/{new}", *similarity, f"rename from {old}", f"rename to {new}", f"--- a/{old}",
+            f"+++ b/{new}"]
+
+
+def _shifted(header: str, shift: int) -> str:
+    """*header* with its new-side start moved by *shift* lines (the net change of rejected hunks before it)."""
+    if not shift:
+        return header
+    match = HEADER.fullmatch(header)
+    if match is None:
+        return header
+    start = int(match.group(3)) + shift
+    if start < 0:
+        return header
+    old = match.group(1) + ("" if match.group(2) is None else f",{match.group(2)}")
+    new = f"{start}" + ("" if match.group(4) is None else f",{match.group(4)}")
+    return f"@@ -{old} +{new} @@{match.group(5)}"
+
+
+def compose_patch(head: FileHead | None, hunks: Sequence[dict], approved: Collection[str], *,
+                  path: str | None = None) -> str:
+    """The patch of exactly the *approved* hunk ids, in order: the head the gateway stored (or, without one, one built
+    from *path*), then each approved hunk's header and lines as the gateway stored them. A rejected hunk before an
+    approved one moves that one's new-side start back by its net line change. Empty when no hunk is approved."""
+    out: list[str] = []
+    shift = 0
+    for hunk in hunks:
+        match = HEADER.fullmatch(hunk["header"])
+        net = (_count(match.group(4)) - _count(match.group(2))) if match else 0
+        if hunk["id"] in approved:
+            out.extend([_shifted(hunk["header"], -shift), *hunk["lines"]])
+        else:
+            shift += net
+    if not out:
+        return ""
+    return "\n".join([*_head_lines(head, path), *out]) + "\n"

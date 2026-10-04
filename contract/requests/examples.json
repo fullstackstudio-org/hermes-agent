@@ -930,6 +930,19 @@
           "note": "Leave a field without a value out; null is not a value."
         },
         {
+          "name": "key_not_a_field_id",
+          "request": "req_form_booking",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "values": {
+              "Name": "Ada Lovelace"
+            }
+          },
+          "reason": "bad_shape",
+          "note": "A values key that is not a well-formed field id fails the model (schema.json propertyNames); field:<id>:unknown is only for a well-formed id the form does not have."
+        },
+        {
           "name": "skip_not_offered",
           "request": "req_form_invoice",
           "layer": "validator",

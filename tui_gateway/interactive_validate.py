@@ -292,7 +292,9 @@ def _form_problem(params: dict, values: dict) -> str | None:
     known = {f.get("id") for f in fields}
     for key in values:
         if not isinstance(key, str) or not _FIELD_ID.fullmatch(key):
-            return "bad_shape"  # not an id any form has, and no text of the client's goes into a reason
+            # The result model already refuses such a key (``propertyNames``); kept so this check never puts text
+            # of the client's into a reason, whatever reaches it.
+            return "bad_shape"
         if key not in known:
             return f"field:{key}:unknown"
     for field in fields:
@@ -352,7 +354,9 @@ def _file_problem(params: dict, files: list[dict]) -> str | None:
 
 def strip_line_ends(text: str) -> str:
     """*text* without whitespace at the end of any line or of the text (the draft as the person sees it: nothing a
-    rendering shows is lost). A trailing newline an editor adds goes with it."""
+    rendering shows is lost). Exactly: split on LF only, strip every ``str.isspace`` character from the end of each
+    line (CR, tab, VT, FF, NEL U+0085, NBSP U+00A0, U+3000, U+2028, U+2029, ...), then from the end of the whole
+    text, so trailing blank lines and a final newline go too. Leading whitespace is kept (contract §6)."""
     return "\n".join(line.rstrip() for line in text.split("\n")).rstrip()
 
 

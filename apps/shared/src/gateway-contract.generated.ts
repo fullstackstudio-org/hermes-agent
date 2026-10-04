@@ -4463,7 +4463,7 @@ export interface FormToggleField {
 }
 /** ``{status: answered, values}`` or ``{status: skipped}`` (only when ``optional``). */
 export type InputFormResult = InputFormAnswered | InputFormSkipped
-/** ``values`` maps field ids to values; a field without a value is left out. The gateway re-validates every value against its field (required present, typed, in range, no unknown id) and refuses the first problem as ``field:<id>:<problem>``. */
+/** ``values`` maps field ids to values; a field without a value is left out. A key that is not a well-formed field id (``FORM_FIELD_ID``) fails the model (``bad_shape``: no text of the client's goes into a reason). The gateway re-validates every value against its field (required present, typed, in range, no unknown id) and refuses the first problem as ``field:<id>:<problem>``. */
 export interface InputFormAnswered {
   status: 'answered'
   values: Record<string, boolean | number | string | string[] | FormDateRange>

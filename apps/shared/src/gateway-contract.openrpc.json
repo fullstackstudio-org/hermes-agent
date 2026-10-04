@@ -17329,7 +17329,7 @@
       },
       "InputFormAnswered": {
         "additionalProperties": false,
-        "description": "``values`` maps field ids to values; a field without a value is left out. The gateway re-validates\nevery value against its field (required present, typed, in range, no unknown id) and refuses the\nfirst problem as ``field:<id>:<problem>``.",
+        "description": "``values`` maps field ids to values; a field without a value is left out. A key that is not a well-formed\nfield id (``FORM_FIELD_ID``) fails the model (``bad_shape``: no text of the client's goes into a reason). The\ngateway re-validates every value against its field (required present, typed, in range, no unknown id) and\nrefuses the first problem as ``field:<id>:<problem>``.",
         "properties": {
           "status": {
             "const": "answered",
@@ -17363,6 +17363,9 @@
               ]
             },
             "maxProperties": 12,
+            "propertyNames": {
+              "pattern": "^[a-z][a-z0-9_]{0,31}$"
+            },
             "title": "Values",
             "type": "object"
           }
@@ -37380,6 +37383,7 @@
         "description": "One uploaded file: its absolute ``path`` (under ``upload.dir``), the name the person sees, the MIME\ntype, the size and the lowercase hex SHA-256 of the bytes as uploaded. The gateway checks size and hash\nafter the request settles.",
         "properties": {
           "path": {
+            "maxLength": 4096,
             "minLength": 2,
             "pattern": "^/",
             "title": "Path",

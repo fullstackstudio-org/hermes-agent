@@ -702,13 +702,25 @@ class InputFormRequestParams(InteractiveRequestParams):
 FormValue = StrictBool | StrictInt | StrictFloat | StrictStr | list[StrictStr] | FormDateRange
 
 
+def _field_id_keys(schema: dict) -> None:
+    """``values`` in JSON Schema: the key rule as ``propertyNames`` and the value schema as ``additionalProperties``
+    (pydantic writes a key pattern as ``patternProperties``, which lets every other key through with any value)."""
+    patterns = schema.pop("patternProperties", None) or {}
+    if len(patterns) == 1:
+        ((pattern, value_schema),) = patterns.items()
+        schema["propertyNames"] = {"pattern": pattern}
+        schema["additionalProperties"] = value_schema
+
+
 class InputFormAnswered(Result):
-    """``values`` maps field ids to values; a field without a value is left out. The gateway re-validates
-    every value against its field (required present, typed, in range, no unknown id) and refuses the
-    first problem as ``field:<id>:<problem>``."""
+    """``values`` maps field ids to values; a field without a value is left out. A key that is not a well-formed
+    field id (``FORM_FIELD_ID``) fails the model (``bad_shape``: no text of the client's goes into a reason). The
+    gateway re-validates every value against its field (required present, typed, in range, no unknown id) and
+    refuses the first problem as ``field:<id>:<problem>``."""
 
     status: Literal[InputStatus.answered]
-    values: dict[str, FormValue] = Field(max_length=FORM_FIELDS_MAX)
+    values: dict[Annotated[str, Field(pattern=FORM_FIELD_ID)], FormValue] = Field(
+        max_length=FORM_FIELDS_MAX, json_schema_extra=_field_id_keys)
 
 
 class InputFormSkipped(Result):
@@ -728,6 +740,8 @@ server_request("input.form", params=InputFormRequestParams, result=InputFormResu
 #: Per FILE.
 UPLOAD_MAX_BYTES = 104_857_600
 UPLOAD_MAX_FILES = 10
+#: An uploaded file's absolute ``path`` (PATH_MAX on Linux).
+UPLOAD_PATH_MAX = 4_096
 #: For ALL files of one answer together (``upload.max_total_bytes``).
 UPLOAD_MAX_TOTAL_BYTES = 104_857_600
 
@@ -779,7 +793,7 @@ class UploadedFile(Result):
     type, the size and the lowercase hex SHA-256 of the bytes as uploaded. The gateway checks size and hash
     after the request settles."""
 
-    path: str = Field(min_length=2, pattern=r"^/")
+    path: str = Field(min_length=2, max_length=UPLOAD_PATH_MAX, pattern=r"^/")
     name: str = Field(min_length=1, max_length=120)
     mime: str = Field(min_length=1, max_length=80)
     bytes: StrictInt = Field(ge=0)

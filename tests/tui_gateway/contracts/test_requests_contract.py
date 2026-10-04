@@ -287,6 +287,22 @@ def test_a_trailing_newline_never_passes_a_whole_value_pattern(field):
     assert not _parses(SERVER_REQUESTS["input.form"].params, _single_field_params(field))
 
 
+@pytest.mark.parametrize("key", ["Name", "name\n", "1st", "", "a" * 33, "na me"])
+def test_a_values_key_that_is_no_field_id_fails_the_model(key):
+    """A ``values`` key must be a well-formed field id (``propertyNames`` in ``schema.json``), so a refusal never
+    carries the client's text: ``field:<id>:unknown`` is only for a well-formed id the form does not have."""
+    result = SERVER_REQUESTS["input.form"].result
+    assert not _parses(result, {"status": "answered", "values": {key: "x"}})
+    assert _parses(result, {"status": "answered", "values": {"colour": "x"}})
+
+
+def test_an_uploaded_files_path_is_bounded():
+    result = SERVER_REQUESTS["input.file"].result
+    entry = {"name": "a.txt", "mime": "text/plain", "bytes": 1, "sha256": "0" * 64}
+    assert _parses(result, {"status": "answered", "files": [{**entry, "path": "/" + "a" * 4095}]})
+    assert not _parses(result, {"status": "answered", "files": [{**entry, "path": "/" + "a" * 4096}]})
+
+
 def test_capabilities_requests_is_bounded():
     assert not _parses(ClientCapabilitiesParams, {"server_requests": True, "requests": ["input.form"] * 33})
     assert _parses(ClientCapabilitiesParams, {"server_requests": True, "requests": ["input.form"] * 32})

@@ -420,6 +420,7 @@ A hunk:
 | `id` | `h1`, `h2`, … numbered by the gateway in the diff's order (`^h[1-9][0-9]{0,2}$`) |
 | `header` | string, at most 200: `@@ -a,b +c,d @@`, optionally followed by a space and the section text (the function the hunk is in); one line. A count left out is 1. |
 | `lines` | 1–400 strings of at most 500 code points |
+| `anchor` | `start`, `end` or `both`; absent when the hunk is not pinned (below) |
 
 A line is one line of the hunk, in the order of the diff. Its first character is its marker: a space (context,
 unchanged), `+` (added) or `-` (removed). The rest is the line's text. The one other line there is, git's note that
@@ -429,6 +430,23 @@ the last `+` line of the hunk, never after a context line (anywhere else the lin
 next line of the file when the patch is applied, invisibly). A change to the final newline of a file is therefore
 always shown as `-` and `+` lines of that line. The header's counts say how many old (` ` and `-`) and new (` ` and `+`) lines the hunk has, and the gateway built the
 hunk so that they agree with `lines`. The starting line numbers are as the agent's diff gave them.
+
+**The header's line numbers are not verified against the file.** `git apply` finds a hunk by its content, searching
+from the header's line, and only two places are guaranteed, which the gateway reports in `anchor`:
+
+- `start`: the old start is 0 or 1. `git apply` requires such a hunk to match at the beginning of the file.
+- `end`: no context line (space-marked line) after the last change in the hunk, the no-newline note aside. `git apply`
+  requires such a hunk to match at the END of the file, wherever the header's line number points: a hunk that appends
+  after a line `b` goes after the LAST line of the file even when the header says `@@ -2,1 +2,2 @@` and another `b`
+  is on line 2.
+- `both`: a whole-file hunk (a new file, a removed file, the whole file replaced).
+
+A hunk that is not the last one always has a context line after its last change: the gateway refuses to build one
+that does not (nothing can follow a hunk that is pinned to the end of the file). Only the last hunk of a request can
+carry `end` or `both`. **What a client renders:** next to a hunk's line numbers (or in their place when it has no
+other use for them), `anchor` `start` as "start of the file", `end` as "end of the file" and `both` as "whole file";
+for `end` it MUST NOT present the header's line numbers as the place where the change lands. A hunk without `anchor`
+is shown with its header as it is; its line numbers are the agent's and the gateway does not vouch for them.
 
 The gateway builds a hunk without a single context line (a space-marked line) only when it starts at line 0 (a new
 file or an insertion at the top) or at line 1 with a non-empty old side (the whole file replaced or removed): `git

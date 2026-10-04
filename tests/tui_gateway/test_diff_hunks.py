@@ -364,9 +364,9 @@ def test_a_hunk_is_read_by_its_counts_so_a_dashed_line_is_content():
 
 
 def test_two_hunks_and_a_section_text():
-    text = _hunk(" a", "-b", "+c", header="@@ -1,2 +1,2 @@ def f(x):") + _hunk(" z", "+y", header="@@ -9 +9,2 @@")
+    text = _hunk(" a", "-b", "+c", " d", header="@@ -1,3 +1,3 @@ def f(x):") + _hunk(" z", "+y", header="@@ -9 +9,2 @@")
     parsed = _parse(text)
-    assert [h.header for h in parsed.hunks] == ["@@ -1,2 +1,2 @@ def f(x):", "@@ -9 +9,2 @@"]
+    assert [h.header for h in parsed.hunks] == ["@@ -1,3 +1,3 @@ def f(x):", "@@ -9 +9,2 @@"]
     assert [h.id for h in parsed.hunks] == ["h1", "h2"]
     assert _parse(text + "\n\n").hunks == parsed.hunks   # blank lines at the end of the text are not a hunk
 
@@ -408,7 +408,7 @@ def test_the_bounds_are_the_contracts():
 
 
 def _many(count: int) -> str:
-    return "".join(f"@@ -{n * 4 + 1},2 +{n * 4 + 1},2 @@\n c\n-a\n+b\n" for n in range(count))
+    return "".join(f"@@ -{n * 5 + 1},3 +{n * 5 + 1},3 @@\n c\n-a\n+b\n d\n" for n in range(count))
 
 
 def test_at_most_two_hundred_hunks():
@@ -446,7 +446,7 @@ def test_a_header_has_at_most_two_hundred_characters():
 
 def test_at_most_64_kib_of_diff():
     # 130 hunks of 500 bytes is under the hunk count and over the byte limit.
-    hunk = "@@ -1,2 +1,2 @@\n a\n-" + "b" * 480 + "\n+" + "c" * 480 + "\n"
+    hunk = "@@ -1,3 +1,3 @@\n a\n-" + "b" * 480 + "\n+" + "c" * 480 + "\n d\n"
     one = len(hunk.encode())
     count = dh.MAX_DIFF_BYTES // one + 1
     assert count <= dh.MAX_HUNKS
@@ -878,3 +878,72 @@ def test_a_new_file_has_only_added_lines_and_a_deleted_one_only_removed_lines():
         dh.parse("--- a/g\n+++ /dev/null\n@@ -1,1 +0,1 @@\n-a\n+b\n")
     with pytest.raises(dh.DiffError, match="the file is deleted, so every line must be removed"):
         dh.parse("--- a/g\n+++ /dev/null\n@@ -1,2 +0,1 @@\n a\n-b\n")
+
+
+# ── anchors: where git apply pins a hunk whatever the header says ───────────────────────────────
+
+
+def test_the_anchor_of_a_hunk():
+    anchor = dh.anchor_of
+    assert anchor("@@ -5,3 +5,3 @@", [" a", "-b", "+c", " d"]) is None          # context on both sides, mid-file
+    assert anchor("@@ -2,1 +2,2 @@", [" b", "+X"]) == "end"                      # nothing after the change
+    assert anchor("@@ -1,2 +1,3 @@", [" a", "-b", "+c", " d"]) == "start"        # old start 1
+    assert anchor("@@ -0,0 +1,2 @@", ["+a", "+b"]) == "both"                      # a new file
+    assert anchor("@@ -1,2 +0,0 @@", ["-a", "-b"]) == "both"                      # a removed file
+    assert anchor("@@ -1 +1 @@", ["-a", "+b"]) == "both"                          # the whole file
+    assert anchor("@@ -9,2 +9,2 @@", [" a", "-b", "+c", dh.NO_NEWLINE, " d"][:3]) == "end"
+    assert anchor("@@ -9,3 +9,3 @@", [" a", "-b", "-c", "\\ No newline at end of file", "+C"]) == "end"
+    assert dh.has_trailing_context([" a", "-b", " c"]) and not dh.has_trailing_context([" a", "-b"])
+    assert not dh.has_trailing_context([])
+
+
+def test_hunks_carry_their_anchor_on_the_wire_dict():
+    parsed = dh.parse("--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n a\n-b\n+c\n d\n@@ -9,1 +9,2 @@\n z\n+tail\n")
+    first, last = (h.as_dict() for h in parsed.hunks)
+    assert first["anchor"] == "start" and last["anchor"] == "end"
+    mid = dh.parse("--- a/f\n+++ b/f\n@@ -5,3 +5,3 @@\n a\n-b\n+c\n d\n").hunks[0].as_dict()
+    assert "anchor" not in mid
+    assert dh.compose_patch(parsed.head, [first, last], {"h2"}).count("anchor") == 0
+
+
+@needs_git
+def test_a_last_hunk_without_trailing_context_lands_at_the_end_whatever_its_header_says(repo):
+    """The header says line 2, git appends after the LAST ``b``: the hunk is accepted, but only as anchored at the end
+    of the file (the client says so); where the end is the header's line, it lands where shown."""
+    repo.write("f.txt", "a\nb\nc\nb\n")
+    repo.commit()
+    body = "@@ -2,1 +2,2 @@\n b\n+X\n"
+    parsed = dh.parse(HEAD_F + body)
+    assert parsed.hunks[0].anchor == "end" and parsed.hunks[0].as_dict()["anchor"] == "end"
+    repo.apply(_compose(parsed, {"h1"}))
+    assert (repo.root / "f.txt").read_text() == "a\nb\nc\nb\nX\n", "git applied it at the end, not after line 2"
+    repo.git("checkout", "--", "f.txt")
+    repo.write("f.txt", "a\nb\n")
+    repo.apply(_compose(parsed, {"h1"}))
+    assert (repo.root / "f.txt").read_text() == "a\nb\nX\n", "where the end is the header's line it lands as shown"
+
+
+@needs_git
+@pytest.mark.parametrize("body", [
+    "@@ -2,1 +2,2 @@\n b\n+X\n@@ -4,2 +5,2 @@\n d\n-e\n+E\n",
+    "@@ -1,2 +1,3 @@\n a\n b\n+X\n@@ -5,2 +6,2 @@\n e\n-b\n+B\n",
+])
+def test_a_leading_context_hunk_in_the_middle_of_a_diff_is_refused(repo, body):
+    repo.write("f.txt", "a\nb\nc\nd\ne\nb\n")
+    repo.commit()
+    applied = subprocess.run(["git", "apply", "-"], cwd=repo.root, env=repo.env, input=(HEAD_F + body).encode(),
+                             capture_output=True)
+    assert applied.returncode != 0 or (repo.root / "f.txt").read_text() != "a\nb\nX\nc\nd\ne\nb\n", \
+        "git does not put it where the header says"
+    with pytest.raises(dh.DiffError, match=r"Hunk h1: it has no context line after its last change but another "
+                                           r"hunk follows"):
+        dh.parse(HEAD_F + body)
+
+
+def test_only_the_last_hunk_may_lack_trailing_context():
+    ok = HEAD_F + "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n@@ -9,1 +9,2 @@\n z\n+tail\n"
+    assert [h.anchor for h in dh.parse(ok).hunks] == ["start", "end"]
+    with pytest.raises(dh.DiffError, match="another hunk follows"):
+        dh.parse(HEAD_F + "@@ -2,2 +2,3 @@\n a\n b\n+X\n@@ -9,2 +10,2 @@\n z\n-y\n+Y\n")
+    with pytest.raises(dh.DiffError, match="Hunk h2: it has no context line after its last change"):
+        dh.parse(HEAD_F + "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n@@ -5,1 +5,2 @@\n z\n+w\n@@ -9,2 +10,2 @@\n z\n-y\n+Y\n")

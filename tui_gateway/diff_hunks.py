@@ -7,6 +7,8 @@ nothing is repaired; a diff that cannot be shown as it is raises :class:`DiffErr
 
 - bounds: at most :data:`MAX_DIFF_BYTES` (64 KiB) of text, :data:`MAX_HUNKS` hunks, :data:`MAX_HUNK_LINES` lines in
   one, :data:`MAX_LINE_CHARS` characters in a line (its marker included), :data:`MAX_HEADER_CHARS` in a hunk header;
+- a hunk without a context line after its last change must be the LAST hunk (``git apply`` pins it to the end of the
+  file, where none can follow), and a hunk without any context line must start at line 0 or 1;
 - a hunk is read by its header's counts (``@@ -a,b +c,d @@``: ``b`` old and ``d`` new lines), the way ``patch`` does,
   so a removed line that looks like ``--- x`` is content; counts that do not match the lines refuse the diff. Starting
   line numbers are not checked;
@@ -92,14 +94,38 @@ class FileHead:
         return self.old if self.kind == "rename" else None
 
 
+def has_trailing_context(lines: Sequence[str]) -> bool:
+    """Whether the last line of a hunk (the no-newline marker aside) is a context line."""
+    body = [line for line in lines if line != NO_NEWLINE]
+    return bool(body) and body[-1][0] == " "
+
+
+def anchor_of(header: str, lines: Sequence[str]) -> str | None:
+    """Where ``git apply`` pins the hunk whatever its header says, or ``None``: ``start`` (the old start is 0 or 1: it
+    must match at the beginning of the file), ``end`` (no context line after the last change: it must match at the END
+    of the file, wherever the header's line number points) or ``both`` (a whole-file hunk). The header's line numbers
+    are not checked against the file; these anchors are the only places the gateway can vouch for."""
+    match = HEADER.fullmatch(header)
+    at_start = match is not None and int(match.group(1)) <= 1
+    at_end = not has_trailing_context(lines)
+    return "both" if at_start and at_end else "start" if at_start else "end" if at_end else None
+
+
 @dataclass(frozen=True)
 class Hunk:
     id: str
     header: str
     lines: tuple[str, ...]
 
+    @property
+    def anchor(self) -> str | None:
+        return anchor_of(self.header, self.lines)
+
     def as_dict(self) -> dict:
-        return {"id": self.id, "header": self.header, "lines": list(self.lines)}
+        out = {"id": self.id, "header": self.header, "lines": list(self.lines)}
+        if (anchor := self.anchor) is not None:
+            out["anchor"] = anchor
+        return out
 
 
 @dataclass(frozen=True)
@@ -471,6 +497,11 @@ def parse(diff: object, path: str | None = None) -> ParsedDiff:
         hunks.append(hunk)
     if not hunks:
         raise DiffError("The diff has no hunk (a line starting with @@): there is nothing to review.")
+    for hunk in hunks[:-1]:
+        if not has_trailing_context(hunk.lines):
+            raise DiffError(f"Hunk {hunk.id}: it has no context line after its last change but another hunk follows; "
+                            "git apply would put it at the end of the file, where no hunk can follow. Include "
+                            "unchanged lines after the change (git diff -U3).")
     if head.kind in ("new", "delete"):
         wanted, what = ("+", "added (+)") if head.kind == "new" else ("-", "removed (-)")
         for hunk in hunks:

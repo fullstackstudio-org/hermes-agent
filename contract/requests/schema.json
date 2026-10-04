@@ -49,9 +49,19 @@
     "answer_refused": 4034
   },
   "$defs": {
+    "DiffAnchor": {
+      "description": "Where ``git apply`` pins a hunk whatever the header's line numbers say (``contract/requests`` §7): ``start``\n(it must match at the beginning of the file), ``end`` (no context line after its last change: it must match at\nthe END of the file) or ``both`` (a whole-file hunk).",
+      "enum": [
+        "start",
+        "end",
+        "both"
+      ],
+      "title": "DiffAnchor",
+      "type": "string"
+    },
     "DiffHunk": {
       "additionalProperties": false,
-      "description": "One hunk of the diff: ``id`` (``h1``, ``h2``, ... as the gateway numbered them), the ``@@ -a,b +c,d @@`` line\nand the hunk's lines, each with its marker. The gateway built it from the agent's diff and keeps its own copy:\nwhat the person approves is that copy.",
+      "description": "One hunk of the diff: ``id`` (``h1``, ``h2``, ... as the gateway numbered them), the ``@@ -a,b +c,d @@`` line\nand the hunk's lines, each with its marker, and ``anchor`` when the hunk is pinned to the start and/or the end of\nthe file (absent otherwise). The gateway built it from the agent's diff and keeps its own copy: what the person\napproves is that copy. The header's line numbers are not checked against the file; ``anchor`` is what the gateway\ncan vouch for, and a client shows it next to the line numbers.",
       "properties": {
         "id": {
           "pattern": "^h[1-9][0-9]{0,2}$",
@@ -76,6 +86,17 @@
           "minItems": 1,
           "title": "Lines",
           "type": "array"
+        },
+        "anchor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiffAnchor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [

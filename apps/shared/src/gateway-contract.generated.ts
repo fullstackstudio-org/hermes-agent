@@ -4560,12 +4560,15 @@ export interface ReviewDiffRequestParams {
 }
 /** What the diff does to its file, as the gateway read it from the header: ``modify`` an existing file, ``new`` a file that does not exist yet, ``delete`` a file, ``rename`` a file to another path (with the edits the hunks show; the person is shown the old path too). */
 export type DiffKind = 'modify' | 'new' | 'delete' | 'rename'
-/** One hunk of the diff: ``id`` (``h1``, ``h2``, ... as the gateway numbered them), the ``@@ -a,b +c,d @@`` line and the hunk's lines, each with its marker. The gateway built it from the agent's diff and keeps its own copy: what the person approves is that copy. */
+/** One hunk of the diff: ``id`` (``h1``, ``h2``, ... as the gateway numbered them), the ``@@ -a,b +c,d @@`` line and the hunk's lines, each with its marker, and ``anchor`` when the hunk is pinned to the start and/or the end of the file (absent otherwise). The gateway built it from the agent's diff and keeps its own copy: what the person approves is that copy. The header's line numbers are not checked against the file; ``anchor`` is what the gateway can vouch for, and a client shows it next to the line numbers. */
 export interface DiffHunk {
   id: string
   header: string
   lines: string[]
+  anchor?: DiffAnchor | null
 }
+/** Where ``git apply`` pins a hunk whatever the header's line numbers say (``contract/requests`` §7): ``start`` (it must match at the beginning of the file), ``end`` (no context line after its last change: it must match at the END of the file) or ``both`` (a whole-file hunk). */
+export type DiffAnchor = 'start' | 'end' | 'both'
 /** ``decision`` and one entry in ``hunks`` for EVERY hunk of the request, keyed by its id. A key that is not a well-formed hunk id fails the model (``bad_shape``: no text of the client's goes into a reason). The gateway refuses the first problem against the request: ``hunk:<id>:unknown`` (an id the request lacks), ``hunk:<id>:missing`` (an id of the request left out), then ``decision:inconsistent`` (``approved`` with no hunk approved, or ``rejected`` with one approved). */
 export interface ReviewDiffResult {
   decision: ReviewDecision

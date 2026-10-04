@@ -321,8 +321,9 @@ REVIEW_DIFF_SCHEMA = {
         "more than 160 columns of spaces and tabs in all, a combining mark after a space, or a line indented more than 96 columns is refused and the "
         "error names the line; so is a binary diff, a diff of several files (one call per file), a change of a "
         "file's mode, a new or deleted file that is a symbolic link, a submodule or executable (only regular files, "
-        "mode 100644), a hunk without a context line that does not start at line 0 or 1 (include unchanged lines "
-        "around the change: git diff -U3, never -U0), and a diff whose '\\ No newline at end of "
+        "mode 100644), a hunk without a context line that does not start at line 0 or 1 or whose last change has no "
+        "unchanged line after it unless it is the LAST hunk (include unchanged lines around each change: git diff "
+        "-U3, never -U0; the last hunk may end with a change and is then pinned to the end of the file), and a diff whose '\\ No newline at end of "
         "file' line is not directly after the last - or + line of the LAST hunk (never after a context line). "
         + _VERBATIM +
         "Outcomes: 'approved' — approved_patch is the patch of exactly the approved hunks, in git's form, written by "

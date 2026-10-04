@@ -394,6 +394,9 @@ def test_example_hunks_are_what_the_gateway_builds():
             body = [line for line in hunk["lines"] if line != diff_hunks.NO_NEWLINE]
             assert (sum(1 for line in body if line[0] in " -"), sum(1 for line in body if line[0] in " +")) == (
                 diff_hunks._count(match.group(2)), diff_hunks._count(match.group(4))), hunk["id"]
+            assert hunk.get("anchor") == diff_hunks.anchor_of(hunk["header"], hunk["lines"]), hunk["id"]
+        # nothing can follow a hunk that is pinned to the end of the file
+        assert all(diff_hunks.has_trailing_context(h["lines"]) for h in hunks[:-1]), frame["id"]
         if frame["params"].get("path"):
             assert diff_hunks.path_problem(frame["params"]["path"]) == ""
 
@@ -470,3 +473,12 @@ def test_a_diff_result_has_every_key_closed():
                 {"decision": "approved", "hunks": {f"h{n}": "approved" for n in range(1, 202)}}):
         assert not _parses(result, bad), bad
     assert _parses(result, {"decision": "rejected", "hunks": {f"h{n}": "rejected" for n in range(1, 201)}})
+
+
+@pytest.mark.parametrize("anchor, ok", [("start", True), ("end", True), ("both", True), (None, True), ("middle", False),
+                                        ("", False), ("End", False), (["end"], False)])
+def test_a_hunk_anchor_is_start_end_or_both(anchor, ok):
+    model = SERVER_REQUESTS["review.diff"].params
+    hunk = {**_hunk(), "anchor": anchor}
+    assert _parses(model, _diff_params([hunk])) is ok
+    assert _parses(model, _diff_params([_hunk()])), "the anchor is optional"

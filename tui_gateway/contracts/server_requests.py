@@ -886,15 +886,28 @@ DIFF_HEADER = "^@@ -[0-9]{1,9}(,[0-9]{1,9})? \\+[0-9]{1,9}(,[0-9]{1,9})? @@( [^\
 DIFF_LINE = "^([ +-][^\r\n\x0b\x0c\x85\u2028\u2029]*|\\\\ No newline at end of file)$"
 
 
+class DiffAnchor(WireEnum):
+    """Where ``git apply`` pins a hunk whatever the header's line numbers say (``contract/requests`` §7): ``start``
+    (it must match at the beginning of the file), ``end`` (no context line after its last change: it must match at
+    the END of the file) or ``both`` (a whole-file hunk)."""
+
+    start = "start"
+    end = "end"
+    both = "both"
+
+
 class DiffHunk(Params):
     """One hunk of the diff: ``id`` (``h1``, ``h2``, ... as the gateway numbered them), the ``@@ -a,b +c,d @@`` line
-    and the hunk's lines, each with its marker. The gateway built it from the agent's diff and keeps its own copy:
-    what the person approves is that copy."""
+    and the hunk's lines, each with its marker, and ``anchor`` when the hunk is pinned to the start and/or the end of
+    the file (absent otherwise). The gateway built it from the agent's diff and keeps its own copy: what the person
+    approves is that copy. The header's line numbers are not checked against the file; ``anchor`` is what the gateway
+    can vouch for, and a client shows it next to the line numbers."""
 
     id: str = Field(pattern=DIFF_HUNK_ID)
     header: str = Field(min_length=1, max_length=DIFF_HEADER_MAX, pattern=DIFF_HEADER)
     lines: list[Annotated[str, Field(min_length=1, max_length=DIFF_LINE_MAX, pattern=DIFF_LINE)]] = Field(
         min_length=1, max_length=DIFF_HUNK_LINES_MAX)
+    anchor: DiffAnchor | None = None
 
 
 class DiffKind(WireEnum):

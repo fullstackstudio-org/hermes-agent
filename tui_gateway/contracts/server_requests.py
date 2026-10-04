@@ -7,9 +7,12 @@ the transport and declared on the shared base) and the ``result`` the client ans
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+import datetime as _dt
+import re
+from decimal import Decimal
+from typing import Annotated, Any, Callable, Literal
 
-from pydantic import Field, RootModel, StrictBool, StrictFloat, StrictInt, StrictStr
+from pydantic import Field, RootModel, StrictBool, StrictFloat, StrictInt, StrictStr, model_validator
 
 from .base import JsonValue, Params, Payload, Result, WireEnum
 from .registry import event, server_request
@@ -355,6 +358,9 @@ CANNOT_SHOW = 4041
 INTERACTIVE_TITLE_MAX = 80
 INTERACTIVE_SUMMARY_MAX = 500
 INTERACTIVE_DETAIL_MAX = 2_000
+#: One line: no CR, LF, VT, FF, NEL, LINE SEPARATOR or PARAGRAPH SEPARATOR (the characters a renderer may break
+#: a line at). Literal characters, not escapes, so every regex engine reading ``schema.json`` sees the same set.
+ONE_LINE = "^[^\r\n\x0b\x0c\x85\u2028\u2029]+$"
 
 
 class RequestActingUser(Params):
@@ -380,7 +386,7 @@ class InteractiveRequestParams(ServerRequestParams):
     ``field:<id>:<problem>``, …, ``contract/requests/README.md``) and leaves the request open."""
 
     v: Literal[1]
-    title: str = Field(min_length=1, max_length=INTERACTIVE_TITLE_MAX, pattern=r"^[^\r\n]+$")
+    title: str = Field(min_length=1, max_length=INTERACTIVE_TITLE_MAX, pattern=ONE_LINE)
     summary: str = Field(min_length=1, max_length=INTERACTIVE_SUMMARY_MAX)
     detail: str | None = Field(default=None, max_length=INTERACTIVE_DETAIL_MAX)
     expires_at: int = Field(ge=0)
@@ -408,14 +414,44 @@ FORM_FIELDS_MAX = 12
 FORM_FIELD_ID = r"^[a-z][a-z0-9_]{0,31}$"
 FORM_TEXT_MAX = 4_000
 FORM_CHOICE_OPTIONS_MAX = 12
-#: A decimal string: an optional minus, no leading zeros, at most two decimals (``"12.50"``, ``"-3"``).
-FORM_DECIMAL = r"^-?(0|[1-9][0-9]{0,14})(\.[0-9]{1,2})?$"
+#: A decimal string: an optional minus, no leading zeros, at most three decimals (``"12.50"``, ``"-3"``,
+#: ``"1.250"``). How many decimals a value may have is the currency's ISO 4217 minor unit (EUR 2, JPY 0, KWD 3);
+#: the gateway's answer check enforces that per currency (``field:<id>:format``), the model only the bound.
+FORM_DECIMAL = r"^-?(0|[1-9][0-9]{0,14})(\.[0-9]{1,3})?$"
 FORM_DATE = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
 FORM_TIME = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
-#: RFC 3339 date-time with an offset (a datetime field's ``min`` / ``max``).
-FORM_DATETIME = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+_CLOCK = r"([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?"
+_OFFSET = r"[+-]([01][0-9]|2[0-3]):[0-5][0-9]"
+#: An INSTANT (a datetime field's ``min``, ``max`` and ``default``): RFC 3339 date and time, seconds optional,
+#: no fractions, a numeric offset (``Z`` is not used: write ``+00:00``), no zone.
+FORM_DATETIME = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T" + _CLOCK + _OFFSET + "$"
 #: An IANA time zone name (``Europe/Amsterdam``, ``UTC``).
 FORM_TZ = r"^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$"
+#: A datetime field's VALUE: an instant as :data:`FORM_DATETIME` followed by its IANA zone as an RFC 9557 suffix,
+#: ``"2026-10-03T14:30+02:00[Europe/Amsterdam]"``. A parser strips the ``[...]`` suffix before handing the rest to
+#: ``Date``, ``ISO8601DateFormatter`` or ``datetime.fromisoformat``. Checked by the gateway's answer check
+#: (``field:<id>:format``): a result value is not typed by kind in the model.
+FORM_DATETIME_VALUE = (r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T" + _CLOCK + _OFFSET
+                       + r"\[[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*\]$")
+
+
+def _ordered(kind: str, lo: Any, hi: Any, default: Any, key: Callable[[Any], Any]) -> None:
+    """``min`` ≤ ``max``, and a ``default`` within them, compared through *key* (which raises ``ValueError`` for
+    a value that only looks right, ``2026-02-30``). Raises ``ValueError`` naming the first problem."""
+    lo_k = None if lo is None else key(lo)
+    hi_k = None if hi is None else key(hi)
+    if lo_k is not None and hi_k is not None and lo_k > hi_k:
+        raise ValueError(f"{kind} field: min is greater than max")
+    if default is not None:
+        value = key(default)
+        if lo_k is not None and value < lo_k:
+            raise ValueError(f"{kind} field: default is below min")
+        if hi_k is not None and value > hi_k:
+            raise ValueError(f"{kind} field: default is above max")
+
+
+def _instant(text: str) -> _dt.datetime:
+    return _dt.datetime.fromisoformat(text)
 
 class FormFieldKind(WireEnum):
     text = "text"
@@ -449,13 +485,22 @@ class FormFieldBase(Params):
 
 class FormTextField(FormFieldBase):
     """Value: a string of at most ``max_length`` (else 4000) code points; one line unless ``multiline``.
-    ``""`` counts as no value."""
+    ``""`` counts as no value (as for every string-valued kind). A ``default`` is a value: omit it for none."""
 
     kind: Literal[FormFieldKind.text]
     multiline: bool = False
     max_length: int | None = Field(default=None, ge=1, le=FORM_TEXT_MAX)
     input: FormTextInput = FormTextInput.plain
-    default: str | None = Field(default=None, max_length=FORM_TEXT_MAX)
+    default: str | None = Field(default=None, min_length=1, max_length=FORM_TEXT_MAX)
+
+    @model_validator(mode="after")
+    def _default_fits(self) -> FormTextField:
+        if self.default is not None:
+            if len(self.default) > (self.max_length or FORM_TEXT_MAX):
+                raise ValueError("text field: default is longer than max_length")
+            if not self.multiline and any(c in self.default for c in "\r\n\x0b\x0c\x85\u2028\u2029"):
+                raise ValueError("text field: a one-line field's default has a line break")
+        return self
 
 
 class FormNumberField(FormFieldBase):
@@ -469,6 +514,18 @@ class FormNumberField(FormFieldBase):
     integer: bool = False
     default: float | None = None
 
+    @model_validator(mode="after")
+    def _bounds(self) -> FormNumberField:
+        _ordered("number", self.min, self.max, self.default, float)
+        if self.default is not None:
+            if self.integer and not float(self.default).is_integer():
+                raise ValueError("number field: default is not a whole number")
+            if self.step is not None:
+                steps = (Decimal(str(self.default)) - Decimal(str(self.min or 0))) / Decimal(str(self.step))
+                if steps != steps.to_integral_value():
+                    raise ValueError("number field: default is not min plus a whole multiple of step")
+        return self
+
 
 class FormAmountField(FormFieldBase):
     """Value: a decimal STRING (``"12.50"``: never a JSON number) in ``[min, max]``, in ``currency``
@@ -480,6 +537,11 @@ class FormAmountField(FormFieldBase):
     max: str | None = Field(default=None, pattern=FORM_DECIMAL)
     default: str | None = Field(default=None, pattern=FORM_DECIMAL)
 
+    @model_validator(mode="after")
+    def _bounds(self) -> FormAmountField:
+        _ordered("amount", self.min, self.max, self.default, Decimal)
+        return self
+
 
 class FormDateField(FormFieldBase):
     """Value: a calendar date ``"2026-10-03"`` in ``[min, max]``. ``tz`` names the zone "today" is in."""
@@ -489,6 +551,11 @@ class FormDateField(FormFieldBase):
     max: str | None = Field(default=None, pattern=FORM_DATE)
     tz: str | None = Field(default=None, max_length=64, pattern=FORM_TZ)
     default: str | None = Field(default=None, pattern=FORM_DATE)
+
+    @model_validator(mode="after")
+    def _bounds(self) -> FormDateField:
+        _ordered("date", self.min, self.max, self.default, _dt.date.fromisoformat)
+        return self
 
 
 class FormTimeField(FormFieldBase):
@@ -500,17 +567,28 @@ class FormTimeField(FormFieldBase):
     tz: str | None = Field(default=None, max_length=64, pattern=FORM_TZ)
     default: str | None = Field(default=None, pattern=FORM_TIME)
 
+    @model_validator(mode="after")
+    def _bounds(self) -> FormTimeField:
+        _ordered("time", self.min, self.max, self.default, _dt.time.fromisoformat)
+        return self
+
 
 class FormDatetimeField(FormFieldBase):
-    """Value: RFC 3339 with the offset AND the IANA zone as an RFC 9557 suffix,
+    """Value (:data:`FORM_DATETIME_VALUE`): RFC 3339 with the offset AND the IANA zone as an RFC 9557 suffix,
     ``"2026-10-03T14:30:00+02:00[Europe/Amsterdam]"``: the zone is ``tz`` when the field has one, else the
-    device's; the offset is that zone's at that instant. ``min`` / ``max`` (offset, no zone) are instants."""
+    device's; the offset is that zone's at that instant. ``min``, ``max`` and ``default`` are INSTANTS
+    (:data:`FORM_DATETIME`: offset, no zone); the client shows ``default`` in the answer's zone."""
 
     kind: Literal[FormFieldKind.datetime]
     min: str | None = Field(default=None, pattern=FORM_DATETIME)
     max: str | None = Field(default=None, pattern=FORM_DATETIME)
     tz: str | None = Field(default=None, max_length=64, pattern=FORM_TZ)
     default: str | None = Field(default=None, pattern=FORM_DATETIME)
+
+    @model_validator(mode="after")
+    def _bounds(self) -> FormDatetimeField:
+        _ordered("datetime", self.min, self.max, self.default, _instant)
+        return self
 
 
 class FormDateRange(Params):
@@ -529,6 +607,19 @@ class FormDaterangeField(FormFieldBase):
     tz: str | None = Field(default=None, max_length=64, pattern=FORM_TZ)
     default: FormDateRange | None = None
 
+    @model_validator(mode="after")
+    def _bounds(self) -> FormDaterangeField:
+        _ordered("daterange", self.min, self.max, None, _dt.date.fromisoformat)
+        if self.default is not None:
+            start, end = self.default.start, self.default.end
+            if not (re.match(FORM_DATE, start) and re.match(FORM_DATE, end)):
+                raise ValueError("daterange field: default start and end are YYYY-MM-DD")
+            if _dt.date.fromisoformat(start) > _dt.date.fromisoformat(end):
+                raise ValueError("daterange field: default ends before it starts")
+            for day in (start, end):
+                _ordered("daterange", self.min, self.max, day, _dt.date.fromisoformat)
+        return self
+
 
 class FormChoiceOption(Params):
     value: str = Field(min_length=1, max_length=64)
@@ -545,6 +636,32 @@ class FormChoiceField(FormFieldBase):
     min_selected: int | None = Field(default=None, ge=0, le=FORM_CHOICE_OPTIONS_MAX)
     max_selected: int | None = Field(default=None, ge=1, le=FORM_CHOICE_OPTIONS_MAX)
     default: str | list[str] | None = None
+
+    @model_validator(mode="after")
+    def _consistent(self) -> FormChoiceField:
+        values = [option.value for option in self.options]
+        if len(set(values)) != len(values):
+            raise ValueError("choice field: two options have the same value")
+        if not self.multiple and (self.min_selected is not None or self.max_selected is not None):
+            raise ValueError("choice field: min_selected / max_selected need multiple")
+        lo, hi = self.min_selected, self.max_selected
+        if lo is not None and hi is not None and lo > hi:
+            raise ValueError("choice field: min_selected is greater than max_selected")
+        if (lo or 0) > len(values) or (hi is not None and hi > len(values)):
+            raise ValueError("choice field: more selections than options")
+        if self.default is None:
+            return self
+        if not self.multiple:
+            if not isinstance(self.default, str) or self.default not in values:
+                raise ValueError("choice field: default is not one option value")
+            return self
+        if not isinstance(self.default, list) or any(value not in values for value in self.default):
+            raise ValueError("choice field: default is not a list of option values")
+        if len(set(self.default)) != len(self.default):
+            raise ValueError("choice field: default lists a value twice")
+        if (lo is not None and len(self.default) < lo) or (hi is not None and len(self.default) > hi):
+            raise ValueError("choice field: default selects too few or too many")
+        return self
 
 
 class FormToggleField(FormFieldBase):
@@ -564,7 +681,18 @@ class FormField(RootModel[Annotated[
 
 
 class InputFormRequestParams(InteractiveRequestParams):
+    """``fields``: 1-12, ids unique within the form. Every field is consistent in itself (``min`` ≤ ``max``, a
+    ``default`` that is a valid value, distinct option values, ``min_selected`` ≤ ``max_selected`` ≤ the
+    options): rules ``schema.json`` cannot express, pinned by ``examples.json`` ``invalid_frames``."""
+
     fields: list[FormField] = Field(min_length=1, max_length=FORM_FIELDS_MAX)
+
+    @model_validator(mode="after")
+    def _unique_ids(self) -> InputFormRequestParams:
+        ids = [field.root.id for field in self.fields]
+        if len(set(ids)) != len(ids):
+            raise ValueError("input.form: two fields have the same id")
+        return self
 
 
 FormValue = StrictBool | StrictInt | StrictFloat | StrictStr | list[StrictStr] | FormDateRange
@@ -593,8 +721,11 @@ server_request("input.form", params=InputFormRequestParams, result=InputFormResu
 
 # ── input.file ────────────────────────────────────────────────────────────────────────────────
 
+#: Per FILE.
 UPLOAD_MAX_BYTES = 104_857_600
 UPLOAD_MAX_FILES = 10
+#: For ALL files of one answer together (``upload.max_total_bytes``).
+UPLOAD_MAX_TOTAL_BYTES = 104_857_600
 
 
 class FileAccept(WireEnum):
@@ -616,12 +747,20 @@ class UploadTarget(Params):
     """Where the answer's files go. ``dir`` is an absolute path under the session's working directory; the
     client uploads each file through the HTTP upload route (the credentials it uses for attachments) to
     ``<dir>/<16 hex>-<safe name>`` and answers with references, never bytes. ``strip_metadata``: remove
-    EXIF / GPS from camera and library images before uploading."""
+    EXIF / GPS from camera and library images before uploading. ``max_bytes`` bounds each file,
+    ``max_total_bytes`` (≥ ``max_bytes``, at most 100 MiB) all files of the answer together."""
 
     dir: str = Field(min_length=2, pattern=r"^/")
     max_bytes: int = Field(ge=1, le=UPLOAD_MAX_BYTES)
+    max_total_bytes: int = Field(ge=1, le=UPLOAD_MAX_TOTAL_BYTES)
     max_files: int = Field(ge=1, le=UPLOAD_MAX_FILES)
     strip_metadata: bool
+
+    @model_validator(mode="after")
+    def _total_covers_one_file(self) -> UploadTarget:
+        if self.max_total_bytes < self.max_bytes:
+            raise ValueError("upload: max_total_bytes is smaller than max_bytes")
+        return self
 
 
 class InputFileRequestParams(InteractiveRequestParams):
@@ -639,7 +778,7 @@ class UploadedFile(Result):
     path: str = Field(min_length=2, pattern=r"^/")
     name: str = Field(min_length=1, max_length=120)
     mime: str = Field(min_length=1, max_length=80)
-    bytes: int = Field(ge=0)
+    bytes: StrictInt = Field(ge=0)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 

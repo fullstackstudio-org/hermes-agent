@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "Normative examples for contract/requests (README.md). Every frame and every valid answer parses against schema.json; every invalid answer is refused with exactly its reason: layer 'model' fails schema.json (reason bad_shape), layer 'validator' passes schema.json and is refused by the gateway's checks against the request's params.",
+  "about": "Normative examples for contract/requests (README.md). Every frame and every valid answer parses against schema.json; every invalid answer is refused with exactly its reason: layer 'model' fails schema.json (reason bad_shape), layer 'validator' passes schema.json and is refused by the gateway's checks against the request's params. Every invalid frame (invalid_frames) is refused by the gateway's params models: layer 'model' also fails schema.json, layer 'cross_field' passes it (JSON Schema cannot compare two keys) and is refused only by the models.",
   "methods": {
     "input.form": {
       "frames": [
@@ -153,6 +153,558 @@
               }
             ]
           }
+        }
+      ],
+      "invalid_frames": [
+        {
+          "name": "duplicate_field_ids",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "f",
+                "kind": "toggle",
+                "label": "F"
+              },
+              {
+                "id": "f",
+                "kind": "toggle",
+                "label": "G"
+              }
+            ]
+          },
+          "note": "Field ids are unique within a form."
+        },
+        {
+          "name": "duplicate_option_values",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "room",
+                "kind": "choice",
+                "label": "Room",
+                "options": [
+                  {
+                    "value": "double",
+                    "label": "Double"
+                  },
+                  {
+                    "value": "double",
+                    "label": "Twin"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "choice_default_not_an_option",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "room",
+                "kind": "choice",
+                "label": "Room",
+                "default": "suite",
+                "options": [
+                  {
+                    "value": "single",
+                    "label": "Single"
+                  },
+                  {
+                    "value": "double",
+                    "label": "Double"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "choice_default_list_without_multiple",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "room",
+                "kind": "choice",
+                "label": "Room",
+                "default": [
+                  "single"
+                ],
+                "options": [
+                  {
+                    "value": "single",
+                    "label": "Single"
+                  },
+                  {
+                    "value": "double",
+                    "label": "Double"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "min_selected_greater_than_max_selected",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "extras",
+                "kind": "choice",
+                "label": "Extras",
+                "multiple": true,
+                "min_selected": 3,
+                "max_selected": 2,
+                "options": [
+                  {
+                    "value": "a",
+                    "label": "A"
+                  },
+                  {
+                    "value": "b",
+                    "label": "B"
+                  },
+                  {
+                    "value": "c",
+                    "label": "C"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "max_selected_more_than_options",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "extras",
+                "kind": "choice",
+                "label": "Extras",
+                "multiple": true,
+                "max_selected": 4,
+                "options": [
+                  {
+                    "value": "a",
+                    "label": "A"
+                  },
+                  {
+                    "value": "b",
+                    "label": "B"
+                  },
+                  {
+                    "value": "c",
+                    "label": "C"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "selection_bounds_without_multiple",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "room",
+                "kind": "choice",
+                "label": "Room",
+                "max_selected": 1,
+                "options": [
+                  {
+                    "value": "single",
+                    "label": "Single"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "number_min_greater_than_max",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "guests",
+                "kind": "number",
+                "label": "Guests",
+                "min": 12,
+                "max": 1
+              }
+            ]
+          }
+        },
+        {
+          "name": "number_default_above_max",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "guests",
+                "kind": "number",
+                "label": "Guests",
+                "min": 1,
+                "max": 12,
+                "default": 20
+              }
+            ]
+          }
+        },
+        {
+          "name": "number_default_not_integer",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "guests",
+                "kind": "number",
+                "label": "Guests",
+                "integer": true,
+                "default": 2.5
+              }
+            ]
+          }
+        },
+        {
+          "name": "amount_min_greater_than_max",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "budget",
+                "kind": "amount",
+                "label": "Budget",
+                "currency": "EUR",
+                "min": "100",
+                "max": "99.99"
+              }
+            ]
+          }
+        },
+        {
+          "name": "date_not_a_calendar_date",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "arrival",
+                "kind": "date",
+                "label": "Arrival",
+                "max": "2026-02-30"
+              }
+            ]
+          }
+        },
+        {
+          "name": "date_default_below_min",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "arrival",
+                "kind": "date",
+                "label": "Arrival",
+                "min": "2026-10-05",
+                "default": "2026-10-04"
+              }
+            ]
+          }
+        },
+        {
+          "name": "time_min_greater_than_max",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "check_in",
+                "kind": "time",
+                "label": "Check-in",
+                "min": "18:00",
+                "max": "08:00"
+              }
+            ]
+          }
+        },
+        {
+          "name": "datetime_min_greater_than_max",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "call_at",
+                "kind": "datetime",
+                "label": "Call",
+                "min": "2026-10-05T12:00+01:00",
+                "max": "2026-10-05T12:00+02:00"
+              }
+            ]
+          },
+          "note": "Compared as instants: 12:00+01:00 is 11:00 UTC, after 12:00+02:00 (10:00 UTC)."
+        },
+        {
+          "name": "daterange_default_reversed",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "stay",
+                "kind": "daterange",
+                "label": "Stay",
+                "default": {
+                  "start": "2026-11-16",
+                  "end": "2026-11-14"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "text_default_with_a_line_break",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "name",
+                "kind": "text",
+                "label": "Name",
+                "default": "Ada\nLovelace"
+              }
+            ]
+          }
+        },
+        {
+          "name": "text_default_longer_than_max_length",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "name",
+                "kind": "text",
+                "label": "Name",
+                "max_length": 3,
+                "default": "Ada L."
+              }
+            ]
+          }
+        },
+        {
+          "name": "datetime_min_with_z",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "call_at",
+                "kind": "datetime",
+                "label": "Call",
+                "min": "2026-10-05T00:00:00Z"
+              }
+            ]
+          },
+          "note": "A numeric offset, never Z."
+        },
+        {
+          "name": "datetime_min_with_fraction",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "call_at",
+                "kind": "datetime",
+                "label": "Call",
+                "min": "2026-10-05T00:00:00.5+02:00"
+              }
+            ]
+          }
+        },
+        {
+          "name": "amount_four_decimals",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "budget",
+                "kind": "amount",
+                "label": "Budget",
+                "currency": "KWD",
+                "max": "10.0005"
+              }
+            ]
+          }
+        },
+        {
+          "name": "title_with_a_line_separator",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One\u2028field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "f",
+                "kind": "toggle",
+                "label": "F"
+              }
+            ]
+          },
+          "note": "U+2028 breaks a line like a newline does."
+        },
+        {
+          "name": "empty_text_default",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "One field",
+            "summary": "One field.",
+            "expires_at": 0,
+            "optional": true,
+            "fields": [
+              {
+                "id": "name",
+                "kind": "text",
+                "label": "Name",
+                "default": ""
+              }
+            ]
+          },
+          "note": "A default is a value; omit it for none."
         }
       ],
       "answers": [
@@ -401,6 +953,7 @@
             "upload": {
               "dir": "/home/ada/work/uploads/hermie/2026-10-04",
               "max_bytes": 10485760,
+              "max_total_bytes": 10485760,
               "max_files": 1,
               "strip_metadata": true
             }
@@ -427,6 +980,7 @@
             "upload": {
               "dir": "/home/ada/work/uploads/hermie/2026-10-04",
               "max_bytes": 26214400,
+              "max_total_bytes": 26214400,
               "max_files": 1,
               "strip_metadata": false
             }
@@ -452,6 +1006,84 @@
             "upload": {
               "dir": "/home/ada/work/uploads/hermie/2026-10-04",
               "max_bytes": 20971520,
+              "max_total_bytes": 52428800,
+              "max_files": 3,
+              "strip_metadata": false
+            }
+          }
+        }
+      ],
+      "invalid_frames": [
+        {
+          "name": "total_smaller_than_one_file",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Signed contracts",
+            "summary": "Upload the two signed rental contracts.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "accept": "document",
+            "multiple": true,
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 20971520,
+              "max_total_bytes": 1048576,
+              "max_files": 3,
+              "strip_metadata": false
+            }
+          },
+          "note": "max_total_bytes covers at least one file of max_bytes."
+        },
+        {
+          "name": "no_total_cap",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Signed contracts",
+            "summary": "Upload the two signed rental contracts.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "accept": "document",
+            "multiple": true,
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 20971520,
+              "max_files": 3,
+              "strip_metadata": false
+            }
+          }
+        },
+        {
+          "name": "total_over_100_mib",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Signed contracts",
+            "summary": "Upload the two signed rental contracts.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "accept": "document",
+            "multiple": true,
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 20971520,
+              "max_total_bytes": 104857601,
               "max_files": 3,
               "strip_metadata": false
             }
@@ -717,6 +1349,58 @@
             ]
           },
           "reason": "file:0:too_large"
+        },
+        {
+          "name": "over_max_total_bytes",
+          "request": "req_file_contracts",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/1a2b3c4d5e6f7081-contract-1.pdf",
+                "name": "contract-1.pdf",
+                "mime": "application/pdf",
+                "bytes": 20000000,
+                "sha256": "9b2c6f1e0a7d4c3b8e5f6a1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e4f3"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/2a2b3c4d5e6f7082-contract-2.pdf",
+                "name": "contract-2.pdf",
+                "mime": "application/pdf",
+                "bytes": 20000000,
+                "sha256": "9b2c6f1e0a7d4c3b8e5f6a1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e4f3"
+              },
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/3a2b3c4d5e6f7083-contract-3.pdf",
+                "name": "contract-3.pdf",
+                "mime": "application/pdf",
+                "bytes": 20000000,
+                "sha256": "9b2c6f1e0a7d4c3b8e5f6a1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d5e4f3"
+              }
+            ]
+          },
+          "reason": "files:too_large",
+          "note": "Each file is under upload.max_bytes (20,971,520), together they are 60,000,000 bytes: more than upload.max_total_bytes (52,428,800)."
+        },
+        {
+          "name": "bytes_as_string",
+          "request": "req_file_receipt",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/3f9c2a7b1d4e8f60-receipt.jpg",
+                "name": "receipt.jpg",
+                "mime": "image/jpeg",
+                "bytes": "482113",
+                "sha256": "fd16e784e91ab960e4fb349d8cc179c9e5891ef6d767c7620e2560a59ba0bc2f"
+              }
+            ]
+          },
+          "reason": "bad_shape",
+          "note": "bytes is a JSON integer, never a string or a float."
         }
       ]
     },
@@ -764,6 +1448,31 @@
             "kind": "post",
             "text": "We are open again from Monday 9:00. Thanks for your patience!",
             "editable": false
+          }
+        }
+      ],
+      "invalid_frames": [
+        {
+          "name": "title_with_a_paragraph_separator",
+          "layer": "model",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Reply\u2029to Bram",
+            "summary": "Here is the reply I would send. Approve, edit or reject it.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "kind": "mail",
+            "text": "Hi Bram,\n\nThe flat is free from 1 November. The rent is EUR 1,150 a month, deposit two months.\nCould you confirm by Friday?\n\nKind regards,\nAda",
+            "subject": "Re: Flat on the Oudegracht",
+            "recipients": [
+              "Bram de Vries <bram@example.com>"
+            ],
+            "editable": true
           }
         }
       ],
@@ -1022,7 +1731,8 @@
       "valid": [
         "1250.50",
         "0",
-        "80"
+        "80",
+        ""
       ],
       "invalid": [
         {
@@ -1033,7 +1743,12 @@
         {
           "value": "1250.505",
           "reason": "field:budget:format",
-          "note": "At most two decimals."
+          "note": "EUR has two decimals (its ISO 4217 minor unit)."
+        },
+        {
+          "value": "1250.5055",
+          "reason": "field:budget:format",
+          "note": "More than three decimals: no currency has that many."
         },
         {
           "value": "1,250.50",
@@ -1046,6 +1761,27 @@
         {
           "value": "5000.01",
           "reason": "field:budget:above_max"
+        }
+      ],
+      "note": "\"\" is no value: valid here because the field is not required."
+    },
+    {
+      "name": "amount_no_minor_unit",
+      "field": {
+        "id": "price_yen",
+        "kind": "amount",
+        "label": "Price",
+        "currency": "JPY",
+        "min": "1"
+      },
+      "valid": [
+        "1500"
+      ],
+      "invalid": [
+        {
+          "value": "1500.5",
+          "reason": "field:price_yen:format",
+          "note": "JPY has no minor unit (ISO 4217 exponent 0)."
         }
       ]
     },
@@ -1060,7 +1796,8 @@
         "tz": "Europe/Amsterdam"
       },
       "valid": [
-        "2026-11-14"
+        "2026-11-14",
+        ""
       ],
       "invalid": [
         {
@@ -1093,7 +1830,8 @@
       },
       "valid": [
         "14:30",
-        "08:00"
+        "08:00",
+        ""
       ],
       "invalid": [
         {
@@ -1122,7 +1860,8 @@
       },
       "valid": [
         "2026-10-07T14:30:00+02:00[Europe/Amsterdam]",
-        "2026-11-07T09:00:00+01:00[Europe/Amsterdam]"
+        "2026-11-07T09:00:00+01:00[Europe/Amsterdam]",
+        "2026-10-07T14:30+02:00[Europe/Amsterdam]"
       ],
       "invalid": [
         {
@@ -1143,6 +1882,16 @@
         {
           "value": "2026-10-04T23:59:00+02:00[Europe/Amsterdam]",
           "reason": "field:call_at:below_min"
+        },
+        {
+          "value": "2026-10-07T14:30:00.500+02:00[Europe/Amsterdam]",
+          "reason": "field:call_at:format",
+          "note": "No fractions of a second."
+        },
+        {
+          "value": "2026-10-07T12:30:00Z[Europe/Amsterdam]",
+          "reason": "field:call_at:format",
+          "note": "A numeric offset, never Z."
         }
       ]
     },

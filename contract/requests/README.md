@@ -15,8 +15,9 @@ Files:
 - `schema.json`: JSON Schema (2020-12) of every params and result object, one `$defs`. Rendered from
   the gateway's models (`tui_gateway/contracts/server_requests.py`) by
   `scripts/gen_gateway_contracts.py`; never edit it by hand.
-- `examples.json`: frames, valid answers, invalid answers with the reason the gateway refuses them,
-  and one field definition with valid and invalid values per form field kind.
+- `examples.json`: frames, invalid frames (params the gateway never sends, §4), valid answers, invalid
+  answers with the reason the gateway refuses them, and one field definition with valid and invalid
+  values per form field kind.
 - `SHA256SUMS`: pins the three files above (`sha256sum -c SHA256SUMS` or
   `shasum -a 256 -c SHA256SUMS`).
 
@@ -49,7 +50,10 @@ carries `requests`, the methods this connection can SHOW on this device:
   `input.file`). A single request it cannot show (no camera for a `capture: photo` and no picker either)
   is answered with `4041` (§3).
 - The result's `requests` echoes the methods the gateway accepted (`[]` when none). Unknown names are
-  ignored.
+  ignored; the list holds at most 32 entries.
+- A request MAY arrive before the result of that `client.capabilities` call: a request that was waiting
+  for a capable device is delivered as soon as the advertisement is accepted. Handle request frames from
+  the moment the call is sent.
 
 ## 2. The envelope
 
@@ -59,7 +63,7 @@ methods share these keys (`InteractiveRequestParams`), next to the transport's `
 | Key | Type | Meaning |
 | --- | --- | --- |
 | `v` | `1` | Contract version. A client that does not know the version answers `4041` with reason `unsupported_version`. |
-| `title` | string, 1–80, one line | Heading. |
+| `title` | string, 1–80, one line: no CR, LF, VT, FF, NEL, U+2028 or U+2029 | Heading. |
 | `summary` | string, 1–500 | The agent's words: what it asks and why. |
 | `detail` | string ≤2,000 or absent | Extra context, shown monospaced. |
 | `expires_at` | integer, Unix seconds | When the gateway stops waiting. |
@@ -105,8 +109,9 @@ shutting down) answers a JSON-RPC ERROR, never a made-up `skipped` or `rejected`
 **Refused answers.** The gateway checks every answer: first against the result model (`schema.json`),
 then against the request's params. A refused answer is `request.answer` error `4034` (or the same
 refusal on a bare response) with `data.reason`, and the request STAYS OPEN: the client shows the reason
-next to the input and lets the person correct it. After ten refused answers the request is withdrawn
-(`request.cancel {reason: too_many_attempts}`) and the agent is told it is unavailable.
+next to the input and lets the person correct it. The tenth refused answer withdraws the request: that
+refusal carries `data.reason: too_many_attempts` (not the problem it was refused for), the request is
+withdrawn (`request.cancel {reason: too_many_attempts}`) and the agent is told it is unavailable.
 
 | Reason | Methods | Meaning |
 | --- | --- | --- |
@@ -114,6 +119,7 @@ next to the input and lets the person correct it. After ten refused answers the 
 | `not_optional` | `input.*` | `skipped` for a request whose `optional` is false. |
 | `field:<id>:<problem>` | `input.form` | §4. |
 | `files:too_many` | `input.file` | More files than `upload.max_files`, or more than one without `multiple`. |
+| `files:too_large` | `input.file` | The files' `bytes` together exceed `upload.max_total_bytes`. |
 | `file:<n>:outside_dir` | `input.file` | File `n` (0-based) is not under `upload.dir` (§5). |
 | `file:<n>:too_large` | `input.file` | File `n` declares more `bytes` than `upload.max_bytes`. |
 | `text:not_verbatim` | `review.draft` | The approved text contains something that cannot be shown as it is (§6). |
@@ -133,7 +139,7 @@ Params: the envelope plus `fields`, 1–12 field objects. Every field has:
 | `label` | string, 1–60 |
 | `hint` | string ≤200, optional |
 | `required` | boolean, default false |
-| `default` | a value of the field's kind, optional: the client pre-fills it |
+| `default` | a value of the field's kind, optional: the client pre-fills it (never `""`: omit it for none) |
 
 Per kind:
 
@@ -141,10 +147,10 @@ Per kind:
 | --- | --- | --- |
 | `text` | `multiline` (false), `max_length` (≤4,000), `input`: `plain` \| `email` \| `phone` \| `url` | string, at most `max_length` (else 4,000) code points; no newline unless `multiline` |
 | `number` | `min`, `max`, `step` (>0), `integer` (false) | JSON number in `[min, max]`; whole when `integer`; `min` (else 0) plus a whole multiple of `step` |
-| `amount` | `currency` (ISO 4217, `^[A-Z]{3}$`), `min`, `max` (decimal strings) | decimal STRING `^-?(0\|[1-9][0-9]{0,14})(\.[0-9]{1,2})?$` in `[min, max]`; never a JSON number |
+| `amount` | `currency` (ISO 4217, `^[A-Z]{3}$`), `min`, `max` (decimal strings) | decimal STRING `^-?(0\|[1-9][0-9]{0,14})(\.[0-9]{1,3})?$` in `[min, max]`, with at most as many decimals as the currency's ISO 4217 minor unit (EUR 2, JPY 0, KWD 3); never a JSON number |
 | `date` | `min`, `max` (`YYYY-MM-DD`), `tz` | `"2026-10-03"`, a real calendar date |
 | `time` | `min`, `max` (`HH:MM`), `tz` | `"14:30"`, 24-hour |
-| `datetime` | `min`, `max` (RFC 3339 with offset), `tz` | `"2026-10-03T14:30:00+02:00[Europe/Amsterdam]"` (below) |
+| `datetime` | `min`, `max` (instants, below), `tz` | `"2026-10-03T14:30:00+02:00[Europe/Amsterdam]"` (below) |
 | `daterange` | `min`, `max` (`YYYY-MM-DD`), `tz` | `{"start": "2026-10-03", "end": "2026-10-05"}`, both inclusive |
 | `choice` | `options` (1–12 `{value ≤64, label ≤80}`), `multiple` (false), `min_selected`, `max_selected` | one option `value` (string); with `multiple` a list of distinct option values |
 | `toggle` | — | JSON boolean |
@@ -152,14 +158,32 @@ Per kind:
 `input` on a text field is a keyboard hint, not a check: the gateway does not validate an address,
 number or URL. `tz` is an IANA zone name; for `date` and `daterange` it says which day "today" is.
 
-**Datetime values** carry the offset AND the zone: RFC 3339 with a numeric offset, followed by the IANA
-zone as an RFC 9557 suffix in brackets. The zone is the field's `tz` when it has one, else the
-device's zone; the offset MUST be that zone's offset at that instant. `min` and `max` are instants
-(RFC 3339 with offset, no zone).
+**Datetime values** carry the offset AND the zone. Exactly:
+
+- An INSTANT is `YYYY-MM-DDTHH:MM` with optional `:SS`, no fractions of a second, and a numeric offset
+  `±HH:MM`. `Z` is not used (write `+00:00`). A datetime field's `min`, `max` and `default` are
+  instants; the client shows `default` in the answer's zone.
+- A VALUE (the answer) is an instant followed by its IANA zone as an RFC 9557 suffix in brackets:
+  `2026-10-03T14:30+02:00[Europe/Amsterdam]`. The suffix is REQUIRED. The zone is the field's `tz` when
+  it has one, else the device's zone; the offset MUST be that zone's offset at that instant.
+- To parse one, strip the bracketed suffix first and hand the rest to `Date` / `ISO8601DateFormatter` /
+  `datetime.fromisoformat`; none of them accepts the suffix.
+
+**Field definitions are consistent.** The gateway never sends a form whose fields contradict
+themselves, and its models refuse one: field ids are unique; option values are distinct;
+`min` ≤ `max` (compared as numbers, decimals, calendar dates, times or instants, and a date that only
+looks like one, `2026-02-30`, is refused); a `default` is a valid value of its field (in range, whole
+when `integer`, on a `step`, one line unless `multiline`, within `max_length`, one of the options, a
+list of distinct options of allowed length with `multiple`, a range whose end is not before its start);
+`min_selected` ≤ `max_selected` ≤ the number of options, and both only with `multiple`. JSON Schema
+cannot express most of these, so `schema.json` accepts such a frame; `examples.json` lists them under
+`invalid_frames` (layer `cross_field`). A client MAY refuse such a frame with `4041` and reason
+`not_supported_on_device`.
 
 Result: `{"status": "answered", "values": {<id>: <value>, ...}}` or `{"status": "skipped"}`. A field
-without a value is left out of `values` (never `null`); `""` for a text field and `[]` for a multiple
-choice count as no value.
+without a value is left out of `values` (never `null`). `""` counts as no value for every
+string-valued kind (`text`, `amount`, `date`, `time`, `datetime`, a single `choice`), and so does `[]`
+for a multiple choice: valid for a field that is not `required`, `missing` for one that is.
 
 The gateway checks `values` keys first (an id the form does not have: `field:<id>:unknown`), then each
 field in `fields` order, and refuses the first problem as `field:<id>:<problem>`:
@@ -191,7 +215,7 @@ Params: the envelope plus
 | `accept` | `image`, `document`, `audio`, `any` |
 | `capture` | `photo`, `scan`, `audio`, or absent: a preference, never a forced camera; the person may always pick an existing file |
 | `multiple` | boolean |
-| `upload` | `{dir, max_bytes (≤104,857,600), max_files (≤10), strip_metadata}` |
+| `upload` | `{dir, max_bytes (≤104,857,600), max_total_bytes (≥ max_bytes, ≤104,857,600), max_files (≤10), strip_metadata}` |
 
 **The upload rule.** Files never travel inside the answer. The client uploads each file through the
 gateway's existing HTTP upload route, with the credentials it already uses for attachments, to
@@ -203,7 +227,9 @@ gateway's existing HTTP upload route, with the credentials it already uses for a
 
 - `path` is absolute and under `upload.dir`: after resolving `.` and `..` segments lexically it starts
   with `upload.dir` followed by `/` (a sibling directory sharing a prefix is not under it).
-- `bytes` and `sha256` describe the bytes as uploaded (after metadata stripping).
+- `bytes` (a JSON integer) and `sha256` describe the bytes as uploaded (after metadata stripping).
+- `upload.max_bytes` bounds EACH file; `upload.max_total_bytes` bounds all files of the answer
+  together. A client checks both before uploading.
 - `strip_metadata`: remove EXIF and GPS data from camera and library images before uploading.
   Documents are uploaded untouched.
 - `text` (≤4,000) is an audio answer's transcript, when the client has one.
@@ -211,7 +237,8 @@ gateway's existing HTTP upload route, with the credentials it already uses for a
   there.
 
 The answer is checked in two steps. While the request is open: shape, `not_optional`, the file count
-(`files:too_many`), then each file in order (`file:<n>:outside_dir`, `file:<n>:too_large`). After it
+(`files:too_many`), then each file in order (`file:<n>:outside_dir`, `file:<n>:too_large`), then the
+total (`files:too_large`). After it
 settled, the gateway checks every file on disk (it exists, its size and SHA-256 match, its real path is
 under `upload.dir`); a mismatch makes the request `unavailable (bad_upload)` for the agent, and the
 client is not asked again.

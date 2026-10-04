@@ -71,7 +71,7 @@ class ClientCapabilitiesParams(Params):
     #: ``server_requests: true``; methods this backend does not know are ignored. Send it in a SECOND call,
     #: only after the first result's ``server_requests`` lists one of them: a backend older than the key
     #: rejects it (4000) and the whole call, ``confirm`` levels included.
-    requests: list[str] | None = None
+    requests: list[str] | None = Field(default=None, max_length=32)
 
 
 class ConfirmPasskeyRps(Result):

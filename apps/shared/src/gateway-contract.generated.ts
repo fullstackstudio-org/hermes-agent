@@ -4324,6 +4324,7 @@ export interface ConfirmPasskeyAssertion {
   signature: string
   user_handle?: string | null
 }
+/** ``fields``: 1-12, ids unique within the form. Every field is consistent in itself (``min`` ≤ ``max``, a ``default`` that is a valid value, distinct option values, ``min_selected`` ≤ ``max_selected`` ≤ the options): rules ``schema.json`` cannot express, pinned by ``examples.json`` ``invalid_frames``. */
 export interface InputFormRequestParams {
   session_id: string
   v: 1
@@ -4342,7 +4343,7 @@ export interface RequestActingUser {
 }
 /** One form field, discriminated by ``kind``. A client that does not know a kind answers ``4041`` (``not_supported_on_device``) rather than leave the field out. */
 export type FormField = FormTextField | FormNumberField | FormAmountField | FormDateField | FormTimeField | FormDatetimeField | FormDaterangeField | FormChoiceField | FormToggleField
-/** Value: a string of at most ``max_length`` (else 4000) code points; one line unless ``multiline``. ``""`` counts as no value. */
+/** Value: a string of at most ``max_length`` (else 4000) code points; one line unless ``multiline``. ``""`` counts as no value (as for every string-valued kind). A ``default`` is a value: omit it for none. */
 export interface FormTextField {
   id: string
   label: string
@@ -4405,7 +4406,7 @@ export interface FormTimeField {
   tz?: string | null
   default?: string | null
 }
-/** Value: RFC 3339 with the offset AND the IANA zone as an RFC 9557 suffix, ``"2026-10-03T14:30:00+02:00[Europe/Amsterdam]"``: the zone is ``tz`` when the field has one, else the device's; the offset is that zone's at that instant. ``min`` / ``max`` (offset, no zone) are instants. */
+/** Value (:data:`FORM_DATETIME_VALUE`): RFC 3339 with the offset AND the IANA zone as an RFC 9557 suffix, ``"2026-10-03T14:30:00+02:00[Europe/Amsterdam]"``: the zone is ``tz`` when the field has one, else the device's; the offset is that zone's at that instant. ``min``, ``max`` and ``default`` are INSTANTS (:data:`FORM_DATETIME`: offset, no zone); the client shows ``default`` in the answer's zone. */
 export interface FormDatetimeField {
   id: string
   label: string
@@ -4487,10 +4488,11 @@ export interface InputFileRequestParams {
 export type FileAccept = 'image' | 'document' | 'audio' | 'any'
 /** A preference for how to obtain the file; the person may always pick an existing one. */
 export type FileCapture = 'photo' | 'scan' | 'audio'
-/** Where the answer's files go. ``dir`` is an absolute path under the session's working directory; the client uploads each file through the HTTP upload route (the credentials it uses for attachments) to ``<dir>/<16 hex>-<safe name>`` and answers with references, never bytes. ``strip_metadata``: remove EXIF / GPS from camera and library images before uploading. */
+/** Where the answer's files go. ``dir`` is an absolute path under the session's working directory; the client uploads each file through the HTTP upload route (the credentials it uses for attachments) to ``<dir>/<16 hex>-<safe name>`` and answers with references, never bytes. ``strip_metadata``: remove EXIF / GPS from camera and library images before uploading. ``max_bytes`` bounds each file, ``max_total_bytes`` (≥ ``max_bytes``, at most 100 MiB) all files of the answer together. */
 export interface UploadTarget {
   dir: string
   max_bytes: number
+  max_total_bytes: number
   max_files: number
   strip_metadata: boolean
 }

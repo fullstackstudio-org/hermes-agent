@@ -9,7 +9,13 @@ names the reason the gateway refuses it with (``request.answer`` 4034 ``data.rea
   it (``not_optional``, ``field:<id>:<problem>``, ``file:<n>:<problem>``, …). Those checks are the
   per-method validators, which live with the gateway's request code, not here; this file pins that each
   such example is well-formed and consistent with its frame, and the validators' own tests must refuse
-  every one of them (``validator_cases()``) with exactly its reason.
+  every one of them (``validator_cases()``) with exactly its reason. That run of ``validator_cases()``
+  against the REAL validators is an acceptance criterion of the task that writes them (plan
+  ``request-types-v2``, P1-F4).
+
+Every invalid FRAME (``invalid_frames``) is refused by the params model; layer ``model`` also fails
+``schema.json``, layer ``cross_field`` passes it (a rule JSON Schema cannot express: unique ids, ``min`` ≤
+``max``, a default that is a valid value, …).
 
 ``schema.json`` and ``SHA256SUMS`` are rendered by ``scripts/gen_gateway_contracts.py``
 (``test_generated.py`` diffs them); here the sums are also checked the way ``sha256sum -c`` would.
@@ -48,7 +54,8 @@ FORM_PROBLEMS = ("missing", "unknown", "type", "format", "too_long", "below_min"
 #: Every reason a method's answer may be refused with (README "Refused answers").
 REASONS: dict[str, re.Pattern[str]] = {
     "input.form": re.compile(r"^(bad_shape|not_optional|field:[a-z][a-z0-9_]{0,31}:(%s))$" % "|".join(FORM_PROBLEMS)),
-    "input.file": re.compile(r"^(bad_shape|not_optional|files:too_many|file:(0|[1-9][0-9]*):(outside_dir|too_large))$"),
+    "input.file": re.compile(r"^(bad_shape|not_optional|files:(too_many|too_large)|"
+                             r"file:(0|[1-9][0-9]*):(outside_dir|too_large))$"),
     "review.draft": re.compile(r"^(bad_shape|text:(not_verbatim|edited))$"),
 }
 #: The discriminator of each method's result and the values every one must have a valid example of.
@@ -130,6 +137,16 @@ def test_frames_parse(method):
         contract.params.model_validate(frame["params"])
 
 
+@pytest.mark.parametrize("method", INTERACTIVE_METHODS)
+def test_invalid_frames_are_refused_by_the_params_model(method):
+    contract = SERVER_REQUESTS[method]
+    frames = EXAMPLES["methods"][method]["invalid_frames"]
+    assert frames, method
+    for case in frames:
+        assert case["layer"] in ("model", "cross_field"), case["name"]
+        assert not _parses(contract.params, case["params"]), f"{case['name']}: the model accepts it"
+
+
 def test_frame_ids_are_unique():
     ids = [f["id"] for method in INTERACTIVE_METHODS for f in EXAMPLES["methods"][method]["frames"]]
     assert len(ids) == len(set(ids))
@@ -182,6 +199,9 @@ def test_validator_cases_are_consistent_with_their_frames():
         elif reason == "files:too_many":
             limit = params["upload"]["max_files"] if params["multiple"] else 1
             assert len(result["files"]) > limit, reason
+        elif reason == "files:too_large":
+            assert all(f["bytes"] <= params["upload"]["max_bytes"] for f in result["files"]), reason
+            assert sum(f["bytes"] for f in result["files"]) > params["upload"]["max_total_bytes"], reason
         elif reason == "text:edited":
             assert params["editable"] is False and result["text"] != params["text"], reason
 
@@ -229,6 +249,7 @@ def test_envelope_is_closed():
     model = SERVER_REQUESTS["input.form"].params
     assert _parses(model, params)
     for bad in (params | {"v": 2}, params | {"title": "two\nlines"}, params | {"title": "x" * 81},
+                *(params | {"title": f"two{sep}lines"} for sep in "\r\x0b\x0c\x85\u2028\u2029"),
                 params | {"summary": ""}, params | {"expires_at": -1}, params | {"extra": True},
                 {k: v for k, v in params.items() if k != "optional"}):
         assert not _parses(model, bad)
@@ -251,6 +272,11 @@ def test_error_examples():
             RequestAnswerParams.model_validate(case["request"]["params"])
             assert REASONS["input.form"].match(error["data"]["reason"])
     assert seen == {CANNOT_SHOW, 4034}
+
+
+def test_capabilities_requests_is_bounded():
+    assert not _parses(ClientCapabilitiesParams, {"server_requests": True, "requests": ["input.form"] * 33})
+    assert _parses(ClientCapabilitiesParams, {"server_requests": True, "requests": ["input.form"] * 32})
 
 
 def test_capabilities_example():
@@ -282,6 +308,8 @@ def test_schema_agrees_with_the_models():
             result_v.validate(answer["result"])
         for case in block["invalid_answers"]:
             assert result_v.is_valid(case["result"]) == (case["layer"] == "validator"), case["name"]
+        for case in block["invalid_frames"]:
+            assert params_v.is_valid(case["params"]) == (case["layer"] == "cross_field"), case["name"]
     field_v = validator({"$ref": "#/$defs/FormField"})
     form_result_v = validator(schema["methods"]["input.form"]["result"])
     for entry in EXAMPLES["form_fields"]:

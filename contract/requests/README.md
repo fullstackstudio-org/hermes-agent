@@ -281,13 +281,120 @@ can show as it is.
 Result: `{"decision": "approved", "text": "..."}` (1–20,000; the text as approved, unchanged unless
 `editable`) or `{"decision": "rejected", "comment": "..."}` (`comment` ≤1,000, optional).
 
-The gateway removes whitespace at the end of each line of an approved text, exactly: the text is split
-on LF only, every character for which Python's `str.isspace()` is true is stripped from the end of
-each line (so CR, tab, VT, FF, NEL U+0085, NBSP U+00A0, U+3000, U+2028, U+2029 and every other Unicode
-space at a line end) and then from the end of the whole text, which also drops trailing blank lines;
-leading whitespace is kept. It then refuses text that still cannot be shown verbatim (a tab, a control, format or bidi character, a line separator, …:
-`text:not_verbatim`) and, when `editable` is false, any change (`text:edited`). Whether the text was
-edited is the gateway's computation, not the client's.
+The gateway removes whitespace at the end of each line of an approved text (§6.1), then refuses text
+that still cannot be shown verbatim (§6.2 to §6.4: `text:not_verbatim`) and, when `editable` is false,
+any change (`text:edited`). Whether the text was edited is the gateway's computation, not the client's.
+
+### 6.1 Stripping (the only thing the gateway rewrites)
+
+The text is split on LF (U+000A) ONLY. Every character for which Python's `str.isspace()` is true is
+stripped from the end of each line (so CR, tab, VT, FF, U+001C to U+001F, NEL U+0085, NBSP U+00A0,
+U+1680, U+2000 to U+200A, U+2028, U+2029, U+202F, U+205F and U+3000 at a line end) and then from the end
+of the whole text, which also drops trailing blank lines and a final LF. A line made only of spaces
+becomes an empty line. Leading whitespace is kept. Stripping happens FIRST: everything in §6.2 to §6.4 is
+checked on the stripped text, so a tab at the end of a line is removed and a tab anywhere else is
+refused. A text that is empty after stripping is refused. A client strips the same way before it checks.
+
+### 6.2 What is refused: characters
+
+After stripping, the text is refused when it contains any of these. Only LF and U+0020 (space) are
+allowed as whitespace.
+
+1. A control character (`Cc`) other than LF: every C0 control (so CR, tab, VT, FF, ESC), DEL and every
+   C1 control. A bare CR in the middle of a line is refused, not read as a line break.
+2. Any other whitespace: `Zs` other than U+0020 (NBSP, U+1680, U+2000 to U+200A, U+202F, U+205F,
+   U+3000), `Zl` (U+2028) and `Zp` (U+2029), and in general every character that `str.isspace()`
+   accepts other than LF and space.
+3. A format character (`Cf`: zero-width space and joiners, the bidi marks, embeddings, overrides and
+   isolates, the soft hyphen U+00AD, the invisible operators, the language tags, U+FEFF), a surrogate
+   (`Cs`), a private-use character (`Co`) and an unassigned code point (`Cn`).
+4. An invisible letter or symbol: U+115F and U+1160 (Hangul Choseong and Jungseong fillers), U+3164
+   (Hangul filler), U+FFA0 (halfwidth Hangul filler), U+2800 (blank Braille pattern) and U+1D159
+   (musical null notehead).
+5. A default-ignorable code point: one that the table below contains. It is a copy of Unicode's
+   `Default_Ignorable_Code_Point` (`DerivedCoreProperties.txt`, unchanged from Unicode 14.0 through
+   16.0). Clients use THIS table, not their platform's property, so a platform that updates the property
+   does not change the answer. Besides most of the `Cf` characters above it holds the variation
+   selectors (U+FE00 to U+FE0F and U+E0100 to U+E01EF) with no exception for an emoji's U+FE0F, the
+   combining grapheme joiner U+034F, the Mongolian free variation selectors, the Khmer inherent vowels
+   U+17B4 and U+17B5, the Hangul fillers and the reserved ranges.
+6. More than `MAX_COMBINING_MARKS` = 4 combining marks in a row (see below).
+
+Default-ignorable table (inclusive ranges, code points in hexadecimal):
+
+```text
+00AD
+034F
+061C
+115F-1160
+17B4-17B5
+180B-180F
+200B-200F
+202A-202E
+2060-206F
+3164
+FE00-FE0F
+FEFF
+FFA0
+FFF0-FFF8
+1BCA0-1BCA3
+1D173-1D17A
+E0000-E0FFF
+```
+
+Combining marks: a combining mark is a character of category `Mn` or `Me` (a spacing mark, `Mc`, is not
+one). The count is of consecutive such characters, whatever the character before them: it starts at
+0, rises by one for each `Mn` or `Me` character, and resets to 0 at any character that is not one (a
+base letter, a space, an LF, an `Mc`). A text is refused when the count exceeds `MAX_COMBINING_MARKS`: 5 marks in a
+row, even at the very start of the text. 4 in a row is fine. A mark that is also default-ignorable
+(U+034F, U+FE0F, …) is refused as that, before it is counted.
+
+An unassigned code point (`Cn`) is judged by a Unicode database, and databases differ between versions.
+A client uses one of Unicode 14.0 or later. The gateway's answer is final: a text it refuses comes back
+as `4034 text:not_verbatim` and the request stays open.
+
+### 6.3 What is refused: layout
+
+The layout limits keep padding from pushing part of a text out of view (a command followed by 300
+spaces and a second command, or 80 blank lines before it). They apply to the stripped text, line by line,
+with the lines split on LF only. All lengths count Unicode code points: not UTF-16 units, bytes or
+grapheme clusters. Every combining mark counts as a character, and so does every character of a
+supplementary plane.
+
+| Limit | Value | What is counted | Refused when |
+| --- | --- | --- | --- |
+| `MAX_SPACE_RUN` | 16 | U+0020 in a row, after the line's first non-space character | a run of more than 16 |
+| `MAX_INDENT` | 32 | U+0020 at the start of a line | more than 32 |
+| `MAX_BLANK_LINES` | 3 | empty lines in a row | a 4th |
+| `MAX_LINE_CHARS` | 2000 | the whole line, indent included, without its LF | more than 2000 |
+
+- Only the space matters here: tabs and every other whitespace were refused in §6.2 already.
+- A leading run of spaces is the indent, measured against `MAX_INDENT` only, and is NOT also a space
+  run. Every later run on the line, however deeply the line is indented, is measured against
+  `MAX_SPACE_RUN`. So 32 spaces and then `x` passes, `x` and then 17 spaces and `y` does not.
+- A blank line is an empty line (after stripping no line of spaces remains). Blank lines at the start of
+  the text count as blank lines in a row too: `"\n\n\n\nx"` begins with four, and is refused.
+  Blank lines at the end of the text are stripped, never counted. Three empty lines between two lines of
+  text is the most that passes (four LF in a row; five is refused).
+- There is no exemption of any kind: a draft is plain text, not JSON, so the allowance the `confirm`
+  request makes for the indentation inside a tool call's JSON string does not exist here.
+
+### 6.4 Total length
+
+As sent, `text` is 1 to 20,000 code points (more is `bad_shape`, as above), and after stripping it must not
+be empty.
+
+### 6.5 What a client does
+
+Clients MUST refuse or flag exactly the same set of texts as §6.1 to §6.4 describe: they run the
+stripping, then the character rules, then the layout limits, with these numbers and no others, on every
+text the person edits, BEFORE they send an approval, and show the problem next to the editor (the exact
+wording is the client's own). A client does not rewrite what it refuses: not by removing the characters
+or the padding, not by replacing a tab with spaces. It also never sends a text it knows is in the refused
+set, and the person cannot approve one. A client MUST NOT be more lenient than this, and SHOULD NOT be
+stricter: a text the client refuses and the gateway accepts is a text the person cannot approve though
+they could. The gateway re-checks everything: an approval refused with `text:not_verbatim` is shown the
+same way, and the request stays open.
 
 ## 7. Versioning
 

@@ -57,9 +57,24 @@ SVG_ELEMENTS = frozenset({"svg", "g", "path", "polyline", "polygon", "line", "ci
 #: backslash escape (``\75rl(``) as the character it names and a literal check for ``url(`` never sees it. No ``href``
 #: or ``xlink:href``, no ``style``, no ``class``, no event handler, no ``xml:*`` and no other namespace: ``xmlns``
 #: itself is allowed only on the root with the SVG namespace.
-_NUM = r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+#:
+#: Three rules hold for every value, so a client has one thing to remember:
+#:
+#: - WHITESPACE is ASCII only (space, tab, CR, LF): a no-break space, an ideographic space, U+0085 or U+2028 is not a
+#:   separator and is refused, as are vertical tab and form feed. A value has no whitespace at its start or its end.
+#: - KEYWORDS are lowercase only: colour names, ``none``, ``currentcolor``, ``rgb``/``rgba``, units, ``nonzero``,
+#:   ``evenodd``, ``butt``, ``round``, ``square``, ``miter``, ``bevel``, ``meet``, ``slice`` (CSS reads them in any case;
+#:   the gateway reads them in one). SVG's own camel-case tokens are exactly as SVG writes them (``skewX``, ``skewY``,
+#:   ``xMidYMid``, ``viewBox``), because there the case is part of the grammar, and so are a path's command letters. The
+#:   case of hexadecimal digits and of an exponent's ``e`` is free: they are digits, not words.
+#: - A NUMBER is at most 32 characters (a run of digits, sign, point and ``e`` is never longer, in ``d`` and ``points``
+#:   too).
+_WS = r"[ \t\r\n]"
+_NUM = r"(?![0-9.eE+-]{33})[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
 _LENGTH = _NUM + r"(?:px|%|em|ex|pt|pc|mm|cm|in)?"
-_SEP = r"[\s,]+"
+_SEP = r"[ \t\r\n,]+"
+_PATH_CHARS = r"(?:(?![0-9.eE+-]{33})[MmZzLlHhVvCcSsQqTtAa0-9eE+., \t\r\n-])*"
+_POINT_CHARS = r"(?:(?![0-9.eE+-]{33})[0-9eE+., \t\r\n-])*"
 _COLOR_KEYWORDS = frozenset("""none currentcolor transparent aliceblue antiquewhite aqua aquamarine azure beige bisque
 black blanchedalmond blue blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson
 cyan darkblue darkcyan darkgoldenrod darkgray darkgreen darkgrey darkkhaki darkmagenta darkolivegreen darkorange
@@ -75,17 +90,16 @@ rebeccapurple red rosybrown royalblue saddlebrown salmon sandybrown seagreen sea
 slategray slategrey snow springgreen steelblue tan teal thistle tomato turquoise violet wheat white whitesmoke yellow
 yellowgreen""".split())
 _HEX = re.compile(r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})")
-_RGB = re.compile(r"rgba?\(\s*" + _NUM + r"%?\s*(?:,\s*" + _NUM + r"%?\s*){2,3}\)", re.IGNORECASE)
-_WORD = re.compile(r"[A-Za-z]+")
-_TRANSFORM = re.compile(r"(?:matrix|translate|scale|rotate|skewX|skewY)\s*\(\s*" + _NUM + r"(?:" + _SEP + _NUM
-                        + r")*\s*\)")
+_RGB = re.compile(r"rgba?\(" + _WS + r"*" + _NUM + r"%?" + _WS + r"*(?:," + _WS + r"*" + _NUM + r"%?" + _WS
+                  + r"*){2,3}\)")
+_TRANSFORM = re.compile(r"(?:matrix|translate|scale|rotate|skewX|skewY)" + _WS + r"*\(" + _WS + r"*" + _NUM + r"(?:"
+                        + _SEP + _NUM + r")*" + _WS + r"*\)")
 
 
 def _color(value: str) -> bool:
-    """A paint: a keyword (``none``, ``currentColor``, a CSS colour name), ``#rgb``/``#rgba``/``#rrggbb``/
+    """A paint: a lowercase keyword (``none``, ``currentcolor``, a CSS colour name), ``#rgb``/``#rgba``/``#rrggbb``/
     ``#rrggbbaa`` or ``rgb()``/``rgba()`` of numbers. Never ``url()``, a function or a variable."""
-    return (_WORD.fullmatch(value) is not None and value.lower() in _COLOR_KEYWORDS) or \
-        _HEX.fullmatch(value) is not None or _RGB.fullmatch(value) is not None
+    return value in _COLOR_KEYWORDS or _HEX.fullmatch(value) is not None or _RGB.fullmatch(value) is not None
 
 
 def _transform(value: str) -> bool:
@@ -109,18 +123,16 @@ def _pattern(regex: str):
     return lambda value: compiled.fullmatch(value) is not None
 
 
-_NUMBER_LIST = _pattern(r"\s*" + _NUM + r"(?:" + _SEP + _NUM + r")*\s*")
-_LENGTH_VALUE = _pattern(r"\s*" + _LENGTH + r"\s*")
+_LENGTH_VALUE = _pattern(_LENGTH)
 #: attribute → does the value match its grammar.
 SVG_VALUES = {
     "xmlns": lambda value: value == SVG_NAMESPACE,
     "version": _pattern(r"1\.[01]"),
-    "viewBox": _pattern(r"\s*" + _NUM + r"(?:" + _SEP + _NUM + r"){3}\s*"),
+    "viewBox": _pattern(_NUM + r"(?:" + _SEP + _NUM + r"){3}"),
     "width": _LENGTH_VALUE, "height": _LENGTH_VALUE,
     "preserveAspectRatio": _pattern(r"(?:none|x(?:Min|Mid|Max)Y(?:Min|Mid|Max))(?: (?:meet|slice))?"),
     "transform": _transform,
-    "d": _pattern(r"[MmZzLlHhVvCcSsQqTtAa0-9eE+.,\s-]*"),
-    "points": _pattern(r"[0-9eE+.,\s-]*"),
+    "d": _pattern(_PATH_CHARS), "points": _pattern(_POINT_CHARS),
     "x": _LENGTH_VALUE, "y": _LENGTH_VALUE, "x1": _LENGTH_VALUE, "y1": _LENGTH_VALUE, "x2": _LENGTH_VALUE,
     "y2": _LENGTH_VALUE, "cx": _LENGTH_VALUE, "cy": _LENGTH_VALUE, "r": _LENGTH_VALUE, "rx": _LENGTH_VALUE,
     "ry": _LENGTH_VALUE,
@@ -130,8 +142,7 @@ SVG_VALUES = {
     "fill-rule": _pattern(r"nonzero|evenodd"),
     "stroke-linecap": _pattern(r"butt|round|square"),
     "stroke-linejoin": _pattern(r"miter|round|bevel"),
-    "stroke-dasharray": lambda value: value == "none" or _pattern(
-        r"\s*" + _LENGTH + r"(?:" + _SEP + _LENGTH + r")*\s*")(value),
+    "stroke-dasharray": lambda value: value == "none" or _pattern(_LENGTH + r"(?:" + _SEP + _LENGTH + r")*")(value),
 }
 SVG_ATTRIBUTES = frozenset(SVG_VALUES)
 SVG_MAX_DEPTH = 32
@@ -270,7 +281,8 @@ def _svg_problem(head: bytes) -> str | None:
     reference, so nothing is spelt out of pieces), no ``url(``, then ``xml.parsers.expat`` (linear; a doctype, an
     entity declaration, a processing instruction and an external reference are refused by its handlers) and an
     ALLOWLIST: unprefixed elements of :data:`SVG_ELEMENTS`, attributes of :data:`SVG_VALUES` only, each value matching its
-    grammar (a number, a colour, a path, a list of points, ...; never a backslash or a function), ``xmlns`` on the root
+    grammar (a number, a colour, a path, a list of points, ...; never a backslash or a function; ASCII whitespace only and none at
+    the ends, lowercase keywords, numbers of at most 32 characters), ``xmlns`` on the root
     and equal to :data:`SVG_NAMESPACE`, no text at all (not even in ``title``), at most :data:`SVG_MAX_DEPTH` deep. No
     control, format, private-use or surrogate character other than tab, CR and LF.
     A denylist of what is dangerous is never enough: a prefix, a character reference or another encoding spells the
@@ -303,6 +315,8 @@ def _svg_problem(head: bytes) -> str | None:
             check = SVG_VALUES.get(key)
             if check is None or "\\" in value or "url(" in value.lower():
                 refuse("attribute")
+            if value != value.strip(" \t\r\n"):
+                refuse("value")  # no whitespace at either end, for every attribute
             if key == "xmlns" and depth != 1:
                 refuse("namespace")
             if not check(value):

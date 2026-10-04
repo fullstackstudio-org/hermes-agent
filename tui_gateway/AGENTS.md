@@ -181,7 +181,7 @@ frame's `statement` (`statement:mismatch`); after the request settled, `verify_f
 PNG begins with the PNG signature and the SVG passes `interactive_device._svg_problem` (`bad_upload`): strict UTF-8, no
 `&`, no `url(` and no backslash, no control or hidden character, expat with handlers that refuse a doctype, entity, CDATA
 and processing instruction, and an ALLOWLIST of unprefixed elements and of attributes whose VALUES each match a grammar
-(number, colour, path, points, viewBox, transform: a denylist is bypassed by a prefix, a character reference, another
+(number, colour, path, points, viewBox, transform; ASCII whitespace only and none at the ends, lowercase keywords, numbers of at most 32 characters: a denylist is bypassed by a prefix, a character reference, another
 encoding or a CSS escape), and no text at all.
 The files' names must end `.png` and `.svg` (`file:<n>:extension`), and the whole file is read (up to 1 MiB, however the
 reads were split). The agent gets

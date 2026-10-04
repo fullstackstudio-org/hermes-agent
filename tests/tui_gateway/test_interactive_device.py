@@ -313,8 +313,7 @@ def test_a_signature_svg_refuses_what_the_reviewers_vectors_spell(mime, head, ok
 
 @pytest.mark.parametrize("attr, value, ok", [
     # paints
-    ("fill", "none", True), ("fill", "currentColor", True), ("fill", "CURRENTCOLOR", True), ("fill", "red", True),
-    ("fill", "RebeccaPurple", True), ("stroke", "#000", True), ("stroke", "#0008", True), ("stroke", "#a1b2c3", True),
+    ("fill", "none", True), ("fill", "currentcolor", True), ("fill", "red", True), ("fill", "rebeccapurple", True), ("stroke", "#000", True), ("stroke", "#0008", True), ("stroke", "#a1b2c3", True),
     ("stroke", "#a1b2c3d4", True), ("stroke", "rgb(0,0,0)", True), ("stroke", "rgba(0, 0, 0, 0.5)", True),
     ("stroke", "rgb(10%, 20%, 30%)", True),
     ("fill", "#12", False), ("fill", "#12345", False), ("fill", "#1234567", False), ("fill", "#ggg", False),
@@ -323,15 +322,15 @@ def test_a_signature_svg_refuses_what_the_reviewers_vectors_spell(mime, head, ok
     # numbers and lengths
     ("stroke-width", "2", True), ("stroke-width", "2.5px", True), ("stroke-width", ".5", True),
     ("stroke-width", "-1e-3", True), ("opacity", "0.5", True), ("opacity", "50%", True), ("width", "10", True),
-    ("width", " 10 ", True), ("x", "1.", True), ("cx", "+3", True), ("stroke-dashoffset", "4", True),
+    ("width", " 10 ", False), ("x", "1.", True), ("cx", "+3", True), ("stroke-dashoffset", "4", True),
     ("stroke-width", "two", False), ("stroke-width", "1 2", False), ("stroke-width", "1px2", False),
     ("opacity", "var(--o)", False), ("width", "auto", False), ("r", "1e", False), ("r", "--1", False),
-    ("r", "1;2", False), ("r", "1 \n", True),
+    ("r", "1;2", False), ("r", "1 \n", False), ("r", "\t1", False),
     # lists
     ("stroke-dasharray", "none", True), ("stroke-dasharray", "4", True), ("stroke-dasharray", "4, 2 1", True),
     ("stroke-dasharray", "4, x", False), ("points", "0,0 1,1", True), ("points", "0 0 1 1", True),
     ("points", "", True), ("points", "0,0 a", False), ("points", "0,0;1,1", False),
-    ("viewBox", "0 0 10 10", True), ("viewBox", "0,0,10,10", True), ("viewBox", " 0 0 10.5 -10 ", True),
+    ("viewBox", "0 0 10 10", True), ("viewBox", "0,0,10,10", True), ("viewBox", " 0 0 10.5 -10 ", False), ("viewBox", "0 0 10.5 -10", True),
     ("viewBox", "0 0 10", False), ("viewBox", "0 0 10 10 10", False), ("viewBox", "0 0 a b", False),
     # paths
     ("d", "M0 0L1 1", True), ("d", "M0,0 c1.5-2 3 4 5 6z", True), ("d", "M1e3 2E-3Z", True), ("d", "", True),
@@ -1291,3 +1290,113 @@ def test_a_calendar_item_error_names_what_is_wrong_once_without_doubling_the_pre
             dev.build_calendar_item(item, _Refused)
         assert str(raised.value).startswith(message), str(raised.value)
         assert "item: item" not in str(raised.value) and "calendar item:" not in str(raised.value)
+
+
+def _attr_ok(attr: str, value: str) -> bool:
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg"><path ' + attr + '="' + value + '"/></svg>').encode()
+    return dev.png_or_svg_problem("image/svg+xml", svg) is None
+
+
+_NOT_ASCII_SPACES = ("\u00a0", "\u3000", "\u2028", "\u2029", "\u0085", "\u2003", "\u202f", "\u1680", "\x0b", "\x0c")
+_SPACED = [("stroke-dasharray", "1{}2"), ("viewBox", "0{0}0{0}1{0}1"), ("points", "0,0{}1,1"), ("d", "M0{}0"),
+           ("transform", "translate(1{}1)"), ("transform", "scale(1){}rotate(1)"), ("stroke", "rgb(0,{}0,0)"),
+           ("stroke-width", "{}1"), ("stroke-width", "1{}"), ("preserveAspectRatio", "xMidYMid{}meet")]
+
+
+@pytest.mark.parametrize("attr, pattern", _SPACED)
+def test_only_ascii_whitespace_separates_svg_values(attr, pattern):
+    for space in (" ", "\t", "\r", "\n"):
+        if attr not in ("stroke-width", "preserveAspectRatio"):
+            assert _attr_ok(attr, pattern.format(space)), (attr, repr(space))
+    for odd in _NOT_ASCII_SPACES:
+        # XML itself would normalise some of these in an attribute; none of them may reach the grammar as a separator
+        value = pattern.format(odd)
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg"><path ' + attr + '="' + value + '"/></svg>').encode()
+        if odd in ("\x0b", "\x0c"):      # control characters: refused before the parse
+            assert dev._svg_problem(svg) == "control", repr(odd)
+        else:
+            assert dev.png_or_svg_problem("image/svg+xml", svg) is not None, (attr, repr(odd))
+
+
+@pytest.mark.parametrize("attr, value", [(a, v) for a, v in [
+    ("d", "M0\u00a00"), ("d", "M0\u30000"), ("d", "M0\u20280"), ("points", "0\u00a00"), ("points", "0\u30000"),
+    ("points", "0\u20280"), ("stroke-dasharray", "1\u00a02"), ("viewBox", "0\u00a00\u00a01\u00a01"),
+    ("transform", "scale(1)\u00a0rotate(1)"), ("transform", "scale(1\u00a02)"), ("stroke", "rgb(0,\u00a00,0)"),
+    ("stroke", "rgb(\u30000,0,0)"), ("width", "1\u00a0"), ("width", "\u00a01")]])
+def test_a_no_break_or_ideographic_space_or_line_separator_is_never_a_separator(attr, value):
+    assert not _attr_ok(attr, value), (attr, value)
+
+
+@pytest.mark.parametrize("attr, value", [
+    ("d", "M0 0 "), ("d", " M0 0"), ("d", "\tM0 0"), ("d", "M0 0\n"), ("points", " 0,0"), ("points", "0,0 "),
+    ("viewBox", " 0 0 1 1"), ("viewBox", "0 0 1 1 "), ("transform", " scale(1)"), ("transform", "scale(1) "),
+    ("stroke-dasharray", " 1"), ("stroke-dasharray", "1 "), ("stroke", " red"), ("stroke", "red "),
+    ("stroke", " #000"), ("stroke", "rgb(0,0,0) "), ("width", " 1"), ("width", "1 "), ("opacity", "1\n"),
+    ("fill-rule", " evenodd"), ("stroke-linecap", "round "), ("preserveAspectRatio", " none"), ("version", "1.1 "),
+])
+def test_no_svg_value_has_whitespace_at_its_start_or_end(attr, value):
+    assert not _attr_ok(attr, value), (attr, value)
+    assert _attr_ok(attr, value.strip(" \t\r\n")), (attr, value)
+
+
+def test_whitespace_at_the_end_of_xmlns_is_refused_too():
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg "/>'
+    assert dev.png_or_svg_problem("image/svg+xml", svg) is not None
+
+
+@pytest.mark.parametrize("attr, template", [
+    ("stroke-width", "{}"), ("opacity", "{}"), ("x", "{}px"), ("stroke-dasharray", "{} {}"), ("viewBox", "{} 0 1 1"),
+    ("viewBox", "0 0 {} 1"), ("transform", "scale({})"), ("transform", "translate(1 {})"), ("stroke", "rgb({},0,0)"),
+    ("stroke", "rgba(0,0,0,{})"),
+])
+def test_a_number_of_more_than_32_characters_is_refused(attr, template):
+    at_limit = "1" * 31 + "5"                 # 32 characters
+    too_long = "1" * 32 + "5"                 # 33
+    assert len(at_limit) == 32 and len(too_long) == 33
+    assert _attr_ok(attr, template.format(at_limit, at_limit)), attr
+    assert not _attr_ok(attr, template.format(too_long, too_long)), attr
+
+
+@pytest.mark.parametrize("number, ok", [("1" * 32, True), ("1" * 33, False), ("-" + "1" * 31, True),
+                                         ("-" + "1" * 32, False), ("0." + "1" * 30, True), ("0." + "1" * 31, False),
+                                         ("1." + "0" * 30, True), ("." + "1" * 31, True), ("." + "1" * 32, False),
+                                         ("1e" + "1" * 30, True), ("1e" + "1" * 31, False), ("1e-" + "1" * 29, True)])
+def test_the_number_cap_counts_every_character_of_the_number(number, ok):
+    assert _attr_ok("stroke-width", number) is ok, (number, len(number))
+
+
+def test_in_a_path_and_in_points_no_run_of_number_characters_exceeds_32():
+    assert _attr_ok("d", "M" + "1" * 32 + " " + "2" * 32) and not _attr_ok("d", "M" + "1" * 33)
+    assert _attr_ok("d", "M" + "1" * 15 + "-" + "1" * 16) and not _attr_ok("d", "M" + "1" * 15 + "-" + "1" * 17)
+    assert _attr_ok("points", "1" * 32 + "," + "2" * 32) and not _attr_ok("points", "1" * 33 + ",1")
+    assert _attr_ok("d", "M0 0" + "L1 1" * 1000)           # many short numbers are fine
+    assert _attr_ok("d", "M" + "e" * 32) and not _attr_ok("d", "M" + "e" * 33)
+
+
+@pytest.mark.parametrize("attr, value, ok", [
+    ("fill", "red", True), ("fill", "Red", False), ("fill", "RED", False), ("fill", "rEd", False),
+    ("fill", "none", True), ("fill", "None", False), ("fill", "NONE", False), ("fill", "currentcolor", True),
+    ("fill", "currentColor", False), ("fill", "CURRENTCOLOR", False), ("fill", "Transparent", False),
+    ("fill", "RebeccaPurple", False), ("fill", "rebeccapurple", True), ("fill", "DarkSlateGray", False),
+    ("fill", "darkslategray", True),
+    ("stroke", "rgb(0,0,0)", True), ("stroke", "RGB(0,0,0)", False), ("stroke", "Rgb(0,0,0)", False),
+    ("stroke", "rgba(0,0,0,1)", True), ("stroke", "RGBA(0,0,0,1)", False),
+    ("stroke", "#abc", True), ("stroke", "#ABC", True), ("stroke", "#AbCdEf", True),       # digits, not words
+    ("stroke-width", "1e3", True), ("stroke-width", "1E3", True),                          # an exponent is a digit
+    ("stroke-width", "2px", True), ("stroke-width", "2PX", False), ("stroke-width", "2Px", False),
+    ("stroke-width", "2MM", False), ("stroke-width", "2mm", True),
+    ("fill-rule", "evenodd", True), ("fill-rule", "EvenOdd", False), ("fill-rule", "NONZERO", False),
+    ("stroke-linecap", "round", True), ("stroke-linecap", "Round", False), ("stroke-linecap", "BUTT", False),
+    ("stroke-linejoin", "bevel", True), ("stroke-linejoin", "Bevel", False), ("stroke-linejoin", "MITER", False),
+    ("preserveAspectRatio", "xMidYMid meet", True), ("preserveAspectRatio", "xMidYMid Meet", False),
+    ("preserveAspectRatio", "xMidYMid SLICE", False), ("preserveAspectRatio", "NONE", False),
+    ("preserveAspectRatio", "xmidymid meet", False), ("preserveAspectRatio", "XMidYMid meet", False),
+    ("transform", "scale(1)", True), ("transform", "Scale(1)", False), ("transform", "SCALE(1)", False),
+    ("transform", "translate(1)", True), ("transform", "Translate(1)", False), ("transform", "MATRIX(1 0 0 1 0 0)", False),
+    ("transform", "skewX(1)", True), ("transform", "skewx(1)", False), ("transform", "SkewX(1)", False),
+    ("transform", "skewY(1)", True), ("transform", "skewy(1)", False), ("transform", "Rotate(1)", False),
+    ("stroke-dasharray", "none", True), ("stroke-dasharray", "None", False), ("stroke-dasharray", "1PX 2", False),
+    ("d", "M0 0L1 1", True), ("d", "m0 0l1 1", True),                                      # a command letter is its case
+])
+def test_keywords_and_function_names_are_lowercase_and_svgs_own_camel_case_is_exact(attr, value, ok):
+    assert _attr_ok(attr, value) is ok, (attr, value)

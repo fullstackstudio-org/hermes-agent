@@ -618,9 +618,17 @@ ALLOWLIST, not by what is known to be dangerous, so draw only this:
 - elements, written WITHOUT a namespace prefix: `svg` (the root, with `xmlns="http://www.w3.org/2000/svg"`, which
   only the root may carry), `g`, `path`, `polyline`, `polygon`, `line`, `circle`, `ellipse`, `rect`, `title`,
   `desc`; NO text at all, not even inside `title` or `desc` (they may be there, empty); at most 32 levels deep;
+- three rules for EVERY attribute value, so write it the plain way: whitespace is ASCII only (space, tab, CR, LF; a
+  no-break space, an ideographic space, U+0085, U+2028 and the like are not separators and are refused) and a value
+  has none at its start or end; keywords and function names are lowercase only (`none`, `currentcolor` (not
+  `currentColor`), `red`, `rgb(`, `px`, `evenodd`, `round`, `meet`, ...; CSS would read any case, the gateway reads
+  one), except SVG's own camel-case tokens, which are exactly as SVG writes them (`skewX`, `skewY`, `xMidYMid`,
+  `viewBox`) and a path's command letters, whose case is their meaning; hexadecimal digits and an exponent's `e` may
+  be either case; a number is at most 32 characters (and so is any run of digits, signs, points and `e` in `d` and
+  `points`);
 - attributes, each value matching its grammar exactly (a CSS backslash escape can spell `url(` without writing it,
   so a value is accepted by what it IS, never by what it lacks): `fill` and `stroke` a paint (`none`,
-  `currentColor`, `transparent`, a CSS colour keyword, `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, or `rgb()`/`rgba()`
+  `currentcolor`, `transparent`, a CSS colour keyword, `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, or `rgb()`/`rgba()`
   of numbers and percentages); `width`, `height`, `x`, `y`, `x1`, `y1`, `x2`, `y2`, `cx`, `cy`, `r`, `rx`, `ry`,
   `opacity`, `fill-opacity`, `stroke-opacity`, `stroke-width`, `stroke-miterlimit` and `stroke-dashoffset` a number
   with an optional unit (`px`, `%`, `em`, `ex`, `pt`, `pc`, `mm`, `cm`, `in`); `stroke-dasharray` `none` or such

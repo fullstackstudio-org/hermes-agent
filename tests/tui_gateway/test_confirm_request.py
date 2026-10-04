@@ -711,6 +711,55 @@ def test_tool_without_an_interactive_session_sends_nothing(server):
     assert app.requests() == []
 
 
+def _bind_like_a_turn(server, sid, source):
+    """Bind the turn's context the way the gateway does (``_set_session_context``), from a session record that
+    carries the ``source`` its client sent on ``session.create`` / ``session.resume``."""
+    from gateway.session_context import clear_session_vars, get_session_env
+    server._sessions[sid]["source"] = source
+    tokens = server._set_session_context(f"key-{sid}", ui_session_id=sid)
+    assert tokens and get_session_env("HERMES_SESSION_SOURCE") == source
+    assert get_session_env("HERMES_UI_SESSION_ID") == sid
+    return lambda: clear_session_vars(tokens)
+
+
+def test_tool_sends_in_a_turn_from_the_hermie_app(server):
+    # The Hermie apps open their conversations with source "hermie"; such a turn is the connected app's own,
+    # not a messaging channel, so the request is sent rather than answered no_session.
+    from tools import confirm_tool
+    app = _Peer("app")
+    _session(server, "s1", app)
+    _advertise(server, app, confirm=["plain"])
+    release = _bind_like_a_turn(server, "s1", "hermie")
+    try:
+        import contextvars
+        box: dict = {}
+        ctx = contextvars.copy_context()
+        thread = threading.Thread(target=lambda: box.setdefault("r", ctx.run(
+            confirm_tool.confirm_action_tool, summary="Delete the old backups.")), daemon=True)
+        thread.start()
+        req = _wait_open()
+        _answer(server, app, req.id, CONFIRMED)
+        thread.join(5)
+    finally:
+        release()
+    assert json.loads(box["r"])["outcome"] == "confirmed" and len(app.requests()) == 1
+
+
+def test_tool_in_a_messaging_session_the_gateway_hosts_is_still_no_session(server):
+    # A plugin may host a messaging conversation through this gateway under the platform's own source; that
+    # turn has a UI session too, and is still a chat channel where nobody can answer a sheet.
+    from tools import confirm_tool
+    app = _Peer("app")
+    _session(server, "s1", app)
+    _advertise(server, app, confirm=["plain"])
+    release = _bind_like_a_turn(server, "s1", "telegram")
+    try:
+        result = json.loads(confirm_tool.confirm_action_tool(summary="Pay."))
+    finally:
+        release()
+    assert (result["outcome"], result["reason"]) == ("unavailable", "no_session") and app.requests() == []
+
+
 def test_tool_round_trip_and_messages(server):
     from tools import confirm_tool
     app = _Peer("app")

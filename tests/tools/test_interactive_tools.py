@@ -169,6 +169,45 @@ def test_a_messaging_surface_call_is_no_session_even_with_a_ui_session_bound(ser
     assert phone.frames == []
 
 
+def _bind_like_a_turn(server, sid, source):
+    """Bind the turn's context the way the gateway does, from a record carrying its client's ``source``."""
+    from gateway.session_context import clear_session_vars, get_session_env
+    server._sessions[sid]["source"] = source
+    tokens = server._set_session_context(f"key-{sid}", ui_session_id=sid)
+    assert tokens and get_session_env("HERMES_SESSION_SOURCE") == source
+    return lambda: clear_session_vars(tokens)
+
+
+def test_a_turn_from_the_hermie_app_sends_the_request(server):
+    # The Hermie apps open their conversations with source "hermie": the connected app's own turn, not a channel.
+    phone = _WS("phone", ROBIN)
+    _session(server, "s1", phone, creator=ROBIN)
+    _caps(server, phone, requests=list(ALL))
+    release = _bind_like_a_turn(server, "s1", "hermie")
+    try:
+        thread, box = _call(tool.ask_form_tool, summary="Who is the booking for?", fields=[FIELD])
+        rid = _wait_open("input.form")
+        _frame(server, phone, rid, result={"status": "answered", "values": {"name": "Zoë"}})
+        thread.join(5)
+    finally:
+        release()
+    assert json.loads(box["r"])["outcome"] == "answered" and len(phone.requests("input.form")) == 1
+
+
+def test_a_messaging_session_the_gateway_hosts_is_still_no_session(server):
+    phone = _WS("phone", ROBIN)
+    _session(server, "s1", phone, creator=ROBIN)
+    _caps(server, phone, requests=list(ALL))
+    release = _bind_like_a_turn(server, "s1", "telegram")
+    try:
+        for result in (tool.ask_form_tool(summary="x", fields=[FIELD]), tool.ask_file_tool(summary="x", accept="any"),
+                       tool.review_draft_tool(summary="x", text="t", kind="mail")):
+            assert json.loads(result)["reason"] == "no_session"
+    finally:
+        release()
+    assert phone.frames == []
+
+
 def test_a_session_the_gateway_does_not_host_is_no_session(server):
     release = _bind_ui_session("not-hosted")
     try:

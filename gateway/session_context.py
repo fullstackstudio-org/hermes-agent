@@ -195,8 +195,11 @@ def get_session_env(name: str, default: str = "") -> str:
 # Surfaces that are not a human chat channel (gateway binds HERMES_SESSION_PLATFORM, CLI/TUI/
 # desktop bind HERMES_SESSION_SOURCE, so both are consulted).  Default-deny: an unrecognized
 # identity counts as messaging.  Mirrors LOCAL_SESSION_SOURCE_IDS in apps/desktop session-source.ts.
+# ``hermie`` (fork): the source the Hermie apps send on session.create/resume through this gateway — a
+# connected app like ``desktop``, not a chat channel.  The name is the signal, not the UI session: a plugin
+# can host a ``telegram`` conversation here too, and that turn has a UI session as well.
 NON_MESSAGING_SESSION_SURFACES = frozenset({
-    "", "api_server", "cli", "codex", "desktop", "gateway", "kanban", "local",
+    "", "api_server", "cli", "codex", "desktop", "gateway", "hermie", "kanban", "local",
     "msgraph_webhook", "tool", "tui", "webhook",
 })
 

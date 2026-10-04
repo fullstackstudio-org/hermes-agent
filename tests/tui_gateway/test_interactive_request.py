@@ -1,6 +1,7 @@
-"""The interactive requests ``input.form``, ``input.file`` and ``review.draft`` as the agent's tools use them
-(``tui_gateway/interactive.py``, plan ``request-types-v2`` task P1-F4): the params builders, the request (outcomes,
-audit, limits), the post-settle file verification and the review register's hand-off.
+"""The interactive requests ``input.form``, ``input.file``, ``review.draft`` and ``review.diff`` as the agent's tools
+use them (``tui_gateway/interactive.py``, plan ``request-types-v2`` tasks P1-F4 and P2-F1): the params builders, the
+request (outcomes, audit, limits), the post-settle file verification, the review register's hand-off and the patch of
+the approved hunks of a diff.
 
 What is pinned here: every builder cleans, bounds and refuses (over-long, empty and control text never goes out, a
 draft is checked verbatim, a bad field definition says which field); the params the builders make are valid frames
@@ -33,7 +34,7 @@ from tests.tui_gateway.test_server_requests_gate import (  # noqa: F401 - fixtur
 from tui_gateway.contracts.registry import SERVER_REQUESTS
 
 MARKER = "MARKER-TEXT-7"
-METHODS = ("input.form", "input.file", "review.draft")
+METHODS = ("input.form", "input.file", "review.draft", "review.diff")
 
 
 @pytest.fixture(autouse=True)
@@ -77,6 +78,18 @@ def _draft(build, **kwargs):
     kwargs.setdefault("text", "Hello Bram,\n\nThanks.")
     kwargs.setdefault("kind", "mail")
     return build.build_draft_params("s1", **kwargs)
+
+
+DIFF = ("diff --git a/src/notes.py b/src/notes.py\nindex 1234567..89abcde 100644\n--- a/src/notes.py\n"
+        "+++ b/src/notes.py\n@@ -1,3 +1,4 @@\n alpha\n-beta\n+BETA\n+BETA2\n gamma\n"
+        "@@ -20,3 +21,4 @@ def tail():\n one\n-two\n+TWO\n+two and a half\n three\n"
+        "@@ -40,2 +42,2 @@\n four\n-" + MARKER + "\n+five\n")
+
+
+def _diff(build, **kwargs):
+    kwargs.setdefault("summary", "Please look at these changes.")
+    kwargs.setdefault("diff", DIFF)
+    return build.build_diff_params("s1", **kwargs)
 
 
 def _file(build, **kwargs):
@@ -421,6 +434,71 @@ def test_draft_display_fields_are_bounded(build, kwargs, message):
         _draft(build, **kwargs)
 
 
+# ── the builder: review.diff ────────────────────────────────────────────────────────────────────
+
+
+def test_a_diff_is_built_into_hunks_by_the_gateway(build):
+    params = _diff(build, title="Notes")
+    assert params["v"] == 1 and params["optional"] is False and params["title"] == "Notes"
+    assert params["path"] == "src/notes.py" and "detail" not in params
+    assert [h["id"] for h in params["hunks"]] == ["h1", "h2", "h3"]
+    assert params["hunks"][1] == {"id": "h2", "header": "@@ -20,3 +21,4 @@ def tail():",
+                                  "lines": [" one", "-two", "+TWO", "+two and a half", " three"]}
+    assert params["acting_user"] == {"id": ROBIN, "name": ROBIN}
+    _contract_accepts("review.diff", params)
+    assert _diff(build)["title"] == "Review changes"
+    params, head = build.build_diff("s1", summary="x", diff=DIFF)
+    assert (head.kind, head.old, head.new) == ("modify", "src/notes.py", "src/notes.py") and "head" not in params
+
+
+def test_a_diff_of_bare_hunks_takes_the_agents_path_and_cleans_nothing(build):
+    bare = "@@ -1,2 +1,2 @@\n a\n-b\n+c\n"
+    assert "path" not in _diff(build, diff=bare)
+    params = _diff(build, diff=bare, path="lib/x.py")
+    assert params["path"] == "lib/x.py"
+    _contract_accepts("review.diff", params)
+    renamed = ("similarity index 90%\nrename from a.txt\nrename to b/c.txt\n--- a/a.txt\n+++ b/b/c.txt\n" + bare)
+    assert _diff(build, diff=renamed)["path"] == "a.txt -> b/c.txt"
+
+
+@pytest.mark.parametrize("kwargs, message", [
+    ({"diff": ""}, "diff is required"), ({"diff": None}, "diff is required"), ({"diff": 5}, "diff is required"),
+    ({"diff": DIFF.replace("two and a half", "two\tand")}, r"Hunk h2, line 4 .*U\+0009"),
+    ({"diff": DIFF.replace("BETA2", "BETA2 ")}, "Hunk h1, line 4 .*whitespace at the end"),
+    ({"diff": DIFF.replace("BETA2", "BE\u202eTA")}, r"U\+202E"),
+    ({"diff": "Binary files a/x and b/x differ\n"}, "binary diff cannot be reviewed"),
+    ({"diff": DIFF + "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n-a\n+b\n"},
+     "more than one file"),
+    ({"diff": "--- a/x\n+++ b/x\n"}, "no hunk"),
+    ({"diff": "```diff\n" + DIFF + "```\n"}, "not part of a unified diff"),
+    ({"diff": DIFF.replace("@@ -1,3 +1,4 @@", "@@ -1,3 +1,3 @@")}, "not part of a hunk|does not fit"),
+    ({"diff": "@@ -1 +1 @@\n-a\n+" + "x" * 500 + "\n"}, "501 characters"),
+    ({"diff": "@@ -1 +1 @@\n-a\n+b\n" * 201}, "more than 200 hunks"),
+    ({"diff": "@@ -1,401 +1,401 @@\n" + " x\n" * 401}, "more than 400 lines"),
+    ({"diff": "@@ -1 +1 @@\n-" + "é" * 40_000 + "\n+b\n"}, "bytes; the limit is 65536"),
+    ({"path": "other.py"}, "not the file the diff changes"),
+    ({"path": 5}, "path must be a string"),
+    ({"summary": ""}, "summary is required"), ({"summary": "x" * 501}, "summary is 501 characters"),
+    ({"title": "t" * 81}, "title is 81 characters"),
+], ids=lambda value: repr(value)[:30])
+def test_a_diff_that_cannot_be_shown_as_it_is_is_refused_nothing_is_repaired(build, kwargs, message):
+    with pytest.raises(build.InteractiveParamsError, match=message):
+        _diff(build, **kwargs)
+
+
+def test_a_diff_at_every_bound_is_valid(build):
+    many = "".join(f"@@ -{n * 3 + 1} +{n * 3 + 1} @@\n-a\n+b\n" for n in range(200))
+    assert len(_diff(build, diff=many)["hunks"]) == 200
+    long = "@@ -1,400 +1,400 @@\n" + " x\n" * 400
+    assert len(_diff(build, diff=long)["hunks"][0]["lines"]) == 400
+    assert len(_diff(build, diff="@@ -1 +1 @@\n-a\n+" + "x" * 499 + "\n")["hunks"][0]["lines"][1]) == 500
+
+
+def test_every_builder_is_registered_and_the_diff_builder_returns_only_params(build):
+    assert set(build.BUILDERS) == set(METHODS)
+    assert build.BUILDERS["review.diff"] is build.build_diff_params
+
+
 # ── asking: helpers ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -629,6 +707,199 @@ def test_a_locked_draft_cannot_come_back_changed_and_a_rejection_carries_a_clean
     assert bare.status == "rejected" and bare.payload == {}
 
 
+# ── asking: review.diff ─────────────────────────────────────────────────────────────────────────
+
+
+def _ask_diff(server, build, phone, answer, **kwargs):
+    params, head = build.build_diff("s1", summary="Please look at these changes.", **{"diff": DIFF, **kwargs})
+    box = {}
+    ctx = contextvars.copy_context()
+    thread = threading.Thread(daemon=True, target=lambda: box.setdefault(
+        "outcome", ctx.run(build.request, "s1", "review.diff", params, timeout=10.0, head=head)))
+    thread.start()
+    rid = _open_id("review.diff")
+    if answer is not None:
+        _frame(server, phone, rid, result=answer)
+    thread.join(10)
+    assert not thread.is_alive() and "outcome" in box
+    return rid, box["outcome"]
+
+
+def test_the_patch_of_the_approved_hunks_is_composed_by_the_gateway(server, build):
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+    rid, outcome = _ask_diff(server, build, phone, {"decision": "approved",
+                                                    "hunks": {"h1": "rejected", "h2": "approved", "h3": "approved"}})
+    assert outcome.status == "approved" and outcome.reason == "" and outcome.answered_by is None
+    assert outcome.payload["hunks"] == {"h1": "rejected", "h2": "approved", "h3": "approved"}
+    # The agent's own header text is gone (no index line); h1 added one line and was left out, so the new-side starts
+    # of the others move back by one.
+    assert outcome.payload["approved_patch"] == (
+        "diff --git a/src/notes.py b/src/notes.py\n--- a/src/notes.py\n+++ b/src/notes.py\n"
+        "@@ -20,3 +20,4 @@ def tail():\n one\n-two\n+TWO\n+two and a half\n three\n"
+        "@@ -40,2 +41,2 @@\n four\n-" + MARKER + "\n+five\n")
+    assert outcome.as_dict()["outcome"] == "approved" and "approved_patch" in outcome.as_dict()
+
+
+def test_every_hunk_approved_gives_the_patch_of_the_whole_diff_minus_the_index_line(server, build):
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+    rid, outcome = _ask_diff(server, build, phone, {"decision": "approved",
+                                                    "hunks": {"h1": "approved", "h2": "approved", "h3": "approved"}})
+    assert outcome.payload["approved_patch"] == "\n".join(
+        line for line in DIFF.split("\n") if not line.startswith("index "))
+
+
+def test_a_rejected_diff_has_every_hunk_rejected_and_no_patch(server, build):
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+    rid, outcome = _ask_diff(server, build, phone, {"decision": "rejected",
+                                                    "hunks": {"h1": "rejected", "h2": "rejected", "h3": "rejected"}})
+    assert outcome.status == "rejected" and outcome.payload == {"hunks": {"h1": "rejected", "h2": "rejected",
+                                                                          "h3": "rejected"}}
+    assert "approved_patch" not in outcome.as_dict()
+
+
+def test_a_client_cannot_put_text_into_the_patch(server, build):
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+    params, head = build.build_diff("s1", summary="Please look.", diff=DIFF)
+    box = _start(build, "s1", "review.diff", params)
+    rid = _open_id("review.diff")
+    every = {"h1": "approved", "h2": "approved", "h3": "approved"}
+    for extra in ({"approved_patch": "+++ evil"}, {"text": "evil"}, {"comment": "evil"},
+                  {"hunks": {**every, "h4": "approved"}}, {"hunks": {"intro": "approved"}}):
+        error = _rpc(server, phone, "request.answer", {"id": rid, "result": {"decision": "approved", "hunks": every,
+                                                                              **extra}})["error"]
+        assert error["data"] in ({"reason": "bad_shape"}, {"reason": "hunk:h4:unknown"}), extra
+    _frame(server, phone, rid, result={"decision": "approved", "hunks": every})
+    outcome = _finish(box)
+    assert "evil" not in outcome.payload["approved_patch"] and outcome.status == "approved"
+
+
+def test_a_diff_answer_that_does_not_fit_is_refused_with_its_reason_and_the_request_stays_open(server, build,
+                                                                                                 audit_records):
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+    params, head = build.build_diff("s1", summary="Please look.", diff=DIFF)
+    box = _start(build, "s1", "review.diff", params)
+    rid = _open_id("review.diff")
+    for result, reason in (
+            ({"decision": "approved", "hunks": {"h1": "approved"}}, "hunk:h2:missing"),
+            ({"decision": "approved", "hunks": {"h1": "approved", "h2": "approved", "h3": "approved", "h4": "approved"}},
+             "hunk:h4:unknown"),
+            ({"decision": "approved", "hunks": {"h1": "rejected", "h2": "rejected", "h3": "rejected"}},
+             "decision:inconsistent"),
+            ({"decision": "rejected", "hunks": {"h1": "approved", "h2": "rejected", "h3": "rejected"}},
+             "decision:inconsistent"),
+            ({"decision": "approved", "hunks": {"h1": "skipped", "h2": "rejected", "h3": "rejected"}}, "bad_shape")):
+        assert _rpc(server, phone, "request.answer", {"id": rid, "result": result})["error"]["data"] == {
+            "reason": reason}
+    assert box["thread"].is_alive(), "a refused answer leaves the request open"
+    _frame(server, phone, rid, result={"decision": "approved", "hunks": {"h1": "rejected", "h2": "rejected",
+                                                                         "h3": "approved"}})
+    assert _finish(box).status == "approved"
+
+
+def test_the_agents_header_text_never_reaches_the_patch_only_the_head_the_gateway_read(server, build):
+    """A rename with edits, written with the agent's own odd header lines: the approved patch is rebuilt from what the
+    gateway read (kind, paths, similarity), so it names exactly the paths the person was shown."""
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+    diff = ("diff --git a/elsewhere.txt b/elsewhere.txt\nsimilarity index 88%\nrename from old/a.txt\n"
+            "rename to new/b.txt\nindex 1234567..89abcde 100644\n--- a/old/a.txt\t2026-10-04 12:00:00\n"
+            "+++ b/new/b.txt\t2026-10-04 12:01:00\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n")
+    rid, outcome = _ask_diff(server, build, phone, {"decision": "approved", "hunks": {"h1": "approved"}}, diff=diff)
+    assert outcome.payload["approved_patch"] == (
+        "diff --git a/old/a.txt b/new/b.txt\nsimilarity index 88%\nrename from old/a.txt\nrename to new/b.txt\n"
+        "--- a/old/a.txt\n+++ b/new/b.txt\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n")
+    frame = phone.requests("review.diff")[0]["params"]
+    assert frame["path"] == "old/a.txt -> new/b.txt"
+    for text in ("elsewhere", "2026"):
+        assert text not in outcome.payload["approved_patch"]
+
+
+def test_a_new_and_a_deleted_file_are_patched_with_their_own_head(server, build):
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+    new = "diff --git a/n.txt b/n.txt\nnew file mode 100755\n--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n"
+    rid, created = _ask_diff(server, build, phone, {"decision": "approved", "hunks": {"h1": "approved"}}, diff=new)
+    assert created.payload["approved_patch"] == (
+        "diff --git a/n.txt b/n.txt\nnew file mode 100755\n--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n")
+    build.reset_for_tests()
+    gone = "--- a/g.txt\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-one\n-two\n"
+    rid, deleted = _ask_diff(server, build, phone, {"decision": "approved", "hunks": {"h1": "approved"}}, diff=gone)
+    assert deleted.payload["approved_patch"] == (
+        "diff --git a/g.txt b/g.txt\ndeleted file mode 100644\n--- a/g.txt\n+++ /dev/null\n@@ -1,2 +0,0 @@\n"
+        "-one\n-two\n")
+
+
+def test_without_the_head_the_patch_is_headed_by_the_shown_path(server, build):
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+    params = _diff(build)
+    box = _start(build, "s1", "review.diff", params)
+    rid = _open_id("review.diff")
+    _frame(server, phone, rid, result={"decision": "approved", "hunks": {"h1": "approved", "h2": "rejected",
+                                                                          "h3": "rejected"}})
+    outcome = _finish(box)
+    assert outcome.payload["approved_patch"].startswith(
+        "diff --git a/src/notes.py b/src/notes.py\n--- a/src/notes.py\n+++ b/src/notes.py\n@@ -1,3 +1,4 @@\n")
+
+
+def test_the_tool_bridge_builds_asks_and_returns_the_patch(server, build):
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+    box = {}
+    ctx = contextvars.copy_context()
+    thread = threading.Thread(daemon=True, target=lambda: box.setdefault("outcome", ctx.run(
+        build.request_from_tool, "s1", "review.diff", summary="Please look.", diff=DIFF, path=None, title=None)))
+    thread.start()
+    rid = _open_id("review.diff")
+    _frame(server, phone, rid, result={"decision": "approved", "hunks": {"h1": "approved", "h2": "rejected",
+                                                                          "h3": "rejected"}})
+    thread.join(10)
+    outcome = box["outcome"]
+    assert outcome.status == "approved"
+    assert outcome.payload["approved_patch"].startswith("diff --git a/src/notes.py b/src/notes.py\n")
+    assert "@@ -20" not in outcome.payload["approved_patch"]
+    with pytest.raises(build.InteractiveParamsError, match="U\\+0009"):
+        build.request_from_tool("s1", "review.diff", summary="x", diff="@@ -1 +1 @@\n-a\n+b\tc\n")
+
+
+def test_a_diff_review_in_a_shared_session_naming_nobody_is_unavailable_with_nothing_sent(server, build):
+    robin, sam = _WS("robin", ROBIN), _WS("sam", SAM)
+    _capable(server, robin, sam)
+    params, head = build.build_diff("s1", summary="Please look.", diff=DIFF)
+    outcome = build.request("s1", "review.diff", params, timeout=5, head=head)
+    assert (outcome.status, outcome.reason) == ("unavailable", "no_acting_user")
+    assert robin.requests("review.diff") == [] and sam.requests("review.diff") == []
+
+
+def test_the_diff_text_reaches_no_audit_record_and_no_log(server, build, audit_records, caplog):
+    caplog.set_level(logging.DEBUG)
+    phone = _WS("phone", ROBIN)
+    _capable(server, phone)
+    rid, outcome = _ask_diff(server, build, phone, {"decision": "approved",
+                                                    "hunks": {"h1": "approved", "h2": "rejected", "h3": "rejected"}})
+    assert outcome.status == "approved" and MARKER in DIFF
+    (request_event, request_fields), (outcome_event, outcome_fields) = audit_records
+    assert (request_event, outcome_event) == ("interactive_request", "interactive_outcome")
+    assert request_fields["method"] == "review.diff" and outcome_fields["outcome"] == "approved"
+    assert MARKER not in json.dumps(audit_records) and "notes.py" not in json.dumps(audit_records)
+    assert MARKER not in caplog.text and "notes.py" not in caplog.text, "a logger saw the diff"
+
+
+def test_a_timeout_or_nobody_to_show_it_is_not_an_approval_and_carries_no_patch(server, build, monkeypatch):
+    monkeypatch.setattr(build, "PARK_SECONDS", 0.1)
+    old = _WS("old", ROBIN)
+    _session(server, "s1", old, creator=ROBIN)
+    _caps(server, old, requests=None)
+    params, head = build.build_diff("s1", summary="Please look.", diff=DIFF)
+    outcome = build.request("s1", "review.diff", params, timeout=5, head=head)
+    assert (outcome.status, outcome.reason, outcome.payload) == ("unavailable", "no_capable_client", {})
+
+
 def test_a_review_in_a_shared_session_naming_nobody_is_unavailable_with_nothing_sent(server, build, audit_records):
     robin, sam = _WS("robin", ROBIN), _WS("sam", SAM)
     _capable(server, robin, sam)
@@ -705,7 +976,8 @@ def test_an_error_response_is_unavailable_never_skipped(server, build, audit_rec
     assert audit_records[-1][1]["reason"] == reason and MARKER not in repr(audit_records)
 
 
-@pytest.mark.parametrize("method, make", [("input.form", _form), ("input.file", _file), ("review.draft", _draft)])
+@pytest.mark.parametrize("method, make", [("input.form", _form), ("input.file", _file), ("review.draft", _draft),
+                                          ("review.diff", _diff)])
 def test_a_declined_4041_is_unavailable_for_every_method_and_audited(server, build, audit_records, method, make):
     """``declined`` (the person chose not to provide it) is a listed reason for every interactive method, a
     draft's included: it is never an answer and never a ``skipped`` or ``rejected``."""

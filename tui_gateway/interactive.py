@@ -1,6 +1,6 @@
-"""The interactive server→client requests ``input.form``, ``input.file`` and ``review.draft``: the agent asks the
-person for typed fields, files, or the approval of a draft through a connected app (plan ``request-types-v2``,
-contract ``contract/requests``).
+"""The interactive server→client requests ``input.form``, ``input.file``, ``review.draft`` and ``review.diff``: the
+agent asks the person for typed fields, files, the approval of a draft or of the hunks of a diff through a connected
+app (plan ``request-types-v2``, contract ``contract/requests``).
 
 What this module adds on top of ``server_requests.send_gated`` (method-gated: a connection gets a request only after
 it listed the method under ``client.capabilities {requests}``; ``acting_user_target`` narrows it to the login the
@@ -8,8 +8,9 @@ turn acts for; ``send_gated`` parks the request until a capable device attaches 
 ``post_server_request`` itself, so nothing here calls a hook):
 
 - the params are BUILT here, never passed through (:func:`build_form_params`, :func:`build_file_params`,
-  :func:`build_draft_params`): text the person will see is cleaned (``request_text.clean_text``) or, for a draft,
-  checked verbatim; over-long or empty text is refused with :class:`InteractiveParamsError`, never truncated; the
+  :func:`build_draft_params`, :func:`build_diff_params`): text the person will see is cleaned
+  (``request_text.clean_text``) or, for a draft and every line of a diff, checked verbatim; over-long or empty text is
+  refused with :class:`InteractiveParamsError`, never truncated; the
   gateway sets ``expires_at``, ``optional``, ``acting_user`` and the upload directory (under the session's working
   directory, ``<cwd>/uploads/hermie/<date>``, created by the builder without following a symbolic link: a link
   anywhere below the working directory makes the request ``unavailable (upload_dir_unsafe)`` with nothing sent);
@@ -28,6 +29,9 @@ turn acts for; ``send_gated`` parks the request until a capable device attaches 
   deleted;
 - an approved draft's final text goes into ``review_register`` under a ``draft_id`` (the gateway's copy, what a
   later confirmation binds to);
+- a diff is read by ``diff_hunks`` into hunks the gateway numbers and keeps (the request's own ``hunks``); an approved
+  diff hands the agent ``approved_patch``, composed by ``diff_hunks.compose_patch`` from those hunks and the file's
+  head the gateway read, with the hunks the person approved, never from anything the client sent;
 - one open interactive request per conversation and :data:`MAX_PER_WINDOW` sent per :data:`WINDOW_SECONDS`
   (:data:`_limiter`, a limiter of its own: ``confirm`` keeps its own key and numbers);
 - one audit record per request and per outcome in the dashboard auth audit log (``interactive_request`` /
@@ -57,7 +61,8 @@ from pathlib import Path
 from typing import Any
 
 from tui_gateway import (
-    interactive_fields, interactive_validate, request_limits, review_register, server_requests, upload_dirs)
+    diff_hunks, interactive_fields, interactive_validate, request_limits, review_register, server_requests,
+    upload_dirs)
 from tui_gateway.contracts.server_requests import (
     DRAFT_TEXT_MAX, INTERACTIVE_METHODS, INTERACTIVE_SUMMARY_MAX, INTERACTIVE_TITLE_MAX, UPLOAD_MAX_FILES,
     DraftKind, FileAccept, FileCapture)
@@ -78,7 +83,8 @@ WINDOW_SECONDS = 600.0
 #: far smaller, and the model reads what comes back).
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 UPLOAD_MAX_TOTAL_BYTES = 50 * 1024 * 1024
-DEFAULT_TITLES = {"input.form": "Fill in a form", "input.file": "Send a file", "review.draft": "Review a draft"}
+DEFAULT_TITLES = {"input.form": "Fill in a form", "input.file": "Send a file", "review.draft": "Review a draft",
+                  "review.diff": "Review changes"}
 SUBJECT_MAX = 200
 RECIPIENT_MAX = 120
 RECIPIENTS_MAX = 10
@@ -290,7 +296,38 @@ def build_draft_params(sid: str, *, summary: object, text: object, kind: object,
     return params
 
 
-BUILDERS = {"input.form": build_form_params, "input.file": build_file_params, "review.draft": build_draft_params}
+def build_diff(sid: str, *, summary: object, diff: object, path: object = None, title: object = None,
+               timeout: float = TIMEOUT_SECONDS) -> tuple[dict, diff_hunks.FileHead]:
+    """The ``review.diff`` params and the file head the gateway read from the diff (what :func:`request` needs to put
+    the approved patch back together). *diff* is the agent's unified diff of ONE file (``diff_hunks.parse``: bounded,
+    every line verbatim, one file, text only); a diff that cannot be shown as it is raises
+    :class:`InteractiveParamsError` saying what to change. *path* names the file when the diff has no header lines;
+    with them it must be the file they name. The hunks in the params are the gateway's own copy."""
+    if path is not None and not isinstance(path, str):
+        raise InteractiveParamsError("path must be a string")
+    try:
+        parsed = diff_hunks.parse(diff, path)
+    except diff_hunks.DiffError as exc:
+        raise InteractiveParamsError(str(exc)) from None
+    shown = parsed.path
+    if shown is not None and len(shown) > diff_hunks.MAX_PATH_CHARS:
+        raise InteractiveParamsError(f"The file names are {len(shown)} characters together; the limit is "
+                                     f"{diff_hunks.MAX_PATH_CHARS}.")
+    params = _envelope(sid, "review.diff", summary=summary, title=title, detail=None, optional=False,
+                       timeout=timeout)
+    if shown is not None:
+        params["path"] = shown
+    params["hunks"] = [hunk.as_dict() for hunk in parsed.hunks]
+    return params, parsed.head
+
+
+def build_diff_params(sid: str, **kwargs: Any) -> dict:
+    """:func:`build_diff` without the head: the ``review.diff`` params alone."""
+    return build_diff(sid, **kwargs)[0]
+
+
+BUILDERS = {"input.form": build_form_params, "input.file": build_file_params, "review.draft": build_draft_params,
+            "review.diff": build_diff_params}
 
 
 # ── files, after the request settled ──────────────────────────────────────────────────────────
@@ -471,11 +508,13 @@ def _rate_key(sid: str) -> str:
     return str((server._sessions.get(sid) or {}).get("session_key") or sid)
 
 
-def request(sid: str, method: str, params: dict, *, timeout: float = TIMEOUT_SECONDS) -> Outcome:
+def request(sid: str, method: str, params: dict, *, timeout: float = TIMEOUT_SECONDS,
+            head: diff_hunks.FileHead | None = None) -> Outcome:
     """Ask the clients of *sid* that can show *method* (and belong to the person the turn acts for) and block for
-    the outcome. *params* come from the matching builder. Call it on the turn's own thread: the acting user is
-    read from its context. Never raises for a client-side failure: every way of not getting a valid answer is
-    ``unavailable`` or ``timeout``."""
+    the outcome. *params* come from the matching builder (for ``review.diff``, *head* is the file head
+    :func:`build_diff` returned; without it the approved patch is headed by ``params["path"]`` alone). Call it on
+    the turn's own thread: the acting user is read from its context. Never raises for a client-side failure: every
+    way of not getting a valid answer is ``unavailable`` or ``timeout``."""
     if method not in INTERACTIVE_METHODS:
         raise ValueError(f"{method!r} is not an interactive request method")
     log = _Audit(sid, method)
@@ -505,7 +544,7 @@ def request(sid: str, method: str, params: dict, *, timeout: float = TIMEOUT_SEC
             sent_at = None  # nothing reached a person: it does not count against the window
     finally:
         _limiter.release(key, sent_at=sent_at)
-    return _outcome(sid, key, method, outgoing, result, log)
+    return _outcome(sid, key, method, outgoing, result, log, head)
 
 
 def _present_values(params: dict, values: dict) -> dict:
@@ -521,7 +560,8 @@ def _present_values(params: dict, values: dict) -> dict:
     return shown
 
 
-def _answer_outcome(sid: str, key: str, method: str, params: dict, answer: dict, shared: bool, answered_by) -> Outcome:
+def _answer_outcome(sid: str, key: str, method: str, params: dict, answer: dict, shared: bool, answered_by,
+                    head: diff_hunks.FileHead | None = None) -> Outcome:
     login = None
     if shared:
         from tui_gateway import server
@@ -541,6 +581,14 @@ def _answer_outcome(sid: str, key: str, method: str, params: dict, answer: dict,
         if (transcript := clean_text(answer.get("text"), multiline=True)):
             payload["text"] = transcript
         return Outcome("answered", payload=payload, answered_by=login)
+    if method == "review.diff":
+        # In the gateway's order and with the gateway's ids: what the client sent is only each hunk's decision.
+        hunks = {hunk["id"]: answer["hunks"][hunk["id"]] for hunk in params["hunks"]}
+        if answer["decision"] == "rejected":
+            return Outcome("rejected", payload={"hunks": hunks}, answered_by=login)
+        approved = {hunk_id for hunk_id, decision in hunks.items() if decision == "approved"}
+        patch = diff_hunks.compose_patch(head, params["hunks"], approved, path=params.get("path"))
+        return Outcome("approved", payload={"approved_patch": patch, "hunks": hunks}, answered_by=login)
     if answer["decision"] == "rejected":
         comment = clean_text(answer.get("comment"), multiline=True)
         return Outcome("rejected", payload={"comment": comment} if comment else {}, answered_by=login)
@@ -551,7 +599,8 @@ def _answer_outcome(sid: str, key: str, method: str, params: dict, answer: dict,
                    payload={"draft_id": draft.draft_id, "text": text, "sha256": draft.sha256, "edited": edited})
 
 
-def _outcome(sid: str, key: str, method: str, params: dict, result, log: _Audit) -> Outcome:
+def _outcome(sid: str, key: str, method: str, params: dict, result, log: _Audit,
+             head: diff_hunks.FileHead | None = None) -> Outcome:
     rid = result.request_id
     if result.status == "answered":
         from tui_gateway import server
@@ -559,7 +608,7 @@ def _outcome(sid: str, key: str, method: str, params: dict, result, log: _Audit)
             shared = bool(server._session_identity_is_ambiguous(server._sessions.get(sid)))
         except Exception:  # noqa: BLE001 - name the answerer when in doubt
             shared = True
-        outcome = _answer_outcome(sid, key, method, params, result.result or {}, shared, result.answered_by)
+        outcome = _answer_outcome(sid, key, method, params, result.result or {}, shared, result.answered_by, head)
         return log.outcome(outcome, request_id=rid, answered_by=result.answered_by)
     if result.status == "timeout":
         return log.outcome(Outcome("timeout", reason="timeout"), request_id=rid)
@@ -586,11 +635,15 @@ def request_from_tool(sid: str, method: str, **kwargs: Any) -> Outcome:
         raise ValueError(f"{method!r} is not an interactive request method")
     if not sid or sid not in server._sessions:
         return _Audit(sid or "-", method).outcome(Outcome("unavailable", reason="no_session"))
+    head = None
     try:
-        params = BUILDERS[method](sid, **kwargs)
+        if method == "review.diff":
+            params, head = build_diff(sid, **kwargs)
+        else:
+            params = BUILDERS[method](sid, **kwargs)
     except UploadDirUnavailable as exc:
         return _Audit(sid, method).outcome(Outcome("unavailable", reason=exc.reason))
-    return request(sid, method, params)
+    return request(sid, method, params, head=head)
 
 
 def reset_for_tests() -> None:

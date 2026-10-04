@@ -143,6 +143,8 @@ withdrawn (`request.cancel {reason: too_many_attempts}`) and the agent is told i
 | `files:too_large` | `input.file` | The files' `bytes` together exceed `upload.max_total_bytes`. |
 | `file:<n>:outside_dir` | `input.file` | File `n` (0-based) is not directly in `upload.dir` (§5). |
 | `file:<n>:too_large` | `input.file` | File `n` declares more `bytes` than `upload.max_bytes`. |
+| `file:<n>:not_audio` | `input.file` | `accept` is `audio` and file `n`'s `mime` is not `audio/` and a subtype, without parameters (§5.1). |
+| `text:not_audio` | `input.file` | `text` for a request whose `accept` is `image` or `document` (§5.1). |
 | `text:not_verbatim` | `review.draft` | The approved text contains something that cannot be shown as it is (§6). |
 | `text:edited` | `review.draft` | The text differs from the draft while `editable` is false. |
 | `hunk:<id>:unknown` | `review.diff` | `hunks` has an id the request does not (§7). |
@@ -251,7 +253,7 @@ Params: the envelope plus
 | Key | Type |
 | --- | --- |
 | `accept` | `image`, `document`, `audio`, `any` |
-| `capture` | `photo`, `scan`, `audio`, or absent: a preference, never a forced camera; the person may always pick an existing file |
+| `capture` | `photo`, `scan`, `audio`, or absent: a preference, never a forced camera; the person may always pick an existing file. `audio` goes with `accept: audio` and only with it (§5.1) |
 | `multiple` | boolean |
 | `upload` | `{dir, max_bytes (≤104,857,600), max_total_bytes (≥ max_bytes, ≤104,857,600), max_files (≤10), strip_metadata}` |
 
@@ -272,18 +274,40 @@ gateway's existing HTTP upload route, with the credentials it already uses for a
   together. A client checks both before uploading.
 - `strip_metadata`: remove EXIF and GPS data from camera and library images before uploading.
   Documents are uploaded untouched.
-- `text` (≤4,000) is an audio answer's transcript, when the client has one.
+- `text` (≤4,000) is an audio answer's transcript, when the client has one (§5.1); it is refused for an `image` or
+  a `document` request (`text:not_audio`).
 - A failed or cancelled upload is `4041 upload_failed`, never an answer naming a file that is not
   there.
 
 The answer is checked in two steps. While the request is open: shape, `not_optional`, the file count
-(`files:too_many`), then each file in order (`file:<n>:outside_dir`, `file:<n>:too_large`), then the
-total (`files:too_large`). After it
+(`files:too_many`), then each file in order (`file:<n>:outside_dir`, `file:<n>:too_large`, and for
+`accept: audio` `file:<n>:not_audio`), then the total (`files:too_large`), then the transcript
+(`text:not_audio`). After it
 settled, the gateway checks every file on disk without following a symbolic link anywhere (`upload.dir`
 is the real path of a directory, the file sits directly in it and is a regular file, not a link, and
 its size and SHA-256 match); a mismatch makes the request `unavailable (bad_upload)` for the agent, and
 the client is not asked again. The upload route writes below the `uploads/hermie` part of a path
 without following a symbolic link either: a client gets an error instead of a file stored elsewhere.
+
+### 5.1 Voice notes (`accept: audio`)
+
+A request with `accept: audio` and `capture: audio` asks for a recording. `capture: audio` goes with `accept:
+audio` and only with it, and `accept: audio` takes `capture: audio` or none: the gateway never builds a frame that
+asks for a recording of an image or a photo of a recording (such a frame is invalid, `examples.json`
+`invalid_frames`). Apart from that it is an ordinary `input.file` request: the same upload, the same checks, the
+same answer shape.
+
+- The sheet records on the device, shows the recording for the person to play back, and uploads it only when they
+  press Send. The system's microphone prompt comes after they pressed Record on the sheet, never instead of it. A
+  device without a microphone, or a denied permission, answers `4041` `no_microphone` or `permission_denied`
+  unless the person can pick an existing audio file instead (`capture` is a preference).
+- `strip_metadata` is false: there is no EXIF or GPS in a recording.
+- Every file's `mime` starts with `audio/` and carries no parameters (`audio/mp4`, not
+  `audio/mp4;codecs=mp4a.40.2`); anything else is refused (`file:<n>:not_audio`).
+- `text` is a transcript, optional. It is made ON the device (on-device recognition, nothing sent to a speech
+  service) and only when the client can; a client that cannot, such as a browser, leaves it out. The agent receives
+  it cleaned and is told it is a machine transcript that may be wrong and that the recording is the source. It is
+  refused for an `image` or a `document` request (`text:not_audio`), which have no recording to transcribe.
 
 ## 6. `review.draft`
 

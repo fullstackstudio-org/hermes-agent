@@ -611,3 +611,35 @@ def test_unavailable_is_not_a_signature():
     assert "a Hermie app that can show a signature pad" in tool._sentence(
         "input.signature", {"outcome": "unavailable", "reason": "no_capable_client"})
     assert "No answer within 300 seconds" in tool._sentence("input.signature", {"outcome": "timeout"})
+
+
+# ── ask_file: a voice note ──────────────────────────────────────────────────────────────────────
+
+
+def test_the_file_tool_says_how_to_ask_for_a_voice_note():
+    text = tool.ASK_FILE_SCHEMA["description"]
+    assert "voice note" in text and "accept 'audio' and capture 'audio'" in text and "on the device" in text
+    assert "possibly wrong: the recording is the source" in text
+    assert "'audio' (a voice note) goes with accept 'audio' only" in \
+        tool.ASK_FILE_SCHEMA["parameters"]["properties"]["capture"]["description"]
+
+
+def test_a_transcript_is_said_to_be_a_machine_transcript_that_may_be_wrong():
+    with_text = tool._sentence("input.file", {"outcome": "answered", "files": [{}], "text": "Tuesday at ten."})
+    without = tool._sentence("input.file", {"outcome": "answered", "files": [{}]})
+    assert "transcript the app made on the person's device" in with_text and "can contain mistakes" in with_text
+    assert "the recording as the source" in with_text and "transcript" not in without
+
+
+def test_asking_for_a_recording_of_an_image_is_a_tool_error_with_nothing_sent(server):
+    phone = _WS("phone", ROBIN)
+    _session(server, "s1", phone, creator=ROBIN)
+    _caps(server, phone, requests=list(ALL))
+    release = _bind_ui_session("s1")
+    try:
+        for accept, capture in (("image", "audio"), ("audio", "photo"), ("audio", "scan")):
+            data = json.loads(tool.ask_file_tool(summary="x", accept=accept, capture=capture))
+            assert "error" in data and "capture audio records a voice note" in data["error"], (accept, capture)
+    finally:
+        release()
+    assert phone.requests("input.file") == []

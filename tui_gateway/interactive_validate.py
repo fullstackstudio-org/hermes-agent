@@ -58,6 +58,9 @@ _VALUE = re.compile(FORM_DATETIME_VALUE)
 _PARTS = re.compile(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?([+-])(\d{2}):(\d{2})\[(.+)\]")
 _INSTANT = re.compile(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?([+-])(\d{2}):(\d{2})")
 
+#: The MIME type of a recording: ``audio/`` and a subtype, no parameters (``audio/mp4``, not ``audio/webm;codecs=opus``).
+_AUDIO_MIME = re.compile(r"audio/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}")
+
 _known_zones: frozenset[str] | None = None
 #: Every zone looked up so far, by name: strong references (``ZoneInfo``'s own cache is small and weak), only for
 #: names in :func:`known_zones`, so it holds at most one entry per zone the host knows.
@@ -359,11 +362,14 @@ def _file_problem(params: dict, files: list[dict]) -> str | None:
     limit = int(upload.get("max_files") or 1) if params.get("multiple") else 1
     if len(files) > limit:
         return "files:too_many"
+    audio = params.get("accept") == "audio"
     for number, file in enumerate(files):
         if not directly_in_dir(str(file.get("path")), str(upload.get("dir"))):
             return f"file:{number}:outside_dir"
         if int(file.get("bytes")) > int(upload.get("max_bytes")):
             return f"file:{number}:too_large"
+        if audio and not _AUDIO_MIME.fullmatch(str(file.get("mime"))):
+            return f"file:{number}:not_audio"
     if sum(int(file.get("bytes")) for file in files) > int(upload.get("max_total_bytes")):
         return "files:too_large"
     return None
@@ -485,7 +491,10 @@ def validate_answer(method: str, params: dict, result: Any) -> str | None:
             if method == "input.form":
                 return _form_problem(params, body["values"])
             if method == "input.file":
-                return _file_problem(params, body["files"])
+                # A transcript belongs to a recording: an image or a document request has none to give.
+                return _file_problem(params, body["files"]) or (
+                    "text:not_audio" if body.get("text") is not None and params.get("accept") in ("image", "document")
+                    else None)
             if method == "input.signature":
                 return _signature_problem(params, body)
             if method == "device.location":

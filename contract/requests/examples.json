@@ -1145,6 +1145,59 @@
               "strip_metadata": false
             }
           }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_file_voice_required",
+          "method": "input.file",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Voice message",
+            "summary": "Record a short message for the driver.",
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "accept": "audio",
+            "capture": "audio",
+            "multiple": false,
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 26214400,
+              "max_total_bytes": 26214400,
+              "max_files": 1,
+              "strip_metadata": false
+            }
+          }
+        },
+        {
+          "jsonrpc": "2.0",
+          "id": "req_file_voice_pick",
+          "method": "input.file",
+          "params": {
+            "session_id": "s_9f2c41",
+            "v": 1,
+            "title": "Recording",
+            "summary": "Send the recording of the meeting.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "accept": "audio",
+            "multiple": false,
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 26214400,
+              "max_total_bytes": 26214400,
+              "max_files": 1,
+              "strip_metadata": false
+            }
+          }
         }
       ],
       "invalid_frames": [
@@ -1222,6 +1275,112 @@
               "strip_metadata": false
             }
           }
+        },
+        {
+          "name": "audio_capture_for_an_image",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Voice reply",
+            "summary": "Record your answer to the landlord; I will transcribe and send it.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "accept": "image",
+            "capture": "audio",
+            "multiple": false,
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 26214400,
+              "max_total_bytes": 26214400,
+              "max_files": 1,
+              "strip_metadata": false
+            }
+          },
+          "note": "A recording is asked for with accept audio only."
+        },
+        {
+          "name": "audio_capture_for_any",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Voice reply",
+            "summary": "Record your answer to the landlord; I will transcribe and send it.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "accept": "any",
+            "capture": "audio",
+            "multiple": false,
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 26214400,
+              "max_total_bytes": 26214400,
+              "max_files": 1,
+              "strip_metadata": false
+            }
+          }
+        },
+        {
+          "name": "photo_capture_for_audio",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Voice reply",
+            "summary": "Record your answer to the landlord; I will transcribe and send it.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "accept": "audio",
+            "capture": "photo",
+            "multiple": false,
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 26214400,
+              "max_total_bytes": 26214400,
+              "max_files": 1,
+              "strip_metadata": false
+            }
+          },
+          "note": "Neither a photo nor a scan is audio."
+        },
+        {
+          "name": "scan_capture_for_audio",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "title": "Voice reply",
+            "summary": "Record your answer to the landlord; I will transcribe and send it.",
+            "expires_at": 1791119400,
+            "optional": true,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "accept": "audio",
+            "capture": "scan",
+            "multiple": false,
+            "upload": {
+              "dir": "/home/ada/work/uploads/hermie/2026-10-04",
+              "max_bytes": 26214400,
+              "max_total_bytes": 26214400,
+              "max_files": 1,
+              "strip_metadata": false
+            }
+          }
         }
       ],
       "answers": [
@@ -1286,6 +1445,40 @@
           "request": "req_file_receipt",
           "result": {
             "status": "skipped"
+          }
+        },
+        {
+          "name": "audio_without_transcript",
+          "request": "req_file_voice",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/a07e5d21c4b98f13-reply.m4a",
+                "name": "reply.m4a",
+                "mime": "audio/mp4",
+                "bytes": 191820,
+                "sha256": "d35a9389705da075460c8eb0a50ee192ef89dc97f5f8fdb8ac058056de07bee5"
+              }
+            ]
+          },
+          "note": "A browser records but cannot transcribe on the device: no text."
+        },
+        {
+          "name": "picked_recording",
+          "request": "req_file_voice_pick",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/b18f6e32d5c09a24-meeting.caf",
+                "name": "meeting.caf",
+                "mime": "audio/x-caf",
+                "bytes": 191820,
+                "sha256": "d35a9389705da075460c8eb0a50ee192ef89dc97f5f8fdb8ac058056de07bee5"
+              }
+            ],
+            "text": "Let's start with the budget."
           }
         }
       ],
@@ -1554,6 +1747,110 @@
           },
           "reason": "bad_shape",
           "note": "bytes is a JSON integer, never a string or a float."
+        },
+        {
+          "name": "audio_request_answered_with_an_image",
+          "request": "req_file_voice",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/a07e5d21c4b98f13-reply.m4a",
+                "name": "reply.jpg",
+                "mime": "image/jpeg",
+                "bytes": 191820,
+                "sha256": "d35a9389705da075460c8eb0a50ee192ef89dc97f5f8fdb8ac058056de07bee5"
+              }
+            ]
+          },
+          "reason": "file:0:not_audio",
+          "note": "accept audio takes audio/* files only."
+        },
+        {
+          "name": "video_for_audio",
+          "request": "req_file_voice",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/a07e5d21c4b98f13-reply.m4a",
+                "name": "reply.mp4",
+                "mime": "video/mp4",
+                "bytes": 191820,
+                "sha256": "d35a9389705da075460c8eb0a50ee192ef89dc97f5f8fdb8ac058056de07bee5"
+              }
+            ]
+          },
+          "reason": "file:0:not_audio"
+        },
+        {
+          "name": "audio_mime_with_parameters",
+          "request": "req_file_voice",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/a07e5d21c4b98f13-reply.m4a",
+                "name": "reply.m4a",
+                "mime": "audio/webm;codecs=opus",
+                "bytes": 191820,
+                "sha256": "d35a9389705da075460c8eb0a50ee192ef89dc97f5f8fdb8ac058056de07bee5"
+              }
+            ]
+          },
+          "reason": "file:0:not_audio",
+          "note": "The type is sent without parameters."
+        },
+        {
+          "name": "transcript_for_a_photo",
+          "request": "req_file_receipt",
+          "layer": "validator",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/3f9c2a7b1d4e8f60-receipt.jpg",
+                "name": "receipt.jpg",
+                "mime": "image/jpeg",
+                "bytes": 482113,
+                "sha256": "fd16e784e91ab960e4fb349d8cc179c9e5891ef6d767c7620e2560a59ba0bc2f"
+              }
+            ],
+            "text": "Parking, 12 euro."
+          },
+          "reason": "text:not_audio",
+          "note": "A transcript belongs to a recording."
+        },
+        {
+          "name": "transcript_too_long",
+          "request": "req_file_voice",
+          "layer": "model",
+          "result": {
+            "status": "answered",
+            "files": [
+              {
+                "path": "/home/ada/work/uploads/hermie/2026-10-04/a07e5d21c4b98f13-reply.m4a",
+                "name": "reply.m4a",
+                "mime": "audio/mp4",
+                "bytes": 191820,
+                "sha256": "d35a9389705da075460c8eb0a50ee192ef89dc97f5f8fdb8ac058056de07bee5"
+              }
+            ],
+            "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          },
+          "reason": "bad_shape"
+        },
+        {
+          "name": "skip_not_offered_for_a_voice_message",
+          "request": "req_file_voice_required",
+          "layer": "validator",
+          "result": {
+            "status": "skipped"
+          },
+          "reason": "not_optional"
         }
       ]
     },
@@ -5849,6 +6146,21 @@
           "message": "cannot_show",
           "data": {
             "reason": "declined"
+          }
+        }
+      }
+    },
+    {
+      "name": "cannot_show_no_microphone",
+      "direction": "client_to_gateway",
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": "req_file_voice",
+        "error": {
+          "code": 4041,
+          "message": "cannot_show",
+          "data": {
+            "reason": "no_microphone"
           }
         }
       }

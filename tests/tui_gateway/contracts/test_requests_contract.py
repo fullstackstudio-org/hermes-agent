@@ -55,8 +55,8 @@ FORM_PROBLEMS = ("missing", "unknown", "type", "format", "too_long", "below_min"
 #: Every reason a method's answer may be refused with (README "Refused answers").
 REASONS: dict[str, re.Pattern[str]] = {
     "input.form": re.compile(r"^(bad_shape|not_optional|field:[a-z][a-z0-9_]{0,31}:(%s))$" % "|".join(FORM_PROBLEMS)),
-    "input.file": re.compile(r"^(bad_shape|not_optional|files:(too_many|too_large)|"
-                             r"file:(0|[1-9][0-9]*):(outside_dir|too_large))$"),
+    "input.file": re.compile(r"^(bad_shape|not_optional|files:(too_many|too_large)|text:not_audio|"
+                             r"file:(0|[1-9][0-9]*):(outside_dir|too_large|not_audio))$"),
     "review.draft": re.compile(r"^(bad_shape|text:(not_verbatim|edited))$"),
     "review.diff": re.compile(r"^(bad_shape|hunk:h[1-9][0-9]{0,2}:(unknown|missing)|decision:inconsistent)$"),
     "input.signature": re.compile(r"^(bad_shape|not_optional|file:(0|1):(outside_dir|too_large)|files:too_large|"
@@ -217,6 +217,10 @@ def test_validator_cases_are_consistent_with_their_frames():
         elif reason == "files:too_large":
             assert all(f["bytes"] <= params["upload"]["max_bytes"] for f in result["files"]), reason
             assert sum(f["bytes"] for f in result["files"]) > params["upload"]["max_total_bytes"], reason
+        elif reason == "text:not_audio":
+            assert params["accept"] in ("image", "document") and result.get("text"), reason
+        elif reason.endswith(":not_audio"):
+            assert params["accept"] == "audio", reason
         elif reason == "files:not_png_and_svg":
             assert sorted(f["mime"] for f in result["files"]) != ["image/png", "image/svg+xml"], reason
         elif reason == "statement:mismatch":

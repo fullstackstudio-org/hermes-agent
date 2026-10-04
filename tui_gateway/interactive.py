@@ -292,6 +292,10 @@ def build_file_params(sid: str, *, summary: object, accept: object, capture: obj
     _one_of("accept", accept, FileAccept)
     if capture is not None:
         _one_of("capture", capture, FileCapture)
+        if (capture == "audio") != (accept == "audio"):
+            raise InteractiveParamsError("capture audio records a voice note and goes with accept audio; accept audio "
+                                         "takes capture audio or none (a photo or a scan is for an image or a "
+                                         "document)")
     if not isinstance(multiple, bool):
         raise InteractiveParamsError("multiple must be true or false")
     params = _envelope(sid, "input.file", summary=summary, title=title, detail=detail, optional=optional,
@@ -301,7 +305,9 @@ def build_file_params(sid: str, *, summary: object, accept: object, capture: obj
         params["capture"] = capture
     params["multiple"] = multiple
     params["upload"] = {"dir": _upload_dir(sid), "max_bytes": max_bytes, "max_total_bytes": max_total_bytes,
-                        "max_files": UPLOAD_MAX_FILES if multiple else 1, "strip_metadata": strip_metadata}
+                        "max_files": UPLOAD_MAX_FILES if multiple else 1,
+                        # Nothing to strip from a recording (EXIF and GPS are an image's).
+                        "strip_metadata": strip_metadata and accept != "audio"}
     return params
 
 

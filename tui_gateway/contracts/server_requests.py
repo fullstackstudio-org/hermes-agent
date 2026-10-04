@@ -826,10 +826,21 @@ class UploadTarget(Params):
 
 
 class InputFileRequestParams(InteractiveRequestParams):
+    """``capture: audio`` is a voice note: the client records on the device and uploads the recording, and may add a
+    transcript it made ON the device. It goes with ``accept: audio`` and only with it: a recording is never offered for
+    an image or a document request, and an audio request never opens a camera (``contract/requests`` §5.1)."""
+
     accept: FileAccept
     capture: FileCapture | None = None
     multiple: bool
     upload: UploadTarget
+
+    @model_validator(mode="after")
+    def _audio_goes_with_audio(self) -> InputFileRequestParams:
+        if (self.capture == FileCapture.audio) != (self.accept == FileAccept.audio) and self.capture is not None:
+            raise ValueError("input.file: capture audio goes with accept audio, and accept audio only with capture "
+                             "audio (or none)")
+        return self
 
 
 class UploadedFile(Result):
@@ -845,8 +856,9 @@ class UploadedFile(Result):
 
 
 class InputFileAnswered(Result):
-    """``files`` (at most ``upload.max_files``, one unless ``multiple``) and an optional ``text`` (an audio
-    answer's transcript)."""
+    """``files`` (at most ``upload.max_files``, one unless ``multiple``) and an optional ``text``: the transcript of
+    an audio answer, made on the person's device when the client can (never for an image or a document request:
+    ``text:not_audio``; an audio request's file that is not ``audio/*``: ``file:<n>:not_audio``)."""
 
     status: Literal[InputStatus.answered]
     files: list[UploadedFile] = Field(min_length=1, max_length=UPLOAD_MAX_FILES)

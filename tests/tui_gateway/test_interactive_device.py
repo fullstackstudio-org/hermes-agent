@@ -1,6 +1,7 @@
-"""The device requests ``device.location``, ``device.contact``, ``device.calendar``, ``device.scan`` and the signature
-``input.signature`` (``tui_gateway/interactive_device.py``, ``interactive.py``, ``interactive_validate.py``; plan
-``request-types-v2`` task P3-F1, contract ``contract/requests`` §8-§12).
+"""The device requests ``device.location``, ``device.contact``, ``device.calendar``, ``device.scan``, the signature
+``input.signature`` and the voice note (``input.file`` with ``accept: audio``) (``tui_gateway/interactive_device.py``,
+``interactive.py``, ``interactive_validate.py``; plan ``request-types-v2`` task P3-F1, contract ``contract/requests``
+§5.1 and §8-§12).
 
 What is pinned here: a location is rounded by the gateway whatever the client sent (two decimals and at least 1,000 m
 for ``approximate``, six decimals for ``precise``) and a client cannot share more than was asked; a contact reaches the
@@ -930,3 +931,116 @@ def test_the_tool_bridge_builds_asks_and_returns_what_the_person_shared(server, 
     with pytest.raises(build.InteractiveParamsError):
         build.request_from_tool("s1", "device.calendar", summary="x", kind="event", item={})
     assert phone.requests("device.contact") == [] and phone.requests("device.calendar") == []
+
+
+# ── input.file: a voice note ────────────────────────────────────────────────────────────────────
+
+
+def _voice(build, **kwargs):
+    kwargs.setdefault("summary", "Record your answer.")
+    kwargs.setdefault("accept", "audio")
+    kwargs.setdefault("capture", "audio")
+    return build.build_file_params("s1", **kwargs)
+
+
+def test_a_voice_request_asks_for_audio_with_nothing_to_strip(build):
+    params = _voice(build)
+    assert (params["accept"], params["capture"], params["multiple"]) == ("audio", "audio", False)
+    assert params["upload"]["strip_metadata"] is False and params["upload"]["max_files"] == 1
+    _contract_accepts("input.file", params)
+    assert "capture" not in _voice(build, capture=None), "accept audio alone is allowed: the person picks a recording"
+    # an image still has its EXIF stripped, and a document request is as it was
+    assert build.build_file_params("s1", summary="x", accept="image", capture="photo")["upload"][
+        "strip_metadata"] is True
+
+
+@pytest.mark.parametrize("accept, capture", [("audio", "photo"), ("audio", "scan"), ("image", "audio"),
+                                             ("document", "audio"), ("any", "audio")])
+def test_a_recording_goes_with_audio_and_only_with_audio(build, accept, capture):
+    with pytest.raises(build.InteractiveParamsError, match="capture audio records a voice note and goes with accept "
+                                                           "audio"):
+        _voice(build, accept=accept, capture=capture)
+
+
+@pytest.mark.parametrize("mime, ok", [("audio/mp4", True), ("audio/x-caf", True), ("audio/webm", True),
+                                      ("audio/mpeg", True), ("audio/ogg", True),
+                                      ("audio/webm;codecs=opus", False), ("audio/", False), ("audio", False),
+                                      ("video/mp4", False), ("image/jpeg", False), ("application/octet-stream", False),
+                                      ("AUDIO/mp4", False), ("audio/mp4\n", False), ("", False)])
+def test_a_voice_notes_files_must_be_audio_without_parameters(mime, ok):
+    params = {**_ENV, "accept": "audio", "capture": "audio", "multiple": False,
+              "upload": {"dir": _DIR, "max_bytes": 100, "max_total_bytes": 100, "max_files": 1,
+                         "strip_metadata": False}}
+    file = {"path": f"{_DIR}/a07e5d21c4b98f13-reply.m4a", "name": "reply.m4a", "mime": mime or "x", "bytes": 10,
+            "sha256": "0" * 64}
+    if not mime:
+        file["mime"] = ""
+    reason = v.validate_answer("input.file", params, {"status": "answered", "files": [file]})
+    assert reason == (None if ok else ("bad_shape" if not mime else "file:0:not_audio")), mime
+
+
+def test_an_audio_files_other_problems_come_before_its_type_and_the_total_after():
+    params = {**_ENV, "accept": "audio", "capture": "audio", "multiple": True,
+              "upload": {"dir": _DIR, "max_bytes": 100, "max_total_bytes": 150, "max_files": 3,
+                         "strip_metadata": False}}
+
+    def file(n, mime="audio/mp4", size=100, path=None):
+        return {"path": path or f"{_DIR}/00000000000000{n}0-r.m4a", "name": "r.m4a", "mime": mime, "bytes": size,
+                "sha256": "0" * 64}
+
+    ask = lambda *files: v.validate_answer("input.file", params, {"status": "answered", "files": list(files)})  # noqa: E731
+    assert ask(file(1, size=50), file(2, size=50)) is None
+    assert ask(file(1, "video/mp4", path="/elsewhere/x.m4a")) == "file:0:outside_dir"
+    assert ask(file(1, "video/mp4", size=101)) == "file:0:too_large"
+    assert ask(file(1), file(2, "image/png")) == "file:1:not_audio"
+    assert ask(file(1), file(2)) == "files:too_large"
+    assert ask(file(1, "image/png", size=100), file(2, size=100)) == "file:0:not_audio", "the type before the total"
+
+
+@pytest.mark.parametrize("accept, ok", [("audio", True), ("any", True), ("image", False), ("document", False)])
+def test_a_transcript_belongs_to_a_recording_not_to_an_image_or_a_document(accept, ok):
+    capture = {"audio": "audio"}.get(accept)
+    params = {**_ENV, "accept": accept, "multiple": False,
+              "upload": {"dir": _DIR, "max_bytes": 100, "max_total_bytes": 100, "max_files": 1,
+                         "strip_metadata": True}, **({"capture": capture} if capture else {})}
+    mime = "audio/mp4" if accept in ("audio", "any") else "image/jpeg"
+    answer = {"status": "answered", "text": "Tuesday at ten.", "files": [{
+        "path": f"{_DIR}/a07e5d21c4b98f13-reply.m4a", "name": "reply", "mime": mime, "bytes": 10, "sha256": "0" * 64}]}
+    assert v.validate_answer("input.file", params, answer) == (None if ok else "text:not_audio")
+    without = {k: val for k, val in answer.items() if k != "text"}
+    assert v.validate_answer("input.file", params, without) is None
+    assert v.validate_answer("input.file", params, {**answer, "text": "x" * 4001}) == "bad_shape"
+
+
+def test_a_voice_note_round_trip_gives_the_recording_and_a_cleaned_transcript(server, build, tmp_path):
+    phone = _WS("phone", ROBIN)
+    _device_capable(server, phone)
+    params = _voice(build)
+    root = Path(params["upload"]["dir"])
+    audio = b"marker-audio"
+    path = _put(root, "0123456789abcdef-reply.m4a", audio)
+    answer = {"status": "answered", "text": "Tuesday‮ at   ten\n\n\n\nworks.",
+              "files": [_entry(path, audio, name="reply.m4a", mime="audio/mp4")]}
+    rid, outcome = _ask(server, build, "input.file", params, peer=phone, answer=answer)
+    assert outcome.status == "answered" and outcome.payload["text"] == "Tuesday at ten\n\nworks."
+    assert outcome.payload["files"][0]["mime"] == "audio/mp4" and outcome.payload["files"][0]["bytes"] == len(audio)
+    # a browser cannot transcribe: no text key at all
+    path2 = _put(root, "fedcba9876543210-reply.webm", audio)
+    rid, plain = _ask(server, build, "input.file", params, peer=phone, answer={
+        "status": "answered", "files": [_entry(path2, audio, name="reply.webm", mime="audio/webm")]})
+    assert plain.status == "answered" and "text" not in plain.payload
+
+
+def test_a_voice_answer_that_is_not_audio_is_refused_and_the_request_stays_open(server, build):
+    phone = _WS("phone", ROBIN)
+    _device_capable(server, phone)
+    params = _voice(build)
+    box = _start(build, "s1", "input.file", params)
+    rid = _open_id("input.file")
+    root = Path(params["upload"]["dir"])
+    path = _put(root, "0123456789abcdef-reply.jpg", b"jpeg")
+    reply = _rpc(server, phone, "request.answer", {"id": rid, "result": {
+        "status": "answered", "files": [_entry(path, b"jpeg", mime="image/jpeg")]}})
+    assert reply["error"]["data"]["reason"] == "file:0:not_audio"
+    _frame(server, phone, rid, result={"status": "skipped"})
+    assert _finish(box).status == "skipped"

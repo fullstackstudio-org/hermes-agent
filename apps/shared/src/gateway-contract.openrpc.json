@@ -18149,7 +18149,7 @@
       },
       "InputFileAnswered": {
         "additionalProperties": false,
-        "description": "``files`` (at most ``upload.max_files``, one unless ``multiple``) and an optional ``text`` (an audio\nanswer's transcript).",
+        "description": "``files`` (at most ``upload.max_files``, one unless ``multiple``) and an optional ``text``: the transcript of\nan audio answer, made on the person's device when the client can (never for an image or a document request:\n``text:not_audio``; an audio request's file that is not ``audio/*``: ``file:<n>:not_audio``).",
         "properties": {
           "status": {
             "const": "answered",
@@ -18188,6 +18188,7 @@
       },
       "InputFileRequestParams": {
         "additionalProperties": false,
+        "description": "``capture: audio`` is a voice note: the client records on the device and uploads the recording, and may add a\ntranscript it made ON the device. It goes with ``accept: audio`` and only with it: a recording is never offered for\nan image or a document request, and an audio request never opens a camera (``contract/requests`` \u00a75.1).",
         "properties": {
           "session_id": {
             "title": "Session Id",

@@ -23,6 +23,36 @@ def test_defaults_are_off_with_the_official_native_rp():
     assert s.require == ps.Require() and s.problems == ()
 
 
+def test_self_enrolment_is_on_by_default_without_cooling_off():
+    s = ps.settings_from_config({})
+    assert s.self_enrol == ps.SelfEnrol(enabled=True, accept_missing_auth_time=False, cooling_off_s=0)
+    s = ps.settings_from_config({"confirm": {"passkey": {"self_enrol": {"cooling_off_s": 600}}}})
+    assert s.self_enrol == ps.SelfEnrol(enabled=True, accept_missing_auth_time=False, cooling_off_s=600)
+    assert s.problems == ()
+
+
+@pytest.mark.parametrize(("section", "expected", "problems"), [
+    ({"enabled": "no"}, ps.SelfEnrol(enabled=False), 1),
+    ({"accept_missing_auth_time": 1}, ps.SelfEnrol(accept_missing_auth_time=False), 1),
+    # An unreadable cooling-off must not become none: self-enrolment is off until it is fixed.
+    ({"cooling_off_s": "10m"}, ps.SelfEnrol(enabled=False), 1),
+    ({"cooling_off_s": -1}, ps.SelfEnrol(enabled=False), 1),
+    ({"cooling_off_s": True}, ps.SelfEnrol(enabled=False), 1),
+    ({"cooling_off_s": 7 * 24 * 3600 + 1}, ps.SelfEnrol(enabled=False), 1),
+    ({"enabled": False, "accept_missing_auth_time": True}, ps.SelfEnrol(enabled=False, accept_missing_auth_time=True),
+     0),
+])
+def test_unusable_self_enrolment_entries_take_the_safe_value(section, expected, problems):
+    s = ps.settings_from_config({"confirm": {"passkey": {"self_enrol": section}}})
+    assert s.self_enrol == expected and len(s.problems) == problems
+    assert all("self_enrol" in p for p in s.problems)
+
+
+def test_a_self_enrol_that_is_not_a_mapping_switches_it_off():
+    s = ps.settings_from_config({"confirm": {"passkey": {"self_enrol": True}}})
+    assert s.self_enrol.enabled is False and s.problems == ("self_enrol is not a mapping; self-enrolment is off",)
+
+
 def test_unusable_entries_are_dropped_and_named():
     s = ps.settings_from_config({"confirm": {"passkey": {
         "enabled": "yes", "receipts_days": 0, "allow_private_base_urls": True,
@@ -62,6 +92,10 @@ def test_a_missing_or_malformed_section_reads_as_the_defaults(cfg):
     ({}, {"confirm": {"passkey": {"base_urls": ["https://evil.example"]}}}, True),
     ({"confirm": {"passkey": {"base_urls": ["https://gw.example"]}}}, {"confirm": {"passkey": {"base_urls": []}}}, True),
     ({}, {"dashboard": {"public_url": "https://evil.example"}}, False),  # not the level's list; see the CLI hint
+    ({}, {"confirm": {"passkey": {"self_enrol": {"enabled": True}}}}, False),  # the default, written out
+    ({}, {"confirm": {"passkey": {"self_enrol": {"enabled": False}}}}, True),
+    ({}, {"confirm": {"passkey": {"self_enrol": {"accept_missing_auth_time": True}}}}, True),
+    ({}, {"confirm": {"passkey": {"self_enrol": {"cooling_off_s": 600}}}}, True),
 ])
 def test_changes_protected(before, after, changed):
     assert ps.changes_protected(before, after) is changed
@@ -127,6 +161,9 @@ def _audit_events() -> list[dict]:
     {"native_rps": {"evil.example": ["https://evil.example"]}},
     {"allow_private_base_urls": True},
     {"require": {"approvals": True}},
+    {"self_enrol": {"enabled": False}},
+    {"self_enrol": {"accept_missing_auth_time": True}},
+    {"self_enrol": {"cooling_off_s": 0, "enabled": True, "accept_missing_auth_time": False, "extra": 1}},
 ])
 def test_a_config_put_changing_the_section_is_refused_and_the_file_is_byte_identical(client, config_file, change):
     before = config_file.read_bytes()
@@ -193,7 +230,9 @@ def test_a_raw_put_keeping_the_section_goes_through(client, config_file):
 # ── config.set RPC ───────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("key", ["confirm", "confirm.passkey", "confirm.passkey.enabled", "confirm.passkey.native_rps"])
+@pytest.mark.parametrize("key", ["confirm", "confirm.passkey", "confirm.passkey.enabled", "confirm.passkey.native_rps",
+                                 "confirm.passkey.self_enrol", "confirm.passkey.self_enrol.enabled",
+                                 "confirm.passkey.self_enrol.cooling_off_s"])
 def test_config_set_refuses_the_section(_isolate_hermes_home, key):
     from hermes_cli.config import get_config_path
     from tui_gateway import server

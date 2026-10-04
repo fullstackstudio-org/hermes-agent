@@ -1738,6 +1738,12 @@ DEFAULT_CONFIG = {
             # approvals = every dangerous-command approval; smart_denied = an owner override of a guardian
             # DENY. Enforced even while `enabled` is false (then a match is blocked).
             "require": {"commands": [], "smart_denied": False, "approvals": False, "tools": []},
+            # Self-enrolment: a signed-in person adds a passkey without a code by signing in again; the
+            # sign-in provider must be able to force that and say when it happened (password, OIDC; not Nous).
+            # accept_missing_auth_time: count a re-sign-in as fresh when the IdP does not say when it was.
+            # cooling_off_s > 0: a passkey added this way is listed but cannot confirm or sign a step-up for
+            # that long (another passkey or the operator can still revoke it).
+            "self_enrol": {"enabled": True, "accept_missing_auth_time": False, "cooling_off_s": 0},
         },
     },
     # Permanently allowed dangerous command patterns (added via "always" approval).

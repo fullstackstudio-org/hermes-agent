@@ -2,7 +2,7 @@
 dashboard app, a stub sign-in provider for two users, the real store, and a software authenticator.
 
 Pinned here: 404 for every route while the level is off; nothing is public; identity only from the
-gate's session; enrolment needs a code every time; an invite needs a valid ``invite`` step-up and a
+gate's session; enrolment needs a code or a fresh re-authentication grant every time; an invite needs a valid ``invite`` step-up and a
 revoke a ``revoke`` step-up for that credential; one user never sees, adds to or revokes another's
 credentials; a cookie write needs a listed ``Origin``; the 16 KiB body cap; the rate limits; the
 ``passkey.changed`` event and the ``on_passkey_change`` hook with their documented payloads; and no code,
@@ -201,8 +201,8 @@ def audit_lines() -> list[dict]:
 
 # ── availability ─────────────────────────────────────────────────────────────────────────────────
 
-ROUTES = [("GET", ""), ("POST", "/register/begin"), ("POST", "/register/finish"), ("POST", "/stepup/begin"),
-          ("POST", "/invites"), ("POST", "/revoke")]
+ROUTES = [("GET", ""), ("POST", "/reauth/begin"), ("POST", "/register/begin"), ("POST", "/register/finish"),
+          ("POST", "/stepup/begin"), ("POST", "/invites"), ("POST", "/revoke")]
 
 
 @pytest.mark.parametrize("passkey", [{"enabled": False}, {"enabled": "yes"}])
@@ -691,3 +691,395 @@ def test_a_misbehaving_hook_never_fails_or_holds_the_change(gw, transports, monk
         manager._hooks = saved
     assert [c["id"] for c in gw.get().json()["credentials"]] == [credential["id"]]
     assert [e["change"] for e in alice.events()] == ["added"]
+
+
+# ── self-enrolment: a fresh sign-in instead of a code ────────────────────────────────────────────
+
+
+class ReauthStubProvider(StubAuthProvider):
+    """The stub provider able to force a fresh sign-in (like ``basic`` and ``self_hosted``). Its sign-in
+    returns ``user`` authenticated at ``auth_time`` (the gateway clock's now when None)."""
+
+    supports_reauth = True
+
+    def __init__(self, clock: Clock):
+        super().__init__()
+        self.clock, self.user, self.auth_time = clock, "alice", None
+        self.fresh: list[bool] = []
+
+    def start_login(self, *, redirect_uri: str, fresh: bool = False):
+        self.fresh.append(fresh)
+        return super().start_login(redirect_uri=redirect_uri)
+
+    def complete_login(self, **kwargs):
+        import dataclasses
+
+        session = super().complete_login(**kwargs)
+        token = Gateway.bearer(f"stub:{self.user}")["Authorization"].split(" ", 1)[1]
+        return dataclasses.replace(session, user_id=self.user, access_token=token,
+                                   auth_time=int(self.clock.t) if self.auth_time is None else self.auth_time)
+
+
+@pytest.fixture
+def make_self_gateway(make_gateway):
+    def make(passkey: dict | None = None) -> Gateway:
+        gw = make_gateway(passkey)
+        clear_providers()
+        gw.provider = ReauthStubProvider(gw.clock)  # type: ignore[attr-defined]
+        register_provider(gw.provider)  # type: ignore[attr-defined]
+        return gw
+
+    return make
+
+
+@pytest.fixture
+def sgw(make_self_gateway) -> Gateway:
+    return make_self_gateway()
+
+
+def open_grant(gw: Gateway, user: str = ALICE, headers: dict | None = None) -> dict:
+    r = gw.post("/reauth/begin", {}, user, headers)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def fresh(gw: Gateway, grant_id: str, user: str = ALICE, *, client: str = "native", secret: str | None = None,
+          auth_time: int | None = None):
+    """What the sign-in routes do when the re-sign-in comes back (SE-3): complete the grant."""
+    return gw.store.complete_grant(grant_id, session_user=user, session_provider="stub",
+                                   auth_time=int(gw.clock.t) if auth_time is None else auth_time, client=client,
+                                   secret=secret)
+
+
+def self_finish(gw: Gateway, auth: SoftAuthenticator, begin: dict, grant_id: str, user: str = ALICE) -> dict:
+    body = gw.finish_body(auth, begin, "", user)
+    del body["code"]
+    return body | {"grant_id": grant_id}
+
+
+def begin_with_grant(gw: Gateway, auth: SoftAuthenticator, grant_id: str, user: str = ALICE,
+                     headers: dict | None = None):
+    return gw.post("/register/begin", {"rp_id": auth.rp_id, "base_url": BASE, "name": "Laptop",
+                                       "grant_id": grant_id}, user, headers)
+
+
+def self_enrol(gw: Gateway, auth: SoftAuthenticator, user: str = ALICE) -> dict:
+    grant = open_grant(gw, user)
+    fresh(gw, grant["grant_id"], user)
+    r = begin_with_grant(gw, auth, grant["grant_id"], user)
+    assert r.status_code == 200, r.text
+    r = gw.post("/register/finish", self_finish(gw, auth, r.json(), grant["grant_id"], user), user)
+    assert r.status_code == 200, r.text
+    return r.json()["credential"]
+
+
+def test_status_says_whether_self_enrolment_is_available(make_gateway, make_self_gateway):
+    body = make_self_gateway().get().json()
+    assert body["self_enrol"] == {"available": True, "reason": "", "cooling_off_s": 0}
+    body = make_self_gateway({"self_enrol": {"enabled": False, "cooling_off_s": 600}}).get().json()
+    assert body["self_enrol"] == {"available": False, "reason": "disabled", "cooling_off_s": 600}
+    # A provider that cannot force a fresh sign-in (like nous): only codes.
+    gw = make_gateway()
+    clear_providers()
+    register_provider(StubAuthProvider())
+    body = gw.get().json()
+    assert body["self_enrol"] == {"available": False, "reason": "provider_no_reauth", "cooling_off_s": 0}
+
+
+def test_a_bearer_caller_opens_a_native_grant_without_a_cookie(sgw):
+    r = sgw.post("/reauth/begin", {})
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in r.headers
+    body = r.json()
+    assert set(body) == {"grant_id", "expires_at", "provider"}
+    assert body["expires_at"] == int(sgw.clock.t) + 600 and body["provider"] == "stub"
+    assert len(b64u_decode(body["grant_id"])) == 16
+    grant = sgw.store.grant(body["grant_id"], user_id=ALICE)
+    assert grant is not None and (grant.client, grant.state, grant.provider) == ("native", "open", "stub")
+    opened = [line for line in audit_lines() if line["event"] == "passkey_reauth_opened"]
+    assert len(opened) == 1 and opened[0]["grant"] == body["grant_id"][:8]
+    assert (opened[0]["user_id"], opened[0]["client"], opened[0]["auth"]) == (ALICE, "native", "bearer")
+    assert body["grant_id"] not in json.dumps(audit_lines())
+
+
+def test_a_cookie_caller_gets_the_binding_cookie_and_a_login_path(sgw):
+    r = sgw.post("/reauth/begin", {}, headers=sgw.cookie(ALICE, BASE))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["login_path"] == f"/auth/login?provider=stub&reauth={body['grant_id']}"
+    cookie = r.headers["set-cookie"]
+    assert cookie.startswith("__Host-hermes_reauth=")
+    for attribute in ("HttpOnly", "Max-Age=600", "Path=/", "SameSite=none", "Secure"):
+        assert attribute.lower() in cookie.lower(), attribute
+    secret = cookie.split(";", 1)[0].split("=", 1)[1]
+    grant = sgw.store.grant(body["grant_id"], user_id=ALICE)
+    assert grant is not None and grant.client == "web"
+    # Only the browser holding the cookie can complete it.
+    assert sgw.store.grant_for_login(body["grant_id"], "stub", secret) is not None
+    assert sgw.store.grant_for_login(body["grant_id"], "stub", None) is None
+    assert sgw.store.grant_for_login(body["grant_id"], "stub", "x" + secret[1:]) is None
+    assert secret not in json.dumps(audit_lines())
+    # A cookie write without a listed Origin opens nothing.
+    r = sgw.post("/reauth/begin", {}, headers=sgw.cookie(ALICE))
+    assert (r.status_code, r.json()["error"]) == (403, "origin_not_listed")
+    assert any(line["event"] == "passkey_reauth_refused" and line["reason"] == "origin_not_listed"
+               for line in audit_lines())
+
+
+def test_the_login_path_keeps_the_proxy_prefix(sgw):
+    headers = sgw.cookie(ALICE, BASE) | {"X-Forwarded-Prefix": "/hermes"}
+    r = sgw.post("/reauth/begin", {}, headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["login_path"] == f"/hermes/auth/login?provider=stub&reauth={r.json()['grant_id']}"
+    # ``__Host-`` forbids a path; under a prefix the cookie is ``__Secure-`` and scoped to it.
+    cookie = r.headers["set-cookie"]
+    assert cookie.startswith("__Secure-hermes_reauth=") and "path=/hermes" in cookie.lower()
+
+
+def test_reauth_begin_is_refused_when_off_or_without_a_capable_provider(make_gateway, make_self_gateway):
+    gw = make_self_gateway({"self_enrol": {"enabled": False}})
+    r = gw.post("/reauth/begin", {})
+    assert (r.status_code, r.json()["error"]) == (403, "self_enrol_disabled")
+    gw = make_gateway()
+    clear_providers()
+    register_provider(StubAuthProvider())
+    r = gw.post("/reauth/begin", {})
+    assert (r.status_code, r.json()["error"]) == (403, "provider_no_reauth")
+    assert gw.store.counts()["open_grants"] == 0
+    refused = [line["reason"] for line in audit_lines() if line["event"] == "passkey_reauth_refused"]
+    assert refused == ["disabled", "provider_no_reauth"]
+
+
+def test_reauth_begin_is_limited_per_user_and_per_address(sgw):
+    assert [sgw.post("/reauth/begin", {}).status_code for _ in range(6)] == [200] * 5 + [429]
+    assert sgw.post("/reauth/begin", {}).headers["retry-after"] == "600"
+    # Every test client shares one address: Bob is refused too.
+    assert sgw.post("/reauth/begin", {}, BOB).status_code == 429
+    assert sgw.store.counts()["open_grants"] == 5
+
+
+def test_reauth_begin_per_user_limit_does_not_spend_the_address(sgw, monkeypatch):
+    monkeypatch.setattr(routes, "REAUTH_BEGIN_PER_IP", SlidingWindowLimiter(1000, 600))
+    assert [sgw.post("/reauth/begin", {}).status_code for _ in range(6)] == [200] * 5 + [429]
+    assert sgw.post("/reauth/begin", {}, BOB).status_code == 200
+
+
+def test_a_fresh_sign_in_enrols_a_passkey_marked_self(sgw, transports, hooks):
+    alice, bob = transports(ALICE), transports(BOB)
+    laptop = native()
+    grant = open_grant(sgw)
+    assert fresh(sgw, grant["grant_id"]).state == "fresh"
+    r = begin_with_grant(sgw, laptop, grant["grant_id"])
+    assert r.status_code == 200, r.text
+    begin = r.json()
+    assert begin["grant"] == {"expires_at": grant["expires_at"]}
+    r = sgw.post("/register/finish", self_finish(sgw, laptop, begin, grant["grant_id"]))
+    assert r.status_code == 200, r.text
+    credential = r.json()["credential"]
+    assert credential["created_via"] == "self" and "usable_from" not in credential
+    assert [c["created_via"] for c in sgw.get().json()["credentials"]] == ["self"]
+    spent = sgw.store.grant(grant["grant_id"], user_id=ALICE)
+    assert spent is not None and spent.state == "spent"
+    ref = {"id": credential["id"], "name": credential["name"], "rp_id": NATIVE_RP}
+    assert alice.events() == [{"change": "added", "credential": ref, "at": int(sgw.clock.t)}] and bob.frames == []
+    assert hooks == [{"change": "added", "user_id": ALICE, "credential": ref, "at": int(sgw.clock.t),
+                      "via": "self"}]
+    registered = [line for line in audit_lines() if line["event"] == "passkey_registered"]
+    assert registered[-1]["created_via"] == "self" and registered[-1]["grant"] == grant["grant_id"][:8]
+    # Usable at once (no cooling-off): it can sign a step-up.
+    assert sgw.stepup("invite")["credentials"] == [{"rp_id": NATIVE_RP, "ids": [credential["id"]]}]
+
+
+def test_a_browser_enrols_with_its_own_web_grant(sgw):
+    headers = sgw.cookie(ALICE, BASE)
+    r = sgw.post("/reauth/begin", {}, headers=headers)
+    secret = r.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
+    grant_id = r.json()["grant_id"]
+    fresh(sgw, grant_id, client="web", secret=secret)
+    browser = web_authenticator(BASE)
+    r = begin_with_grant(sgw, browser, grant_id, headers=headers)
+    assert r.status_code == 200, r.text
+    r = sgw.post("/register/finish", self_finish(sgw, browser, r.json(), grant_id), headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["credential"]["created_via"] == "self"
+
+
+def test_register_finish_takes_exactly_one_authority(sgw):
+    laptop = native()
+    grant = open_grant(sgw)
+    fresh(sgw, grant["grant_id"])
+    begin = begin_with_grant(sgw, laptop, grant["grant_id"]).json()
+    body = self_finish(sgw, laptop, begin, grant["grant_id"])
+    both = body | {"code": sgw.store.mint_code(user_id=ALICE).code}
+    neither = {k: v for k, v in body.items() if k != "grant_id"}
+    for bad in (both, neither, body | {"grant_id": 7}, body | {"grant_id": ""}, body | {"grant_id": "g" * 65}):
+        r = sgw.post("/register/finish", bad)
+        assert (r.status_code, r.json()["error"]) == (400, "bad_request"), bad.get("grant_id")
+    assert sgw.get().json()["credentials"] == []
+    assert sgw.post("/register/finish", body).status_code == 200
+
+
+@pytest.mark.parametrize("case", ["open", "expired", "other_user", "spent", "failed", "other_client", "unknown"])
+def test_a_grant_that_cannot_authorise_is_refused_at_begin_and_finish(sgw, case):
+    laptop = native()
+    caller = ALICE
+    expected: tuple = ("unknown", None)
+    if case == "unknown":
+        grant_id = b64u(b"\x01" * 16)
+    elif case == "other_client":
+        r = sgw.post("/reauth/begin", {}, headers=sgw.cookie(ALICE, BASE))
+        grant_id = r.json()["grant_id"]
+        secret = r.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
+        fresh(sgw, grant_id, client="web", secret=secret)  # a fresh browser grant, used by the app
+    else:
+        grant_id = open_grant(sgw)["grant_id"]
+        if case == "open":
+            expected = ("not_fresh", None)
+        elif case == "failed":
+            fresh(sgw, grant_id, user=BOB)  # the re-sign-in came back as someone else
+            expected = ("failed", "user_mismatch")
+        else:
+            fresh(sgw, grant_id)
+        if case == "expired":
+            sgw.clock.t += 601
+        elif case == "other_user":
+            caller = BOB
+        elif case == "spent":
+            self_finish_ok = begin_with_grant(sgw, laptop, grant_id).json()
+            assert sgw.post("/register/finish", self_finish(sgw, laptop, self_finish_ok, grant_id)).status_code == 200
+            laptop = native()
+            expected = ("spent", None)
+    r = begin_with_grant(sgw, laptop, grant_id, caller)
+    assert (r.status_code, r.json()["error"], r.json()["reason"], r.json().get("failure")) == (
+        403, "reauth_invalid", *expected)
+    # Finish re-checks it (a registration opened without the grant cannot borrow it either).
+    begin = sgw.begin_registration(laptop, caller)
+    r = sgw.post("/register/finish", self_finish(sgw, laptop, begin, grant_id, caller), caller)
+    assert (r.status_code, r.json()["error"], r.json()["reason"], r.json().get("failure")) == (
+        403, "reauth_invalid", *expected)
+    assert len(sgw.get(caller).json()["credentials"]) == (1 if case == "spent" else 0)
+    assert any(line.get("grant_reason") == expected[0] for line in audit_lines())
+
+
+def test_failed_grants_count_like_failed_codes(sgw):
+    laptop = native()
+    begin = sgw.begin_registration(laptop)
+    grant_id = open_grant(sgw)["grant_id"]  # never completed: not fresh
+    statuses = [sgw.post("/register/finish", self_finish(sgw, laptop, begin, grant_id)).status_code
+                for _ in range(6)]
+    assert statuses == [403] * 5 + [429]
+
+
+def test_self_enrolment_switched_off_refuses_a_grant_opened_before(make_self_gateway):
+    gw = make_self_gateway()
+    laptop = native()
+    grant_id = open_grant(gw)["grant_id"]
+    fresh(gw, grant_id)
+    begin = gw.begin_registration(laptop)
+    gw.config["confirm"]["passkey"]["self_enrol"] = {"enabled": False}
+    r = begin_with_grant(gw, native(), grant_id)
+    assert (r.status_code, r.json()["error"]) == (403, "self_enrol_disabled")
+    r = gw.post("/register/finish", self_finish(gw, laptop, begin, grant_id))
+    assert (r.status_code, r.json()["error"]) == (403, "self_enrol_disabled")
+    assert gw.get().json()["credentials"] == []
+    # Codes keep working.
+    r = gw.post("/register/finish", gw.finish_body(laptop, begin, gw.store.mint_code(user_id=ALICE).code))
+    assert r.status_code == 200 and r.json()["credential"]["created_via"] == "operator"
+
+
+def test_a_cooling_off_passkey_is_listed_but_cannot_confirm_or_sign_and_can_be_revoked(make_self_gateway, hooks):
+    gw = make_self_gateway({"self_enrol": {"enabled": True, "cooling_off_s": 600}})
+    # With only a cooling-off passkey there is nothing to step up with.
+    first = native()
+    cooling = self_enrol(gw, first)
+    assert cooling["usable_from"] == int(gw.clock.t) + 600
+    listed = gw.get().json()["credentials"]
+    assert [c["usable_from"] for c in listed] == [int(gw.clock.t) + 600]
+    assert gw.store.snapshot(ALICE) == ()  # no `confirm` target
+    assert gw.post("/stepup/begin", {"purpose": "invite"}).json()["reason"] == "not_enrolled"
+    # An earlier, usable passkey (from a code) is the only signer.
+    phone = native()
+    phone_id = gw.enrol(phone)["id"]
+    stepup = gw.stepup("invite")
+    assert stepup["credentials"] == [{"rp_id": NATIVE_RP, "ids": [phone_id]}]
+    assert [c.credential_id for c in gw.store.snapshot(ALICE)] == [phone.credential_id]
+    # Signing an invite with the cooling-off passkey is refused: it cannot mint a code for a usable one.
+    r = gw.post("/invites", {"stepup_id": stepup["stepup_id"], "assertion": gw.sign_stepup(first, stepup)})
+    assert (r.status_code, r.json()["error"], r.json()["reason"]) == (422, "assertion_invalid", "unknown_credential")
+    # But it can be revoked, with the usable one.
+    stepup = gw.stepup("revoke", cooling["id"])
+    r = gw.post("/revoke", {"credential_id": cooling["id"], "stepup_id": stepup["stepup_id"],
+                            "assertion": gw.sign_stepup(phone, stepup)})
+    assert r.status_code == 200, r.text
+    assert [c["id"] for c in gw.get().json()["credentials"]] == [phone_id]
+    assert [(h["change"], h["via"]) for h in hooks] == [("added", "self"), ("added", "operator"),
+                                                        ("revoked", "passkey")]
+
+
+def test_a_cooling_off_passkey_becomes_usable_when_the_period_ends(make_self_gateway):
+    gw = make_self_gateway({"self_enrol": {"enabled": True, "cooling_off_s": 600}})
+    laptop = native()
+    credential = self_enrol(gw, laptop)
+    gw.clock.t += 600
+    assert "usable_from" not in gw.get().json()["credentials"][0]
+    stepup = gw.stepup("invite")
+    assert stepup["credentials"] == [{"rp_id": NATIVE_RP, "ids": [credential["id"]]}]
+    r = gw.post("/invites", {"stepup_id": stepup["stepup_id"], "assertion": gw.sign_stepup(laptop, stepup)})
+    assert r.status_code == 200, r.text
+
+
+def test_no_grant_secret_or_id_reaches_the_audit_log(sgw, caplog):
+    headers = sgw.cookie(ALICE, BASE)
+    r = sgw.post("/reauth/begin", {}, headers=headers)
+    secret = r.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
+    grant_id = r.json()["grant_id"]
+    fresh(sgw, grant_id, client="web", secret=secret)
+    browser = web_authenticator(BASE)
+    begin = begin_with_grant(sgw, browser, grant_id, headers=headers).json()
+    sgw.post("/register/finish", self_finish(sgw, browser, begin, grant_id), headers=headers)
+    text = json.dumps(audit_lines()) + caplog.text
+    assert secret not in text and grant_id not in text
+    assert grant_id[:8] in text
+
+
+def test_end_to_end_a_browser_signs_in_again_and_adds_a_self_passkey(sgw, transports, hooks):
+    """Through the real sign-in routes: reauth/begin sets the binding cookie, /auth/login asks the provider
+    for a fresh sign-in, the callback completes the grant, and the grant enrols one passkey."""
+    alice = transports(ALICE)
+    browser = TestClient(web_server.app, base_url=BASE, follow_redirects=False)
+    browser.cookies.set("hermes_session_at", sgw.bearer(ALICE)["Authorization"].split(" ", 1)[1])
+    origin = {"Origin": BASE}
+    r = browser.post(f"{routes.PREFIX}/reauth/begin", json={}, headers=origin)
+    assert r.status_code == 200, r.text
+    grant_id, login_path = r.json()["grant_id"], r.json()["login_path"]
+    r = browser.get(login_path + "&next=/settings")
+    assert r.status_code in (302, 303, 307), r.text
+    assert sgw.provider.fresh == [True]  # type: ignore[attr-defined]
+    r = browser.get(r.headers["location"])  # the provider's redirect back to the callback
+    assert r.status_code in (302, 303, 307), r.text
+    grant = sgw.store.grant(grant_id, user_id=ALICE)
+    assert grant is not None and grant.state == "fresh"
+    laptop = web_authenticator(BASE)
+    r = browser.post(f"{routes.PREFIX}/register/begin", headers=origin,
+                     json={"rp_id": laptop.rp_id, "base_url": BASE, "name": "Laptop", "grant_id": grant_id})
+    assert r.status_code == 200, r.text
+    r = browser.post(f"{routes.PREFIX}/register/finish", headers=origin,
+                     json=self_finish(sgw, laptop, r.json(), grant_id))
+    assert r.status_code == 200, r.text
+    assert r.json()["credential"]["created_via"] == "self"
+    assert [e["change"] for e in alice.events()] == ["added"] and [h["via"] for h in hooks] == ["self"]
+    events = [line["event"] for line in audit_lines()]
+    assert events.index("passkey_reauth_opened") < events.index("passkey_reauth_fresh") \
+        < events.index("passkey_registered")
+
+
+def test_end_to_end_a_stale_sign_in_cannot_enrol(sgw):
+    browser = TestClient(web_server.app, base_url=BASE, follow_redirects=False)
+    browser.cookies.set("hermes_session_at", sgw.bearer(ALICE)["Authorization"].split(" ", 1)[1])
+    r = browser.post(f"{routes.PREFIX}/reauth/begin", json={}, headers={"Origin": BASE})
+    grant_id = r.json()["grant_id"]
+    sgw.provider.auth_time = int(sgw.clock.t) - 3600  # type: ignore[attr-defined]  # the IdP reused an old sign-in
+    r = browser.get(r.json()["login_path"])
+    browser.get(r.headers["location"])
+    r = begin_with_grant(sgw, web_authenticator(BASE), grant_id, headers=sgw.cookie(ALICE, BASE))
+    assert (r.status_code, r.json()["reason"], r.json()["failure"]) == (403, "failed", "auth_not_fresh")

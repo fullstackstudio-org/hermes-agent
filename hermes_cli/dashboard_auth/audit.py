@@ -77,6 +77,8 @@ class AuditEvent(enum.Enum):
     CONFIRM_FORCED = "confirm_forced"
     # A dashboard or RPC config write that would have changed a protected section (confirm.passkey).
     PROTECTED_SETTING_REFUSED = "protected_setting_refused"
+    # The operator switched passkey self-enrolment on or off (`hermes dashboard passkey self-enrol on|off`).
+    PASSKEY_SELF_ENROL_CHANGED = "passkey_self_enrol_changed"
     # The remote MCP endpoint and its authorization server (hermes_cli/dashboard_auth/mcp): registrations,
     # consents, token issue/refresh/refusal, grant revocations, tool calls, chats opened and throttles.
     # Fields name the user, the grant, the client id and name, the address, the tool, the session, an

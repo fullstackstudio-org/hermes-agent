@@ -1886,26 +1886,29 @@ That is a narrow guarantee. A stolen dashboard session can still run code on the
 
 | Command | Description |
 |---------|-------------|
-| `status` | Whether the level is enabled, the listed and accepted base URLs, the native and web RPs, the sign-in providers, the stored counts, the operator rules in force (`confirm.passkey.require`), and every reason the level is unavailable with what to set. It also compares the passkey base URLs with the dashboard's public URLs and prints a hint where they differ. |
+| `status` | Whether the level is enabled, the listed and accepted base URLs, the native and web RPs, the sign-in providers and whether each can ask a person to sign in again, whether self-enrolment is on (with its cooling-off), the stored counts (passkeys in a cooling-off period, open sign-in grants), the operator rules in force (`confirm.passkey.require`), and every reason the level is unavailable with what to set. It also compares the passkey base URLs with the dashboard's public URLs and prints a hint where they differ. |
 | `base-url list` / `base-url add URL` / `base-url remove URL` | The base URLs clients dial for this gateway (`confirm.passkey.base_urls`, serialised as origin plus path prefix). A confirmation that names any other base URL is refused. This list is kept apart from `dashboard.public_url(s)` on purpose: a dashboard session can change those. Empty means the level is unavailable (`no_base_url`). |
-| `list [--user ID] [--all]` | Stored credentials (`--all` includes revoked ones). |
+| `list [--user ID] [--all]` | Stored credentials with how each was authorised (`via operator`, `passkey` or `self`) and any cooling-off period (`--all` includes revoked ones). |
 | `invite [--user ID] [--ttl 15m] [--print]` | Mint a one-time enrolment code (default 15 minutes, at most 24 hours). Bind it with `--user <provider>:<user id>` when you know the id. Refused when the output is not a terminal unless `--print` is given. |
 | `revoke <credential id prefix>` / `revoke --user ID --all` | Revoke one credential, or all of one user's. |
 | `receipts [--user ID] [--since YYYY-MM-DD] [--limit N]` | Receipts of verified answers (digests, never the text); older than `confirm.passkey.receipts_days` are pruned first. |
+| `self-enrol on` / `self-enrol off` | Whether a signed-in person may add a passkey without a code by signing in again (`confirm.passkey.self_enrol.enabled`, on by default). Codes keep working either way. |
 
 What a signed-in person does in the app goes through the dashboard's passkey routes, which answer like
 an unknown path while `confirm.passkey.enabled` is false and are never reachable without a sign-in:
 
 | Route | What it does |
 |-------|--------------|
-| `GET /api/auth/passkeys` | The caller's own passkeys, this gateway's id, the accepted RPs and base URLs. |
-| `POST /api/auth/passkeys/register/begin` / `register/finish` | Enrol a passkey. Finishing always needs an enrolment code: one from `invite`, or one the person minted with a passkey they already have. A session alone never enrols. |
+| `GET /api/auth/passkeys` | The caller's own passkeys (with `usable_from` during a cooling-off period), this gateway's id, the accepted RPs and base URLs, and `self_enrol {available, reason, cooling_off_s}`. |
+| `POST /api/auth/passkeys/reauth/begin` | Open a sign-in grant for self-enrolment (10 minutes): the person then signs in again through `/auth/login?reauth=` (browser, bound by an HttpOnly cookie) or the app's sign-in (bound by its PKCE exchange). Refused when self-enrolment is off or the person's sign-in provider cannot force a fresh sign-in; 5 per user and per address per 10 minutes. |
+| `POST /api/auth/passkeys/register/begin` / `register/finish` | Enrol a passkey. Finishing needs exactly one authority: an enrolment code (from `invite`, or one the person minted with a passkey they already have) or a grant the person's fresh sign-in completed, used up by that passkey. A session alone never enrols. |
 | `POST /api/auth/passkeys/stepup/begin` | Open a passkey step-up (`invite` or `revoke`, 120 s, single use: a refused assertion spends it). |
 | `POST /api/auth/passkeys/invites` | With an `invite` step-up: a code for the caller's own next passkey (another provider or a browser). Off when `confirm.passkey.user_invites` is false. |
 | `POST /api/auth/passkeys/revoke` | With a `revoke` step-up for that credential: revoke one of the caller's own passkeys, the last one included. |
 
 Nobody sees, adds to or revokes another person's passkeys. A browser write must come from the origin of
-one of the passkey base URLs. Every enrolment-code failure gets the same answer, and failures are
+one of the passkey base URLs. Every enrolment-code failure gets the same answer (a grant that cannot
+authorise gets `reauth_invalid` with its reason), and failures of both are
 limited (5 per user and per address per 10 minutes, 20 per hour gateway-wide). Each added or revoked
 passkey is written to `dashboard-auth.log`, sent to that person's open connections (`passkey.changed`)
 and given to plugins (`on_passkey_change`), so a passkey nobody expected does not go unnoticed.

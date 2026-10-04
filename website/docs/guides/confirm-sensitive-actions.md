@@ -49,7 +49,9 @@ from the app.
 ## What `passkey` proves, and what it does not
 
 A `confirmed` answer with `verified: true` means: a passkey that was enrolled for this gateway user (with
-an enrolment code from the operator, or from an earlier passkey of the same user) signed, with user
+an enrolment code from the operator, a code minted with an earlier passkey of the same user, or a sign-in
+of that user that the sign-in provider reported as fresh and the gateway bound to the enrolling app or
+browser) signed, with user
 presence and user verification as reported by its authenticator, a challenge that commits to this
 gateway's base URL, this conversation, this request, a fresh random value and the exact title, summary and
 detail the gateway sent. The gateway checks the signature against the public key it stored at enrolment,
@@ -93,8 +95,13 @@ What it does **not** prove:
    page on the same origin, can show one text and request a signature for another. The native app does
    not have this weakness.
 8. On a plain-`http` gateway a network attacker cannot forge a confirmation, but owns the session.
-9. Bootstrap. The first enrolment code comes from the operator; whoever redeems it while signed in as the
-   user gets the passkey. Hand it over out of band, and bind it with `--user` when the id is known.
+9. Bootstrap. The first passkey comes from an operator code or, where the operator allows self-enrolment,
+   from a fresh sign-in. With a code, whoever redeems it while signed in as the user gets the passkey: hand
+   it over out of band, and bind it with `--user` when the id is known. With self-enrolment the passkey
+   level is exactly as strong as that sign-in plus the detection around it: **whoever holds a session and
+   can also sign in again as the person (their password, and the identity provider's second factor if it
+   asks for one) can add a passkey and then confirm.** A stolen session alone cannot: the sign-in has to
+   happen again, now.
 
 A `declined` is never verified: declining needs no passkey.
 
@@ -140,10 +147,38 @@ On the gateway host, as the gateway's user:
    plain-`http` address counts only with `confirm.passkey.allow_private_base_urls: true` (read the
    contract's note on what that gives up).
 3. Enable it in `config.yaml` (`confirm.passkey.enabled: true`) and restart.
-4. Mint an enrolment code for the person (`hermes dashboard passkey invite --user <provider>:<user id>`)
-   and hand it over out of band. They add a passkey in the app with it; later passkeys (another provider,
-   a browser) they can add with a code they mint themselves with a passkey they already have.
+4. Either let people add a passkey themselves (self-enrolment, on by default, below) or mint an enrolment
+   code for the person (`hermes dashboard passkey invite --user <provider>:<user id>`) and hand it over out
+   of band. They add a passkey in the app with it; later passkeys (another provider, a browser) they can
+   add with a code they mint themselves with a passkey they already have.
 5. `hermes dashboard passkey status` names every reason the level is unavailable and what to set.
+
+### Self-enrolment: add a passkey by signing in again
+
+With `confirm.passkey.self_enrol.enabled: true` (the default), a signed-in person can add a passkey from
+the app's or the web client's settings without a code: they sign in again, the sign-in provider confirms
+it happened just now, and that one fresh sign-in authorises one passkey for that person, from the app or
+browser that asked (it expires after 10 minutes and is used up by the passkey). It needs a provider that
+can force a fresh sign-in: the password provider (`basic`) and OIDC (`self_hosted`, which asks the
+identity provider for `prompt=login` and `max_age=0` and checks the returned `auth_time`). Nous cannot,
+so people signed in with Nous need a code.
+
+```yaml
+confirm:
+  passkey:
+    self_enrol:
+      enabled: true                  # `hermes dashboard passkey self-enrol off` for codes only
+      accept_missing_auth_time: false  # true: trust an identity provider that does not send auth_time
+      cooling_off_s: 0               # > 0: a passkey added this way is listed but unusable this long
+```
+
+An identity provider that ignores `prompt=login` and reuses its single sign-on session returns an old
+`auth_time`; the gateway refuses that sign-in for enrolment (the person signs out of the identity provider
+and tries again). During a cooling-off period the new passkey is no `confirm` target and cannot sign an
+invite or revoke step-up, but another passkey or the operator can revoke it. Every passkey added this way
+is marked `self` (`hermes dashboard passkey list`, the `on_passkey_change` hook's `via`), so the security
+notification can say it was added after a new sign-in. Like the rest of `confirm.passkey`, the section is
+protected: only the operator changes it.
 
 ## Operator rules: force a passkey
 

@@ -1430,7 +1430,7 @@ def my_callback(change: str, user_id: str, credential: dict, at: int, via: str, 
 | `user_id` | `str` | `"<provider>:<user id>"`, the signed-in user whose passkeys changed |
 | `credential` | `dict` | `{"id", "name", "rp_id"}`: the base64url credential id, the name the app gave it, and its relying party |
 | `at` | `int` | Unix seconds |
-| `via` | `str` | What authorised it: `"operator"` (an enrolment code the operator minted) or `"passkey"` (a code minted after a passkey step-up, or a revoke signed with a passkey) |
+| `via` | `str` | What authorised it: `"operator"` (an enrolment code the operator minted), `"passkey"` (a code minted after a passkey step-up, or a revoke signed with a passkey) or `"self"` (the person signed in again to add it, without a code: say so in the notification, e.g. "A passkey was added after a new sign-in") |
 
 Never a code, key, signature or token. Operator commands (`hermes dashboard passkey revoke`) run in their
 own process and do not fire it.

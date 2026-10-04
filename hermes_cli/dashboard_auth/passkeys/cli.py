@@ -8,6 +8,8 @@
                                    mint a one-time enrolment code (refused to a non-terminal without --print)
     revoke <credential id prefix> | revoke --user ID --all
     receipts [--user ID] [--since DATE] [--limit N]
+    self-enrol on|off              whether a signed-in person may add a passkey by signing in again
+                                   (confirm.passkey.self_enrol.enabled)
 
 This module is imported when the CLI parser is built, so it imports the store only inside the commands.
 """
@@ -71,7 +73,8 @@ def add_passkey_parser(dashboard_subparsers) -> None:
         "passkey", help="Manage passkeys for confirmations at level passkey (operator, on the gateway host)",
         description="Manage the passkey store of this gateway: enrolment codes, credentials and receipts. "
                     "Run on the gateway host as the gateway's user.")
-    sub = parser.add_subparsers(dest="passkey_command", metavar="{status,base-url,list,invite,revoke,receipts}")
+    sub = parser.add_subparsers(dest="passkey_command",
+                                metavar="{status,base-url,list,invite,revoke,receipts,self-enrol}")
     parser.set_defaults(func=cmd_dashboard_passkey, passkey_command=None)
 
     sub.add_parser("status", help="Show what is enabled, listed and stored")
@@ -106,6 +109,13 @@ def add_passkey_parser(dashboard_subparsers) -> None:
     p_receipts.add_argument("--since", type=parse_date, default=None, help="Only from this date (YYYY-MM-DD)")
     p_receipts.add_argument("--limit", type=int, default=50, help="At most this many (default 50)")
 
+    p_self = sub.add_parser(
+        "self-enrol", help="Allow or refuse adding a passkey by signing in again (no code)",
+        description="Whether a signed-in person may add a passkey for themselves without an enrolment code, by "
+                    "signing in again (confirm.passkey.self_enrol.enabled). It needs a sign-in provider that "
+                    "can ask for a fresh sign-in (password, OIDC; not Nous). Codes keep working either way.")
+    p_self.add_argument("action", choices=("on", "off"))
+
 
 def cmd_dashboard_passkey(args) -> None:
     code = run(args)
@@ -131,9 +141,11 @@ def run(args, *, out: TextIO | None = None, err: TextIO | None = None, store=Non
     command = getattr(args, "passkey_command", None)
     if command == "base-url":
         return _base_url(args, out=out, err=err)
+    if command == "self-enrol":
+        return _self_enrol(args, out=out, err=err)
     handlers = {"status": _status, "list": _list, "invite": _invite, "revoke": _revoke, "receipts": _receipts}
     if command not in handlers:
-        print("usage: hermes dashboard passkey {status,base-url,list,invite,revoke,receipts}", file=err)
+        print("usage: hermes dashboard passkey {status,base-url,list,invite,revoke,receipts,self-enrol}", file=err)
         return 2
     if command == "status" and sign_in_providers is None:
         sign_in_providers = configured_sign_in_providers()
@@ -160,6 +172,43 @@ def configured_sign_in_providers() -> list[str]:
     return names
 
 
+def provider_supports_reauth(name: str) -> Optional[bool]:
+    """Whether the bundled sign-in provider *name* (``plugins.dashboard_auth.<name>``) can ask a person to
+    sign in again and say when (``supports_reauth``); None when it cannot be read."""
+    import importlib
+    import inspect
+
+    from hermes_cli.dashboard_auth.base import DashboardAuthProvider
+    try:
+        module = importlib.import_module(f"plugins.dashboard_auth.{name}")
+    except Exception:  # noqa: BLE001 - a broken plugin: unknown, not "no"
+        return None
+    classes = [c for c in vars(module).values() if inspect.isclass(c) and issubclass(c, DashboardAuthProvider)
+               and c.__module__ == module.__name__ and getattr(c, "supports_session", True)]
+    return any(getattr(c, "supports_reauth", False) is True for c in classes) if classes else None
+
+
+def _provider_line(name: str) -> str:
+    support = provider_supports_reauth(name)
+    if support is None:
+        return name
+    return f"{name} ({'can' if support else 'cannot'} ask to sign in again)"
+
+
+def _self_enrol_line(settings, sign_in_providers: list[str]) -> str:
+    self_enrol = settings.self_enrol
+    if not self_enrol.enabled:
+        return ("Self-enrolment (add a passkey by signing in again): off. Every passkey needs an enrolment "
+                "code; `hermes dashboard passkey self-enrol on` allows it.")
+    capable = [name for name in sign_in_providers if provider_supports_reauth(name)]
+    parts = [f"cooling-off {self_enrol.cooling_off_s} s" if self_enrol.cooling_off_s else "no cooling-off",
+             "a sign-in without auth_time counts as fresh (assumed)" if self_enrol.accept_missing_auth_time
+             else "a sign-in without auth_time is refused"]
+    who = (f"for people signed in with {', '.join(capable)}" if capable
+           else "but no configured sign-in provider can ask to sign in again, so nobody can use it")
+    return f"Self-enrolment (add a passkey by signing in again): on {who}; {'; '.join(parts)}."
+
+
 def _status(args, *, out, err, store, settings, public_urls, isatty, sign_in_providers) -> int:
     from hermes_cli.dashboard_auth.passkeys.challenge import b64u
     from hermes_cli.dashboard_auth.passkeys.settings import gateway_context, serialise_base_urls
@@ -177,9 +226,10 @@ def _status(args, *, out, err, store, settings, public_urls, isatty, sign_in_pro
     if exists:
         print(f"Gateway id: {b64u(identity[0])}", file=out)
         counts = store.counts()
-        print(f"Credentials: {counts['credentials']} active for {counts['users']} user(s), "
-              f"{counts['revoked']} revoked; open codes: {counts['open_codes']}; receipts: {counts['receipts']}",
-              file=out)
+        print(f"Credentials: {counts['credentials']} active for {counts['users']} user(s)"
+              + (f" ({counts['cooling_off']} cooling off)" if counts.get("cooling_off") else "")
+              + f", {counts['revoked']} revoked; open codes: {counts['open_codes']}; "
+              f"open sign-in grants: {counts.get('open_grants', 0)}; receipts: {counts['receipts']}", file=out)
     print("Base URLs (confirm.passkey.base_urls): " + (", ".join(settings.base_urls) or "none"), file=out)
     print("Accepted base URLs: " + (", ".join(ctx.accepted_base_urls) or "none"), file=out)
     dashboard, _rejected = serialise_base_urls(public_urls)
@@ -196,9 +246,10 @@ def _status(args, *, out, err, store, settings, public_urls, isatty, sign_in_pro
           file=out)
     print("Web RPs: " + (", ".join(sorted(ctx.web_rp_ids)) or "none (needs an https base URL without a path)"),
           file=out)
-    print("Sign-in providers: " + (", ".join(sign_in_providers) or "none"), file=out)
+    print("Sign-in providers: " + (", ".join(_provider_line(n) for n in sign_in_providers) or "none"), file=out)
     print(f"User invites: {'allowed' if settings.user_invites else 'off'}; "
           f"receipts kept {settings.receipts_days} days", file=out)
+    print(_self_enrol_line(settings, sign_in_providers), file=out)
     print("Operator rules: " + _rules(settings.require), file=out)
     for problem in settings.problems:
         print(f"Config: {problem}", file=out)
@@ -273,6 +324,30 @@ def _base_url(args, *, out, err) -> int:
     return 0
 
 
+def _self_enrol(args, *, out, err) -> int:
+    """Write ``confirm.passkey.self_enrol.enabled`` in this profile's config.yaml (operator only; the
+    dashboard's config writers refuse the section). The rest of the section is kept as written."""
+    from hermes_cli.config import require_readable_config_before_write, save_config
+
+    enabled = args.action == "on"
+    raw = require_readable_config_before_write()
+    confirm: dict = raw["confirm"] if isinstance(raw.get("confirm"), dict) else {}
+    passkey: dict = confirm["passkey"] if isinstance(confirm.get("passkey"), dict) else {}
+    section: dict = passkey["self_enrol"] if isinstance(passkey.get("self_enrol"), dict) else {}
+    raw["confirm"] = {**confirm, "passkey": {**passkey, "self_enrol": {**section, "enabled": enabled}}}
+    save_config(raw)
+    from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
+    audit_log(AuditEvent.PASSKEY_SELF_ENROL_CHANGED, by="operator", enabled=enabled)
+    if enabled:
+        print("Self-enrolment on: a signed-in person may add a passkey by signing in again (password or OIDC "
+              "sign-in). Whoever can sign in as a person can then also add a passkey for them.", file=out)
+    else:
+        print("Self-enrolment off: every passkey needs an enrolment code (`hermes dashboard passkey invite`, or "
+              "one a person mints with an earlier passkey).", file=out)
+    print("The running gateway reads it on the next request; no restart needed.", file=out)
+    return 0
+
+
 def _list(args, *, out, err, store, settings, public_urls, isatty, sign_in_providers) -> int:
     if not store.exists():
         print("No passkeys stored.", file=out)
@@ -281,8 +356,11 @@ def _list(args, *, out, err, store, settings, public_urls, isatty, sign_in_provi
     if not records:
         print("No passkeys stored" + (f" for {args.user}." if args.user else "."), file=out)
         return 0
+    now = store.now()
     for c in records:
         state = "active" if c.active else f"revoked {_when(c.revoked_at)} by {c.revoked_by}"
+        if c.active and c.usable_from is not None and c.usable_from > now:
+            state = f"cooling off until {_when(c.usable_from)}"
         print(f"{c.id_b64u[:16]}  {c.user_id!r}  rp={c.rp_id}  {c.name!r}  created {_when(c.created_at)} "
               f"via {c.created_via}  last used {_when(c.last_used_at)}  "
               f"{'synced' if c.backup_eligible else 'device-bound'}  {state}", file=out)

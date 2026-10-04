@@ -27,6 +27,7 @@ PROTECTED_SETTING = "protected_setting"
 PROTECTED_DETAIL = ("protected_setting: confirm.passkey can only be changed on the gateway host "
                     "(config.yaml or `hermes config set`)")
 RECEIPTS_DAYS_RANGE = (1, 3650)
+COOLING_OFF_RANGE = (0, 7 * 24 * 60 * 60)
 
 
 def _defaults() -> dict:
@@ -97,6 +98,18 @@ class Require:
 
 
 @dataclass(frozen=True)
+class SelfEnrol:
+    """Self-enrolment without a code (``confirm.passkey.self_enrol``): a signed-in person adds a passkey by
+    signing in again. ``accept_missing_auth_time`` counts a re-sign-in as fresh when the provider does not
+    say when it happened (marked as assumed); ``cooling_off_s`` > 0 keeps a passkey added this way out of
+    use for that long."""
+
+    enabled: bool = True
+    accept_missing_auth_time: bool = False
+    cooling_off_s: int = 0
+
+
+@dataclass(frozen=True)
 class PasskeySettings:
     enabled: bool = False
     base_urls: tuple[str, ...] = ()  # serialised (contract §3); the only base URLs a challenge may name
@@ -105,6 +118,7 @@ class PasskeySettings:
     receipts_days: int = 90
     allow_private_base_urls: bool = False
     require: Require = Require()
+    self_enrol: SelfEnrol = SelfEnrol()
     problems: tuple[str, ...] = ()  # entries that were ignored, for ``passkey status``
 
 
@@ -171,7 +185,37 @@ def settings_from_config(cfg: Any) -> PasskeySettings:
                            native_rps=_native_rps(raw.get("native_rps"), problems),
                            user_invites=flag("user_invites"), receipts_days=days,
                            allow_private_base_urls=flag("allow_private_base_urls"),
-                           require=_require(raw, problems), problems=tuple(problems))
+                           require=_require(raw, problems), self_enrol=_self_enrol(raw, problems),
+                           problems=tuple(problems))
+
+
+def _self_enrol(raw: Mapping, problems: list[str]) -> SelfEnrol:
+    """``self_enrol`` as the routes apply it. Anything unreadable takes the safe value, so a typo never opens
+    enrolment wider than the operator wrote: a flag that is not true or false is off, and a cooling-off
+    period that is not a whole number of seconds in range switches self-enrolment off (a cooling-off the
+    operator asked for and the gateway cannot read must not become none)."""
+    section = raw.get("self_enrol")
+    defaults = cast(dict, _defaults()["self_enrol"])
+    if not isinstance(section, Mapping):
+        problems.append("self_enrol is not a mapping; self-enrolment is off")
+        return SelfEnrol(enabled=False, accept_missing_auth_time=False, cooling_off_s=defaults["cooling_off_s"])
+    flags: dict[str, bool] = {}
+    for name in ("enabled", "accept_missing_auth_time"):
+        value = section.get(name)
+        if isinstance(value, bool):
+            flags[name] = value
+        else:
+            problems.append(f"self_enrol.{name} is not true or false; using false")
+            flags[name] = False
+    cooling = section.get("cooling_off_s")
+    low, high = COOLING_OFF_RANGE
+    if isinstance(cooling, bool) or not isinstance(cooling, int) or not low <= cooling <= high:
+        problems.append(f"self_enrol.cooling_off_s must be a whole number of seconds from {low} to {high}; "
+                        "self-enrolment is off until it is")
+        flags["enabled"] = False
+        cooling = int(defaults["cooling_off_s"])
+    return SelfEnrol(enabled=flags["enabled"], accept_missing_auth_time=flags["accept_missing_auth_time"],
+                     cooling_off_s=cooling)
 
 
 def _require(raw: Mapping, problems: list[str]) -> Require:

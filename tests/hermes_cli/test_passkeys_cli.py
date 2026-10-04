@@ -233,3 +233,76 @@ def test_receipts_list_and_prune(store, _isolate_hermes_home):
 def test_no_subcommand_prints_usage(store):
     code, _, err = _run(store, [])
     assert code == 2 and "usage" in err
+
+
+# ── self-enrolment ───────────────────────────────────────────────────────────────────────────────
+
+
+def _self_enrol_credential(store, credential_id: bytes, *, usable_from=None, user=U):
+    grant = store.open_grant(user, user.split(":", 1)[0], "native")
+    store.complete_grant(grant.id, session_user=user, session_provider=user.split(":", 1)[0],
+                         auth_time=store.now(), client="native")
+    p = store.open_pending("register", user_id=user, rp_id="confirm.hermie.dev", base_url="https://gw.example.com",
+                           subject="Laptop")
+    reg = RegistrationOk(credential_id=credential_id, rp_id="confirm.hermie.dev", alg=-7, public_x=b"x" * 32,
+                         public_y=b"y" * 32, sign_count=0, backup_eligible=True, backed_up=True, aaguid=b"\0" * 16,
+                         transports=(), registration_id=p.id, user_id=user, nonce=p.nonce)
+    return store.add_credential(user_id=user, grant_id=grant.id, registration=reg, usable_from=usable_from)
+
+
+def test_status_says_which_providers_can_ask_to_sign_in_again(store):
+    _, out, _ = _run(store, ["status"], cfg=_enabled(), providers=("basic", "self_hosted", "nous"))
+    assert ("Sign-in providers: basic (can ask to sign in again), self_hosted (can ask to sign in again), "
+            "nous (cannot ask to sign in again)") in out
+    assert "Self-enrolment (add a passkey by signing in again): on for people signed in with basic, self_hosted" in out
+    assert "no cooling-off" in out and "a sign-in without auth_time is refused" in out
+
+
+def test_status_says_when_nobody_can_self_enrol(store):
+    _, out, _ = _run(store, ["status"], cfg=_enabled(), providers=("nous",))
+    assert "on but no configured sign-in provider can ask to sign in again, so nobody can use it" in out
+    _, out, _ = _run(store, ["status"], cfg=_enabled(self_enrol={"enabled": False}))
+    assert "Self-enrolment (add a passkey by signing in again): off" in out and "self-enrol on" in out
+    _, out, _ = _run(store, ["status"], cfg=_enabled(self_enrol={"cooling_off_s": 600,
+                                                                  "accept_missing_auth_time": True}))
+    assert "cooling-off 600 s" in out and "counts as fresh (assumed)" in out
+
+
+def test_status_counts_open_grants_and_cooling_off_passkeys(store):
+    _self_enrol_credential(store, b"\x07" * 32, usable_from=store.now() + 600)
+    store.open_grant(U, "self_hosted", "native")
+    _, out, _ = _run(store, ["status"], cfg=_enabled())
+    assert "Credentials: 1 active for 1 user(s) (1 cooling off), 0 revoked" in out
+    assert "open sign-in grants: 1" in out
+
+
+def test_list_shows_self_and_the_cooling_off_period(store):
+    cooling = _self_enrol_credential(store, b"\x08" * 32, usable_from=store.now() + 600)
+    usable = _self_enrol_credential(store, b"\x09" * 32)
+    _, out, _ = _run(store, ["list"])
+    lines = {line.split()[0]: line for line in out.splitlines()}
+    assert "via self" in lines[cooling.id_b64u[:16]] and "cooling off until" in lines[cooling.id_b64u[:16]]
+    assert "via self" in lines[usable.id_b64u[:16]] and lines[usable.id_b64u[:16]].endswith("active")
+
+
+def test_self_enrol_on_off_writes_the_protected_flag(store, _isolate_hermes_home):
+    from hermes_cli.config import get_config_path, load_config
+    from hermes_cli.dashboard_auth.passkeys.settings import load_settings
+    from hermes_constants import get_hermes_home
+
+    path = get_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("confirm:\n  passkey:\n    enabled: true\n    self_enrol:\n      cooling_off_s: 600\n")
+    code, out, _ = _run(store, ["self-enrol", "off"])
+    assert code == 0 and "Self-enrolment off" in out
+    assert load_config()["confirm"]["passkey"]["self_enrol"] == {"cooling_off_s": 600, "enabled": False,
+                                                                 "accept_missing_auth_time": False}
+    assert load_settings().self_enrol.enabled is False and load_config()["confirm"]["passkey"]["enabled"] is True
+    code, out, _ = _run(store, ["self-enrol", "on"])
+    assert code == 0 and "Self-enrolment on" in out and load_settings().self_enrol.enabled is True
+    assert load_settings().self_enrol.cooling_off_s == 600
+    events = [json.loads(line) for line in (get_hermes_home() / "logs" / "dashboard-auth.log").read_text().splitlines()]
+    assert [(e["by"], e["enabled"]) for e in events if e["event"] == "passkey_self_enrol_changed"] == [
+        ("operator", False), ("operator", True)]
+    with pytest.raises(SystemExit):
+        _parser().parse_args(["dashboard", "passkey", "self-enrol", "maybe"])

@@ -148,9 +148,10 @@ VALID_HOOKS: Set[str] = {
     # on_passkey_change (fork): a passkey of a signed-in user was added or revoked through the dashboard's
     # passkey routes (hermes_cli/dashboard_auth/passkeys/routes.py), fired after the store committed it;
     # returns ignored. Kwargs: change ("added"|"revoked"), user_id ("<provider>:<user id>"), credential
-    # ({id, name, rp_id}), at (Unix seconds), via ("operator"|"passkey": what authorised it). Never a
-    # code, key, assertion or token. Meant for a security notification that cannot be muted. Bounded by
-    # plugins.hook_callback_timeout (plugins_dispatch._HOOK_TIMEOUT_BOUNDED_HOOKS).
+    # ({id, name, rp_id}), at (Unix seconds), via ("operator"|"passkey"|"self": what authorised it; "self"
+    # is a fresh sign-in without a code). Never a code, key, assertion or token. Meant for a security
+    # notification that cannot be muted. Bounded by plugins.hook_callback_timeout
+    # (plugins_dispatch._HOOK_TIMEOUT_BOUNDED_HOOKS).
     "on_passkey_change",
     # pre_confirm_request (fork): a `confirm` request (tui_gateway/confirm.py) was just written to the
     # person's connected apps; fired off the request's thread, returns ignored. Kwargs: session_id,

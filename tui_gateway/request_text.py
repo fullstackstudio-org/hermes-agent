@@ -17,7 +17,7 @@ import bisect
 import re
 import unicodedata
 
-# Letters and symbols that render as nothing (Hangul fillers, the blank Braille pattern, the musical null
+# Letters and symbols that render as nothing (Hangul fillers, the blank Braille pattern, the Khitan filler, the musical null
 # notehead): text built from them looks empty or hides where a line really ends.
 _INVISIBLE_LETTERS = frozenset({"\u115f", "\u1160", "\u3164", "\uffa0", "\u2800", "\U0001d159", "\U00016fe4"})
 _LINE_BREAKS = frozenset({"\n", "\u2028", "\u2029"})

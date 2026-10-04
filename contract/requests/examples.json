@@ -2730,6 +2730,50 @@
               }
             ]
           }
+        },
+        {
+          "name": "anchor_end_on_a_hunk_that_is_not_last",
+          "layer": "cross_field",
+          "params": {
+            "session_id": "s_example",
+            "v": 1,
+            "expires_at": 1791119400,
+            "optional": false,
+            "acting_user": {
+              "id": "oidc:5b1e0c9a",
+              "name": "Ada"
+            },
+            "title": "Changes to settings.py",
+            "summary": "I changed the default currency and the retry limit. Approve or reject each hunk; I apply only the approved ones.",
+            "kind": "modify",
+            "path": "app/settings.py",
+            "hunks": [
+              {
+                "id": "h1",
+                "header": "@@ -3,4 +3,4 @@ class Settings:",
+                "lines": [
+                  "     name = \"booking\"",
+                  "-    currency = \"USD\"",
+                  "+    currency = \"EUR\"",
+                  "     locale = \"nl-NL\"",
+                  "     debug = False"
+                ],
+                "anchor": "end"
+              },
+              {
+                "id": "h2",
+                "header": "@@ -20,3 +20,4 @@ def retry():",
+                "lines": [
+                  "     attempts = 0",
+                  "-    limit = 3",
+                  "+    limit = 5",
+                  "+    backoff = 2",
+                  "     return attempts"
+                ]
+              }
+            ]
+          },
+          "note": "A hunk pinned to the end of the file is the last one: nothing can follow it."
         }
       ],
       "answers": [

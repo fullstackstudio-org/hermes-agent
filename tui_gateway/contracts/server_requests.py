@@ -940,6 +940,8 @@ class ReviewDiffRequestParams(InteractiveRequestParams):
             raise ValueError("review.diff: two hunks have the same id")
         if (self.kind == DiffKind.rename) != (self.old_path is not None):
             raise ValueError("review.diff: old_path is given for a rename and only for a rename")
+        if any(hunk.anchor in (DiffAnchor.end, DiffAnchor.both) for hunk in self.hunks[:-1]):
+            raise ValueError("review.diff: only the last hunk can be anchored at the end of the file")
         return self
 
 

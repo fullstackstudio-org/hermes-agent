@@ -449,9 +449,10 @@ for `end` it MUST NOT present the header's line numbers as the place where the c
 is shown with its header as it is; its line numbers are the agent's and the gateway does not vouch for them.
 
 The gateway builds a hunk without a single context line (a space-marked line) only when it starts at line 0 (a new
-file or an insertion at the top) or at line 1 with a non-empty old side (the whole file replaced or removed): `git
-apply` puts any other hunk without context at the END of the file, not at the line the header names, so the person
-would see one place and the change would land elsewhere. The agent includes unchanged lines around a change (`git
+file) or at line 1 with a non-empty old side (the whole file replaced or removed): `git apply` puts any other hunk
+without context at the END of the file, not at the line the header names, so the person would see one place and the
+change would land elsewhere. An insertion at the top of an existing file is `@@ -1,N +1,N+1 @@` with context lines;
+`@@ -0,0 +1 @@` on a file that is not empty is refused by `git apply`. The agent includes unchanged lines around a change (`git
 diff -U3`, never `-U0`). A new file's hunks hold only `+` lines and a deleted file's only `-` lines.
 
 The gateway reads the agent's unified diff itself (at most 64 KiB, at most 200 hunks, at most 400 lines in a hunk)

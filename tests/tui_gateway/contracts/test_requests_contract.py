@@ -482,3 +482,14 @@ def test_a_hunk_anchor_is_start_end_or_both(anchor, ok):
     hunk = {**_hunk(), "anchor": anchor}
     assert _parses(model, _diff_params([hunk])) is ok
     assert _parses(model, _diff_params([_hunk()])), "the anchor is optional"
+
+
+def test_only_the_last_hunk_can_be_anchored_at_the_end():
+    model = SERVER_REQUESTS["review.diff"].params
+    first, last = _hunk("h1"), _hunk("h2")
+    for anchor in ("end", "both"):
+        assert not _parses(model, _diff_params([{**first, "anchor": anchor}, last])), anchor
+        assert _parses(model, _diff_params([first, {**last, "anchor": anchor}])), anchor
+    assert _parses(model, _diff_params([{**first, "anchor": "start"}, last]))
+    assert _parses(model, _diff_params([{**first, "anchor": "start"}, {**last, "anchor": "both"}]))
+    assert _parses(model, _diff_params([{**first, "anchor": "end"}])), "a single hunk is the last one"

@@ -537,6 +537,7 @@ def test_the_line_bound_is_inclusive_and_does_not_lean_on_the_detail_bound():
     "ᅠ",  # Hangul jungseong filler
     "ﾠ",  # halfwidth Hangul filler
     "\U0001d159",  # musical symbol null notehead
+    "\U00016fe4",  # Khitan small script filler (a combining mark)
 ])
 def test_blank_looking_characters_are_refused_in_a_verbatim_detail(blank):
     from tui_gateway import confirm
@@ -551,7 +552,7 @@ def test_blank_looking_characters_are_refused_in_a_verbatim_detail(blank):
 
 @pytest.mark.parametrize("detail", PADDED + LEGIT_MULTILINE + VERBATIM + [
     _interior(16), _interior(17), _indent(32), _indent(33), _blank_lines(3), _blank_lines(4),
-    "a⠀b", "a\U0001d159b", "x" * 2000, "ls\n\n\n\n", "ls \n", "\n\n\nls", "    ls",
+    "a⠀b", "a\U0001d159b", "a\U00016fe4b", "x" * 2000, "ls\n\n\n\n", "ls \n", "\n\n\nls", "    ls",
 ])
 def test_the_policy_precheck_and_the_gateway_agree(detail):
     """The policy's own checks exist to give the agent a precise reason; the gateway's ``verbatim_problem``

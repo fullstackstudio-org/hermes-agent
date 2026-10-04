@@ -274,7 +274,7 @@ def _bounds() -> tuple[int, int]:
 
 # Characters a ``confirm`` text drops or rewrites (``tui_gateway.request_text.clean_text``) or that read as something
 # else than what the shell gets: what the person sees would not be what runs.
-_INVISIBLE_LETTERS = frozenset({"ᅟ", "ᅠ", "ㅤ", "ﾠ", "⠀", "\U0001d159"})
+_INVISIBLE_LETTERS = frozenset({"ᅟ", "ᅠ", "ㅤ", "ﾠ", "⠀", "\U0001d159", "\U00016fe4"})
 _MAX_COMBINING_MARKS = 4
 # The layout bounds of a verbatim detail (``tui_gateway.request_text.MAX_SPACE_RUN`` and the rest, which say
 # why): spacing beyond them could park part of the detail outside what the person sees.
@@ -305,8 +305,8 @@ def hidden_characters(text: str) -> bool:
     marks = 0
     for ch in text:
         category = unicodedata.category(ch)
-        if category == "Cn" or _default_ignorable(ch):
-            return True
+        if category == "Cn" or _default_ignorable(ch) or ch in _INVISIBLE_LETTERS:
+            return True   # the invisible letters first: U+16FE4 is a combining mark, which the next branch would count
         if category in ("Mn", "Me"):
             marks += 1
             if marks > _MAX_COMBINING_MARKS:

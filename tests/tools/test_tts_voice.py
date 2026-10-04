@@ -16,16 +16,31 @@ import yaml
 from tools import tts_voice
 from tools.tts_voice import VoiceSelection, VoiceSelectionError, resolve_voice_selection
 
+_REAL_FETCH_EDGE_VOICES = tts_voice._fetch_edge_voices
+_REAL_FETCH_ELEVENLABS_IDS = tts_voice._fetch_elevenlabs_voice_ids
+
+
+def _settle(timeout=3.0):
+    """Wait for the Edge list's background refresh to finish (it holds the single-flight slot)."""
+    import time
+    end = time.monotonic() + timeout
+    while tts_voice._edge_inflight is not None and time.monotonic() < end:
+        time.sleep(0.01)
+
 
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     for key in ("ELEVENLABS_API_KEY", "OPENAI_API_KEY", "HERMES_SESSION_PLATFORM"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(tts_voice, "_edge_cache", {"at": 0.0, "voices": None, "failed_at": 0.0})
+    monkeypatch.setattr(tts_voice, "_edge_inflight", None)
     monkeypatch.setattr(tts_voice, "_el_cache", {})
+    monkeypatch.setattr(tts_voice, "_el_failed", {})
     # Never reach the network from a unit test unless the test installs its own fetcher.
     monkeypatch.setattr(tts_voice, "_fetch_edge_voices", lambda: pytest.fail("edge list fetched"))
     monkeypatch.setattr(tts_voice, "_fetch_elevenlabs_voice_ids", lambda key, base: pytest.fail("el list fetched"))
+    yield
+    _settle()
 
 
 EDGE_RAW = [
@@ -41,7 +56,9 @@ EDGE_RAW = [
 
 
 def _edge_list(monkeypatch):
+    """Edge's list is served by a fetch; ``voice-config`` never waits for a cold one, so warm it."""
     monkeypatch.setattr(tts_voice, "_fetch_edge_voices", lambda: EDGE_RAW)
+    assert tts_voice.edge_voices() is not None
 
 
 # --------------------------------------------------------------------------- validation
@@ -149,6 +166,7 @@ class TestEdge:
 
     def test_list_failure_is_reported_not_hidden(self, monkeypatch):
         monkeypatch.setattr(tts_voice, "_fetch_edge_voices", lambda: (_ for _ in ()).throw(OSError("x")))
+        assert tts_voice.edge_voices() is None
         caps = tts_voice.voice_capabilities({}, "edge")
         assert caps["voices"] == [] and caps["voices_error"] == "unavailable"
 
@@ -186,6 +204,120 @@ class TestEdge:
         assert call.kwargs["rate"] == "+20%" and call.kwargs["pitch"] == "-10Hz"
         call = self._synthesize(tmp_path, VoiceSelection(rate=-10), {"provider": "edge", "speed": 1.5})
         assert call.kwargs["rate"] == "+40%"  # speed 1.5 = +50%, hint -10
+
+
+class TestEdgeListResilience:
+    """The Edge list sits on GET voice-config and POST speak: it must never hold either for long."""
+
+    def _hung_fetcher(self, monkeypatch):
+        import threading
+        release, calls = threading.Event(), []
+
+        def fetch():
+            calls.append(1)
+            release.wait(10)
+            return EDGE_RAW
+        monkeypatch.setattr(tts_voice, "_fetch_edge_voices", fetch)
+        return release, calls
+
+    def test_the_fetch_has_a_hard_deadline_of_its_own(self, monkeypatch):
+        import time
+
+        async def hang():
+            await asyncio.sleep(30)
+
+        edge = MagicMock()
+        edge.list_voices = hang
+        monkeypatch.setattr("tools.tts_tool._import_edge_tts", lambda: edge)
+        monkeypatch.setattr(tts_voice, "EDGE_FETCH_DEADLINE_SECONDS", 0.2)
+        started = time.monotonic()
+        with pytest.raises(asyncio.TimeoutError):
+            _REAL_FETCH_EDGE_VOICES()
+        assert time.monotonic() - started < 2
+
+    def test_a_timed_out_fetch_is_a_negative_answer_and_not_retried_for_a_minute(self, monkeypatch):
+        import time
+        calls = []
+
+        async def hang():
+            calls.append(1)
+            await asyncio.sleep(30)
+
+        edge = MagicMock()
+        edge.list_voices = hang
+        monkeypatch.setattr("tools.tts_tool._import_edge_tts", lambda: edge)
+        monkeypatch.setattr(tts_voice, "_fetch_edge_voices", _REAL_FETCH_EDGE_VOICES)
+        monkeypatch.setattr(tts_voice, "EDGE_FETCH_DEADLINE_SECONDS", 0.2)
+        monkeypatch.setattr(tts_voice, "EDGE_WAIT_SECONDS", 3.0)
+        started = time.monotonic()
+        assert tts_voice.edge_voice_list() == (None, "unavailable")
+        assert time.monotonic() - started < 2.5
+        assert tts_voice.edge_voice_list() == (None, "unavailable")
+        assert tts_voice.edge_voice_list(wait=0) == (None, "unavailable")
+        assert len(calls) == 1
+
+    def test_voice_config_does_not_wait_for_a_cold_cache(self, monkeypatch):
+        import time
+        release, calls = self._hung_fetcher(monkeypatch)
+        started = time.monotonic()
+        caps = tts_voice.voice_capabilities({}, "edge")
+        again = tts_voice.voice_capabilities({}, "edge")
+        assert time.monotonic() - started < 1
+        assert caps["voices"] == [] and caps["voices_error"] == "loading"
+        assert again["voices_error"] == "loading"
+        release.set()
+        _settle()
+        assert len(calls) == 1  # both answers shared one fetch
+        ready = tts_voice.voice_capabilities({}, "edge")
+        assert len(ready["voices"]) == 4 and "voices_error" not in ready
+
+    def test_speak_waits_up_to_the_deadline_then_passes_the_voice_through(self, monkeypatch):
+        import time
+        release, _ = self._hung_fetcher(monkeypatch)
+        monkeypatch.setattr(tts_voice, "EDGE_WAIT_SECONDS", 0.3)
+        started = time.monotonic()
+        selection = resolve_voice_selection({}, "edge", "nl-NL-NoSuchNeural")
+        assert selection.voice == "nl-NL-NoSuchNeural"  # not validated: the list never arrived
+        assert time.monotonic() - started < 2
+        release.set()
+
+    def test_one_fetch_at_a_time_and_every_caller_gets_the_list(self, monkeypatch):
+        import threading
+        import time
+        calls = []
+
+        def slow():
+            calls.append(1)
+            time.sleep(0.3)
+            return EDGE_RAW
+        monkeypatch.setattr(tts_voice, "_fetch_edge_voices", slow)
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(tts_voice.edge_voices())) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(5)
+        assert len(calls) == 1
+        assert len(results) == 8 and all(r is not None and len(r) == 4 for r in results)
+
+    def test_an_expired_list_is_served_while_it_refreshes(self, monkeypatch):
+        _edge_list(monkeypatch)
+        monkeypatch.setitem(tts_voice._edge_cache, "at", tts_voice._edge_cache["at"] - tts_voice._LIST_TTL_SECONDS - 1)
+        release, calls = self._hung_fetcher(monkeypatch)
+        voices, state = tts_voice.edge_voice_list()  # does not wait for the refresh
+        assert state == "ready" and len(voices) == 4
+        release.set()
+        _settle()
+        assert len(calls) == 1
+
+    def test_a_failed_refresh_keeps_the_last_good_list(self, monkeypatch):
+        _edge_list(monkeypatch)
+        monkeypatch.setitem(tts_voice._edge_cache, "at", tts_voice._edge_cache["at"] - tts_voice._LIST_TTL_SECONDS - 1)
+        monkeypatch.setattr(tts_voice, "_fetch_edge_voices", lambda: (_ for _ in ()).throw(OSError("down")))
+        assert tts_voice.edge_voice_list()[1] == "ready"
+        _settle()
+        voices, state = tts_voice.edge_voice_list()
+        assert state == "ready" and len(voices) == 4
 
 
 class TestProsodyBounds:
@@ -258,6 +390,92 @@ class TestElevenLabs:
         monkeypatch.setattr(tts_voice, "_fetch_elevenlabs_voice_ids", lambda k, b: (_ for _ in ()).throw(OSError("x")))
         assert resolve_voice_selection({}, "elevenlabs", "AnythingGoes123").voice == "AnythingGoes123"
         monkeypatch.delenv("ELEVENLABS_API_KEY")
+        assert resolve_voice_selection({}, "elevenlabs", "AnythingGoes123").voice == "AnythingGoes123"
+
+    @pytest.mark.parametrize("configured,root", [
+        (None, "https://api.elevenlabs.io/v1"),
+        ("", "https://api.elevenlabs.io/v1"),
+        ("https://proxy.example", "https://proxy.example/v1"),
+        ("https://proxy.example/", "https://proxy.example/v1"),
+        ("https://proxy.example/v1", "https://proxy.example/v1"),
+        ("https://proxy.example/v1/", "https://proxy.example/v1"),
+        ("https://proxy.example/eleven", "https://proxy.example/eleven/v1"),
+    ])
+    def test_list_url_follows_base_url_with_or_without_v1(self, monkeypatch, configured, root):
+        calls = self._ids(monkeypatch)
+        config = {"elevenlabs": {"base_url": configured}} if configured is not None else {}
+        assert tts_voice.elevenlabs_voice_ids(config) == {EL_VOICE, EL_OTHER}
+        assert calls == [("sk-el-test", root)]
+
+    def test_list_url_is_voices_under_the_root(self, monkeypatch):
+        monkeypatch.setattr(tts_voice, "_fetch_elevenlabs_voice_ids", _REAL_FETCH_ELEVENLABS_IDS)
+        seen = []
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps({"voices": [{"voice_id": EL_VOICE}]}).encode()
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: seen.append(req.full_url) or Resp())
+        assert tts_voice._fetch_elevenlabs_voice_ids("k", tts_voice._elevenlabs_api_root("https://proxy.example")) == {EL_VOICE}
+        assert seen == ["https://proxy.example/v1/voices"]
+
+    def test_failed_list_is_remembered_for_a_minute(self, monkeypatch):
+        monkeypatch.setenv("ELEVENLABS_API_KEY", "sk-el-test")
+        calls = []
+        now = [1000.0]
+        monkeypatch.setattr(tts_voice.time, "monotonic", lambda: now[0])
+
+        def boom(key, base):
+            calls.append(1)
+            raise OSError("down")
+        monkeypatch.setattr(tts_voice, "_fetch_elevenlabs_voice_ids", boom)
+        assert tts_voice.elevenlabs_voice_ids({}) is None
+        assert tts_voice.elevenlabs_voice_ids({}) is None
+        assert resolve_voice_selection({}, "elevenlabs", "AnythingGoes123").voice == "AnythingGoes123"
+        assert len(calls) == 1
+        now[0] += tts_voice._LIST_FAILURE_TTL_SECONDS + 1
+        assert tts_voice.elevenlabs_voice_ids({}) is None
+        assert len(calls) == 2
+        monkeypatch.setattr(tts_voice, "_fetch_elevenlabs_voice_ids", lambda k, b: {EL_VOICE})
+        now[0] += tts_voice._LIST_FAILURE_TTL_SECONDS + 1
+        assert tts_voice.elevenlabs_voice_ids({}) == {EL_VOICE}
+        assert tts_voice._el_failed == {}
+
+    def test_another_accounts_failure_does_not_block_this_one(self, monkeypatch):
+        monkeypatch.setenv("ELEVENLABS_API_KEY", "sk-el-broken")
+
+        def fetch(key, base):
+            if key == "sk-el-broken":
+                raise OSError("down")
+            return {EL_VOICE}
+        monkeypatch.setattr(tts_voice, "_fetch_elevenlabs_voice_ids", fetch)
+        assert tts_voice.elevenlabs_voice_ids({}) is None
+        monkeypatch.setenv("ELEVENLABS_API_KEY", "sk-el-fine")
+        assert tts_voice.elevenlabs_voice_ids({}) == {EL_VOICE}
+
+    @pytest.mark.parametrize("body", [[], "text", 5, {"voices": "x"}, {"voices": {"a": 1}}, {}])
+    def test_a_body_that_is_not_a_voice_list_is_a_failure_not_a_crash(self, monkeypatch, body):
+        monkeypatch.setattr(tts_voice, "_fetch_elevenlabs_voice_ids", _REAL_FETCH_ELEVENLABS_IDS)
+        monkeypatch.setenv("ELEVENLABS_API_KEY", "sk-el-test")
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps(body).encode()
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: Resp())
+        assert tts_voice.elevenlabs_voice_ids({}) is None
         assert resolve_voice_selection({}, "elevenlabs", "AnythingGoes123").voice == "AnythingGoes123"
 
     def test_voice_selection_advertised_without_a_voice_list(self):
@@ -373,7 +591,7 @@ class TestPublicVoiceConfig:
         assert tts["voice_selection"] is True and tts["prosody"] is False
 
     def test_relay_reason_text_unchanged(self, voice_home, monkeypatch):
-        monkeypatch.setattr(tts_voice, "_fetch_edge_voices", lambda: EDGE_RAW)
+        _edge_list(monkeypatch)
         voice_home({"tts": {"provider": "edge"}})
         tts = _public()["tts"]
         assert tts["mode"] == "relay" and tts["reason"] == "provider 'edge' has no client wire"
@@ -381,7 +599,7 @@ class TestPublicVoiceConfig:
         assert {"id": "nl-NL-FennaNeural", "name": "Fenna", "language": "nl-NL"} in tts["voices"]
 
     def test_language_filter(self, voice_home, monkeypatch):
-        monkeypatch.setattr(tts_voice, "_fetch_edge_voices", lambda: EDGE_RAW)
+        _edge_list(monkeypatch)
         voice_home({"tts": {"provider": "edge"}})
         assert [v["id"] for v in _public("nl-BE")["tts"]["voices"]] == ["nl-BE-ArnaudNeural"]
 
@@ -405,6 +623,29 @@ class TestPublicVoiceConfig:
                        "voice": "v"}
 
 
+    @pytest.mark.parametrize("url,expected", [
+        ("https://user:pw@[2001:db8::1]:8443/v1?key=abc#f", "https://[2001:db8::1]:8443/v1"),
+        ("https://[::1]/v1?x=1", "https://[::1]/v1"),
+        ("https://u@host.example/v1", "https://host.example/v1"),
+        ("https://host.example:0/v1?x=1", "https://host.example:0/v1"),
+        ("https://host.example/v1", "https://host.example/v1"),  # nothing to strip: unchanged
+        ("https://host.example:notaport/v1?x=1", ""),  # unparseable: dropped, not passed on
+    ])
+    def test_url_secrets_keep_ipv6_brackets(self, url, expected):
+        from tools.voice_client_config import _strip_url_secrets
+        assert _strip_url_secrets(url) == expected
+
+    def test_every_url_field_is_scrubbed_whatever_its_name_or_case(self):
+        from tools.voice_client_config import _without_secrets
+        dirty = "https://user:pw@host.example/v1?sig=abc"
+        out = _without_secrets({
+            "base_url": dirty, "wss_url": dirty, "BaseURL": dirty, "Proxy_Url": dirty, "url": dirty,
+            "nested": {"endpoint_url": dirty}, "model": "m", "note": "not a url field?x=1"})
+        clean = "https://host.example/v1"
+        assert out == {"base_url": clean, "wss_url": clean, "BaseURL": clean, "Proxy_Url": clean, "url": clean,
+                       "nested": {"endpoint_url": clean}, "model": "m", "note": "not a url field?x=1"}
+
+
 # --------------------------------------------------------------------------- preview fetch guard
 class _FakeResponse:
     def __init__(self, body=b"ID3sample", content_type="audio/mpeg"):
@@ -413,7 +654,7 @@ class _FakeResponse:
         self.headers = email.message.Message()
         self.headers["Content-Type"] = content_type
 
-    def read(self, n=-1):
+    def read1(self, n=-1):
         chunk = self._body[self._pos:self._pos + (n if n and n > 0 else len(self._body))]
         self._pos += len(chunk)
         return chunk
@@ -540,3 +781,114 @@ class TestPreviewCache:
         assert len(tts_voice._preview_cache) == 50
         assert tts_voice.preview_cache_get("k", "v0") is not None
         assert tts_voice.preview_cache_get("k", "v1") is None  # the least recently used went
+
+
+class TestPreviewDeadline:
+    """The limit is on the whole download: a real server that dribbles bytes or stalls cannot outlast it."""
+
+    @pytest.fixture()
+    def slow_server(self, monkeypatch):
+        import http.server
+        import threading
+        import time
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.end_headers()
+                self.wfile.flush()
+                try:
+                    if self.path == "/stall":
+                        time.sleep(8)
+                        return
+                    for _ in range(80):  # 16 bytes every 100 ms: eight seconds of a slow trickle
+                        self.wfile.write(b"ID3audio-bytes-16")
+                        self.wfile.flush()
+                        time.sleep(0.1)
+                except OSError:
+                    pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        # The host allowlist is https-only and never lets a loopback address through; this test is
+        # about the clock, so it steps over that one check and nothing else.
+        monkeypatch.setattr(tts_voice, "check_preview_url", lambda url: None)
+        try:
+            yield f"http://127.0.0.1:{server.server_address[1]}"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_trickling_server_is_cut_off_at_the_limit(self, slow_server):
+        import time
+        started = time.monotonic()
+        with pytest.raises(tts_voice.PreviewError, match="too long"):
+            tts_voice.fetch_preview(f"{slow_server}/trickle", timeout=1)
+        assert 0.8 < time.monotonic() - started < 6
+
+    def test_a_stalled_server_is_cut_off_at_the_limit(self, slow_server):
+        import time
+        started = time.monotonic()
+        with pytest.raises(tts_voice.PreviewError):
+            tts_voice.fetch_preview(f"{slow_server}/stall", timeout=1)
+        assert time.monotonic() - started < 6
+
+    def test_a_fast_server_still_works(self, slow_server, monkeypatch):
+        import http.server
+        import threading
+
+        class Fast(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.send_header("Content-Length", "9")
+                self.end_headers()
+                self.wfile.write(b"ID3sample")
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Fast)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            body = tts_voice.fetch_preview(f"http://127.0.0.1:{server.server_address[1]}/x", timeout=2)
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert body == (b"ID3sample", "audio/mpeg")
+
+
+class TestPreviewCacheBudget:
+    @pytest.fixture(autouse=True)
+    def _empty(self, monkeypatch):
+        monkeypatch.setattr(tts_voice, "_preview_cache", tts_voice.OrderedDict())
+        monkeypatch.setattr(tts_voice, "PREVIEW_CACHE_MAX_BYTES", 100)
+
+    def test_oldest_go_first_past_the_byte_budget(self):
+        for i in range(3):
+            tts_voice.preview_cache_put("k", f"v{i}", (b"x" * 40, "audio/mpeg"))
+        assert tts_voice.preview_cache_get("k", "v0") is None
+        assert tts_voice.preview_cache_get("k", "v1") is not None and tts_voice.preview_cache_get("k", "v2") is not None
+        assert sum(len(e[1][0]) for e in tts_voice._preview_cache.values()) <= 100
+
+    def test_a_body_over_the_whole_budget_is_not_kept_and_evicts_nothing(self):
+        tts_voice.preview_cache_put("k", "v0", (b"x" * 40, "audio/mpeg"))
+        tts_voice.preview_cache_put("k", "big", (b"x" * 101, "audio/mpeg"))
+        assert tts_voice.preview_cache_get("k", "big") is None
+        assert tts_voice.preview_cache_get("k", "v0") is not None
+
+    def test_replacing_an_entry_does_not_double_count_it(self):
+        for _ in range(5):
+            tts_voice.preview_cache_put("k", "v0", (b"x" * 60, "audio/mpeg"))
+        assert tts_voice.preview_cache_get("k", "v0") is not None and len(tts_voice._preview_cache) == 1
+
+    def test_the_real_budget_is_fifty_megabytes(self, monkeypatch):
+        monkeypatch.undo()
+        assert tts_voice.PREVIEW_CACHE_MAX_BYTES == 50 * 1024 * 1024

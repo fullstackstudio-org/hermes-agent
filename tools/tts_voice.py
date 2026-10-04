@@ -25,6 +25,7 @@ import json
 import logging
 import math
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -99,16 +100,49 @@ def _section(config: Any, name: str) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-# --- Edge voice list (cached) ---
+# --- Edge voice list (cached, single-flight, never on the request path for long) ---
+# The list comes from Microsoft's service, which can hang. Three guards: the fetch itself has a hard
+# deadline; only one fetch runs at a time and every caller shares it; and a request that has to wait
+# for a cold cache waits at most a little longer than that deadline (``GET voice-config`` does not wait).
+EDGE_FETCH_DEADLINE_SECONDS = 5.0
+EDGE_WAIT_SECONDS = EDGE_FETCH_DEADLINE_SECONDS + 0.5
+
 _edge_lock = threading.Lock()
 _edge_cache: Dict[str, Any] = {"at": 0.0, "voices": None, "failed_at": 0.0}
+_edge_inflight: Optional[threading.Event] = None
 
 
 def _fetch_edge_voices() -> List[Dict[str, Any]]:
-    """The raw ``edge_tts.list_voices()`` result. Runs in a worker thread, so a fresh loop is fine."""
+    """The raw ``edge_tts.list_voices()`` result, within :data:`EDGE_FETCH_DEADLINE_SECONDS`.
+
+    Runs in the refresh thread, so a loop of its own is fine. The loop is closed, not shut down:
+    ``asyncio.run`` would wait up to five minutes for a resolver thread that is stuck on DNS.
+    """
     from tools import tts_tool
     edge_tts = tts_tool._import_edge_tts()
-    return list(asyncio.run(edge_tts.list_voices()))
+    loop = asyncio.new_event_loop()
+    try:
+        return list(loop.run_until_complete(
+            asyncio.wait_for(edge_tts.list_voices(), timeout=EDGE_FETCH_DEADLINE_SECONDS)))
+    finally:
+        loop.close()
+
+
+def _refresh_edge_voices(done: threading.Event) -> None:
+    global _edge_inflight
+    try:
+        fetched = [v for v in (_normalize_edge_voice(r) for r in _fetch_edge_voices()) if v]
+        fetched.sort(key=lambda v: (v["language"].lower(), v["name"].lower(), v["id"]))
+        with _edge_lock:
+            _edge_cache.update(at=time.monotonic(), voices=fetched, failed_at=0.0)
+    except Exception as exc:  # the finally below frees the single-flight slot whatever happens
+        logger.warning("Edge voice list unavailable: %s", str(exc) or type(exc).__name__)
+        with _edge_lock:
+            _edge_cache["failed_at"] = time.monotonic()
+    finally:
+        with _edge_lock:
+            _edge_inflight = None
+        done.set()
 
 
 _FRIENDLY_RE = re.compile(r"^Microsoft\s+(.+?)\s+Online\s+\(Natural\)", re.IGNORECASE)
@@ -128,30 +162,49 @@ def _normalize_edge_voice(raw: Any) -> Optional[Dict[str, str]]:
     }
 
 
-def edge_voices() -> Optional[List[Dict[str, str]]]:
-    """Edge's voices as ``[{id, name, language}]``, cached; ``None`` when the list is unavailable.
+def edge_voice_list(wait: Optional[float] = None) -> tuple:
+    """Edge's voices as ``([{id, name, language}], state)``; the list is ``None`` unless *state* is ``"ready"``.
 
-    A failed fetch is remembered for a minute so a dashboard polling ``voice-config`` does not retry
-    the network on every request, and the last good list outlives a later failure.
+    ``"ready"``: a list (fresh, or the last good one while a refresh runs in the background).
+    ``"loading"``: nothing cached yet and a fetch is still running. ``"unavailable"``: nothing cached
+    and the last fetch failed (remembered for a minute, so a dashboard polling ``voice-config`` does
+    not hit the network on every request; the last good list outlives a later failure).
+
+    There is one fetch at a time, in a background thread, with a hard deadline of its own. *wait* is
+    how long this caller waits for a cold cache: ``None`` = :data:`EDGE_WAIT_SECONDS`, ``0`` = not at
+    all (the fetch is started and the answer is ``"loading"``).
     """
+    global _edge_inflight
+    if wait is None:
+        wait = EDGE_WAIT_SECONDS
     now = time.monotonic()
     with _edge_lock:
         voices = _edge_cache["voices"]
         if voices is not None and now - _edge_cache["at"] < _LIST_TTL_SECONDS:
-            return voices
-        if now - _edge_cache["failed_at"] < _LIST_FAILURE_TTL_SECONDS:
-            return voices
-    try:
-        fetched = [v for v in (_normalize_edge_voice(r) for r in _fetch_edge_voices()) if v]
-    except Exception as exc:
-        logger.warning("Edge voice list unavailable: %s", exc)
-        with _edge_lock:
-            _edge_cache["failed_at"] = time.monotonic()
-            return _edge_cache["voices"]
-    fetched.sort(key=lambda v: (v["language"].lower(), v["name"].lower(), v["id"]))
+            return voices, "ready"
+        failed_at = _edge_cache["failed_at"]
+        if failed_at > 0.0 and now - failed_at < _LIST_FAILURE_TTL_SECONDS:
+            return (voices, "ready") if voices is not None else (None, "unavailable")
+        if _edge_inflight is None:
+            _edge_inflight = done = threading.Event()
+            threading.Thread(target=_refresh_edge_voices, args=(done,), daemon=True, name="edge-voice-list").start()
+        done = _edge_inflight
+        if voices is not None:
+            return voices, "ready"  # stale, served while the refresh runs
+    if wait > 0:
+        done.wait(wait)
     with _edge_lock:
-        _edge_cache.update(at=time.monotonic(), voices=fetched, failed_at=0.0)
-    return fetched
+        voices = _edge_cache["voices"]
+        if voices is not None:
+            return voices, "ready"
+        failed_at = _edge_cache["failed_at"]
+        failed = failed_at > 0.0 and time.monotonic() - failed_at < _LIST_FAILURE_TTL_SECONDS
+        return None, ("unavailable" if failed else "loading")
+
+
+def edge_voices(wait: Optional[float] = None) -> Optional[List[Dict[str, str]]]:
+    """Edge's voices (see :func:`edge_voice_list`), or ``None`` when they are not available (yet)."""
+    return edge_voice_list(wait)[0]
 
 
 def filter_voices_by_language(voices: List[Dict[str, str]], language: Optional[str]) -> List[Dict[str, str]]:
@@ -166,13 +219,23 @@ def filter_voices_by_language(voices: List[Dict[str, str]], language: Optional[s
 # --- ElevenLabs voice list (cached per account) ---
 _el_lock = threading.Lock()
 _el_cache: Dict[str, tuple] = {}
+_el_failed: Dict[str, float] = {}  # cache key -> when the last list attempt failed
+
+
+def _elevenlabs_api_root(base_url: Optional[str]) -> str:
+    """The REST root (ending in ``/v1``) for ``tts.elevenlabs.base_url``.
+
+    The SDK path takes the origin (``https://proxy.example``) and adds ``/v1`` itself; a value that
+    already ends in ``/v1`` is taken as the root. Both reach the same ``/v1/voices``.
+    """
+    base = str(base_url or "").strip().rstrip("/") or "https://api.elevenlabs.io"
+    return base if base.lower().endswith("/v1") else f"{base}/v1"
 
 
 def _elevenlabs_endpoint(tts_config: Dict[str, Any]) -> tuple:
     from tools import tts_tool
     api_key = tts_tool._resolve_provider_key("ELEVENLABS_API_KEY", "elevenlabs")
-    base_url = str(_section(tts_config, "elevenlabs").get("base_url") or "https://api.elevenlabs.io/v1").rstrip("/")
-    return api_key, base_url
+    return api_key, _elevenlabs_api_root(_section(tts_config, "elevenlabs").get("base_url"))
 
 
 def _fetch_elevenlabs_voice_ids(api_key: str, base_url: str) -> Set[str]:
@@ -180,7 +243,10 @@ def _fetch_elevenlabs_voice_ids(api_key: str, base_url: str) -> Set[str]:
         f"{base_url}/voices", headers={"Accept": "application/json", "xi-api-key": api_key})
     with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 - fixed https endpoint
         payload = json.loads(response.read().decode("utf-8"))
-    ids = {str(v.get("voice_id") or "").strip() for v in (payload.get("voices") or []) if isinstance(v, dict)}
+    voices = payload.get("voices") if isinstance(payload, dict) else None
+    if not isinstance(voices, list):
+        raise ValueError("ElevenLabs answered with something that is not a voice list")
+    ids = {str(v.get("voice_id") or "").strip() for v in voices if isinstance(v, dict)}
     ids.discard("")
     return ids
 
@@ -188,8 +254,9 @@ def _fetch_elevenlabs_voice_ids(api_key: str, base_url: str) -> Set[str]:
 def elevenlabs_voice_ids(tts_config: Dict[str, Any]) -> Optional[Set[str]]:
     """The account's voice ids (cached 5 minutes), or ``None`` when they cannot be listed.
 
-    Must run under the requesting profile's scope: the key is that profile's. The cache is keyed by a
-    hash of the key, never the key itself, and holds ids only.
+    A failed listing is remembered for a minute (a rejected key or a down service is not asked again
+    on every speak). Must run under the requesting profile's scope: the key is that profile's. The
+    cache is keyed by a hash of the key, never the key itself, and holds ids only.
     """
     try:
         api_key, base_url = _elevenlabs_endpoint(tts_config)
@@ -204,13 +271,19 @@ def elevenlabs_voice_ids(tts_config: Dict[str, Any]) -> Optional[Set[str]]:
         hit = _el_cache.get(cache_key)
         if hit and now - hit[0] < _ELEVENLABS_LIST_TTL_SECONDS:
             return hit[1]
+        failed_at = _el_failed.get(cache_key)
+        if failed_at is not None and now - failed_at < _LIST_FAILURE_TTL_SECONDS:
+            return None
     try:
         ids = _fetch_elevenlabs_voice_ids(api_key, base_url)
     except Exception as exc:
         logger.warning("ElevenLabs voice list unavailable: %s", exc)
+        with _el_lock:
+            _el_failed[cache_key] = time.monotonic()
         return None
     with _el_lock:
         _el_cache[cache_key] = (time.monotonic(), ids)
+        _el_failed.pop(cache_key, None)
     return ids
 
 
@@ -219,6 +292,7 @@ PREVIEW_MAX_BYTES = 5 * 1024 * 1024
 PREVIEW_TIMEOUT_SECONDS = 10
 PREVIEW_CACHE_TTL_SECONDS = 3600
 PREVIEW_CACHE_MAX_ENTRIES = 50
+PREVIEW_CACHE_MAX_BYTES = 50 * 1024 * 1024
 # Where ElevenLabs keeps the sample files: ``preview_url`` points at storage.googleapis.com
 # (``eleven-public-prod/...``) for the premade voices and at an ``elevenlabs.io`` host for others.
 # A ``preview_url`` is data from a third party, so the fetch goes to these hosts and nowhere else.
@@ -251,30 +325,47 @@ def check_preview_url(url: str) -> None:
         raise PreviewError(f"preview host {host!r} is not allowed")
 
 
-def fetch_preview(url: str) -> tuple:
+def _response_socket(response: Any) -> Any:
+    """The socket under an ``http.client`` response (``response.fp`` is a buffered reader over a
+    ``SocketIO`` that holds it), or ``None`` for a response that is not backed by one."""
+    return getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+
+
+def fetch_preview(url: str, timeout: float = PREVIEW_TIMEOUT_SECONDS) -> tuple:
     """Download one preview → ``(bytes, content_type)``. Blocking (worker thread).
 
     https and the host allowlist are checked first, redirects are not followed, the body is read
-    in chunks and refused past :data:`PREVIEW_MAX_BYTES`, and the whole download has to finish
-    within :data:`PREVIEW_TIMEOUT_SECONDS`. A non-audio content type is sent on as ``audio/mpeg``.
+    in chunks and refused past :data:`PREVIEW_MAX_BYTES`, and the body has to arrive within *timeout*
+    seconds (default :data:`PREVIEW_TIMEOUT_SECONDS`) of the start, counted as a whole: each read
+    returns what has arrived (``read1``) and the socket's timeout is cut to the time that is left
+    before it, so a server that dribbles bytes or stalls cannot outlast the limit. (Connecting and
+    the response headers are bounded by *timeout* per operation, not as a whole.) A non-audio content
+    type is sent on as ``audio/mpeg``.
     """
     check_preview_url(url)
     opener = urllib.request.build_opener(_NoRedirect)
     request = urllib.request.Request(url, headers={"Accept": "audio/*"})
-    deadline = time.monotonic() + PREVIEW_TIMEOUT_SECONDS
+    deadline = time.monotonic() + timeout
     try:
-        with opener.open(request, timeout=PREVIEW_TIMEOUT_SECONDS) as response:
+        with opener.open(request, timeout=timeout) as response:
             content_type = response.headers.get_content_type() if response.headers else ""
+            sock = _response_socket(response)
             body = bytearray()
-            while True:
-                chunk = response.read(64 * 1024)
+            while not getattr(response, "isclosed", lambda: False)():  # closed = the body was complete
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PreviewError("preview download took too long")
+                if sock is not None:
+                    sock.settimeout(remaining)
+                try:
+                    chunk = response.read1(64 * 1024)
+                except (TimeoutError, socket.timeout):  # the socket ran out of the time that was left
+                    raise PreviewError("preview download took too long") from None
                 if not chunk:
                     break
                 body.extend(chunk)
                 if len(body) > PREVIEW_MAX_BYTES:
                     raise PreviewError("preview is larger than the limit")
-                if time.monotonic() > deadline:
-                    raise PreviewError("preview download took too long")
     except PreviewError:
         raise
     except Exception as exc:  # HTTPError (incl. a refused redirect), timeouts, DNS, TLS
@@ -307,11 +398,19 @@ def preview_cache_get(api_key: str, voice_id: str) -> Optional[tuple]:
 
 
 def preview_cache_put(api_key: str, voice_id: str, value: tuple) -> None:
+    """Remember a preview; the oldest go first past :data:`PREVIEW_CACHE_MAX_ENTRIES` entries or
+    :data:`PREVIEW_CACHE_MAX_BYTES` bytes in all (a body larger than the whole budget is not kept)."""
+    size = len(value[0])
+    if size > PREVIEW_CACHE_MAX_BYTES:
+        return
+    key = _preview_key(api_key, voice_id)
     with _preview_lock:
-        _preview_cache[_preview_key(api_key, voice_id)] = (time.monotonic(), value)
-        _preview_cache.move_to_end(_preview_key(api_key, voice_id))
-        while len(_preview_cache) > PREVIEW_CACHE_MAX_ENTRIES:
-            _preview_cache.popitem(last=False)
+        _preview_cache.pop(key, None)
+        _preview_cache[key] = (time.monotonic(), value)
+        total = sum(len(entry[1][0]) for entry in _preview_cache.values())
+        while len(_preview_cache) > PREVIEW_CACHE_MAX_ENTRIES or total > PREVIEW_CACHE_MAX_BYTES:
+            _, (_, (evicted, _)) = _preview_cache.popitem(last=False)
+            total -= len(evicted)
 
 
 # --- Validation ---
@@ -450,10 +549,11 @@ def voice_capabilities(tts_config: Dict[str, Any], provider: str, language: Opti
     elif selectable and provider == "edge":
         caps["voice_preview"] = "speak"
     if provider == "edge" and selectable:
-        voices = edge_voices()
+        # Never waits: a cold cache starts the fetch and answers "loading" (the client asks again).
+        voices, state = edge_voice_list(wait=0)
         if voices is None:
             caps["voices"] = []
-            caps["voices_error"] = "unavailable"
+            caps["voices_error"] = state
         else:
             caps["voices"] = filter_voices_by_language(voices, language)
     return caps

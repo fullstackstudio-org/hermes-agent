@@ -244,19 +244,32 @@ _SECRET_NAME_RE = re.compile(r"key|token|secret|password|passwd|authorization|cr
 
 
 def _strip_url_secrets(url: str) -> str:
-    """A base URL without userinfo, query and fragment (``https://user:pw@host/v1?key=...``)."""
-    parts = urlsplit(url)
+    """A base URL without userinfo, query and fragment (``https://user:pw@host/v1?key=...``).
+
+    An address that cannot be parsed (a bad port, say) is dropped rather than passed on as it came.
+    """
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return ""
     if not (parts.username or parts.password or parts.query or parts.fragment):
         return url
     host = parts.hostname or ""
-    if parts.port:
-        host = f"{host}:{parts.port}"
+    if ":" in host:  # an IPv6 literal: urlsplit hands it back without its brackets
+        host = f"[{host}]"
+    if port is not None:
+        host = f"{host}:{port}"
     return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def _is_url_field(name: Any) -> bool:
+    return str(name).lower().endswith("url")
 
 
 def _without_secrets(value: Any) -> Any:
     if isinstance(value, dict):
-        return {k: (_strip_url_secrets(v) if k == "base_url" and isinstance(v, str) else _without_secrets(v))
+        return {k: (_strip_url_secrets(v) if _is_url_field(k) and isinstance(v, str) else _without_secrets(v))
                 for k, v in value.items() if not _SECRET_NAME_RE.search(str(k))}
     if isinstance(value, list):
         return [_without_secrets(v) for v in value]

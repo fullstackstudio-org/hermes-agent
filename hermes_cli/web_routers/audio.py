@@ -152,7 +152,9 @@ async def get_client_voice_config(profile: Optional[str] = None, language: Optio
     client needs to choose a voice: ``voice_selection`` (a per-request ``voice`` works for the
     configured provider), ``prosody`` (``rate``/``pitch`` work, Edge only), ``voice`` (spoken when a
     request names none) and, for Edge, ``voices`` as ``[{id, name, language}]``, narrowed by an
-    optional ``?language=`` (``nl`` or ``nl-NL``).
+    optional ``?language=`` (``nl`` or ``nl-NL``). The Edge list is never waited for: with none cached
+    yet the fetch starts in the background and ``voices`` is ``[]`` with ``voices_error`` ``"loading"``
+    (``"unavailable"`` after a failed fetch). An unknown ``?profile=`` is a 404.
 
     Earlier versions returned the profile's STT/TTS API keys here so the desktop could call the
     providers directly; any authenticated client could read them. They are not served any more.
@@ -268,6 +270,11 @@ async def _fetch_elevenlabs_voices(api_key: str) -> Dict[str, Any]:
         if _voice_list_error_logged_once(str(exc)):
             _log.warning("ElevenLabs voice list failed: %s", exc)
         raise HTTPException(status_code=502, detail="Could not load ElevenLabs voices")
+    voices = payload.get("voices", []) if isinstance(payload, dict) else None
+    if not isinstance(voices, list):
+        if _voice_list_error_logged_once("not-a-voice-list"):
+            _log.warning("ElevenLabs voice list failed: the body is not a voice list")
+        raise HTTPException(status_code=502, detail="Could not load ElevenLabs voices")
     _voice_list_error_logged_once(None)  # success — re-arm logging for next failure
     return payload
 
@@ -316,6 +323,7 @@ async def get_elevenlabs_voice_preview(voice_id: str, profile: Optional[str] = N
     characters. 400 for a malformed id, 404 for no key / an unknown voice / a voice without a sample,
     502 when ElevenLabs or the sample host fails (or answers with something that is not a small
     audio file); see ``tools.tts_voice`` for the host allowlist, redirect, size and time limits.
+    ``?profile=`` picks the profile whose key and voice list are used (404 for an unknown profile).
     """
     from tools import tts_voice
 
@@ -348,7 +356,8 @@ async def get_elevenlabs_voice_preview(voice_id: str, profile: Optional[str] = N
         tts_voice.preview_cache_put(api_key, voice_id, cached)
 
     body, content_type = cached
-    return Response(content=body, media_type=content_type, headers={"Cache-Control": "private, max-age=3600"})
+    return Response(content=body, media_type=content_type, headers={
+        "Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"})
 
 
 @router.post("/api/audio/speak")
@@ -479,10 +488,17 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
                binary PCM frames, then ``{"type": "end"}``
       server → ``{"type": "fallback"}`` when the configured provider has no
                chunked API — the client uses the POST endpoint instead (with its ``voice``;
-               nothing is read from this socket after a fallback).
+               nothing is read from this socket after a fallback). Also the answer to a frame that
+               names a ``voice`` when the streamer is not ``tts.provider``'s own (``tts.streaming.provider``
+               pinned to another provider, or ``auto``): voice-config lists ``tts.provider``'s voices and
+               POST /speak speaks with it, so the voice is only honoured there.
       server → ``{"type": "error", "code": "...", "message": "..."}`` when a frame's ``voice``
                cannot be honoured (``invalid_voice``, ``unknown_voice``, ``voice_unsupported``);
-               the session ends there, nothing more is synthesized.
+               the session ends there, nothing more is synthesized. ``voice_failed`` is the same
+               frame for a voice the provider refused while synthesizing (a voice that could not be
+               checked against a list is passed through).
+      An unknown ``?profile=`` is not a 404 (the socket is already open): the answer is ``fallback``,
+      and POST /api/audio/speak then answers 404.
     """
     if not _ws_auth_ok(ws):
         await ws.close(code=4401)
@@ -541,13 +557,23 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
     session_voice: list = [None]
 
     def _switch_voice(voice: str):
-        """Validate *voice* for the streamer's provider and return a streamer that speaks it."""
+        """Validate *voice* and return a streamer that speaks it, or ``None`` = answer ``fallback``.
+
+        voice-config advertises the voices of ``tts.provider`` and POST /speak synthesizes with it. A
+        streamer of another provider (``tts.streaming.provider`` pinned elsewhere or ``auto``) is not
+        the one the client chose the voice from, so the client is sent to POST /speak instead.
+        """
         from tools import tts_streaming, tts_voice
         from tools.tts_tool import _get_provider
         with _config_profile_scope(profile):
-            name = tts_voice.streamer_provider_name(current[0], cfg, _get_provider(cfg))
+            configured = _get_provider(cfg)
+            name = tts_voice.streamer_provider_name(current[0], cfg, configured)
+            if name != configured:
+                return None
             selection = tts_voice.resolve_voice_selection(cfg, name, voice)
             switched = tts_streaming.resolve_streaming_provider(selection.apply(cfg, name)) if selection else None
+            if switched is not None and tts_voice.streamer_provider_name(switched, cfg, configured) != configured:
+                return None
         if switched is None:
             raise tts_voice.VoiceSelectionError(
                 "voice_unsupported", f"the configured streaming provider ({name}) cannot speak voice {voice!r}")
@@ -610,10 +636,16 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
                         loop.call_soon_threadsafe(chunks.put_nowait, chunk)
         except Exception as exc:
             _log.warning("speak-stream synthesis failed: %s", exc)
+            if session_voice[0] is not None and not stop.is_set():
+                # A voice that was passed through unchecked (no list to validate it against) can
+                # still be refused by the provider: say so, instead of ending the reply in silence.
+                loop.call_soon_threadsafe(chunks.put_nowait, {
+                    "type": "error", "code": "voice_failed",
+                    "message": "The provider could not speak that voice"})
         finally:
             loop.call_soon_threadsafe(chunks.put_nowait, None)
 
-    threading.Thread(target=_produce, daemon=True).start()
+    threading.Thread(target=_produce, daemon=True, name="speak-stream-producer").start()
 
     async def _pump_client():
         # Text frames feed synthesis; done ends the text; stop/disconnect
@@ -626,7 +658,13 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
                     voice = None  # blank = no voice named
                 if voice is not None and voice != session_voice[0]:
                     try:
-                        current[0] = await loop.run_in_executor(None, _switch_voice, voice)
+                        switched = await loop.run_in_executor(None, _switch_voice, voice)
+                        if switched is None:  # the streamer is not tts.provider's: POST /speak is
+                            stop.set()
+                            text_q.put(None)
+                            chunks.put_nowait({"type": "fallback"})
+                            return
+                        current[0] = switched
                         session_voice[0] = voice
                     except Exception as exc:
                         from tools.tts_voice import VoiceSelectionError
@@ -656,8 +694,9 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
             chunk = await chunks.get()
             if chunk is None:
                 break
-            if isinstance(chunk, dict):  # a voice the session cannot speak: report it and end
+            if isinstance(chunk, dict):  # a voice the session cannot speak, or a fallback: send it and end
                 await ws.send_json(chunk)
+                stop.set()
                 break
             await _send_start()
             await ws.send_bytes(chunk)

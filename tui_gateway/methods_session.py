@@ -438,6 +438,9 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Whole-session branch of a stored parent without routing its transcript through the client
     (a distinct method so an older gateway answers "unknown method" instead of an empty branch)."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "branch a chat")) is not None:
+        return refused
     return _create_session(rid, params, copy_parent_history=True)
 
 
@@ -1136,9 +1139,12 @@ def _title_read(session: dict, db, key: str) -> str:
 @method("session.title")
 @_with_db(5007, session_scoped=True)
 def _(rid, params: dict, session: dict, db) -> dict:
+    from tui_gateway.agent_guard import refusal as _agent_refusal
     key = session["session_key"]
     if "title" not in params:
         result = {"title": _title_read(session, db, key), "session_key": key}
+    elif (refused := _agent_refusal(rid, "rename a chat")) is not None:
+        return refused
     elif not (title := (params.get("title", "") or "").strip()):
         return _err(rid, 4021, "title required")
     else:
@@ -1169,6 +1175,9 @@ def _(rid, params: dict, session: dict, db) -> dict:
 def _(rid, params: dict) -> dict:
     """Set/clear ``hidden`` (leaves the default list, stays resumable by its owner) on a session + lineage:
     LIVE runtime id first (unpersisted drafts via ``pending_hidden``), then a stored id/key in the profile db."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "hide or unhide a chat")) is not None:
+        return refused
     hidden = is_truthy_value(params.get("hidden", True))
     # Quiet live lookup: a stored id that is not in memory is this method's expected second tier, not a
     # rejection — _sess_nowait would log "session-scoped RPC rejected … not in memory" for a request that is
@@ -1901,6 +1910,9 @@ def _(rid, params: dict, session: dict) -> dict:
 
 @_session_method("session.undo", live=True)
 def _(rid, params: dict, session: dict) -> dict:
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "undo a turn in a chat")) is not None:
+        return refused
     # Under a running turn the post-run write would clobber the undo — stop the reply first.
     busy = _err(rid, 4009, busy_message("undo"))
     if session.get("running"):
@@ -2030,6 +2042,9 @@ def _compress_live(rid, sid: str, session: dict, focus_topic: str) -> dict:
 @method("session.compress")
 @_profile_scoped
 def _(rid, params: dict) -> dict:
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "compress a chat")) is not None:
+        return refused
     session, err = _sess_nowait(params, rid)
     if err:
         return err
@@ -2195,12 +2210,18 @@ def _branch_live(rid, params: dict, session: dict, *, omit_messages: bool = Fals
 
 @_session_method("session.branch", live=True)
 def _(rid, params: dict, session: dict) -> dict:
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "branch a chat")) is not None:
+        return refused
     return _branch_live(rid, params, session)
 
 
 @_session_method("session.branch_whole", live=True)
 def _(rid, params: dict, session: dict) -> dict:
     """Whole-history ``session.branch`` that doesn't echo the copied transcript back."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "branch a chat")) is not None:
+        return refused
     return _branch_live(rid, params, session, omit_messages=True)
 
 

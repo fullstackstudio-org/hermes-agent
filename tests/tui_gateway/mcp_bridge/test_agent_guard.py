@@ -51,6 +51,14 @@ GUARDED = {
     "profiles.set_asset": {"name": "marker", "asset": "avatar", "clear": True},
     "free_tier.provision": {},
     "onboarding.reset_setup_profile": {},
+    # What would rewrite, shrink, hide, rename or fork the person's chat.
+    "session.undo": {"session_id": SID},
+    "session.compress": {"session_id": SID},
+    "session.set_hidden": {"session_id": SID, "hidden": True},
+    "session.title": {"session_id": SID, "title": "marker"},
+    "session.branch": {"session_id": SID},
+    "session.branch_whole": {"session_id": SID},
+    "session.branch_stored": {"parent_session_id": KEY},
 }
 
 
@@ -81,10 +89,20 @@ def test_an_agent_is_refused_by_the_handler_itself(gateway, monkeypatch, method)
     assert "agent connected through MCP" in response["error"]["message"]
 
 
-@pytest.mark.parametrize("method", ["vault.lock", "config.set"])
+@pytest.mark.parametrize("method", ["vault.lock", "config.set", "session.title", "session.set_hidden"])
 def test_the_person_is_not_refused(gateway, method):
     response = gateway.app.call(method, GUARDED[method])
     assert "agent connected through MCP" not in str(response)
+
+
+def test_an_agent_may_still_read_a_chats_title(gateway):
+    """Only the rename is refused: reading the title acts on nothing."""
+    from tui_gateway import server_requests
+
+    transport = gateway.connect()
+    server_requests.advertise(transport, True)
+    response = _dispatch(transport, "session.title", {"session_id": SID})
+    assert "result" in response, response
 
 
 # ── an agent's prompt.submit (plan: "Agent prompts") ───────────────────────────────────────────────

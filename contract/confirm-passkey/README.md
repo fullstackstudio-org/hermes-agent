@@ -11,7 +11,9 @@ a byte-identical copy of this directory; `sha256sum -c SHA256SUMS` (or `shasum -
 checks a copy, and `python generate.py --check` rebuilds and compares everything.
 
 Status: contract version 1. The gateway does not offer the level yet; until it does, a `passkey`
-request is `unavailable` and nothing is sent. Nothing here changes level `plain`.
+request is `unavailable` and nothing is sent. Nothing here changes level `plain`. Self-enrolment (a
+fresh sign-in as an enrolment authority, §7.2 and §8) is an additive part of version 1: optional fields,
+one new route and no change to any cryptographic construction or vector.
 
 Normative words: MUST, MUST NOT, SHOULD as in RFC 2119. Where this document and `vectors.json`
 disagree, that is a bug in one of them; report it rather than picking one.
@@ -23,9 +25,17 @@ with user presence and user verification as reported by its authenticator, a cha
 this gateway's base URL and id, this session, this request id, a fresh nonce, and the SHA-256 of the
 exact title, summary and detail the gateway sent.
 
+"Enrolled for this gateway user" means one of three things (§7): the operator gave a code, the user
+minted a code with an earlier passkey of their own, or the user signed in again, the identity provider
+(or the gateway's own password check) reported that sign-in as fresh, and the gateway bound it to the
+client that enrols.
+
 It does not prove a biometric (user verification may be a device passcode or a password manager's PIN),
 hardware (no attestation is checked), that the person understood the text, that the agent then does what
 it described, or anything on a gateway that is itself compromised (the gateway is the verifier).
+Where the operator allows self-enrolment, it also does not prove more than the sign-in does: whoever can
+pass a fresh primary authentication as the person (and holds a session for them) can enrol a passkey and
+then confirm with it. A gateway whose operator wants more switches self-enrolment off and keeps the codes.
 
 ## 2. Encoding
 
@@ -117,12 +127,107 @@ malicious gateway can present another gateway's id from the start. The client ru
 - `user_id`: `"<provider>:<user id>"` as the gateway's auth layer names the signed-in user.
 - Credential ids: the authenticator's raw credential id, at most 1,023 bytes.
 
-## 7. Enrolment codes
+## 7. Enrolment authority: codes and fresh-authentication grants
+
+A credential is enrolled with exactly one authority, never both and never none: an enrolment code (§7.1) or
+a fresh-authentication grant (§7.2). The authority is spent in the same transaction that stores the
+credential, so a failed enrolment leaves it unused.
+
+### 7.1 Enrolment codes
 
 A code is 100 random bits written as 20 Crockford base32 symbols (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`) in
 groups of five: `XXXXX-XXXXX-XXXXX-XXXXX`. To compare, canonicalise: upper-case, drop `-` and spaces,
 map `O` to `0` and `I`, `L` to `1`; anything else, or a length other than 20, is invalid. The gateway
 stores `SHA-256(canonical ASCII)` only. `enrolment_code_vectors` covers the canonicalisation.
+
+A code comes from the operator (any user, or one named user) or from a person who signed an `invite`
+step-up with a passkey they already have (bound to that person). A credential enrolled with the first is
+`created_via: "operator"`, with the second `"passkey"`.
+
+### 7.2 Fresh-authentication grants (self-enrolment)
+
+A signed-in person can authorise one enrolment by signing in again. The gateway, not the client, decides
+whether that sign-in counts: the provider says when the person authenticated and the gateway compares it
+with when the grant was opened. A credential enrolled this way is `created_via: "self"`.
+
+**Grant.** `id` is 16 random bytes, base64url (22 characters). It belongs to one user (`<provider>:<user
+id>`), one sign-in provider and one client kind, `web` (a browser with a cookie session) or `native` (a
+bearer caller, the app). It lives 600 s from opening (`expires_at = created_at + 600`) and has the states
+
+```
+open ──► fresh ──► spent
+   └───► failed
+```
+
+`open` becomes `fresh` or `failed` exactly once, when the sign-in it asked for comes back. `spent` is
+reached only by the credential insert, in the same transaction, and only from `fresh`. `failed` and `spent`
+are final. An expired grant is unknown in every state. A grant authorises at most one credential.
+
+**Binding.** The grant id alone is never enough: it can end up in a proxy's access log
+(`/auth/login?…&reauth=<id>`) or in a browser history. Each grant is bound to the client that opened it,
+from opening until the spend, with a secret that the gateway stores as SHA-256 only, compares in constant
+time, and never logs:
+
+| Client kind | Binding | Where it travels |
+| --- | --- | --- |
+| `web` | the cookie `__Host-hermes_reauth`, whose value is a 32-byte random secret (base64url), set when the grant is opened | required at `GET /auth/login?reauth=`, at the sign-in's completion (the callback or the password login), at `register/begin` and at `register/finish` (checked again inside the spend). Kept after the completion, fresh or failed; cleared by the response to a successful `register/finish`, at logout and by expiry |
+| `native` | the app's PKCE verifier at `POST /auth/native/token`; a fresh completion hands back a one-time `use_secret` (32 random bytes, base64url) | `use_secret` in the body of `register/begin` and `register/finish`. A native grant that is not fresh has no `use_secret` yet |
+
+The reauth cookie has exactly one shape, whatever the proxy prefix or the scheme the gateway itself sees:
+`__Host-hermes_reauth=<secret>; Max-Age=600; Path=/; Secure; HttpOnly; SameSite=Lax`, no `Domain`. It is
+read under that name only: no `__Secure-` or bare variant counts, so a sibling host cannot toss one in. Safari does not keep a `Secure` cookie on `http://localhost`, so a
+web grant fails there (the codes of §7.1 still work); behind a path prefix the `Path=/` cookie is also sent to
+other applications on the same host (it holds only a grant secret, useless without the session).
+A gateway therefore refuses to open a `web` grant for a browser that is not on https (the request's
+`Origin`, or the request scheme when the `Origin` is not http) or on a loopback development host
+(`localhost`, `127.0.0.1`, `[::1]`, `*.localhost`): `insecure_binding`.
+
+Without its binding a grant is `unknown` (§8, `reauth_invalid`) whatever its state; so is a grant used by
+the other kind of client, another user's grant, and an expired or nonexistent one. Nobody learns whether
+a grant exists.
+
+**Freshness.** A completion is `fresh` only when the session the provider returned has the same provider
+and the same `<provider>:<user id>` as the grant, and the provider's `auth_time` (Unix seconds) is not
+older than the grant by more than the skew:
+
+```
+auth_time >= grant.created_at - 120
+```
+
+The checks run in this order, the first that fails is the `failure`:
+
+1. `provider_mismatch` — the session's provider is not the grant's;
+2. `user_mismatch` — the session's `<provider>:<user id>` is not the grant's;
+3. `auth_time_missing` — the provider did not say when (0 or absent), unless the operator accepts that
+   (`accept_missing_auth_time`), which makes the grant `fresh` with the time recorded as assumed. The
+   option never excuses an `auth_time` that is present but old;
+4. `auth_not_fresh` — `auth_time < created_at - 120`.
+
+There is no upper bound: a later `auth_time` is fresh. A sign-in as another person (`user_mismatch`)
+still completes as an ordinary login for that person: the grant fails, the login does not (a grant's
+failure never undoes a sign-in). `reauth_freshness_vectors` is this table.
+
+**Which providers can give a fresh authentication.** A provider that can be told to authenticate the
+person again and reports when it did:
+
+- an OpenID Connect provider is sent `prompt=login` and `max_age=0` for a grant's sign-in; OpenID Connect
+  Core 3.1.2.1 makes `auth_time` REQUIRED in the ID token when `max_age` was requested. A provider that
+  ignores `prompt=login` and reuses its own session returns the old `auth_time` (`auth_not_fresh`);
+- the gateway's own password provider verifies the password itself and reports `auth_time` as now;
+- a provider that cannot (no `prompt` or `max_age`, no `auth_time`) is `provider_no_reauth`: codes remain.
+
+A gateway without a person behind the session (session-token mode, loopback mode) offers no passkeys at
+all (§8, capability reason `no_identity`).
+
+**Cooling-off.** The operator may set `cooling_off_s` (0 by default). A credential enrolled by a grant is
+then listed with `usable_from` (Unix seconds) and cannot answer a `confirm` or sign an `invite` or `revoke`
+step-up before it (it is in no snapshot of §9, so it cannot mint a code for an immediately usable second
+credential), but it can be revoked by another usable credential or the operator. `usable_from` is absent
+once it has passed and for every credential without cooling-off.
+
+**Switch.** The operator may switch self-enrolment off (`self_enrol.enabled: false`): `reauth/begin`, and
+a `register/begin` or `register/finish` that names a grant, are `self_enrol_disabled`, also for a grant
+opened before the switch. Codes are unaffected.
 
 ## 8. Wire objects
 
@@ -196,6 +301,95 @@ refusals, and it settles the request as `declined` with `verified: false`.
 | 4040 | client's JSON-RPC error response to the `confirm` frame | the client cannot run the ceremony (`data.reason`, e.g. `no_credential`); the gateway takes that connection out of the running |
 
 Dismissing the system passkey sheet sends nothing.
+
+### Self-enrolment routes (`/api/auth/passkeys`, REST)
+
+The REST routes are behind the gateway's gate: nothing is public, the identity is the gate's (the session
+cookie or the bearer), never a body field. A cookie caller's write needs an `Origin` that is the origin of
+one of the level's accepted base URLs (`origin_not_listed` otherwise); a bearer caller is exempt. Bodies
+are JSON objects of at most 16 KiB. While the level is off every route answers like an unknown path (404
+for a GET, 405 for a POST). An answer other than 200 is `{"error": <code>, "detail": <text>, "reason"?,
+"failure"?}` with `Cache-Control: no-store`; `reason` and `failure` are the only fields a client branches
+on, `detail` is for people and logs.
+
+**`GET /api/auth/passkeys`** (status) gains:
+
+```json
+"self_enrol": { "available": true, "reason": "", "cooling_off_s": 0 }
+```
+
+`reason` is `""` when the caller can add a passkey by signing in again, `"disabled"` when the operator
+switched it off, `"provider_no_reauth"` when the caller's sign-in provider cannot give a fresh
+authentication (§7.2). Each credential carries `created_via` (`"operator"`, `"passkey"` or `"self"`) and,
+only while it is cooling off, `usable_from`. An older gateway has neither field: a client treats a missing
+`self_enrol` as not available.
+
+**`POST /api/auth/passkeys/reauth/begin`** with body `{}` opens a grant (§7.2) for the caller's session.
+
+- A cookie caller (the web client) gets `{"grant_id", "expires_at", "provider", "login_path"}` and the
+  binding cookie in `Set-Cookie`. `login_path` is `<prefix>/auth/login?provider=<p>&reauth=<id>`; the page
+  appends `&next=<its own path>` and navigates the whole window there (a sign-in cannot be framed).
+- A bearer caller (the app) gets `{"grant_id", "expires_at", "provider"}`, no cookie and no `login_path`.
+- Errors: 403 `self_enrol_disabled`, 403 `provider_no_reauth`, 403 `insecure_binding` (cookie caller not on
+  https or loopback), 403 `origin_not_listed`, 429 `rate_limited` with `Retry-After: 600` (5 per user and 5
+  per address in 10 minutes). 404 or 405 while the level is off.
+- A gateway that does not know the route answers 404 or 405: the client shows only the code path.
+
+**The sign-in.** The grant is completed by a sign-in that carries its id:
+
+- web: the browser goes to `GET <prefix>/auth/login?provider=<p>&reauth=<id>&next=<path>`. The gateway
+  checks the binding cookie, that the grant is `open`, unexpired and for provider `p` before any redirect or
+  cookie; otherwise it answers a plain page with status 400, never a redirect. Then the ordinary sign-in runs (with `prompt=login` and `max_age=0` for an
+  OpenID Connect provider) and the browser lands on `next` signed in, whatever became of the grant.
+- native: the app opens `GET /auth/native/authorize?…&reauth=<id>` (the usual parameters plus `reauth`) in
+  the system browser and redeems the loopback code at `POST /auth/native/token` with its PKCE verifier. A
+  re-authentication code returns **no tokens**:
+
+  ```json
+  { "reauth": { "grant_id": "…", "state": "fresh", "expires_at": 1790000600, "use_secret": "…" } }
+  { "reauth": { "grant_id": "…", "state": "failed", "reason": "auth_not_fresh", "expires_at": 1790000600 } }
+  ```
+
+  `use_secret` is present only when `state` is `fresh`; `reason` only when it is `failed` (a `failure` of
+  §7.2, or `unknown` / `not_open` / `client_mismatch` when the grant could not be completed and was left as
+  it was). The app keeps its own token set untouched, and the gateway does not revoke the identity
+  provider session the re-authentication minted (it is never handed out and expires by itself). A body that
+  carries tokens is not a re-authentication answer.
+
+Both sign-in routes are public, so a `reauth` parameter is rate limited before anything is read. Every check
+reserves a slot in two budgets, per address (200 in 600 s, counted first) and per address and grant id (20 in
+600 s); a check that finds the grant gives its slots back, so only refusals use them up. A malformed id is
+not counted in the second. When a budget is used up the answer is 429 (a plain page for the web route and
+for `authorize`) with `Retry-After`, the whole seconds (at least 1) until a slot frees; nothing was read. The
+per-grant budget keeps one client behind a shared address from using up the address ceiling's room; once the
+ceiling is used up every grant from that address gets 429 until a slot frees.
+
+**`POST /api/auth/passkeys/register/begin`** takes `{rp_id, base_url, name}` and optionally `grant_id`
+(and, from the app, `use_secret`; the browser's cookie travels by itself). With a `grant_id` the gateway
+checks that the grant is fresh, this user's, unexpired, unspent, opened by this kind of client and presented
+with its binding before it opens the registration, and the answer gains `"grant": {"expires_at": <int>}`.
+A cancelled system sheet may repeat `begin` with the same grant while it is unspent.
+
+**`POST /api/auth/passkeys/register/finish`** takes `{registration_id, base_url, credential, code}` **or**
+`{registration_id, base_url, credential, grant_id}` (the app adds `use_secret`; the browser adds nothing):
+exactly one of `code` and `grant_id`, else 400 `bad_request`. The grant is checked again and spent in the
+transaction that stores the credential (§11); a web caller's response clears the binding cookie. The answer
+is `{"ok": true, "credential": {…}}` with `created_via: "self"` and, with cooling-off, `usable_from`.
+
+Grant errors, at `register/begin` and `register/finish`: 403 `reauth_invalid` with `reason`
+
+| `reason` | Meaning | `failure` |
+| --- | --- | --- |
+| `unknown` | no such grant for this user, expired, presented without its binding, or opened by the other kind of client | — |
+| `not_fresh` | still `open`: the sign-in did not come back | — |
+| `spent` | used for a credential already | — |
+| `failed` | the sign-in came back and did not count | one of `user_mismatch`, `provider_mismatch`, `auth_time_missing`, `auth_not_fresh` |
+
+A grant refused at `register/finish` counts like a wrong enrolment code against the failure limiters
+(5 per user, 5 per address in 10 minutes, 20 per gateway in an hour: 429 `rate_limited`). 403
+`self_enrol_disabled` and `provider_no_reauth` are also possible at these two routes, and a grant a
+native app has not completed fresh is `unknown` to it (it has no `use_secret` yet): the app learns why from
+the token answer, a browser from `reauth_invalid` with its cookie.
 
 ## 9. Verifying an assertion (gateway)
 
@@ -301,10 +495,11 @@ and RPs under `derived`.
 
 ## 11. Verifying a registration (gateway)
 
-`POST /api/auth/passkeys/register/finish` carries `{registration_id, base_url, code, credential: {id,
-client_data_json, attestation_object, transports?}}` for an open registration (`rp_id`, `base_url`,
-`name`, `nonce`, user) created by `register/begin`. The enrolment code and "credential already stored"
-are checked by the route, not by this function. Order, each failure 422 `attestation_invalid` with
+`POST /api/auth/passkeys/register/finish` carries `{registration_id, base_url, credential: {id,
+client_data_json, attestation_object, transports?}}` and exactly one authority (`code`, or `grant_id` with
+the binding of §7.2) for an open registration (`rp_id`, `base_url`, `name`, `nonce`, user) created by
+`register/begin`. The authority and "credential already stored" are checked by the route and the store, not
+by this function, which ignores the authority fields. Order, each failure 422 `attestation_invalid` with
 `reason`:
 
 1. `bad_shape` — fields present, base64url valid, `credential.id` 1–1,023 bytes, `client_data_json`
@@ -351,9 +546,11 @@ encodings are accepted.
 | `assertion_vectors` | `context` (a key of `contexts`), `request`, `store` (credential records of several users, one revoked), `answer`, `signed_by` (informative), `expect`: `{ok: true, sign_count, backup_eligible, backed_up, counter_warning}` or `{ok: false, code: 4034, reason}` |
 | `sequence_vectors` | multi-answer behaviour (`too_many_attempts`); steps name assertion vectors |
 | `registration_vectors` | `context`, `begin` (the open registration), `finish` (the body), `expect` |
-| `wire_examples` | one example of each wire object in §8, including both second-call forms |
+| `reauth_freshness_vectors` | §7.2: a `grant` (`provider`, `user_id`, `created_at`), the `session` its sign-in returned (`provider`, `user_id`, `auth_time`, 0 for none), `accept_missing_auth_time`, and `expect`: `{state: "fresh", auth_time_assumed}` or `{state: "failed", failure}`. A timestamp rule, not a construction: nothing here is signed |
+| `wire_examples` | one example of each wire object in §8, including both second-call forms, the status route's `self_enrol`, `reauth/begin` for both client kinds, the binding cookie, the native token route's two `reauth` answers, `register/begin` and `register/finish` with a grant for both client kinds, the error answers of the self-enrolment routes, and the refusal pages of the sign-in routes (400 and 429 with `Retry-After`) |
 
 Take `U`'s active credentials from `store` as the snapshot. Run every vector against the context it names.
+A freshness vector needs no context: apply §7.2 to its `grant` and `session`.
 
 Coverage: positives for the native RP (synced, counter 0/0), the web RP (device-bound, counter
 increasing, unknown `clientDataJSON` keys), an extensions map, a high-S signature, a synced counter
@@ -381,3 +578,11 @@ result the README does not give fails the build. Needs Python 3.11+ and `cryptog
 Real-device captures (iCloud Keychain and a third-party provider on iOS and macOS: `clientDataJSON`
 bytes and origin, flags, signCount) are to be added once a build with the associated domain exists. RS256
 and EdDSA are out of scope for version 1.
+
+Self-enrolment depends on how the operator's identity provider behaves, which no vector can show: whether
+it honours `prompt=login` and `max_age=0`, and whether its ID token carries `auth_time`. Neither is
+verified against a real provider yet; until it is, a gateway whose provider falls short refuses with
+`auth_time_missing` or `auth_not_fresh`, or the operator sets `accept_missing_auth_time`, and the codes of
+§7.1 keep working. Safari's requirement of a user gesture for `navigator.credentials.create()` after the
+sign-in redirect is likewise not verified for every version; the web client therefore runs the ceremony
+from a button.

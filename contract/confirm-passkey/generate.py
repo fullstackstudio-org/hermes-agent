@@ -6,7 +6,7 @@
 
 Everything is derived from fixed labels, and signatures use deterministic ECDSA (RFC 6979), so a rebuild
 reproduces the files exactly. Before writing or checking, every vector is run through the reference
-evaluator below (``evaluate_assertion`` / ``evaluate_registration``), written from README.md's step order
+evaluator below (``evaluate_assertion`` / ``evaluate_registration`` / ``evaluate_freshness``), written from README.md's step order
 and independent of any production verifier: a vector whose labelled result differs from what the README
 says it should be fails the build.
 
@@ -28,6 +28,7 @@ import re
 import struct
 import sys
 import unicodedata
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -1119,6 +1120,166 @@ def enrolment_code_vectors() -> list[dict]:
     return out
 
 
+# ── fresh-authentication grants (README §7.2) ─────────────────────────────────────────────────
+
+GRANT_TTL = 600
+FRESHNESS_SKEW = 120
+REAUTH_FAILURE_ORDER = ["provider_mismatch", "user_mismatch", "auth_time_missing", "auth_not_fresh"]
+GRANT_PROVIDER = "self_hosted"
+GRANT_CREATED_AT = 1790000000
+
+
+def evaluate_freshness(vector: dict) -> dict:
+    """README §7.2, the freshness rule, in its order."""
+    grant, session = vector["grant"], vector["session"]
+    if session["provider"] != grant["provider"]:
+        return {"state": "failed", "failure": "provider_mismatch"}
+    if session["user_id"] != grant["user_id"]:
+        return {"state": "failed", "failure": "user_mismatch"}
+    auth_time = session["auth_time"]
+    if not auth_time:
+        if vector["accept_missing_auth_time"]:
+            return {"state": "fresh", "auth_time_assumed": True}
+        return {"state": "failed", "failure": "auth_time_missing"}
+    if auth_time < grant["created_at"] - FRESHNESS_SKEW:
+        return {"state": "failed", "failure": "auth_not_fresh"}
+    return {"state": "fresh", "auth_time_assumed": False}
+
+
+def freshness_vectors() -> list[dict]:
+    created = GRANT_CREATED_AT
+    cases: list[tuple] = [
+        # name, session patch, accept_missing, description
+        ("signed in just after the grant was opened", {"auth_time": created + 12}, False, ""),
+        ("signed in at the moment the grant was opened", {"auth_time": created}, False, ""),
+        ("authentication time after the grant", {"auth_time": created + 3600}, False,
+         "There is no upper bound."),
+        ("exactly the skew before the grant", {"auth_time": created - FRESHNESS_SKEW}, False,
+         "The boundary is fresh: auth_time >= created_at - 120."),
+        ("one second beyond the skew", {"auth_time": created - FRESHNESS_SKEW - 1}, False,
+         "An identity provider that reused its own session."),
+        ("an old authentication time", {"auth_time": created - 86400}, False, ""),
+        ("no authentication time", {"auth_time": 0}, False,
+         "The provider did not say when. Refused unless the operator accepts it."),
+        ("no authentication time, operator accepts it", {"auth_time": 0}, True,
+         "Fresh, with the time recorded as assumed."),
+        ("an old authentication time, operator accepts a missing one", {"auth_time": created - 86400}, True,
+         "The option excuses a missing authentication time only."),
+        ("signed in as somebody else", {"user_id": OTHER_USER, "auth_time": created + 5}, False,
+         "The grant fails; the sign-in itself still stands as that person's."),
+        ("signed in as somebody else without a time", {"user_id": OTHER_USER, "auth_time": 0}, True,
+         "The person is checked before the time."),
+        ("another sign-in provider", {"provider": "basic", "user_id": "basic:7c1f0e2a", "auth_time": created + 5},
+         False, ""),
+        ("another provider, another person, no time", {"provider": "basic", "user_id": "basic:91b44d03",
+                                                       "auth_time": 0}, True,
+         "The provider is checked first."),
+    ]
+    out = []
+    for name, patch, accept, description in cases:
+        session = {"provider": GRANT_PROVIDER, "user_id": USER, "auth_time": created + 5, **patch}
+        vector = {"name": name, "description": description,
+                  "grant": {"provider": GRANT_PROVIDER, "user_id": USER, "created_at": created},
+                  "session": session, "accept_missing_auth_time": accept}
+        vector["expect"] = evaluate_freshness(vector)
+        out.append(vector)
+    return out
+
+
+GRANT_ID = b64u(det("grant id", 16))
+GRANT_SECRET = b64u(det("grant web secret", 32))
+GRANT_USE_SECRET = b64u(det("grant native use secret", 32))
+GRANT_EXPIRES_AT = GRANT_CREATED_AT + GRANT_TTL
+REAUTH_COOKIE_NAME = "__Host-hermes_reauth"
+
+
+def _credential_view(*, usable_from: int | None = None) -> dict:
+    view = {"id": b64u(REG_CRED_ID), "name": REG_NAME, "rp_id": NATIVE_RP, "aaguid": str(uuid.UUID(bytes=AAGUID)),
+            "created_at": GRANT_CREATED_AT + 60, "last_used_at": None, "backup_eligible": True, "backed_up": True,
+            "created_via": "self", "transports": ["internal", "hybrid"]}
+    if usable_from is not None:
+        view["usable_from"] = usable_from
+    return view
+
+
+def _status_example(self_enrol: dict, credentials: list[dict]) -> dict:
+    derived = CONTEXTS["main"]["derived"]
+    return {"v": 1, "enabled": True, "reason": "", "gateway_id": b64u(GATEWAY_ID),
+            "user": {"id": USER, "handle": b64u(user_handle(HANDLE_KEY, USER))},
+            "rp": derived["accepted_rps"], "base_urls": derived["accepted_base_urls"], "user_invites": True,
+            "self_enrol": self_enrol, "credentials": credentials}
+
+
+def _error_example(status: int, error: str, detail: str, **extra: str) -> dict:
+    return {"status": status, "body": {"error": error, "detail": detail, **extra}}
+
+
+def self_enrolment_examples() -> dict:
+    finish = {k: v for k, v in registration_vectors()[0]["finish"].items() if k != "code"}
+    begin = {"rp_id": NATIVE_RP, "base_url": GW, "name": REG_NAME}
+    cooling = GRANT_CREATED_AT + 60 + 600
+    return {
+        "status_self_enrol": _status_example({"available": True, "reason": "", "cooling_off_s": 0},
+                                             [_credential_view()]),
+        "status_self_enrol_cooling_off": _status_example({"available": True, "reason": "", "cooling_off_s": 600},
+                                                         [_credential_view(usable_from=cooling)]),
+        "self_enrol_disabled": {"available": False, "reason": "disabled", "cooling_off_s": 0},
+        "self_enrol_provider_no_reauth": {"available": False, "reason": "provider_no_reauth", "cooling_off_s": 0},
+        "reauth_begin_request": {},
+        "reauth_begin_answer_web": {"grant_id": GRANT_ID, "expires_at": GRANT_EXPIRES_AT,
+                                    "provider": GRANT_PROVIDER,
+                                    "login_path": f"/auth/login?provider={GRANT_PROVIDER}&reauth={GRANT_ID}"},
+        "reauth_begin_answer_native": {"grant_id": GRANT_ID, "expires_at": GRANT_EXPIRES_AT,
+                                       "provider": GRANT_PROVIDER},
+        "reauth_cookie_set": f"{REAUTH_COOKIE_NAME}={GRANT_SECRET}; Max-Age=600; Path=/; Secure; HttpOnly; "
+                             "SameSite=Lax",
+        "reauth_cookie_cleared": f"{REAUTH_COOKIE_NAME}=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax",
+        "native_token_reauth_fresh": {"reauth": {"grant_id": GRANT_ID, "state": "fresh",
+                                                 "expires_at": GRANT_EXPIRES_AT, "use_secret": GRANT_USE_SECRET}},
+        "native_token_reauth_failed": {"reauth": {"grant_id": GRANT_ID, "state": "failed",
+                                                  "reason": "auth_not_fresh", "expires_at": GRANT_EXPIRES_AT}},
+        "register_begin_request_with_grant_web": {**begin, "grant_id": GRANT_ID},
+        "register_begin_request_with_grant_native": {**begin, "grant_id": GRANT_ID, "use_secret": GRANT_USE_SECRET},
+        "register_begin_answer_with_grant": {
+            "registration_id": REG_ID, "nonce": b64u(REG_NONCE), "expires_at": GRANT_CREATED_AT + 60 + 300,
+            "gateway_id": b64u(GATEWAY_ID), "base_url": GW, "rp": {"id": NATIVE_RP, "name": NATIVE_RP},
+            "user": {"id": USER, "handle": b64u(user_handle(HANDLE_KEY, USER)), "name": REG_NAME,
+                     "display_name": REG_NAME},
+            "exclude_credentials": [], "pub_key_cred_params": [{"type": "public-key", "alg": -7}],
+            "user_verification": "required", "attestation": "none", "grant": {"expires_at": GRANT_EXPIRES_AT}},
+        "register_finish_request_with_grant_web": {**finish, "grant_id": GRANT_ID},
+        "register_finish_request_with_grant_native": {**finish, "grant_id": GRANT_ID, "use_secret": GRANT_USE_SECRET},
+        "register_finish_answer_self": {"ok": True, "credential": _credential_view()},
+        "error_reauth_invalid": _error_example(
+            403, "reauth_invalid", "This sign-in cannot add a passkey; sign in again.", reason="failed",
+            failure="auth_not_fresh"),
+        "error_reauth_invalid_unknown": _error_example(
+            403, "reauth_invalid", "This sign-in cannot add a passkey; sign in again.", reason="unknown"),
+        "error_self_enrol_disabled": _error_example(
+            403, "self_enrol_disabled", "This gateway's operator has switched off adding a passkey by signing in "
+            "again; use an enrolment code."),
+        "error_provider_no_reauth": _error_example(
+            403, "provider_no_reauth", "Your sign-in provider cannot ask you to sign in again; use an enrolment "
+            "code."),
+        "error_insecure_binding": _error_example(
+            403, "insecure_binding", "Adding a passkey by signing in again needs this page on https; use an "
+            "enrolment code."),
+        "error_origin_not_listed": _error_example(
+            403, "origin_not_listed", "A browser write needs an Origin that is one of this gateway's passkey base "
+            "URLs."),
+        "error_reauth_rate_limited": _error_example(
+            429, "rate_limited", "Too many attempts to add a passkey; try again later."),
+        "sign_in_refused_page": {"status": 400, "content_type": "text/html",
+                                 "text": "This passkey set-up has expired or was not started here; go back and "
+                                         "start again."},
+        "sign_in_rate_limited_page": {"status": 429, "content_type": "text/html", "retry_after": "42",
+                                      "text": "Too many attempts. Try again shortly."},
+        "error_exactly_one_authority": _error_example(
+            400, "bad_request", "Give exactly one of code (an enrolment code) or grant_id (a sign-in made again to "
+            "add this passkey)."),
+    }
+
+
 def wire_examples() -> dict:
     main = CONTEXTS["main"]
     return {
@@ -1153,6 +1314,7 @@ def wire_examples() -> dict:
                                                 "data": {"reason": "no_credential"}}},
         "request_answer_refused": {"jsonrpc": "2.0", "id": 7, "error": {"code": 4034, "message": "answer refused",
                                                                         "data": {"reason": "challenge_mismatch"}}},
+        **self_enrolment_examples(),
     }
 
 
@@ -1187,6 +1349,17 @@ def build() -> tuple[dict, list[str]]:
                        {"ok": False, "status": 422, "error": "attestation_invalid"})
         if got != vector["expect"]:
             problems.append(f"registration {vector['name']!r}: labelled {vector['expect']}, the README gives {got}")
+    freshness = freshness_vectors()
+    for vector in freshness:
+        got = evaluate_freshness(vector)
+        if got != vector["expect"]:
+            problems.append(f"freshness {vector['name']!r}: labelled {vector['expect']}, the README gives {got}")
+    names = [v["name"] for v in freshness]
+    if len(names) != len(set(names)):
+        problems.append("duplicate freshness vector names")
+    missing = set(REAUTH_FAILURE_ORDER) - {v["expect"].get("failure") for v in freshness}
+    if missing:
+        problems.append(f"no freshness vector for {sorted(missing)}")
     for label, vectors, order in (("assertion", assertions, REFUSAL_ORDER),
                                   ("registration", registrations, REGISTRATION_REFUSAL_ORDER)):
         names = [v["name"] for v in vectors]
@@ -1221,6 +1394,8 @@ def build() -> tuple[dict, list[str]]:
         }],
         "registration_refusal_order": REGISTRATION_REFUSAL_ORDER,
         "registration_vectors": registrations,
+        "reauth_failure_order": REAUTH_FAILURE_ORDER,
+        "reauth_freshness_vectors": freshness,
         "wire_examples": wire_examples(),
     }
     return doc, problems

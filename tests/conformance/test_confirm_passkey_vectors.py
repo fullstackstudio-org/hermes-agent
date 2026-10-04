@@ -97,3 +97,60 @@ def test_the_gateways_own_verifier_gives_every_labelled_result(vectors):
         assert _assertion_verdict(vector) == vector["expect"], vector["name"]
     for vector in vectors["registration_vectors"]:
         assert _registration_verdict(vector) == vector["expect"], vector["name"]
+
+
+# ── fresh-authentication grants (README §7.2) ────────────────────────────────────────────────────
+
+
+def test_every_grant_failure_has_a_freshness_vector(vectors):
+    failures = {v["expect"].get("failure") for v in vectors["reauth_freshness_vectors"]}
+    assert set(vectors["reauth_failure_order"]) <= failures
+    assert {v["expect"]["state"] for v in vectors["reauth_freshness_vectors"]} == {"fresh", "failed"}
+
+
+@pytest.mark.parametrize("client", ["web", "native"])
+def test_the_stores_freshness_rule_gives_every_labelled_result(vectors, tmp_path, client):
+    """The production store (``PasskeyStore.complete_grant``), not the generator's reference evaluator,
+    against every freshness vector, completed the way each kind of client completes a grant."""
+    from hermes_cli.dashboard_auth.passkeys.store import (
+        PasskeyStore, new_reauth_secret, reauth_secret_hash)
+
+    for index, vector in enumerate(vectors["reauth_freshness_vectors"]):
+        grant, session = vector["grant"], vector["session"]
+        store = PasskeyStore(tmp_path / f"{client}-{index}.db", clock=lambda created=grant["created_at"]: created)
+        secret = new_reauth_secret()
+        opened = store.open_grant(grant["user_id"], grant["provider"], client,
+                                  reauth_secret_hash(secret) if client == "web" else None)
+        assert opened.created_at == grant["created_at"] and opened.expires_at == grant["created_at"] + 600
+        done = store.complete_grant(
+            opened.id, session_user=session["user_id"], session_provider=session["provider"],
+            auth_time=session["auth_time"], client=client, secret=secret if client == "web" else None,
+            use_secret_hash=reauth_secret_hash(new_reauth_secret()) if client == "native" else None,
+            accept_missing=vector["accept_missing_auth_time"])
+        expect = vector["expect"]
+        assert done.state == expect["state"], vector["name"]
+        if expect["state"] == "failed":
+            assert done.failure == expect["failure"], vector["name"]
+        else:
+            assert done.auth_time_assumed is expect["auth_time_assumed"], vector["name"]
+
+
+def test_the_self_enrolment_wire_examples_are_all_there(vectors):
+    examples = vectors["wire_examples"]
+    for key in ("status_self_enrol", "status_self_enrol_cooling_off", "self_enrol_disabled",
+                "self_enrol_provider_no_reauth", "reauth_begin_answer_web", "reauth_begin_answer_native",
+                "reauth_cookie_set", "reauth_cookie_cleared", "native_token_reauth_fresh",
+                "native_token_reauth_failed", "register_begin_request_with_grant_web",
+                "register_begin_request_with_grant_native", "register_begin_answer_with_grant",
+                "register_finish_request_with_grant_web", "register_finish_request_with_grant_native",
+                "register_finish_answer_self", "error_reauth_invalid", "error_reauth_invalid_unknown",
+                "error_self_enrol_disabled", "error_provider_no_reauth", "error_insecure_binding",
+                "error_origin_not_listed", "error_reauth_rate_limited", "error_exactly_one_authority",
+                "sign_in_refused_page", "sign_in_rate_limited_page"):
+        assert key in examples, key
+    # One authority per enrolment, and a web finish carries no use_secret (its binding is the cookie).
+    web, native = (examples[f"register_finish_request_with_grant_{kind}"] for kind in ("web", "native"))
+    assert "code" not in web and "code" not in native
+    assert "use_secret" not in web and "use_secret" in native
+    assert "use_secret" in examples["native_token_reauth_fresh"]["reauth"]
+    assert "use_secret" not in examples["native_token_reauth_failed"]["reauth"]

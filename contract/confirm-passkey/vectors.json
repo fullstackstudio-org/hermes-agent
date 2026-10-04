@@ -11331,6 +11331,261 @@
       }
     }
   ],
+  "reauth_failure_order": [
+    "provider_mismatch",
+    "user_mismatch",
+    "auth_time_missing",
+    "auth_not_fresh"
+  ],
+  "reauth_freshness_vectors": [
+    {
+      "name": "signed in just after the grant was opened",
+      "description": "",
+      "grant": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "created_at": 1790000000
+      },
+      "session": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "auth_time": 1790000012
+      },
+      "accept_missing_auth_time": false,
+      "expect": {
+        "state": "fresh",
+        "auth_time_assumed": false
+      }
+    },
+    {
+      "name": "signed in at the moment the grant was opened",
+      "description": "",
+      "grant": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "created_at": 1790000000
+      },
+      "session": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "auth_time": 1790000000
+      },
+      "accept_missing_auth_time": false,
+      "expect": {
+        "state": "fresh",
+        "auth_time_assumed": false
+      }
+    },
+    {
+      "name": "authentication time after the grant",
+      "description": "There is no upper bound.",
+      "grant": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "created_at": 1790000000
+      },
+      "session": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "auth_time": 1790003600
+      },
+      "accept_missing_auth_time": false,
+      "expect": {
+        "state": "fresh",
+        "auth_time_assumed": false
+      }
+    },
+    {
+      "name": "exactly the skew before the grant",
+      "description": "The boundary is fresh: auth_time >= created_at - 120.",
+      "grant": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "created_at": 1790000000
+      },
+      "session": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "auth_time": 1789999880
+      },
+      "accept_missing_auth_time": false,
+      "expect": {
+        "state": "fresh",
+        "auth_time_assumed": false
+      }
+    },
+    {
+      "name": "one second beyond the skew",
+      "description": "An identity provider that reused its own session.",
+      "grant": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "created_at": 1790000000
+      },
+      "session": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "auth_time": 1789999879
+      },
+      "accept_missing_auth_time": false,
+      "expect": {
+        "state": "failed",
+        "failure": "auth_not_fresh"
+      }
+    },
+    {
+      "name": "an old authentication time",
+      "description": "",
+      "grant": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "created_at": 1790000000
+      },
+      "session": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "auth_time": 1789913600
+      },
+      "accept_missing_auth_time": false,
+      "expect": {
+        "state": "failed",
+        "failure": "auth_not_fresh"
+      }
+    },
+    {
+      "name": "no authentication time",
+      "description": "The provider did not say when. Refused unless the operator accepts it.",
+      "grant": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "created_at": 1790000000
+      },
+      "session": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "auth_time": 0
+      },
+      "accept_missing_auth_time": false,
+      "expect": {
+        "state": "failed",
+        "failure": "auth_time_missing"
+      }
+    },
+    {
+      "name": "no authentication time, operator accepts it",
+      "description": "Fresh, with the time recorded as assumed.",
+      "grant": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "created_at": 1790000000
+      },
+      "session": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "auth_time": 0
+      },
+      "accept_missing_auth_time": true,
+      "expect": {
+        "state": "fresh",
+        "auth_time_assumed": true
+      }
+    },
+    {
+      "name": "an old authentication time, operator accepts a missing one",
+      "description": "The option excuses a missing authentication time only.",
+      "grant": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "created_at": 1790000000
+      },
+      "session": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "auth_time": 1789913600
+      },
+      "accept_missing_auth_time": true,
+      "expect": {
+        "state": "failed",
+        "failure": "auth_not_fresh"
+      }
+    },
+    {
+      "name": "signed in as somebody else",
+      "description": "The grant fails; the sign-in itself still stands as that person's.",
+      "grant": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "created_at": 1790000000
+      },
+      "session": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:91b44d03",
+        "auth_time": 1790000005
+      },
+      "accept_missing_auth_time": false,
+      "expect": {
+        "state": "failed",
+        "failure": "user_mismatch"
+      }
+    },
+    {
+      "name": "signed in as somebody else without a time",
+      "description": "The person is checked before the time.",
+      "grant": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "created_at": 1790000000
+      },
+      "session": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:91b44d03",
+        "auth_time": 0
+      },
+      "accept_missing_auth_time": true,
+      "expect": {
+        "state": "failed",
+        "failure": "user_mismatch"
+      }
+    },
+    {
+      "name": "another sign-in provider",
+      "description": "",
+      "grant": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "created_at": 1790000000
+      },
+      "session": {
+        "provider": "basic",
+        "user_id": "basic:7c1f0e2a",
+        "auth_time": 1790000005
+      },
+      "accept_missing_auth_time": false,
+      "expect": {
+        "state": "failed",
+        "failure": "provider_mismatch"
+      }
+    },
+    {
+      "name": "another provider, another person, no time",
+      "description": "The provider is checked first.",
+      "grant": {
+        "provider": "self_hosted",
+        "user_id": "self_hosted:7c1f0e2a",
+        "created_at": 1790000000
+      },
+      "session": {
+        "provider": "basic",
+        "user_id": "basic:91b44d03",
+        "auth_time": 0
+      },
+      "accept_missing_auth_time": true,
+      "expect": {
+        "state": "failed",
+        "failure": "provider_mismatch"
+      }
+    }
+  ],
   "wire_examples": {
     "capabilities_first_result": {
       "server_requests": [
@@ -11471,6 +11726,298 @@
         "data": {
           "reason": "challenge_mismatch"
         }
+      }
+    },
+    "status_self_enrol": {
+      "v": 1,
+      "enabled": true,
+      "reason": "",
+      "gateway_id": "2kvwXlBOqzLxDCPyRKi-lQ",
+      "user": {
+        "id": "self_hosted:7c1f0e2a",
+        "handle": "eNOpJbV5iejrl7BamTUxOwpIzm3Bu2S2vNEK3eo3ZJs"
+      },
+      "rp": {
+        "native": [
+          "confirm.hermie.dev"
+        ],
+        "web": [
+          "gw.example.com",
+          "other.example.com"
+        ]
+      },
+      "base_urls": [
+        "https://gw.example.com",
+        "https://other.example.com"
+      ],
+      "user_invites": true,
+      "self_enrol": {
+        "available": true,
+        "reason": "",
+        "cooling_off_s": 0
+      },
+      "credentials": [
+        {
+          "id": "zAmx9u3edJzfBdWGJPSMEd7IEddgqfUqIzMXlFj1KoE",
+          "name": "Alex Example — gw.example.com",
+          "rp_id": "confirm.hermie.dev",
+          "aaguid": "800d2109-8ff7-e298-8e68-1c3161cc58ee",
+          "created_at": 1790000060,
+          "last_used_at": null,
+          "backup_eligible": true,
+          "backed_up": true,
+          "created_via": "self",
+          "transports": [
+            "internal",
+            "hybrid"
+          ]
+        }
+      ]
+    },
+    "status_self_enrol_cooling_off": {
+      "v": 1,
+      "enabled": true,
+      "reason": "",
+      "gateway_id": "2kvwXlBOqzLxDCPyRKi-lQ",
+      "user": {
+        "id": "self_hosted:7c1f0e2a",
+        "handle": "eNOpJbV5iejrl7BamTUxOwpIzm3Bu2S2vNEK3eo3ZJs"
+      },
+      "rp": {
+        "native": [
+          "confirm.hermie.dev"
+        ],
+        "web": [
+          "gw.example.com",
+          "other.example.com"
+        ]
+      },
+      "base_urls": [
+        "https://gw.example.com",
+        "https://other.example.com"
+      ],
+      "user_invites": true,
+      "self_enrol": {
+        "available": true,
+        "reason": "",
+        "cooling_off_s": 600
+      },
+      "credentials": [
+        {
+          "id": "zAmx9u3edJzfBdWGJPSMEd7IEddgqfUqIzMXlFj1KoE",
+          "name": "Alex Example — gw.example.com",
+          "rp_id": "confirm.hermie.dev",
+          "aaguid": "800d2109-8ff7-e298-8e68-1c3161cc58ee",
+          "created_at": 1790000060,
+          "last_used_at": null,
+          "backup_eligible": true,
+          "backed_up": true,
+          "created_via": "self",
+          "transports": [
+            "internal",
+            "hybrid"
+          ],
+          "usable_from": 1790000660
+        }
+      ]
+    },
+    "self_enrol_disabled": {
+      "available": false,
+      "reason": "disabled",
+      "cooling_off_s": 0
+    },
+    "self_enrol_provider_no_reauth": {
+      "available": false,
+      "reason": "provider_no_reauth",
+      "cooling_off_s": 0
+    },
+    "reauth_begin_request": {},
+    "reauth_begin_answer_web": {
+      "grant_id": "CTbyDtvtuIQQmgUqM240kw",
+      "expires_at": 1790000600,
+      "provider": "self_hosted",
+      "login_path": "/auth/login?provider=self_hosted&reauth=CTbyDtvtuIQQmgUqM240kw"
+    },
+    "reauth_begin_answer_native": {
+      "grant_id": "CTbyDtvtuIQQmgUqM240kw",
+      "expires_at": 1790000600,
+      "provider": "self_hosted"
+    },
+    "reauth_cookie_set": "__Host-hermes_reauth=8zIRYkfIptCxwEjku-s36BtHCjrHgpS43tXKNvOGEbY; Max-Age=600; Path=/; Secure; HttpOnly; SameSite=Lax",
+    "reauth_cookie_cleared": "__Host-hermes_reauth=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax",
+    "native_token_reauth_fresh": {
+      "reauth": {
+        "grant_id": "CTbyDtvtuIQQmgUqM240kw",
+        "state": "fresh",
+        "expires_at": 1790000600,
+        "use_secret": "7LllY2NEkyiy8JkZ7NgZf_BQB8uqhIqVViH-KvJf2Qc"
+      }
+    },
+    "native_token_reauth_failed": {
+      "reauth": {
+        "grant_id": "CTbyDtvtuIQQmgUqM240kw",
+        "state": "failed",
+        "reason": "auth_not_fresh",
+        "expires_at": 1790000600
+      }
+    },
+    "register_begin_request_with_grant_web": {
+      "rp_id": "confirm.hermie.dev",
+      "base_url": "https://gw.example.com",
+      "name": "Alex Example — gw.example.com",
+      "grant_id": "CTbyDtvtuIQQmgUqM240kw"
+    },
+    "register_begin_request_with_grant_native": {
+      "rp_id": "confirm.hermie.dev",
+      "base_url": "https://gw.example.com",
+      "name": "Alex Example — gw.example.com",
+      "grant_id": "CTbyDtvtuIQQmgUqM240kw",
+      "use_secret": "7LllY2NEkyiy8JkZ7NgZf_BQB8uqhIqVViH-KvJf2Qc"
+    },
+    "register_begin_answer_with_grant": {
+      "registration_id": "reg-5d1e0a77b3c4",
+      "nonce": "7ebdXbcRoRY7Qv7zZaT-TPcb6im2wvbrTe_n9PjomR0",
+      "expires_at": 1790000360,
+      "gateway_id": "2kvwXlBOqzLxDCPyRKi-lQ",
+      "base_url": "https://gw.example.com",
+      "rp": {
+        "id": "confirm.hermie.dev",
+        "name": "confirm.hermie.dev"
+      },
+      "user": {
+        "id": "self_hosted:7c1f0e2a",
+        "handle": "eNOpJbV5iejrl7BamTUxOwpIzm3Bu2S2vNEK3eo3ZJs",
+        "name": "Alex Example — gw.example.com",
+        "display_name": "Alex Example — gw.example.com"
+      },
+      "exclude_credentials": [],
+      "pub_key_cred_params": [
+        {
+          "type": "public-key",
+          "alg": -7
+        }
+      ],
+      "user_verification": "required",
+      "attestation": "none",
+      "grant": {
+        "expires_at": 1790000600
+      }
+    },
+    "register_finish_request_with_grant_web": {
+      "registration_id": "reg-5d1e0a77b3c4",
+      "base_url": "https://gw.example.com",
+      "credential": {
+        "id": "zAmx9u3edJzfBdWGJPSMEd7IEddgqfUqIzMXlFj1KoE",
+        "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiYXR5TFlVMlF2a1ZHbVlhNTZXbHpodTRsbE1HeV9obm9hU1FYUWJuZjdtbyIsIm9yaWdpbiI6Imh0dHBzOi8vY29uZmlybS5oZXJtaWUuZGV2IiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+        "attestation_object": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVikK-iELZGLYNpyk0up1VA1qB7_xMTX-E46vPZFA-69xsBdAAAAAIANIQmP9-KYjmgcMWHMWO4AIMwJsfbt3nSc3wXVhiT0jBHeyBHXYKn1KiMzF5RY9SqBpQECAyYgASFYIDjruMB0rVj-NqJQ1hgiIhxAAFi-3E0_LLoq6MULSlI3Ilggoen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA",
+        "transports": [
+          "internal",
+          "hybrid"
+        ]
+      },
+      "grant_id": "CTbyDtvtuIQQmgUqM240kw"
+    },
+    "register_finish_request_with_grant_native": {
+      "registration_id": "reg-5d1e0a77b3c4",
+      "base_url": "https://gw.example.com",
+      "credential": {
+        "id": "zAmx9u3edJzfBdWGJPSMEd7IEddgqfUqIzMXlFj1KoE",
+        "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiYXR5TFlVMlF2a1ZHbVlhNTZXbHpodTRsbE1HeV9obm9hU1FYUWJuZjdtbyIsIm9yaWdpbiI6Imh0dHBzOi8vY29uZmlybS5oZXJtaWUuZGV2IiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+        "attestation_object": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVikK-iELZGLYNpyk0up1VA1qB7_xMTX-E46vPZFA-69xsBdAAAAAIANIQmP9-KYjmgcMWHMWO4AIMwJsfbt3nSc3wXVhiT0jBHeyBHXYKn1KiMzF5RY9SqBpQECAyYgASFYIDjruMB0rVj-NqJQ1hgiIhxAAFi-3E0_LLoq6MULSlI3Ilggoen-aLeOM-TS44ZykGv0_ysMfpeLND2wRAgBbrC2hMA",
+        "transports": [
+          "internal",
+          "hybrid"
+        ]
+      },
+      "grant_id": "CTbyDtvtuIQQmgUqM240kw",
+      "use_secret": "7LllY2NEkyiy8JkZ7NgZf_BQB8uqhIqVViH-KvJf2Qc"
+    },
+    "register_finish_answer_self": {
+      "ok": true,
+      "credential": {
+        "id": "zAmx9u3edJzfBdWGJPSMEd7IEddgqfUqIzMXlFj1KoE",
+        "name": "Alex Example — gw.example.com",
+        "rp_id": "confirm.hermie.dev",
+        "aaguid": "800d2109-8ff7-e298-8e68-1c3161cc58ee",
+        "created_at": 1790000060,
+        "last_used_at": null,
+        "backup_eligible": true,
+        "backed_up": true,
+        "created_via": "self",
+        "transports": [
+          "internal",
+          "hybrid"
+        ]
+      }
+    },
+    "error_reauth_invalid": {
+      "status": 403,
+      "body": {
+        "error": "reauth_invalid",
+        "detail": "This sign-in cannot add a passkey; sign in again.",
+        "reason": "failed",
+        "failure": "auth_not_fresh"
+      }
+    },
+    "error_reauth_invalid_unknown": {
+      "status": 403,
+      "body": {
+        "error": "reauth_invalid",
+        "detail": "This sign-in cannot add a passkey; sign in again.",
+        "reason": "unknown"
+      }
+    },
+    "error_self_enrol_disabled": {
+      "status": 403,
+      "body": {
+        "error": "self_enrol_disabled",
+        "detail": "This gateway's operator has switched off adding a passkey by signing in again; use an enrolment code."
+      }
+    },
+    "error_provider_no_reauth": {
+      "status": 403,
+      "body": {
+        "error": "provider_no_reauth",
+        "detail": "Your sign-in provider cannot ask you to sign in again; use an enrolment code."
+      }
+    },
+    "error_insecure_binding": {
+      "status": 403,
+      "body": {
+        "error": "insecure_binding",
+        "detail": "Adding a passkey by signing in again needs this page on https; use an enrolment code."
+      }
+    },
+    "error_origin_not_listed": {
+      "status": 403,
+      "body": {
+        "error": "origin_not_listed",
+        "detail": "A browser write needs an Origin that is one of this gateway's passkey base URLs."
+      }
+    },
+    "error_reauth_rate_limited": {
+      "status": 429,
+      "body": {
+        "error": "rate_limited",
+        "detail": "Too many attempts to add a passkey; try again later."
+      }
+    },
+    "sign_in_refused_page": {
+      "status": 400,
+      "content_type": "text/html",
+      "text": "This passkey set-up has expired or was not started here; go back and start again."
+    },
+    "sign_in_rate_limited_page": {
+      "status": 429,
+      "content_type": "text/html",
+      "retry_after": "42",
+      "text": "Too many attempts. Try again shortly."
+    },
+    "error_exactly_one_authority": {
+      "status": 400,
+      "body": {
+        "error": "bad_request",
+        "detail": "Give exactly one of code (an enrolment code) or grant_id (a sign-in made again to add this passkey)."
       }
     }
   }

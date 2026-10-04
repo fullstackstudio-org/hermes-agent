@@ -652,3 +652,52 @@ def test_the_policy_is_read_with_the_passkey_settings_parser(self_enrol, usable)
     cfg = {"confirm": {"passkey": {"enabled": True, "self_enrol": self_enrol}}}
     assert reauth.policy(cfg).usable is usable
     assert reauth.policy(cfg).accept_missing_auth_time is False
+
+
+def test_the_native_token_answers_are_the_contracts_wire_examples(gw):
+    """``contract/confirm-passkey`` → ``wire_examples.native_token_reauth_*``: the same fields and kinds."""
+    from pathlib import Path
+
+    examples = json.loads((Path(__file__).resolve().parents[2] / "contract" / "confirm-passkey" / "vectors.json")
+                          .read_text(encoding="utf-8"))["wire_examples"]
+
+    def kinds(value):
+        return {key: type(inner).__name__ for key, inner in value["reauth"].items()}
+
+    verifier, code = _native_round_trip(gw, gw.open_native(), provider="idp")
+    fresh_answer = gw.client.post("/auth/native/token", json={"code": code, "code_verifier": verifier}).json()
+    assert kinds(fresh_answer) == kinds(examples["native_token_reauth_fresh"])
+    assert fresh_answer["reauth"]["state"] == examples["native_token_reauth_fresh"]["reauth"]["state"]
+
+    gw.idp.auth_time = 1  # an old sign-in the IdP reused
+    grant_id = gw.open_native()
+    verifier, code = _native_round_trip(gw, grant_id, provider="idp")
+    failed_answer = gw.client.post("/auth/native/token", json={"code": code, "code_verifier": verifier}).json()
+    assert failed_answer == {"reauth": {**examples["native_token_reauth_failed"]["reauth"], "grant_id": grant_id,
+                                        "expires_at": gw.store.grant(grant_id, user_id=ALICE).expires_at}}
+
+
+def test_the_sign_in_refusal_pages_are_the_contracts_wire_examples(gw):
+    """``wire_examples.sign_in_refused_page`` and ``sign_in_rate_limited_page``: status, content type, the text
+    of the page, and a ``Retry-After`` in whole seconds on the 429."""
+    import re
+    from pathlib import Path
+
+    examples = json.loads((Path(__file__).resolve().parents[2] / "contract" / "confirm-passkey" / "vectors.json")
+                          .read_text(encoding="utf-8"))["wire_examples"]
+
+    def page(response) -> str:
+        return re.sub(r"<[^>]+>", "", response.text.split("<body>", 1)[1])
+
+    refused = gw.web_login("A" * 22)
+    example = examples["sign_in_refused_page"]
+    assert (refused.status_code, page(refused)) == (example["status"], example["text"])
+    assert refused.headers["content-type"].startswith(example["content_type"])
+    for _ in range(reauth.REFUSALS_PER_GRANT.max_events):
+        gw.web_login("A" * 22)
+    limited = gw.web_login("A" * 22)
+    example = examples["sign_in_rate_limited_page"]
+    assert (limited.status_code, page(limited)) == (example["status"], example["text"])
+    assert limited.headers["content-type"].startswith(example["content_type"])
+    assert limited.headers["retry-after"].isdigit() and int(limited.headers["retry-after"]) >= 1
+    assert example["retry_after"].isdigit()

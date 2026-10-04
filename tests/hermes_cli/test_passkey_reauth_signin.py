@@ -375,17 +375,56 @@ def test_a_provider_without_reauth_starts_no_grant(gw):
 
 
 def test_refusals_are_rate_limited_per_address_and_grant_id(gw):
-    for _ in range(reauth.REFUSALS_PER_IP.max_events):
+    for _ in range(reauth.REFUSALS_PER_GRANT.max_events):
         assert gw.web_login("A" * 22).status_code == 400
     assert gw.web_login("A" * 22).status_code == 429
     # A login without reauth is not affected.
     assert gw.client.get("/auth/login", params={"provider": "idp"}).status_code == 302
-    # Nor somebody else's grant behind the same address (a shared proxy or NAT): the budget is per grant id.
+    # Nor somebody else's grant behind the same address (a shared proxy or NAT): that budget is per grant id.
     grant_id = gw.open_web()
     assert gw.web_login(grant_id).status_code == 302
-    # A malformed id costs no store read and is never counted.
-    for _ in range(reauth.REFUSALS_PER_IP.max_events + 5):
+
+
+def _spray_id(n: int) -> str:
+    return base64.urlsafe_b64encode(n.to_bytes(16, "big")).decode().rstrip("=")
+
+
+@pytest.mark.parametrize("route", ["web", "native"])
+def test_spraying_well_formed_ids_hits_the_per_address_ceiling(gw, monkeypatch, route):
+    """Every refused id costs a config read, a store read and an audit line; random well-formed ids each have
+    a fresh per-grant budget, so the per-address ceiling (checked first) is what stops a spray."""
+    reads = []
+    real = gw.store.grant_for_login
+    monkeypatch.setattr(gw.store, "grant_for_login", lambda *a, **kw: reads.append(1) or real(*a, **kw))
+    ceiling = reauth.REFUSALS_PER_ADDRESS.max_events
+    gw.client.cookies.set(HOST_COOKIE, "x" * 43)  # with a cookie every web attempt reaches the store
+
+    def attempt(n: int):
+        if route == "web":
+            return gw.web_login(_spray_id(n))
+        _verifier, challenge = make_pkce()
+        return authorize(gw.client, challenge, reauth=_spray_id(n), provider="idp")
+
+    assert [attempt(n).status_code for n in range(ceiling)] == [400] * ceiling
+    refused = len(audit_lines("passkey_reauth_refused"))
+    statuses = [attempt(ceiling + n).status_code for n in range(5)]
+    assert statuses == [429] * 5
+    assert len(audit_lines("passkey_reauth_refused")) == refused  # no more log lines, no more reads
+    assert len(reads) == ceiling
+    assert gw.idp.starts == []
+
+
+def test_malformed_ids_count_only_against_the_ceiling(gw):
+    for _ in range(reauth.REFUSALS_PER_GRANT.max_events + 5):  # past the per-grant budget: still a plain 400
         assert gw.web_login("not a grant").status_code == 400
+
+
+def test_with_the_level_off_a_spray_reads_no_store_and_still_hits_the_ceiling(gw, monkeypatch):
+    gw.config["confirm"]["passkey"]["enabled"] = False
+    monkeypatch.setattr(gw.store, "grant_for_login", lambda *a, **kw: pytest.fail("store read with the level off"))
+    ceiling = reauth.REFUSALS_PER_ADDRESS.max_events
+    assert all(gw.web_login(_spray_id(n)).status_code == 400 for n in range(ceiling))
+    assert gw.web_login(_spray_id(ceiling)).status_code == 429
 
 
 def test_without_reauth_the_web_login_is_unchanged(gw):

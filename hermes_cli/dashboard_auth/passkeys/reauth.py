@@ -45,12 +45,19 @@ _log = logging.getLogger(__name__)
 #: A grant id as the store mints it: 16 random bytes, base64url without padding.
 _GRANT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{22}$")
 
-#: Refusals of a ``reauth`` parameter on the public sign-in routes, per client address AND grant id. A refused
-#: check is a store read; past this budget the routes answer 429 for that grant id before reading anything.
-#: Keyed by the pair so that one client behind a shared address (a proxy, a NAT) cannot use up everybody's
-#: budget; a malformed id is refused without a store read and never counted. Grant ids are 128-bit random,
-#: so trying other ids learns nothing either way.
-REFUSALS_PER_IP = SlidingWindowLimiter(20, 600)
+#: Refusals of a ``reauth`` parameter on the public sign-in routes. A refused check costs a config read, a
+#: store read and an audit line (also while the level is off), so two budgets apply, both checked before
+#: anything is read:
+#:
+#: - per address (:data:`REFUSALS_PER_ADDRESS`), checked FIRST: a wide ceiling on every refusal from one
+#:   address, so spraying random well-formed ids ends in 429 instead of costing reads and log lines forever;
+#: - per address AND grant id (:data:`REFUSALS_PER_GRANT`): the narrow budget, so one client behind a shared
+#:   address (a proxy, a NAT) retrying a dead grant does not use up the ceiling's room for anybody else's
+#:   grant long before the ceiling is reached. A malformed id is not counted here (it costs no store read).
+#:
+#: Grant ids are 128-bit random, so trying other ids learns nothing either way.
+REFUSALS_PER_ADDRESS = SlidingWindowLimiter(200, 600)
+REFUSALS_PER_GRANT = SlidingWindowLimiter(20, 600)
 
 #: The page a browser gets for a dead or foreign grant at ``/auth/login`` (400, never a redirect).
 EXPIRED_TEXT = "This passkey set-up has expired or was not started here; go back and start again."
@@ -169,14 +176,17 @@ def _refusal_key(ip: str, grant_id: str) -> str:
 
 
 def refusals_exhausted(ip: str, grant_id: str) -> bool:
-    """Whether this address has used up its refusals for *grant_id* (never for a malformed id: those cost
-    no store read and are refused anyway)."""
-    return is_grant_id(grant_id) and REFUSALS_PER_IP.exhausted(_refusal_key(ip, grant_id))
+    """Whether this address must get 429 for *grant_id* before anything is read: its ceiling for all
+    refusals is used up (checked first), or its budget for this well-formed id is."""
+    if REFUSALS_PER_ADDRESS.exhausted(ip):
+        return True
+    return is_grant_id(grant_id) and REFUSALS_PER_GRANT.exhausted(_refusal_key(ip, grant_id))
 
 
 def _count_refusal(ip: str, grant_id: str) -> None:
+    REFUSALS_PER_ADDRESS.check(ip)
     if is_grant_id(grant_id):
-        REFUSALS_PER_IP.check(_refusal_key(ip, grant_id))
+        REFUSALS_PER_GRANT.check(_refusal_key(ip, grant_id))
 
 
 def _refused(*, grant_id: str, provider: str, client: str, reason: str, ip: str, where: str,
@@ -188,7 +198,7 @@ def _refused(*, grant_id: str, provider: str, client: str, reason: str, ip: str,
 def grant_for_login(grant_id: str, *, provider: Any, client: str, secret: Optional[str], ip: str = "",
                     store: Optional[PasskeyStore] = None, cfg: Any = None) -> Optional[Grant]:
     """The open, unexpired *client* grant a sign-in with *provider* (a provider object) may start for, or None
-    (audited and counted against :data:`REFUSALS_PER_IP`). A ``web`` grant needs this browser's cookie
+    (audited and counted against the refusal budgets). A ``web`` grant needs this browser's cookie
     *secret*; a ``native`` one is looked up without a secret and must be a native grant. Never raises."""
     name = str(getattr(provider, "name", "") or "")
     reason = ""
@@ -295,9 +305,11 @@ def complete(grant_id: str, session: Session, *, client: str, secret: Optional[s
 
 
 def reset_for_tests() -> None:
-    REFUSALS_PER_IP.reset()
+    REFUSALS_PER_ADDRESS.reset()
+    REFUSALS_PER_GRANT.reset()
 
 
-__all__ = ["EXPIRED_TEXT", "Opened", "Outcome", "Policy", "REFUSALS_PER_IP", "complete",
+__all__ = ["EXPIRED_TEXT", "Opened", "Outcome", "Policy", "REFUSALS_PER_ADDRESS", "REFUSALS_PER_GRANT",
+           "complete",
            "grant_for_login", "is_grant_id", "native_grant_for_login", "open_grant", "policy",
            "provider_reauth_reason", "refusals_exhausted", "reset_for_tests", "session_user"]

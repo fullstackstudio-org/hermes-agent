@@ -662,11 +662,13 @@ def scan_file(file_path: Path, rel_path: str = "", *, any_text: bool = False) ->
     return scan_text(source.text, rel_path or file_path.name, file_path.suffix.lower())
 
 
-def scan_text(text: str, rel_path: str, suffix: str) -> List[Finding]:
-    """``scan_file`` on text already read; *suffix* is the extension it is judged by."""
+def scan_text(text: str, rel_path: str, suffix: str, prose_lines: Optional[set] = None) -> List[Finding]:
+    """``scan_file`` on text already read; *suffix* is the extension it is judged by. *prose_lines*:
+    the lines inside string literals that code patterns skip, when the caller knows them exactly
+    (parsed Python); otherwise every line on or inside a triple quote."""
     lines = text.split('\n')
     findings = []
-    docstring_lines = _compute_docstring_lines(lines)  # so code patterns don't fire on prose
+    docstring_lines = _compute_docstring_lines(lines) if prose_lines is None else prose_lines
     traversal_lines = _mask_prose_link_destinations(lines) if suffix == ".md" else lines
     owners = _statement_owners(lines)  # per-file context for the demotion
     for pattern, pid, severity, category, description in _COMPILED_THREAT_PATTERNS:

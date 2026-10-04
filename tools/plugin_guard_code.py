@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from tools.skills_guard import Finding, _compute_docstring_lines
@@ -60,6 +61,9 @@ _DESCRIPTIONS = {
     "import_hook_change": "changes the import machinery (sys.meta_path / sys.path_hooks): later imports can come from anywhere",
 }
 _SEVERITY = {"dynamic_source_loader": "medium"}
+# Every finding this module makes: a route by which code runs that no text scan reads. Under a test
+# tree these step down only when nothing the plugin runs imports the file (``plugin_guard``).
+ROUTE_PATTERN_IDS = frozenset(_DESCRIPTIONS)
 
 
 def python_code_findings(text: str, rel: str, *, line_fallback: bool = True) -> List[Finding]:
@@ -246,6 +250,54 @@ class _CodeReader:
                     self.add("dynamic_source_loader", node)
                 elif _suffix(tail) not in PYTHON_SOURCE_EXTENSIONS:
                     self.add("non_source_loader", node)
+
+
+@dataclass
+class ModuleRefs:
+    """What a Python file can make the interpreter load from the plugin: relative imports as
+    ``(level, module parts, imported names)``, absolute imports as dotted parts, every string
+    constant (a module or file name can be built from one), and *dynamic* when it imports or loads
+    something the scan cannot name."""
+    relative: List[Tuple[int, Tuple[str, ...], Tuple[str, ...]]] = field(default_factory=list)
+    absolute: List[Tuple[str, ...]] = field(default_factory=list)
+    strings: Set[str] = field(default_factory=set)
+    dynamic: bool = False
+
+
+_IMPORTERS = {"import_module", "__import__", "find_spec", "spec_from_file_location", "SourceFileLoader",
+              "SourcelessFileLoader", "run_path", "run_module", "load_source", "load_module", "exec", "eval",
+              "compile", "addsitedir"}
+
+
+def module_refs(text: str) -> Optional[ModuleRefs]:
+    """The ``ModuleRefs`` of Python *text*, or None when it does not parse."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    refs = ModuleRefs()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            refs.absolute.extend(tuple(alias.name.split(".")) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module = tuple(node.module.split(".")) if node.module else ()
+            names = tuple(alias.name for alias in node.names if alias.name != "*")
+            if node.level:
+                refs.relative.append((node.level, module, names))
+            else:
+                refs.absolute.extend([module] + [module + (name,) for name in names])
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            refs.strings.add(node.value)
+        elif isinstance(node, ast.Call):
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+            if name in _IMPORTERS:
+                position, keyword = _FILE_LOADERS.get(name, (0, "name"))
+                target = _argument(node, position, keyword)
+                if (target is None and (node.args or node.keywords)) or \
+                        (target is not None and _literal_tail(target) is None):
+                    refs.dynamic = True
+    return refs
 
 
 def _argument(call: ast.Call, position: int, keyword: str) -> Optional[ast.AST]:

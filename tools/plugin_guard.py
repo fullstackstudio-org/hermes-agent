@@ -19,7 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
-from tools.plugin_guard_code import PYTHON_SOURCE_EXTENSIONS, python_code_findings
+from tools.plugin_guard_code import (
+    PYTHON_SOURCE_EXTENSIONS, ROUTE_PATTERN_IDS, ModuleRefs, module_refs, python_code_findings)
 from tools.plugin_guard_context import (
     STEP_DOWN, is_agent_facing, is_base64_media, is_ci_workflow, is_data_decode, is_doc_prose,
     JsSinkInventory, is_inert_fixture_line, is_loopback_only, is_pip_install_in_prose_literal,
@@ -28,7 +29,7 @@ from tools.skills_guard import (
     Finding, ScanResult, SCANNABLE_EXTENSIONS, SUSPICIOUS_BINARY_EXTENSIONS, SourceText, _determine_verdict,
     decode_python_source, format_scan_report, read_source_text, scan_text)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-fork-8"
+PLUGIN_SCANNER_VERSION = "plugin-guard-fork-9"
 
 # Caches and vendored environments a checkout makes for itself. Skipped only when nothing in
 # them is tracked by git: a TRACKED ``venv/evil.py`` or ``__pycache__/x.pyc`` ships with the
@@ -261,12 +262,14 @@ def _main_guard_body_lines(text: str) -> set[int]:
 
 def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path,
                      js: Optional[JsSinkInventory] = None, *, parsed_python: bool = False,
-                     text: Optional[str] = None) -> List[Finding]:
+                     text: Optional[str] = None, from_ast: bool = False, unreached: bool = False) -> List[Finding]:
     """Apply plugin-specific exemptions and severity remaps to raw findings. *js* is the scan's
     JavaScript inventory (``plugin_guard_context`` (5b)); without it no JS token rule applies.
     *parsed_python*: the findings come from parsing the file as Python, so it is code whatever its
     name (a ``notes.txt`` a loader runs is not documentation). *text*: the file as the scan decoded
-    it (read here as UTF-8 when not given)."""
+    it (read here as UTF-8 when not given). *from_ast*: the findings come from the parsed code
+    itself, so no comment heuristic applies to them. *unreached*: the file is test or script code
+    that nothing the plugin runs imports (``_unreached_dev_files``)."""
     if not findings:
         return []
     suffix = ".py" if parsed_python else _code_suffix(file_path)
@@ -274,6 +277,7 @@ def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path,
     if text is None:
         text = "\n".join(_file_lines(file_path))
     main_guard_lines: Optional[set] = None
+    comment_lines: Optional[set] = None
     is_js = suffix in {".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx", ".mts", ".cts", ".vue", ".svelte"}
     # A CI workflow definition runs on the forge's runner, not the host: same cap as a README.
     doc_prose = not parsed_python and (is_doc_prose(rel_path) or is_ci_workflow(rel_path))
@@ -290,9 +294,14 @@ def _filter_findings(findings: List[Finding], rel_path: str, file_path: Path,
             f.severity = DOC_PROSE_DEMOTIONS[f.pattern_id]
         line = lines[f.line - 1] if 0 < f.line <= len(lines) else f.match
         js_data = js is not None and js.js_data(f, rel_path, f.line, line)
-        f.severity = _context_severity(f, rel_path, line, doc_prose, is_code, js_data)
-        if _is_defensive_documentation(f, rel_path, suffix):
-            f.severity = _comment_severity(f)
+        f.severity = _context_severity(f, rel_path, line, doc_prose, is_code, js_data, unreached)
+        if not from_ast and _is_defensive_documentation(f, rel_path, suffix):
+            # In Python, "a line that starts with #" is a comment only when the tokenizer says so:
+            # ``a = """`` / ``# """; exec(src)`` starts with # inside a string and runs.
+            if parsed_python and comment_lines is None:
+                comment_lines = _python_comment_lines(text)
+            if not parsed_python or f.line in comment_lines:
+                f.severity = _comment_severity(f)
         # Last and critical-only: a one-step cap that can never re-raise a finding an
         # earlier remap already lowered.
         if f.pattern_id in MAIN_GUARD_DEMOTIONS and f.severity == "critical" \
@@ -329,11 +338,15 @@ def _file_lines(file_path: Path) -> List[str]:
 
 
 def _context_severity(f: Finding, rel_path: str, line: str, doc_prose: bool, is_code: bool,
-                      js_data: bool = False) -> str:
+                      js_data: bool = False, unreached: bool = False) -> str:
     """Severity after the inert-context demotions (``plugin_guard_context``). Each rule only
     ever lowers, and every finding stays in the report; the order runs from the broadest
     context (where the text lives) to the narrowest (what the token sits inside)."""
     sev = f.severity
+    if f.pattern_id in ROUTE_IDS:
+        # A route by which code runs unread steps down only in test or script code nothing the
+        # plugin runs imports: a file NAMED like a test is no reason (``from .tests import x``).
+        return STEP_DOWN.get(sev, sev) if unreached else sev
     if doc_prose:
         sev = prose_cap(f) or sev
         if is_self_uninstall_doc(f, line):
@@ -356,6 +369,141 @@ def _context_severity(f: Finding, rel_path: str, line: str, doc_prose: bool, is_
     if js_data:
         sev = _at_most(sev, "low")    # `case"sudo":`, `/re/.exec("")`: data (context (5b))
     return sev
+
+
+def _python_prose_lines(text: str) -> Optional[set]:
+    """Lines of Python *text* that hold only a docstring or the inside of a multi-line string
+    literal (prose), by the AST: a line where any other code starts or ends is not prose, so
+    ``# \"\"\"; exec(src)`` closing a string is scanned. None when the text does not parse."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    statements = {node.value for node in ast.walk(tree) if isinstance(node, ast.Expr)}
+    strings = [node for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)
+               and (node in statements or getattr(node, "end_lineno", node.lineno) > node.lineno)]
+    if not strings:
+        return set()
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    exempt = set()
+    for node in strings:
+        exempt.add(node)
+        up = parents.get(node)
+        while up is not None:
+            exempt.add(up)
+            up = parents.get(up)
+    for node in ast.walk(tree):      # the name a string is assigned to is not code that runs
+        if isinstance(getattr(node, "ctx", None), ast.Store):
+            exempt.update(ast.walk(node))
+    code = set()
+    for node in ast.walk(tree):
+        if node not in exempt and hasattr(node, "lineno") and not isinstance(node, ast.JoinedStr):
+            code.add(node.lineno)
+            code.add(getattr(node, "end_lineno", node.lineno))
+    prose = set()
+    for node in strings:
+        prose.update(range(node.lineno, node.end_lineno + 1))
+    return prose - code
+
+
+def _python_comment_lines(text: str) -> set:
+    """Lines whose first token is a comment, by the tokenizer (so ``#`` inside a string is not)."""
+    import io
+    import tokenize
+
+    lines: set = set()
+    seen: set = set()
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            row = token.start[0]
+            if token.type in (tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT, tokenize.ENCODING):
+                continue
+            if row not in seen:
+                seen.add(row)
+                if token.type == tokenize.COMMENT:
+                    lines.add(row)
+    except (tokenize.TokenError, SyntaxError, IndentationError):
+        pass
+    return lines
+
+
+# Manifests whose strings can name a file the plugin runs (``hooks``, a dashboard ``api`` entry).
+_MANIFEST_NAMES = {"plugin.yaml", "plugin.yml", "manifest.json", "plugin.json"}
+# Test and script code: run by a developer or a test runner, not by the plugin loader.
+DEV_SCRIPT_DIRS = {"scripts"}
+ROUTE_IDS = ROUTE_PATTERN_IDS | {"source_encoding", "undecodable_source"}
+
+
+def _is_dev_file(rel: str) -> bool:
+    parts = rel.split("/")
+    return is_test_tree(rel) or (len(parts) > 1 and parts[0] in DEV_SCRIPT_DIRS)
+
+
+def _module_parts(rel: str) -> Tuple[str, ...]:
+    parts = rel.split("/")
+    parts[-1] = parts[-1].rsplit(".", 1)[0]
+    return tuple(parts[:-1]) if parts[-1] == "__init__" else tuple(parts)
+
+
+def _name_parts(value: str) -> set:
+    return set(re.split(r"[./\\:]+", value))
+
+
+def _unreached_dev_files(refs: dict, manifest_strings: set) -> set:
+    """The test and script files (``_is_dev_file``) that nothing the plugin runs can import.
+
+    *refs* maps every Python file to its ``ModuleRefs`` (None: it does not parse). Starting from
+    the files that are not test or script code, a file is reached by a relative import that names
+    it or a package above it, an absolute import whose parts contain its module path, or a string
+    constant (or a manifest string in *manifest_strings*) holding its name; a reached file reaches
+    on in turn. A reached file that does not parse or imports something the scan cannot name could
+    load anything, so then nothing is unreached."""
+    dev = {rel for rel in refs if _is_dev_file(rel)}
+    if not dev:
+        return set()
+    modules = {rel: _module_parts(rel) for rel in refs}
+    by_module = {mod: rel for rel, mod in modules.items()}
+    reached: set = set()
+    queue = [rel for rel in refs if rel not in dev]
+
+    def reach(rel: str) -> None:
+        if rel in dev and rel not in reached:
+            reached.add(rel)
+            queue.append(rel)
+
+    def reach_by_strings(strings: set) -> None:
+        parts = set().union(*map(_name_parts, strings)) if strings else set()
+        for rel in dev - reached:
+            if modules[rel] and modules[rel][-1] in parts:
+                reach(rel)
+
+    reach_by_strings(manifest_strings)
+    while queue:
+        rel = queue.pop()
+        found: Optional[ModuleRefs] = refs[rel]
+        if found is None or found.dynamic:
+            return set()
+        package = modules[rel] if rel.endswith(("/__init__.py", "/__init__.pyw")) or rel in (
+            "__init__.py", "__init__.pyw") else modules[rel][:-1]
+        targets = []
+        for level, module, names in found.relative:
+            if level - 1 > len(package):
+                continue
+            base = package[:len(package) - (level - 1)] + module
+            targets.append(base)
+            targets.extend(base + (name,) for name in names)
+        for target in targets:
+            for k in range(1, len(target) + 1):
+                hit = by_module.get(target[:k])
+                if hit is not None:
+                    reach(hit)
+        for parts in found.absolute:
+            for dev_rel in dev - reached:
+                mod = modules[dev_rel]
+                if mod and any(parts[i:i + len(mod)] == mod for i in range(len(parts) - len(mod) + 1)):
+                    reach(dev_rel)
+        reach_by_strings(found.strings)
+    return dev - reached
 
 
 def _is_defensive_documentation(finding: Finding, rel_path: str, suffix: str = "") -> bool:
@@ -593,32 +741,40 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
         all_findings.extend(_check_plugin_structure(plugin_dir, tracked))
         js = JsSinkInventory(plugin_dir, frozenset(EXCLUDED_DIRS),
                              walk=lambda: _walk(plugin_dir, tracked, know_tracked=True))
-        for f, rel in sorted(_walk(plugin_dir, tracked, know_tracked=True)):
-            if not f.is_file() or f.is_symlink():
-                continue
+        entries = [(f, rel) for f, rel in sorted(_walk(plugin_dir, tracked, know_tracked=True))
+                   if f.is_file() and not f.is_symlink()]
+        sources = {rel: _read_plugin_file(f) for f, rel in entries}
+        python_refs = {rel: (module_refs(sources[rel].text) if sources[rel] is not None else None)
+                       for f, rel in entries if _code_suffix(f) in PYTHON_SOURCE_EXTENSIONS}
+        manifest_strings = {line for f, rel in entries if f.name.lower() in _MANIFEST_NAMES
+                            and sources[rel] is not None for line in sources[rel].text.split()}
+        unreached = _unreached_dev_files(python_refs, manifest_strings)
+        for f, rel in entries:
             for finding, member_text, where in _archive_findings(f, rel):
                 all_findings.append(finding)
                 if member_text is not None:
-                    all_findings.extend(_filter_findings(scan_text(member_text, where, ".py"), where, f, js,
-                                                         parsed_python=True, text=member_text))
+                    all_findings.extend(_filter_findings(
+                        scan_text(member_text, where, ".py", _python_prose_lines(member_text)), where, f, js,
+                        parsed_python=True, text=member_text))
                     all_findings.extend(_filter_findings(python_code_findings(member_text, where), where, f, js,
-                                                         parsed_python=True, text=member_text))
+                                                         parsed_python=True, text=member_text, from_ast=True))
             # Every text file, whatever its name: a loader can be pointed at any of them (HERM-195).
-            source = _read_plugin_file(f)
+            source = sources[rel]
             if source is None:
                 continue
             suffix = _code_suffix(f)
             view, is_python = _python_view(f, source, suffix)
             # A file that parses as Python code is judged as code whatever its name.
-            judged = dict(parsed_python=is_python, text=view.text)
-            all_findings.extend(_filter_findings(scan_text(view.text, rel, ".py" if is_python else suffix),
+            judged = dict(parsed_python=is_python, text=view.text, unreached=rel in unreached)
+            prose = _python_prose_lines(view.text) if is_python else None
+            all_findings.extend(_filter_findings(scan_text(view.text, rel, ".py" if is_python else suffix, prose),
                                                  rel, f, js, **judged))
             all_findings.extend(_filter_findings(
-                _encoding_findings(view, rel, ".py" if is_python else suffix), rel, f, js, **judged))
+                _encoding_findings(view, rel, ".py" if is_python else suffix), rel, f, js, from_ast=True, **judged))
             if is_python:
                 all_findings.extend(_filter_findings(
                     python_code_findings(view.text, rel, line_fallback=suffix in PYTHON_SOURCE_EXTENSIONS),
-                    rel, f, js, **judged))
+                    rel, f, js, from_ast=True, **judged))
     verdict = _determine_verdict(all_findings)
     if all_findings:
         categories = sorted({f.category for f in all_findings})

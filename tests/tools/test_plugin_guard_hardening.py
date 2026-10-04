@@ -178,3 +178,49 @@ def test_a_pth_file_is_flagged(tmp_path):
                                 "x.pth": "import probe_payload\n"})
     _commit_all(plugin)
     assert ("pth_file", "x.pth") in _found(plugin)
+
+
+# ── 3. a line that starts with # inside a string is code ──────────────────────────────────
+
+
+def test_a_hash_line_inside_a_string_does_not_demote_the_code_after_it(tmp_path):
+    plugin = _plugin(tmp_path, {"__init__.py": (
+        f'src = {MARKER}\na = """\n# """; exec(src)\n'
+        'b = """\n# """; import os; os.system("echo SCANNER_PROBE_MARKER")\n'
+        "# a real comment: os.system('echo SCANNER_PROBE_MARKER') is what we never do\n")})
+    _commit_all(plugin)
+    by_line = {(f.pattern_id, f.line): f.severity for f in scan_plugin(plugin).findings}
+    assert by_line[("exec_dynamic_code", 3)] == "high"
+    assert by_line[("python_os_system", 5)] == "high"
+    assert by_line[("python_os_system", 6)] in ("medium", "low")      # a comment is still prose
+
+
+# ── 4. test and script code steps down only when nothing the plugin runs imports it ─────────
+
+
+@pytest.mark.parametrize("files, path", [
+    ({"__init__.py": "from . import test_util\n", "test_util.py": "src = X\nexec(src)\n"}, "test_util.py"),
+    ({"__init__.py": "from .tests import helper\n", "tests/__init__.py": "",
+      "tests/helper.py": "src = X\nexec(src)\n"}, "tests/helper.py"),
+    ({"__init__.py": "from . import tests\n", "tests/__init__.py": "from . import helper\n",
+      "tests/helper.py": "src = X\nexec(src)\n"}, "tests/helper.py"),
+    ({"__init__.py": "import importlib\nimportlib.import_module('.scripts.tool', __package__)\n",
+      "scripts/tool.py": "src = X\nexec(src)\n"}, "scripts/tool.py"),
+    ({"__init__.py": "import importlib\nNAME = 'help' + 'er'\nimportlib.import_module(NAME)\n",
+      "tests/helper.py": "src = X\nexec(src)\n"}, "tests/helper.py"),
+])
+def test_test_or_script_code_the_plugin_imports_keeps_full_severity(tmp_path, files, path):
+    plugin = _plugin(tmp_path, {rel: text.replace("X", MARKER) for rel, text in files.items()})
+    _commit_all(plugin)
+    assert ("exec_dynamic_code", path) in _found(plugin)
+
+
+@pytest.mark.parametrize("path", ["tests/test_x.py", "test_x.py", "scripts/release.py"])
+def test_test_or_script_code_nothing_imports_steps_down(tmp_path, path):
+    plugin = _plugin(tmp_path, {"__init__.py": "from . import helpers\n", "helpers.py": "VALUE = 1\n",
+                                path: "import sys\ndef main(root):\n    sys.path.insert(0, str(root))\n"
+                                      "    exec(open(root).read())\n"})
+    _commit_all(plugin)
+    result = scan_plugin(plugin)
+    assert [f.severity for f in result.findings if f.pattern_id == "exec_dynamic_code"] == ["medium"]
+    assert result.verdict == "safe"

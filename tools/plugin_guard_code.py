@@ -49,7 +49,7 @@ _PATH_BUILDERS = {"join", "Path", "PurePath", "PosixPath", "WindowsPath", "PureP
                   "absolute", "expandvars", "fsdecode"}
 
 _DESCRIPTIONS = {
-    "archive_on_sys_path": "puts an archive on sys.path (imports code no scan reads)",
+    "archive_on_sys_path": "puts a file (an archive, whatever its name) on sys.path: imports code no scan reads",
     "zipimport_use": "uses zipimport (imports code from an archive no scan reads)",
     "bytecode_or_native_loader": "loads bytecode or a native module directly",
     "non_source_loader": "loads a file that is not .py source as a module",
@@ -170,6 +170,17 @@ class _CodeReader:
             return name in {"__import__", "import_module"}
         return False
 
+    def added_paths(self, value: ast.AST) -> List[ast.AST]:
+        """The path expressions *value* adds to ``sys.path``: the elements of a list or tuple, both
+        sides of a ``+`` (``sys.path`` itself excepted), else *value* itself."""
+        if isinstance(value, (ast.List, ast.Tuple)):
+            return list(value.elts)
+        if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+            return self.added_paths(value.left) + self.added_paths(value.right)
+        if self.sys_attr(value) == "path":
+            return []
+        return [value]
+
     # ── checks ──────────────────────────────────────────────────────────────────────────────
 
     def check(self, node: ast.AST) -> None:
@@ -191,7 +202,7 @@ class _CodeReader:
         attr = self.sys_attr(base)
         if attr in _IMPORT_HOOKS:
             self.add("import_hook_change", statement)
-        elif attr == "path" and statement.value is not None and _mentions_archive(statement.value):
+        elif attr == "path" and statement.value is not None and _adds_a_file(self.added_paths(statement.value)):
             self.add("archive_on_sys_path", statement)
 
     def check_call(self, node: ast.Call) -> None:
@@ -217,12 +228,14 @@ class _CodeReader:
                 and isinstance(node.args[1], ast.Constant) and node.args[1].value in _IMPORT_HOOKS:
             self.add("import_hook_change", node)
         if isinstance(func, ast.Attribute) and func.attr in {"insert", "append", "extend", "__iadd__"} \
-                and self.sys_attr(func.value) == "path" and _mentions_archive(node):
-            self.add("archive_on_sys_path", node)
+                and self.sys_attr(func.value) == "path":
+            added = _argument(node, 1 if func.attr == "insert" else 0, "object")
+            if added is not None and _adds_a_file(self.added_paths(added)):
+                self.add("archive_on_sys_path", node)
         is_addsitedir = (isinstance(func, ast.Attribute) and func.attr == "addsitedir"
                          and isinstance(func.value, ast.Name) and func.value.id in self.site_names) \
             or (isinstance(func, ast.Name) and func.id in self.site_funcs)
-        if is_addsitedir and _mentions_archive(node):
+        if is_addsitedir and node.args and _adds_a_file([node.args[0]]):
             self.add("archive_on_sys_path", node)
         if name in _FILE_LOADERS:
             position, keyword = _FILE_LOADERS[name]
@@ -296,6 +309,16 @@ def _strings(node: ast.AST) -> Iterator[str]:
 
 def _mentions_archive(node: ast.AST) -> bool:
     return any(_ARCHIVE_MENTION.search(s) for s in _strings(node))
+
+
+def _adds_a_file(paths: List[ast.AST]) -> bool:
+    """Whether a ``sys.path`` entry is a FILE: it names an archive, or its last literal piece has an
+    extension (a zip is importable whatever it is called: ``logo.png`` works as well as ``deps.zip``)."""
+    for path in paths:
+        tail = _literal_tail(path)
+        if _mentions_archive(path) or (tail is not None and _suffix(tail)):
+            return True
+    return False
 
 
 # ── fallback: Python the scanner cannot parse ───────────────────────────────────────────────

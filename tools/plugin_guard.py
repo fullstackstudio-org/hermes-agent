@@ -28,7 +28,7 @@ from tools.skills_guard import (
     Finding, ScanResult, SCANNABLE_EXTENSIONS, SUSPICIOUS_BINARY_EXTENSIONS, SourceText, _determine_verdict,
     decode_python_source, format_scan_report, read_source_text, scan_text)
 
-PLUGIN_SCANNER_VERSION = "plugin-guard-fork-7"
+PLUGIN_SCANNER_VERSION = "plugin-guard-fork-8"
 
 # Caches and vendored environments a checkout makes for itself. Skipped only when nothing in
 # them is tracked by git: a TRACKED ``venv/evil.py`` or ``__pycache__/x.pyc`` ships with the
@@ -50,7 +50,9 @@ BYTECODE_EXTENSIONS = {".pyc", ".pyo"}
 # count, not only this interpreter's, so a scan on macOS judges a Linux or Windows tree the same.
 NATIVE_EXTENSION_SUFFIXES = tuple(sorted(set(_machinery.EXTENSION_SUFFIXES) | {".so", ".pyd"}, key=len, reverse=True))
 # Archives Python can import from (zipimport, a wheel or egg on sys.path, a zipapp): unreadable to
-# a text scan, so at least a binary finding.
+# a text scan, so at least a binary finding. A zip is importable whatever it is called (``logo.png``
+# on sys.path imports as well as ``deps.zip``), so every file is also checked for a zip signature
+# (``_archive_findings``).
 ARCHIVE_EXTENSIONS = {".zip", ".whl", ".egg", ".pyz"}
 EXTRA_BINARY_EXTENSIONS = {".pyd"} | ARCHIVE_EXTENSIONS
 
@@ -375,6 +377,86 @@ def _is_defensive_documentation(finding: Finding, rel_path: str, suffix: str = "
     return True
 
 
+_ZIP_LOCAL_HEADER = b"PK\x03\x04"
+_ZIP_END_OF_DIRECTORY = b"PK\x05\x06"
+_ZIP_TAIL = 22 + 0xFFFF          # the end record plus the longest archive comment
+_ARCHIVE_IMPORTABLE = (".py", ".pyc", ".pyo")
+MAX_ARCHIVE_MEMBERS = 2000
+
+
+def _looks_like_zip(file_path: Path) -> bool:
+    try:
+        with open(file_path, "rb") as handle:
+            head = handle.read(4)
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - _ZIP_TAIL))
+            tail = handle.read()
+    except OSError:
+        return False
+    return head == _ZIP_LOCAL_HEADER or _ZIP_END_OF_DIRECTORY in tail
+
+
+def _archive_findings(file_path: Path, rel: str) -> List[Tuple[Finding, Optional[str], Optional[str]]]:
+    """Findings for a file that is a zip archive, whatever its name, as ``(finding, member text,
+    member suffix)``: a zip that holds Python modules is importable once it is on sys.path, so it is
+    reported high, and each Python member is returned with its text to be scanned like a file."""
+    import zipfile
+
+    if not _looks_like_zip(file_path):
+        return []
+    try:
+        with zipfile.ZipFile(file_path) as archive:
+            members = archive.infolist()
+            importable = [m for m in members if m.filename.lower().endswith(_ARCHIVE_IMPORTABLE)]
+            if not importable:
+                return []
+            out: List[Tuple[Finding, Optional[str], Optional[str]]] = [(Finding(
+                "importable_archive", "high", "execution", rel, 0,
+                f"zip with {len(importable)} Python module(s)",
+                "a zip archive (whatever its name) holding Python modules: importable once it is on "
+                "sys.path, and its contents are scanned only as far as listed here"), None, None)]
+            budget = MAX_PLUGIN_TOTAL_SIZE_KB * 1024
+            for member in importable[:MAX_ARCHIVE_MEMBERS]:
+                where = f"{rel}!/{member.filename}"
+                if member.filename.lower().endswith((".pyc", ".pyo")):
+                    out.append((_finding("compiled_bytecode", "critical", "execution", where, "bytecode in a zip",
+                                         "compiled Python bytecode inside an archive: importable, cannot be "
+                                         "scanned"), None, None))
+                    continue
+                if member.file_size > MAX_PLUGIN_SINGLE_FILE_KB * 1024 or member.file_size > budget:
+                    out.append((_finding("too_large_to_analyse", "high", "structural", where,
+                                         f"{member.file_size // 1024}KB", "archive member too large to analyse"),
+                                None, None))
+                    continue
+                budget -= member.file_size
+                source = decode_python_source(archive.read(member))
+                if source is None:
+                    out.append((_finding("undecodable_source", "high", "obfuscation", where, "undecodable",
+                                         "Python module in an archive that cannot be decoded"), None, None))
+                    continue
+                out.append((Finding("archive_member", "low", "structural", where, 0, member.filename,
+                                    "Python module inside an archive (scanned)"), source.text, where))
+            if len(importable) > MAX_ARCHIVE_MEMBERS:
+                out.append((_finding("too_large_to_analyse", "high", "structural", rel, f"{len(importable)} modules",
+                                     "archive holds more Python modules than the scan reads"), None, None))
+            return out
+    except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, NotImplementedError, EOFError):
+        if _ZIP_LOCAL_HEADER != _read_head(file_path):
+            return []        # a stray end-record signature in a binary: neither zipfile nor zipimport opens it
+        return [(_finding("unreadable_archive", "high", "structural", rel, "zip that cannot be read",
+                          "file starts like a zip archive but cannot be read: its contents are not scanned"),
+                 None, None)]
+
+
+def _read_head(file_path: Path) -> bytes:
+    try:
+        with open(file_path, "rb") as handle:
+            return handle.read(4)
+    except OSError:
+        return b""
+
+
 def _dangerous_findings_summary(findings: List[Finding]) -> str:
     """Describe the critical findings that made a plugin install dangerous."""
     critical = [finding for finding in findings if finding.severity == "critical"]
@@ -426,6 +508,10 @@ def _check_plugin_structure(plugin_dir: Path, tracked: Optional[set] = None) -> 
             findings.append(_finding("native_extension", "critical", "execution", rel, f"extension: {native}",
                                      "native Python extension module beside Python code: importable, "
                                      "cannot be scanned"))
+        elif ext == ".pth":
+            findings.append(_finding("pth_file", "high", "execution", rel, "path configuration file",
+                                     "a .pth file: its `import` lines run when its directory becomes a site "
+                                     "directory (site.addsitedir)"))
         elif ext in SUSPICIOUS_BINARY_EXTENSIONS or ext in EXTRA_BINARY_EXTENSIONS:
             findings.append(_finding("binary_file", SEVERITY_REMAP["binary_file"], "structural", rel,
                                      f"binary: {ext}", f"binary/executable file ({ext}) bundled in plugin (cannot be scanned)"))
@@ -510,6 +596,13 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
         for f, rel in sorted(_walk(plugin_dir, tracked, know_tracked=True)):
             if not f.is_file() or f.is_symlink():
                 continue
+            for finding, member_text, where in _archive_findings(f, rel):
+                all_findings.append(finding)
+                if member_text is not None:
+                    all_findings.extend(_filter_findings(scan_text(member_text, where, ".py"), where, f, js,
+                                                         parsed_python=True, text=member_text))
+                    all_findings.extend(_filter_findings(python_code_findings(member_text, where), where, f, js,
+                                                         parsed_python=True, text=member_text))
             # Every text file, whatever its name: a loader can be pointed at any of them (HERM-195).
             source = _read_plugin_file(f)
             if source is None:

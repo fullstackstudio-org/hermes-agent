@@ -8,6 +8,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import errno
 import mimetypes
 import os
 import re
@@ -590,6 +591,33 @@ def _nofollow_temp(dir_fd: int, name: str) -> tuple[int, str]:
     return os.open(tmp_name, _NOFOLLOW_TMP_FLAGS, 0o600, dir_fd=dir_fd), tmp_name
 
 
+#: ``link()`` errors that mean "this filesystem has no hard links" (FAT, exFAT, some FUSE and network mounts).
+_NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS, errno.EMLINK})
+
+
+def _promote_temp(tmp: "str | Path", dest: "str | Path", *, overwrite: bool, dir_fd: Optional[int] = None) -> None:
+    """Move a finished temp file to *dest* (both names relative to *dir_fd* when given). With *overwrite* it
+    replaces whatever is there. Without, it never clobbers: the temp file is hard-linked to *dest*, which fails
+    with 409 when *dest* exists by then (a file created after the existence check included), and the temp name is
+    removed. Where the filesystem has no hard links it falls back to the replace, and the check made before the
+    write is the only guard, as before."""
+    fds = {"src_dir_fd": dir_fd, "dst_dir_fd": dir_fd} if dir_fd is not None else {}
+    if overwrite:
+        os.replace(tmp, dest, **fds)
+        return
+    try:
+        os.link(tmp, dest, follow_symlinks=False, **fds)
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail="File already exists")
+    except OSError as exc:
+        if exc.errno not in _NO_HARD_LINKS:
+            raise
+        os.replace(tmp, dest, **fds)
+        return
+    with contextlib.suppress(OSError):
+        os.unlink(tmp, dir_fd=dir_fd) if dir_fd is not None else os.unlink(tmp)
+
+
 def _managed_write_target(path: str, request: Request, overwrite: bool):
     """``(policy, target, display_path, nofollow)``. *nofollow* is set for a path through ``uploads/hermie``
     (:func:`_nofollow_target`): its target is the anchor's real path plus the rest as written, and the existence
@@ -626,7 +654,13 @@ async def upload_managed_file(payload: ManagedFileUpload, request: Request):
     if nofollow is None:
         with _io_errors("File is not writable", "Could not write file"):
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
+            try:
+                # Without overwrite, O_EXCL: a file (or link) that appeared after the check is never clobbered.
+                out = open(target, "wb" if payload.overwrite else "xb")
+            except FileExistsError:
+                raise HTTPException(status_code=409, detail="File already exists")
+            with out:
+                out.write(data)
         return _managed_write_result(policy, target, display_path)
     with _nofollow_parent(nofollow) as dir_fd:
         _nofollow_refuse_existing(dir_fd, nofollow.name, payload.overwrite)
@@ -636,7 +670,7 @@ async def upload_managed_file(payload: ManagedFileUpload, request: Request):
             try:
                 with os.fdopen(fd, "wb") as out:
                     out.write(data)
-                os.replace(tmp_name, nofollow.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                _promote_temp(tmp_name, nofollow.name, overwrite=payload.overwrite, dir_fd=dir_fd)
                 renamed = True
             finally:
                 if not renamed:
@@ -653,6 +687,7 @@ async def stream_upload_to_path(
     not_writable: str,
     write_failed: str,
     dir_fd: Optional[int] = None,
+    overwrite: bool = True,
 ) -> int:
     """Stream a multipart upload to ``target`` in chunks; returns bytes written.
 
@@ -663,7 +698,9 @@ async def stream_upload_to_path(
     browser aborts a large upload mid-stream.
 
     With *dir_fd* (a descriptor of ``target``'s folder from :func:`_nofollow_parent`) the temp file is created,
-    renamed and removed relative to it, so no path is resolved again after the folder was opened.
+    renamed and removed relative to it, so no path is resolved again after the folder was opened. Without
+    *overwrite* the temp file is moved into place without clobbering (:func:`_promote_temp`): 409 when ``target``
+    exists by then.
     """
     from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES, _UPLOAD_CHUNK_BYTES
     if dir_fd is None:
@@ -671,7 +708,7 @@ async def stream_upload_to_path(
         tmp_path = Path(tmp_name)
 
         def promote() -> None:
-            os.replace(tmp_path, target)
+            _promote_temp(tmp_path, target, overwrite=overwrite)
 
         def discard() -> None:
             tmp_path.unlink(missing_ok=True)
@@ -679,7 +716,7 @@ async def stream_upload_to_path(
         tmp_fd, tmp_name = _nofollow_temp(dir_fd, target.name)
 
         def promote() -> None:
-            os.replace(tmp_name, target.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            _promote_temp(tmp_name, target.name, overwrite=overwrite, dir_fd=dir_fd)
 
         def discard() -> None:
             with contextlib.suppress(FileNotFoundError):
@@ -727,6 +764,7 @@ async def upload_managed_file_stream(
             too_large="File is too large",
             not_writable="File is not writable",
             write_failed="Could not write file",
+            overwrite=overwrite,
         )
         return _managed_write_result(policy, target, display_path)
     with _nofollow_parent(nofollow) as dir_fd:
@@ -738,6 +776,7 @@ async def upload_managed_file_stream(
                 not_writable="File is not writable",
                 write_failed="Could not write file",
                 dir_fd=dir_fd,
+                overwrite=overwrite,
             )
     return _managed_write_result(policy, target, display_path)
 

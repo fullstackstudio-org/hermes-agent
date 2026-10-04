@@ -571,3 +571,70 @@ def test_an_upload_below_uploads_hermie_under_a_search_only_ancestor_works(local
         assert (folder / "0123456789abcdef-x.txt").read_bytes() == b"MARKER"
     finally:
         locked.chmod(0o700)
+
+
+# ---------------------------------------------------------------------------
+# overwrite=false never clobbers, also a file that appears after the existence check
+# ---------------------------------------------------------------------------
+
+
+def _late_file_after_check(monkeypatch, target):
+    """Make *target* appear right after the route checked that it does not exist."""
+    real = _rt_files._managed_write_target
+
+    def check_then_race(*args, **kwargs):
+        result = real(*args, **kwargs)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"OTHER")
+        return result
+
+    monkeypatch.setattr(_rt_files, "_managed_write_target", check_then_race)
+
+
+@pytest.mark.parametrize("route", sorted(_UPLOADS))
+def test_no_overwrite_never_clobbers_a_file_that_appeared_after_the_check(local_files_client, monkeypatch, route):
+    client, home = local_files_client
+    target = home / "notes" / "a.txt"
+    _late_file_after_check(monkeypatch, target)
+    response = _UPLOADS[route](client, target)
+    assert response.status_code == 409, response.text
+    assert target.read_bytes() == b"OTHER"
+    assert [p.name for p in target.parent.iterdir()] == ["a.txt"], "no temp file left behind"
+
+
+@pytest.mark.parametrize("route", sorted(_UPLOADS))
+def test_no_overwrite_below_uploads_hermie_never_clobbers_a_late_file(local_files_client, monkeypatch, route):
+    client, home = local_files_client
+    folder = home / "work" / "uploads" / "hermie" / _DAY
+    real = _rt_files._nofollow_refuse_existing
+
+    def check_then_race(dir_fd, name, overwrite):
+        real(dir_fd, name, overwrite)
+        (folder / name).write_bytes(b"OTHER")
+
+    monkeypatch.setattr(_rt_files, "_nofollow_refuse_existing", check_then_race)
+    response = _UPLOADS[route](client, folder / "0123456789abcdef-x.txt")
+    assert response.status_code == 409, response.text
+    assert (folder / "0123456789abcdef-x.txt").read_bytes() == b"OTHER"
+    assert [p.name for p in folder.iterdir()] == ["0123456789abcdef-x.txt"], "no temp file left behind"
+    # overwrite=true still replaces
+    monkeypatch.setattr(_rt_files, "_nofollow_refuse_existing", real)
+    assert _UPLOADS[route](client, folder / "0123456789abcdef-x.txt", overwrite=True).status_code == 200
+    assert (folder / "0123456789abcdef-x.txt").read_bytes() == b"MARKER"
+
+
+@pytest.mark.parametrize("route", sorted(_UPLOADS))
+def test_no_overwrite_falls_back_to_a_rename_without_hard_links(local_files_client, monkeypatch, route):
+    """A filesystem without hard links (FAT, some FUSE mounts): the upload still lands, guarded by the check."""
+    import errno
+    client, home = local_files_client
+
+    def no_links(*args, **kwargs):
+        raise OSError(errno.EPERM, "hard links not supported")
+
+    monkeypatch.setattr(_rt_files.os, "link", no_links)
+    folder = home / "work" / "uploads" / "hermie" / _DAY
+    response = _UPLOADS[route](client, folder / "0123456789abcdef-x.txt")
+    assert response.status_code == 200, response.text
+    assert [p.name for p in folder.iterdir()] == ["0123456789abcdef-x.txt"]
+    assert (folder / "0123456789abcdef-x.txt").read_bytes() == b"MARKER"

@@ -704,23 +704,39 @@ def _interrupt_agent_turn(sid: str, session: dict, transport, *, expected_turn_i
 
     Narrower than a person's Stop (:func:`_interrupt_session_turn`), because an agent never alters a turn or a
     message somebody else sent: the queued prompts this agent's connection (its grant) did not send stay queued
-    and run after the stopped turn (no queue generation bump, which would also cancel a drain in progress), and
+    and run after the stopped turn, and background delegations are left running (:func:`_stop_turn_narrowly`)."""
+    from tui_gateway.agent_guard import grant_of
+
+    login, agent, grant = _transport_auth_user(transport)[0], _transport_agent(transport), grant_of(transport)
+    return _stop_turn_narrowly(
+        sid, session, request_id=request_id,
+        may_stop=lambda: bool(grant) and _agent_turn_is_running(session, expected_turn_id, login, agent),
+        keep_queued=lambda entry: grant_of(entry.get("transport")) != grant)
+
+
+def _stop_turn_narrowly(sid: str, session: dict, *, may_stop: Callable[[], bool],
+                        keep_queued: Callable[[dict], bool], request_id: str | None = None) -> bool:
+    """Stop the running turn when ``may_stop()`` (asked under ``history_lock``) says it is the one the caller may
+    stop, touching nothing else of the chat; returns whether it was stopped.
+
+    The narrow Stop, for a caller that may not speak for everybody in the session (an agent through MCP, a person
+    in a shared chat): only the queued prompts ``keep_queued`` refuses are dropped, the rest stay queued and run
+    after the stopped turn (no queue generation bump, which would also cancel a drain in progress), and
     background delegations are left running. The check and the stop hold the session's turn-start fence
     (``agent_guard.turn_start_fence``), which every turn start takes before it clears the agent's interrupt
     flag, so the stop cannot land on the turn after the one it checked. The open requests and approvals it
     withdraws are therefore that turn's."""
-    from tui_gateway.agent_guard import grant_of, turn_start_fence
+    from tui_gateway.agent_guard import turn_start_fence
 
-    login, agent, grant = _transport_auth_user(transport)[0], _transport_agent(transport), grant_of(transport)
     use_compute_host = _session_uses_compute_host(session)
     with turn_start_fence(session):
         with session["history_lock"]:
-            if not grant or not _agent_turn_is_running(session, expected_turn_id, login, agent):
+            if not may_stop():
                 return False
             session["_turn_cancel_requested"] = True
             queue = [entry for entry in (session.get("queued_prompt"), *(session.get("queued_prompts") or []))
                      if isinstance(entry, dict)]
-            _ac_set_queue(session, [entry for entry in queue if grant_of(entry.get("transport")) != grant])
+            _ac_set_queue(session, [entry for entry in queue if keep_queued(entry)])
             active_marker_key = str(session.pop("_active_turn_marker_key", "") or "")
             for key in ("_shutdown_interrupt", "_shutdown_queued", "_shutdown_token"):
                 session.pop(key, None)

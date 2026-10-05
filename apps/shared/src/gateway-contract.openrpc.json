@@ -33368,7 +33368,7 @@
       },
       "SessionInterruptAllResult": {
         "additionalProperties": false,
-        "description": "``already_idle``: sessions the caller may act on with no turn running (or whose turn ended during the call).\n``not_allowed``: BUSY sessions it may not stop (another person's, or another person's turn in a shared chat).\n``failed``: turns whose stop raised (logged); they are not in ``stopped``.",
+        "description": "``already_idle``: sessions the caller may act on with no turn running, or whose turn ended during the call\n(the turn that started after it is not stopped: each stop re-checks it is still the same turn, still the caller's).\n``not_allowed``: BUSY sessions it may not stop (another person's, or another person's turn in a shared chat).\n``failed``: turns whose stop raised (logged); they are not in ``stopped``.",
         "properties": {
           "stopped": {
             "items": {

@@ -172,7 +172,7 @@ _LONG_HANDLERS = frozenset({
     "bot_relay.deliver", "bot_relay.reply", "image.generate", "projects.discover_repos",
     "projects.record_repos", "projects.for_cwd", "projects.tree", "projects.project_sessions",
     "setup.runtime_check", "setup.status", "free_tier.provision", "voice.toggle", "voice.record", "voice.tts", "wake.start",
-    "wake.status", "session.active_list", "session.interrupt_all", "session.branch", "session.compress", "session.list",
+    "wake.status", "session.active_list", "session.branch", "session.compress", "session.list",
     "session.resume", "session.workspace.move", "shell.exec", "skills.manage", "slash.exec",
     "command.dispatch",  # /goal draft invokes the auxiliary model; never block the RPC reader
 })
@@ -180,6 +180,13 @@ _LONG_HANDLERS = frozenset({
 _rpc_pool_workers = max(2, env_int("HERMES_TUI_RPC_POOL_WORKERS", 8))
 _pool = concurrent.futures.ThreadPoolExecutor(max_workers=_rpc_pool_workers, thread_name_prefix="tui-rpc")
 atexit.register(lambda: _pool.shutdown(wait=False, cancel_futures=True))
+
+# A "stop everything" must not wait behind slow handlers: with ``_pool`` full of billing and model probes it
+# would queue for as long as they take. It cannot run inline either, as ``session.interrupt`` does, because it
+# stops many turns and each stop may wait out a compression commit. So these get their own small executor.
+_STOP_HANDLERS = frozenset({"session.interrupt_all"})
+_stop_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="tui-rpc-stop")
+atexit.register(lambda: _stop_pool.shutdown(wait=False, cancel_futures=True))
 
 # Exact in-memory session record executing on the current turn thread — unlike a public session id,
 # this object identity cannot be supplied by RPC.

@@ -62,7 +62,12 @@ Within one authenticated gateway, resuming or activating a live session attaches
 
 ### Stopping every running turn: `session.interrupt_all`
 
-`session.interrupt` stops one session. `session.interrupt_all {profile?}` stops every running turn the caller may stop, in one call, for a "stop everything" control. It reads the live-session registry once under its lock, decides per session, then stops the turns the way `session.interrupt` does (queue cleared, pending prompts denied, crash-recovery marker retired, compute-host turns stopped through the host).
+`session.interrupt` stops one session. `session.interrupt_all {profile?}` stops every running turn the caller may stop, in one call, for a "stop everything" control. It reads the live-session registry once under its lock and notes, per session, which turn runs and whether the caller may stop it. Each stop then re-checks, holding the session's turn-start fence, that the same turn is still running and still the caller's: a turn that ended in the meantime is counted idle, and the turn that started after it (somebody else's queued message, or the caller's own next one) is left alone.
+
+How much a stop ends depends on the session:
+
+- **A session that is the caller's alone** gets the full Stop of `session.interrupt`: queue cleared, background delegations ended, pending prompts denied, crash-recovery marker retired, compute-host turns stopped through the host.
+- **A shared chat** (another person has attached to it, or is attached now) gets a narrow stop: the caller's turn ends and the caller's own queued messages are dropped, but other people's queued messages stay queued and run next, and background delegations keep running, because they may be someone else's.
 
 ```
 → {"jsonrpc":"2.0","id":1,"method":"session.interrupt_all","params":{"profile":"work"}}
@@ -81,7 +86,7 @@ Within one authenticated gateway, resuming or activating a live session attaches
 
 Authorisation is the one `session.interrupt` uses, asked per session (`session_transports._transport_may_access_session`: attached now, or the login that created the session or attached before), and a signed-in connection additionally stops only turns that are its own login's. That covers turns started from its other clients, in any profile, and turns nobody signed in sent (a wake-up, a crash continuation) in a session that is not shared. In a shared chat a turn another person sent is `not_allowed`, as is a turn nobody in particular sent. A connection without a per-person identity (session-token mode, stdio) reaches what `session.interrupt` lets it reach. An agent connected through MCP is refused (`4033`): it stops only its own turn, by id, through `session.interrupt`.
 
-**Cron runs are not stopped.** They run in the scheduler's own thread pool, outside the live-session registry, and no cron record names the login that owns it, so ownership cannot be shown. They are neither stopped nor counted; pause or remove the job with `cron.manage`. The call runs on the RPC pool, not the socket reader, because an interrupt may wait out a compression commit.
+**Cron runs are not stopped.** They run in the scheduler's own thread pool, outside the live-session registry, and no cron record names the login that owns it, so ownership cannot be shown. They are neither stopped nor counted; pause or remove the job with `cron.manage`. The call runs on a small executor of its own: not on the socket reader, because a stop may wait out a compression commit, and not on the shared RPC pool, where it would queue behind slow handlers.
 
 ### Provider account usage: `account.usage`
 

@@ -57,7 +57,7 @@ class SimpleHomes:
 
 
 def _session(sid, *, creator=ALICE, running=True, home=None, peers=(), source="hermie", turn_author=None, shared=False,
-             title=None):
+             title=None, turn_id=None):
     agent = MagicMock()
     agent.session_id = f"key-{sid}"
     session = {"session_key": f"key-{sid}", "transport": None, "history": [], "history_lock": threading.Lock(),
@@ -65,8 +65,12 @@ def _session(sid, *, creator=ALICE, running=True, home=None, peers=(), source="h
                "agent": agent, "_run_thread": None, "queued_prompt": None, "source": source,
                "profile_home": str(home) if home else None, "pending_title": title,
                "created_at": 1.0, "last_active": 1.0}
-    if turn_author:
-        session["inflight_turn"] = {"display_metadata": {"author": {"id": turn_author, "name": ""}}}
+    if turn_author or turn_id:
+        metadata = {**({"author": {"id": turn_author, "name": ""}} if turn_author else {}),
+                    **({"turn_id": turn_id} if turn_id else {})}
+        session["inflight_turn"] = {"display_metadata": metadata}
+    if turn_id:
+        session["turn_id"] = turn_id
     if shared:
         session["auth_user_shared"] = True
     server._sessions[sid] = session
@@ -272,6 +276,89 @@ def test_the_stopped_turns_crash_marker_is_retired_like_a_stop(homes, monkeypatc
     assert retired == [("key-marked", ("rotated-key",), False)] and "_shutdown_interrupt" not in session
 
 
+# ── the turn that was checked is the turn that is stopped ───────────────────────────────────────
+
+
+def _switch_turn(session, *, author, turn_id):
+    """What the run thread does when one turn ends and the queued next one starts: a new in-flight record."""
+    session["turn_id"] = turn_id
+    session["inflight_turn"] = {"display_metadata": {"author": {"id": author, "name": ""}, "turn_id": turn_id}}
+
+
+def test_a_turn_that_changed_owner_between_the_check_and_the_stop_is_not_stopped(homes, monkeypatch):
+    """Alice's turn in the shared chat ends after the registry pass; Bob's queued prompt starts as the next turn.
+    The stop was decided for Alice's turn, so Bob's is left alone."""
+    alice, bob = _WS("alice", ALICE), _WS("bob", BOB)
+    chat = _session("chat", peers=(alice, bob), turn_author=ALICE, shared=True, turn_id="turn-alice")
+    monkeypatch.setattr(server, "_tts_stream_stop", lambda *a, **k: _switch_turn(chat, author=BOB, turn_id="turn-bob"))
+    result = _call(_WS("alice-laptop", ALICE))["result"]
+    assert result["stopped"] == [] and result["already_idle"] == 1 and result["failed"] == 0
+    assert "_turn_cancel_requested" not in chat and chat["running"] is True
+    assert not chat["agent"].method_calls                                   # Bob's agent loop was never told to stop
+
+
+def test_the_callers_next_turn_is_not_the_one_that_was_checked(homes, monkeypatch):
+    """Same owner, but another turn: the stop names the turn it decided on, not whatever runs by then."""
+    chat = _session("chat", turn_author=ALICE, turn_id="turn-1")
+    monkeypatch.setattr(server, "_tts_stream_stop", lambda *a, **k: _switch_turn(chat, author=ALICE, turn_id="turn-2"))
+    result = _call(_WS("laptop", ALICE))["result"]
+    assert result["stopped"] == [] and result["already_idle"] == 1 and "_turn_cancel_requested" not in chat
+
+
+def test_the_check_and_the_stop_hold_the_turn_start_fence(homes, monkeypatch):
+    """A turn start takes the fence before it clears the agent's interrupt flag, so the stop must hold it from its
+    check to its interrupt, as an agent's bound ``session.interrupt`` does."""
+    from tui_gateway.agent_guard import turn_start_fence
+    chat = _session("chat", turn_author=ALICE, turn_id="turn-1")
+    held: list[bool] = []
+    real = server._interrupt_session_turn
+
+    def spy(sid, session, **kw):
+        held.append(turn_start_fence(session).locked())
+        return real(sid, session, **kw)
+    monkeypatch.setattr(server, "_interrupt_session_turn", spy)
+    assert _ids(_call(_WS("laptop", ALICE))["result"]) == ["chat"]
+    assert held == [True] and not turn_start_fence(chat).locked()
+
+
+# ── a shared chat is stopped narrowly, the caller's own fully ───────────────────────────────────
+
+
+@pytest.fixture
+def delegations(monkeypatch):
+    import tools.async_delegation as async_delegation
+    ended: list = []
+    monkeypatch.setattr(async_delegation, "interrupt_for_session", lambda **kw: ended.append(kw))
+    return ended
+
+
+def test_in_a_shared_chat_the_stop_keeps_the_others_queue_and_the_delegations(homes, delegations):
+    alice, bob = _WS("alice", ALICE), _WS("bob", BOB)
+    chat = _session("chat", peers=(alice, bob), turn_author=ALICE, shared=True, turn_id="turn-alice")
+    alices_next = {"text": "alice-marker-next", "transport": alice}
+    bobs_next = {"text": "bob-marker-next", "transport": bob}
+    chat["queued_prompt"], chat["queued_prompts"] = alices_next, [bobs_next]
+    chat["_queued_prompt_generation"] = 7
+    result = _call(_WS("alice-laptop", ALICE))["result"]
+    assert _ids(result) == ["chat"] and _stopped(chat)
+    assert chat["queued_prompt"] is bobs_next and "queued_prompts" not in chat   # Bob's message still runs next
+    assert chat["_queued_prompt_generation"] == 7                                # a drain in progress is not cancelled
+    assert delegations == []                                                    # background work keeps running
+    assert chat["agent"].method_calls                                           # Alice's turn itself was stopped
+
+
+def test_in_the_callers_own_chat_the_stop_is_the_full_stop(homes, delegations):
+    chat = _session("chat", turn_author=ALICE, turn_id="turn-1")
+    chat["queued_prompt"] = {"text": "own-marker-next", "transport": _WS("phone", ALICE)}
+    chat["queued_prompts"] = [{"text": "own-marker-later", "transport": None}]
+    chat["_queued_prompt_generation"] = 7
+    result = _call(_WS("laptop", ALICE))["result"]
+    assert _ids(result) == ["chat"] and _stopped(chat)
+    assert chat["queued_prompt"] is None and "queued_prompts" not in chat
+    assert chat["_queued_prompt_generation"] == 8
+    assert [call["origin_ui_session_id"] for call in delegations] == ["chat"]
+
+
 # ── cron ────────────────────────────────────────────────────────────────────────────────────────
 
 
@@ -291,6 +378,31 @@ def test_cron_runs_are_outside_the_registry_and_left_alone(homes, monkeypatch):
         scheduler.release_running_job("usage-test-job")
 
 
-def test_the_method_runs_on_the_pool_and_is_in_the_contract(homes):
-    assert "session.interrupt_all" in server._LONG_HANDLERS
+def test_the_method_is_in_the_contract(homes):
     assert _call(_WS("laptop", ALICE), {"surprise": 1})["error"]["code"] == 4000
+
+
+def test_the_method_does_not_wait_behind_a_full_rpc_pool(homes, monkeypatch):
+    """Every ``_pool`` worker busy with a slow handler: the stop still runs at once, on its own executor, and
+    never on the socket reader (``dispatch`` returns None and the worker writes the answer)."""
+    import queue
+    from concurrent.futures import ThreadPoolExecutor
+    from hermes_cli import backend_retirement
+
+    assert "session.interrupt_all" in server._STOP_HANDLERS and "session.interrupt_all" not in server._LONG_HANDLERS
+    monkeypatch.setattr(backend_retirement, "retirement", backend_retirement.RetirementFence())
+    session = _session("mine")
+    frames: queue.Queue = queue.Queue()
+    laptop = _WS("laptop", ALICE)
+    laptop.write = lambda frame: frames.put(frame) or True
+    release = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as full:
+        monkeypatch.setattr(server, "_pool", full)
+        blocked = full.submit(release.wait, 10)
+        try:
+            assert server.dispatch({"jsonrpc": "2.0", "id": 9, "method": "session.interrupt_all", "params": {}},
+                                   laptop) is None
+            answer = frames.get(timeout=5)
+            assert _ids(answer["result"]) == ["mine"] and _stopped(session) and not blocked.done()
+        finally:
+            release.set()

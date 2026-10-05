@@ -48,8 +48,8 @@ def _handle_admitted_request(req: dict) -> dict | None:
 
 
 def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
-    """Route inbound RPCs — long handlers to the pool (returns None; the worker writes its own
-    response via the bound transport), everything else inline (returns the response dict).
+    """Route inbound RPCs — long handlers to the pool and the stop-everything handlers to their own executor
+    (returns None; the worker writes its own response via the bound transport), everything else inline (returns the response dict).
     *transport* pins every write of this request — events included — to that transport;
     omitted → the module stdio transport (``tui_gateway.entry`` behaviour)."""
     t = transport or _stdio_transport
@@ -64,7 +64,7 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
         normalized = _normalize_request(req)
         if isinstance(normalized, dict):
             return normalized
-        if normalized[1] not in _LONG_HANDLERS:
+        if normalized[1] not in _LONG_HANDLERS and normalized[1] not in _STOP_HANDLERS:
             return handle_request(req)
         from hermes_cli.backend_retirement import retirement
 
@@ -84,7 +84,8 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
                     resp = _err(req.get("id"), -32000, f"handler error: {exc}")
                 if resp is not None:
                     t.write(resp)
-            future = _pool.submit(lambda: ctx.run(run))
+            pool = _stop_pool if normalized[1] in _STOP_HANDLERS else _pool
+            future = pool.submit(lambda: ctx.run(run))
         except BaseException:
             retirement.release()
             raise

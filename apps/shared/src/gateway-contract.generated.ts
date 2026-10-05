@@ -3329,7 +3329,7 @@ export type InterruptStatus = 'interrupted' | 'not_interrupted'
 export interface SessionInterruptAllParams {
   profile?: string | null
 }
-/** ``already_idle``: sessions the caller may act on with no turn running (or whose turn ended during the call). ``not_allowed``: BUSY sessions it may not stop (another person's, or another person's turn in a shared chat). ``failed``: turns whose stop raised (logged); they are not in ``stopped``. */
+/** ``already_idle``: sessions the caller may act on with no turn running, or whose turn ended during the call (the turn that started after it is not stopped: each stop re-checks it is still the same turn, still the caller's). ``not_allowed``: BUSY sessions it may not stop (another person's, or another person's turn in a shared chat). ``failed``: turns whose stop raised (logged); they are not in ``stopped``. */
 export interface SessionInterruptAllResult {
   stopped: InterruptedSession[]
   already_idle: number

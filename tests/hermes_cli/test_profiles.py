@@ -37,6 +37,7 @@ from hermes_cli.profiles import (
     remove_wrapper_script,
     rename_profile,
     export_profile,
+    import_profile,
     _get_default_hermes_home,
     NO_BUNDLED_SKILLS_MARKER,
     backfill_profile_envs,
@@ -504,6 +505,21 @@ class TestProfilesMaxLimit:
         # Still governed by the default home's max: 5, not the named profile's 1.
         create_profile("second", no_alias=True)
         assert {p.name for p in list_profiles()} == {"default", "worker", "second"}
+
+    def test_import_is_refused_at_the_limit(self, profile_env, tmp_path):
+        """An imported archive is a new profile too: ``profile import`` (and the dashboard route on
+        it) may not exceed the ceiling ``create`` enforces (HERM-127)."""
+        default_home = profile_env / ".hermes"
+        create_profile("source", no_alias=True)
+        archive = tmp_path / "source.tar.gz"
+        export_profile("source", str(archive))
+        (default_home / "config.yaml").write_text("profiles:\n  max: 2\n")
+        with pytest.raises(ValueError, match=r"allows 2 profiles and already has 2"):
+            import_profile(str(archive), name="copy")
+        assert {p.name for p in list_profiles()} == {"default", "source"}
+        assert not (default_home / "profiles" / "copy").exists()
+        (default_home / "config.yaml").write_text("profiles:\n  max: 3\n")
+        assert import_profile(str(archive), name="copy").is_dir()
 
 
 

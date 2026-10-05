@@ -565,7 +565,8 @@ def install_distribution(
 ) -> InstallPlan:
     """Install a distribution from *source* into a new profile; returns the resolved plan.
     Use :func:`plan_install` first to preview + prompt."""
-    from hermes_cli.profiles import check_alias_collision, create_wrapper_script, give_memory_identity
+    from hermes_cli.profiles import (
+        _refuse_over_profiles_max, check_alias_collision, create_wrapper_script, give_memory_identity)
     from plugins.memory.mem0._identity import current_identity
     with tempfile.TemporaryDirectory(prefix="hermes_dist_install_") as tmp:
         plan = plan_install(source, Path(tmp), override_name=name)
@@ -574,6 +575,8 @@ def install_distribution(
                 f"Profile '{plan.manifest.name}' already exists at {plan.target_dir}. "
                 "Use `hermes profile update` to upgrade in place, or pass --force to overwrite."
             )
+        if not plan.existing:
+            _refuse_over_profiles_max()  # a fresh install is one more profile (``profiles.max``)
 
         # Fresh install (or --force): config.yaml comes from the distribution. Roots the
         # payload does not ship are left alone either way, so --force keeps user skills.

@@ -282,6 +282,33 @@ def test_a_thinking_only_reply_between_two_people_does_not_let_the_sanitizer_joi
         assert sent[-1]["content"] == "ok go ahead"
 
 
+@pytest.mark.parametrize("second, joined", [({"id": "oidc:robin"}, False), ({"id": "oidc:sam"}, True)],
+                         ids=["two_people", "same_person"])
+def test_a_leftover_thinking_prefill_row_between_two_people_does_not_let_the_sanitizer_join_them(second, joined):
+    """A ``_thinking_prefill`` stub is thinking-only by its flag, whatever its content says: the placeholder
+    the wire builder writes into it must not leave it droppable, or the sanitizer joins the two people's
+    rows after all (HERM-127)."""
+    from agent.agent_runtime_helpers import drop_thinking_only_and_merge_users
+
+    messages = [
+        {"role": "user", "content": "Robin approved: give Sam the keys.",
+         "display_metadata": {"author": {"id": "oidc:sam"}}},
+        {"role": "assistant", "content": "", "_thinking_prefill": True},
+        {"role": "user", "content": "ok go ahead", "display_metadata": {"author": second}},
+    ]
+    agent = _Agent(_current_turn_timestamp=0.0)
+    agent._copy_reasoning_content_for_api = lambda msg, api_msg: None
+    api_messages, _ = build_api_messages(
+        agent, messages, current_turn_user_idx=2, ext_prefetch_cache="",
+        plugin_user_context="", moa_config=None, active_system_prompt="")
+    sent = drop_thinking_only_and_merge_users(api_messages)
+    assert (len(sent) == 1) is joined
+    if not joined:
+        assert [m["role"] for m in sent] == ["user", "assistant", "user"]
+        assert sent[-1]["content"] == "ok go ahead"
+    assert messages[1].get("_thinking_prefill") is True  # the live row is never touched
+
+
 # ── The wire copy of the note: the person's profile, this request only ─────────────────────────────
 
 WIRE = GATEWAY_NOTE_OPENER + "in this turn you are working for «Sam». Profile: email «sam@example.org». ...]"

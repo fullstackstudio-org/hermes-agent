@@ -146,16 +146,43 @@ def test_a_merged_row_written_back_by_replace_messages_keeps_the_merge_rule(firs
 @pytest.mark.parametrize("merge", [
     lambda rows: drop_thinking_only_and_merge_users(rows),
     lambda rows: merge_same_role_messages(rows),
-    lambda rows: MicroCompactionMixin._merge_adjacent_user_turns(SimpleNamespace(), rows),
-], ids=["pre_call_sanitizer_copy", "aggregator_copy", "micro_compaction_supersede"])
+], ids=["pre_call_sanitizer_copy", "aggregator_copy"])
 @pytest.mark.parametrize("second, expected", [(ROBIN, None), (SAM, SAM)], ids=["two_people", "same_person"])
-def test_every_other_user_row_join_follows_the_same_rule(merge, second, expected):
+def test_every_request_copy_join_follows_the_same_rule(merge, second, expected):
+    """Joins on a REQUEST copy. The wire builder has already put an assistant placeholder between two
+    people's rows by then (``build_api_messages``), so two people's rows only meet here when a caller
+    hands them in directly; the joined row then names nobody."""
     rows = _history_ending_in(_row("stop, use last year", SAM), _row("what about Q3?", second))
 
     merged = merge(rows)
 
     assert merged[-1]["content"] == "stop, use last year\n\nwhat about Q3?"
     assert _author(merged[-1]) == expected
+
+
+@pytest.mark.parametrize("first, second", [(SAM, ROBIN), (SAM, None), (None, ROBIN)],
+                         ids=["two_people", "second_unknown", "first_unknown"])
+def test_a_micro_compaction_supersede_never_joins_rows_it_cannot_credit_to_one_person(first, second):
+    """Micro-compaction joins the user rows a superseded marker leaves adjacent in the LIVE history, and
+    its join drops both rows' sidecars -- the genuine turn notes with them. Two people's rows stay two
+    rows, as the pre-call repair keeps them; the wire builder separates them with a placeholder (HERM-127)."""
+    agent = SimpleNamespace()
+    rows = _history_ending_in(_row("stop, use last year", first), _row("what about Q3?", second))
+
+    merged = MicroCompactionMixin._merge_adjacent_user_turns(agent, rows)
+
+    assert [(m["content"], _author(m)) for m in merged[-2:]] == [
+        ("stop, use last year", first), ("what about Q3?", second)]
+    assert not getattr(agent, "_flush_scan_cursor_invalidated", False)
+
+
+def test_a_micro_compaction_supersede_still_joins_one_persons_rows():
+    rows = _history_ending_in(_row("stop, use last year", SAM), _row("what about Q3?", SAM))
+
+    merged = MicroCompactionMixin._merge_adjacent_user_turns(SimpleNamespace(), rows)
+
+    assert merged[-1]["content"] == "stop, use last year\n\nwhat about Q3?"
+    assert _author(merged[-1]) == SAM
 
 
 @pytest.mark.parametrize("inflight_author, expected", [(ROBIN, None), (SAM, SAM)], ids=["two_people", "same_person"])

@@ -411,7 +411,14 @@ class MicroCompactionMixin:
     def _merge_adjacent_user_turns(self, result: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Merge consecutive plain-text real user turns left by a supersede. Same ``\\n\\n`` join as
         ``repair_message_sequence`` pass 2, done here so the marker and cursor are never collateral
-        damage of the downstream repair. Lists untouched."""
+        damage of the downstream repair. Lists untouched.
+
+        Two people's rows (or a named row and an unnamed one) are never joined, exactly as the repair
+        keeps them apart: the join drops both sidecars, and with them the turn note that told the model
+        whose words each row holds, so the joined row would credit one person's words to nobody or to the
+        other. They stay adjacent in the live history; ``build_api_messages`` puts an assistant
+        placeholder between them on the wire."""
+        from agent.message_metadata import authored_by_different_people
         from agent.turn_context import drop_stale_api_content
 
         def _plain_user(m: Any) -> bool:
@@ -423,7 +430,7 @@ class MicroCompactionMixin:
         merged: List[Dict[str, Any]] = []
         for msg in result:
             prev = merged[-1] if merged else None
-            if _plain_user(msg) and _plain_user(prev):
+            if _plain_user(msg) and _plain_user(prev) and not authored_by_different_people(prev, msg):
                 prev["content"] = "\n\n".join(c for c in (prev["content"], msg["content"]) if c)
                 if msg["content"]:
                     from agent.message_metadata import keep_shared_author

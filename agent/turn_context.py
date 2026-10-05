@@ -1328,7 +1328,10 @@ def build_api_messages(
         elif idx in placeholder_at:
             # Only thinking-only replies stand between them, which the pre-call sanitizer drops before it
             # joins the rows it leaves adjacent: the last one carries the placeholder text so it stays.
+            # A ``_thinking_prefill`` stub counts as thinking-only by its flag whatever its content, so
+            # the request copy drops the flag too, or the sanitizer would still drop it and join them.
             api_msg["content"] = _INTERRUPTED_PLACEHOLDER
+            api_msg.pop("_thinking_prefill", None)
 
         # Pass reasoning back to the API for ALL assistant messages so multi-turn
         # reasoning context is preserved.

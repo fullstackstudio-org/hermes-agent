@@ -41,6 +41,22 @@ class TestMintAndConsume:
         assert info["provider"] == "nous"
         assert "minted_at" in info
 
+    def test_extra_cannot_override_the_minted_identity(self):
+        """``extra`` is server-chosen context riding along; the identity the mint was asked for is the
+        identity the ticket carries, whatever ``extra`` names (HERM-127)."""
+        ticket = mint_ticket(
+            user_id="u1", provider="stub", user_name="Sam", profile={"email": "sam@example.org"},
+            extra={"user_id": "marker-other", "provider": "marker-provider", "user_name": "marker-name",
+                   "minted_at": 0, "profile": {"email": "marker@example.org"}, "viewer_id": "v1"})
+        info = consume_ticket(ticket)
+        assert (info["user_id"], info["provider"], info["user_name"]) == ("u1", "stub", "Sam")
+        assert info["minted_at"] > 0 and info["profile"] == {"email": "sam@example.org"}
+        assert info["viewer_id"] == "v1"  # genuine extra context still rides along
+
+    def test_extra_cannot_supply_a_profile_the_mint_did_not(self):
+        info = consume_ticket(mint_ticket(user_id="u1", provider="stub", extra={"profile": {"email": "x@y.z"}}))
+        assert "profile" not in info
+
     def test_ticket_has_minimum_length(self):
         # ``secrets.token_urlsafe(32)`` produces ~43 chars; enforce a floor
         # so a future refactor can't accidentally shrink the entropy.

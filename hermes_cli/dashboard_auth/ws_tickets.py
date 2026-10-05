@@ -39,6 +39,10 @@ INTERNAL_USER_ID = "server-internal"
 INTERNAL_PROVIDER = "server-internal"
 
 
+#: What a ticket says about WHO it was minted for; never taken from ``mint_ticket``'s ``extra``.
+_IDENTITY_KEYS = frozenset({"user_id", "provider", "user_name", "minted_at", "profile"})
+
+
 class TicketInvalid(Exception):
     """Ticket missing, expired, or already consumed."""
 
@@ -60,11 +64,14 @@ def mint_ticket(
     there is one, so a ticket minted without it -- or by an older caller -- carries the name alone.
 
     ``extra`` rides along for routes that need server-chosen context (the Bot Desktop bridge pins
-    the RFB socket's profile home here so a client can never pick another profile's screen).
+    the RFB socket's profile home here so a client can never pick another profile's screen). It is laid
+    down FIRST and can never name the identity: ``user_id``, ``provider``, ``user_name``, ``minted_at``
+    and ``profile`` are always the ones this mint was given, so no caller's context, however it is
+    built, can turn a ticket into somebody else's.
     """
     ticket = secrets.token_urlsafe(32)
-    info = {"user_id": user_id, "provider": provider, "user_name": user_name,
-            "minted_at": int(time.time()), **(extra or {})}
+    info = {**{k: v for k, v in (extra or {}).items() if k not in _IDENTITY_KEYS},
+            "user_id": user_id, "provider": provider, "user_name": user_name, "minted_at": int(time.time())}
     if profile:
         info["profile"] = dict(profile)
     with _lock:

@@ -266,6 +266,17 @@ class TestInstall:
         assert m.name == "installed"
         assert m.source == str(staged)
 
+    def test_a_fresh_install_is_refused_at_profiles_max(self, profile_env):
+        """A fresh install is one more profile: it may not exceed ``profiles.max`` (HERM-127). A forced
+        reinstall over an existing profile adds none and is not counted."""
+        (profile_env / ".hermes" / "config.yaml").write_text("profiles:\n  max: 2\n")
+        staged = _make_staging_dir(profile_env, "src")
+        install_distribution(str(staged), name="first")
+        with pytest.raises(ValueError, match=r"allows 2 profiles and already has 2"):
+            install_distribution(str(staged), name="second")
+        assert not (profile_env / ".hermes" / "profiles" / "second").exists()
+        install_distribution(str(staged), name="first", force=True)
+
     def test_install_respects_distribution_owned_allowlist(self, profile_env):
         """Install must only copy paths listed in distribution_owned."""
         mf = DistributionManifest(

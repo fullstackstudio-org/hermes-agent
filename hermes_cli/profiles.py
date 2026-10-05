@@ -1267,6 +1267,26 @@ def _profiles_max_limit() -> Optional[int]:
     return limit if limit > 0 else None
 
 
+def _refuse_over_profiles_max() -> None:
+    """ValueError when one more profile would exceed the operator ceiling (``profiles.max``).
+
+    Counts exactly what `hermes profile list` shows -- the default profile plus every live named one --
+    so the refusal and the listing never disagree about what a "profile" is. Every path that adds a
+    profile calls this before it creates anything: :func:`create_profile`, :func:`import_profile` and
+    ``profile_distribution.install_distribution`` (a fresh install).
+    No lock guards this read-then-create: two concurrent creates can both pass the check and land one
+    profile over the limit. That race is accepted rather than building a locking scheme for it, since
+    neither path takes a lock today."""
+    profiles_limit = _profiles_max_limit()
+    if profiles_limit is not None:
+        current_count = len(list_profile_names())
+        if current_count >= profiles_limit:
+            raise ValueError(
+                f"This gateway allows {profiles_limit} profiles and already has {current_count}. "
+                "Delete a profile first, or raise profiles.max in config.yaml."
+            )
+
+
 def create_profile(
     name: str, clone_from: Optional[str] = None, clone_all: bool = False, clone_config: bool = False,
     no_alias: bool = False, no_skills: bool = False, description: Optional[str] = None,
@@ -1312,21 +1332,9 @@ def create_profile(
             )
     if profile_dir.exists():
         raise _profile_exists_error(canon)
-    # Operator ceiling (``profiles.max``): count exactly what `hermes profile list` shows — the
-    # default profile plus every live named one — so the refusal and the listing never disagree
-    # about what a "profile" is. Checked here, after the name/existence checks above (a rename
-    # onto an existing name still fails as a name collision, not as "at the limit") and before any
-    # directory is created. No lock guards this read-then-create: two concurrent creates can both
-    # pass the check and land one profile over the limit. That race is accepted rather than
-    # building a locking scheme for it, since ``create_profile`` takes no lock today.
-    profiles_limit = _profiles_max_limit()
-    if profiles_limit is not None:
-        current_count = len(list_profile_names())
-        if current_count >= profiles_limit:
-            raise ValueError(
-                f"This gateway allows {profiles_limit} profiles and already has {current_count}. "
-                "Delete a profile first, or raise profiles.max in config.yaml."
-            )
+    # Checked after the name/existence checks above (a rename onto an existing name still fails as
+    # a name collision, not as "at the limit") and before any directory is created.
+    _refuse_over_profiles_max()
     source_dir = _resolve_clone_source(clone_from) if cloning else None
     if source_dir is not None and clone_channels:
         from hermes_cli.profile_channels import clone_channels_refusal
@@ -2235,6 +2243,7 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
     profile_dir = get_profile_dir(canon)
     if profile_dir.exists():
         raise _profile_exists_error(canon)
+    _refuse_over_profiles_max()  # an imported archive is one more profile, as a created one is
     _get_profiles_root().mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="hermes_profile_import_") as tmpdir:
         staging_root = Path(tmpdir)

@@ -20,9 +20,16 @@ from typing import Optional
 # would let a hand-edited config.yaml aim the copy outside the source profile.
 _PROVIDER_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 # ``<home>/<provider>/`` directories that hold a provider's runtime DATA, not its config, and so stay
-# with the source. mem0's config is ``mem0.json``; ``mem0/`` holds only its OSS history database,
-# the past texts of the source profile's memories, which a new profile must not start out holding.
-_PROVIDER_DATA_DIRS = frozenset({"mem0"})
+# with the source; a new profile must not start out holding another profile's memory. Each provider
+# here recreates its directory on first use, so the clone starts empty and working.
+# * mem0: config is ``mem0.json``; ``mem0/`` holds only its OSS history database, the past texts of
+#   the source profile's memories.
+# * byterover: config is ``memory.byterover`` in config.yaml (copied with it); ``byterover/`` is the
+#   ``brv`` working directory -- the source's curated context tree and its project binding.
+# * openviking: config is ``memory.openviking`` in config.yaml plus ``.env``; ``openviking/`` holds
+#   ``pending_sessions/`` markers for the SOURCE's sessions awaiting commit (a clone holding them would
+#   commit those conversations as its own on first start) and ``runs/`` locks.
+_PROVIDER_DATA_DIRS = frozenset({"mem0", "byterover", "openviking"})
 
 
 def active_memory_provider(config: Optional[dict]) -> Optional[str]:

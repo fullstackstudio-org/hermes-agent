@@ -108,12 +108,35 @@ def test_unavailable_entries_and_value_hygiene():
 def test_credential_shaped_text_is_dropped_whole():
     entry = view.entry_from_snapshot("anthropic", _snap(
         plan=f"Max {MARKER}", unavailable_reason=f"Bearer {MARKER}", title="Authorization: Bearer abcdefghijklmnopqrstuvwx",
-        windows=(AccountUsageWindow("Week", 1.0, None, f"token {MARKER}"),),
+        windows=(AccountUsageWindow("Week", 1.0, None, f"token {MARKER}"), AccountUsageWindow(f"Bearer {MARKER}", 2.0),
+                 AccountUsageWindow("Opus week", 3.0)),
         details=(f"key={MARKER}", "Extra usage: 1.00 / 2.00 USD")))
     blob = json.dumps(entry)
     assert MARKER not in blob and "abcdefghijklmnopqrstuvwx" not in blob
+    # Nothing of the marker survives in another spelling either: the id is not a slug of a dropped label.
+    assert "usageviewmarker" not in blob.lower() and "bearer" not in blob.lower()
     assert entry["plan"] is None and entry["windows"][0]["detail"] is None
+    assert [(w["id"], w["label"]) for w in entry["windows"]] == [
+        ("week", "Week"), ("window_2", "Usage window"), ("opus_week", "Opus week")]
     assert entry["details"] == ["Extra usage: 1.00 / 2.00 USD"] and entry["title"] == "Claude account limits"
+
+
+def test_a_window_id_never_collides_with_a_dropped_labels_fallback():
+    entry = view.entry_from_snapshot("anthropic", _snap(windows=(
+        AccountUsageWindow("window_2", 1.0), AccountUsageWindow(f"token={MARKER}", 2.0))))
+    assert [w["id"] for w in entry["windows"]] == ["window_2", "window_2_2"]
+
+
+def test_a_long_run_of_letters_and_digits_is_credential_shaped():
+    hex_key = "0123456789abcdef0123456789abcdef"                     # 32 hex, a key in free text
+    for text in (f"key {hex_key}", f"Plan {hex_key[:24]}", f"see {hex_key.upper()} here", "Ab1" * 9):
+        assert view._safe_text(text) is None, text
+    for text in ("Current week", "Opus week", "Current session", "Max 20x", "default_claude_max_20x_plan",
+                 "Renews: 2026-11-01", "2026-10-05T18:30:00Z", "Extra usage: 3.00 / 20.00 USD",
+                 "Total usable: $9.00", "You have 1 reset banked - use /usage reset to activate",
+                 "123456789012345678901234", "Pneumonoultramicroscopicsilico", "$7.50 of $10.00 remaining",
+                 "Credits balance: $1234567.89", "abcdefghijklmnopqrstuv1"):
+        assert view._safe_text(text) == text, text
 
 
 def test_a_failed_fetch_is_a_fixed_sentence_never_the_exceptions_text():
@@ -303,6 +326,102 @@ def test_concurrent_callers_for_one_pair_share_one_fetch():
     for t in threads:
         t.join(10)
     assert len(calls) == 1 and len(results) == 6 and all(r == results[0] for r in results)
+
+
+def _blocked_fetch(entered: threading.Event, release: threading.Event, calls: list):
+    def fetch(provider):
+        calls.append(provider)
+        entered.set()
+        release.wait(10)
+        return _snap(provider, windows=(AccountUsageWindow("Week", 99.0),))
+    return fetch
+
+
+def test_a_caller_behind_a_running_fetch_gets_the_stale_entry_at_once(clock):
+    """The pair is being refetched (expired, so a fetch is running and holds the pair's lock): a second caller
+    answers from the entry it has instead of holding an RPC worker until the fetch ends."""
+    calls: list = []
+    stale = view.provider_entry("home", "anthropic", fetch=_counting_fetch(calls))
+    clock.now += 61
+    entered, release = threading.Event(), threading.Event()
+    fetching = threading.Thread(target=view.provider_entry, args=("home", "anthropic"),
+                                kwargs={"fetch": _blocked_fetch(entered, release, calls)})
+    fetching.start()
+    try:
+        assert entered.wait(5)
+        started = time.monotonic()
+        waiter = view.provider_entry("home", "anthropic", fetch=_counting_fetch(calls))
+        assert time.monotonic() - started < 0.5 and waiter == stale and len(calls) == 2
+    finally:
+        release.set()
+        fetching.join(5)
+    assert view.provider_entry("home", "anthropic", fetch=_counting_fetch(calls))["windows"][0]["used_percent"] == 99.0
+
+
+def test_a_caller_with_nothing_cached_waits_briefly_then_hears_it_is_refreshing(monkeypatch):
+    monkeypatch.setattr(view, "WAITER_TIMEOUT_S", 0.2)
+    calls: list = []
+    entered, release = threading.Event(), threading.Event()
+    fetching = threading.Thread(target=view.provider_entry, args=("home", "nous"),
+                                kwargs={"fetch": _blocked_fetch(entered, release, calls)})
+    fetching.start()
+    try:
+        assert entered.wait(5)
+        started = time.monotonic()
+        waiter = view.provider_entry("home", "nous", fetch=_counting_fetch(calls))
+        assert time.monotonic() - started < 2 and len(calls) == 1
+    finally:
+        release.set()
+        fetching.join(5)
+    assert set(waiter) == ENTRY_KEYS and waiter["available"] is False and waiter["provider"] == "nous"
+    assert waiter["unavailable_reason"] == view.REFRESHING_REASON
+    # Not remembered: the next caller gets the real entry the running fetch stored.
+    assert view.provider_entry("home", "nous", fetch=_counting_fetch(calls))["available"] is True and len(calls) == 1
+
+
+def test_a_hung_fetch_is_abandoned_through_the_real_bound(monkeypatch):
+    """The real ``run_bounded_sync``: the hung worker is left behind, the caller gets the timeout entry, the pair is
+    free again at once, a caller in the meantime is not held for the whole bound, and the abandoned worker's late
+    answer never lands in the cache."""
+    from agent import deadline
+
+    bounded: list[str] = []
+    real_bound = deadline.run_bounded_sync
+
+    def spy(fn, timeout, **kw):                 # passes straight through: only proves the real bound is the one used
+        bounded.append(kw.get("label", ""))
+        return real_bound(fn, timeout, **kw)
+    monkeypatch.setattr(deadline, "run_bounded_sync", spy)
+    monkeypatch.setattr(view, "PROVIDER_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(view, "WAITER_TIMEOUT_S", 0.1)
+    entered, release, returned = threading.Event(), threading.Event(), threading.Event()
+
+    def hung(provider):
+        entered.set()
+        release.wait(10)
+        returned.set()
+        return _snap(provider, windows=(AccountUsageWindow("Week", 77.0),))
+    results: dict = {}
+    first = threading.Thread(target=lambda: results.setdefault("first", view.provider_entry("home", "openrouter", fetch=hung)))
+    first.start()
+    try:
+        assert entered.wait(5)
+        started = time.monotonic()
+        results["waiter"] = view.provider_entry("home", "openrouter", fetch=hung)
+        assert time.monotonic() - started < 0.4                        # the waiter did not sit out the bound
+        first.join(5)
+        assert not first.is_alive()
+        assert results["first"]["unavailable_reason"] == "The provider did not answer within 0.5 seconds."
+        assert results["waiter"]["unavailable_reason"] == view.REFRESHING_REASON
+        started = time.monotonic()
+        again = view.provider_entry("home", "openrouter", fetch=lambda p: pytest.fail("refetched inside the failure TTL"))
+        assert time.monotonic() - started < 0.2 and again == results["first"]   # the lock was released
+    finally:
+        release.set()
+    assert returned.wait(5)
+    time.sleep(0.05)
+    assert view._read(("home", "openrouter")).entry == results["first"]        # the late answer was dropped
+    assert bounded == ["account-usage-openrouter"]
 
 
 # ── timeout, parallelism ────────────────────────────────────────────────────────────────────────

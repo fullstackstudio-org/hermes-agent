@@ -34,6 +34,10 @@ FAILURE_TTL_S = 15.0
 REFRESH_MIN_INTERVAL_S = 15.0
 #: Wall-clock bound per provider; past it the entry is ``available: false``.
 PROVIDER_TIMEOUT_S = 10.0
+#: How long a caller with nothing cached waits for a fetch of the same pair that is already running, before it
+#: answers :data:`REFRESHING_REASON` instead of holding an RPC worker for up to the whole bound.
+WAITER_TIMEOUT_S = 2.0
+REFRESHING_REASON = "Usage for this provider is being refreshed; ask again in a moment."
 
 _MAX_TEXT = 300
 _MAX_CACHE_ENTRIES = 512
@@ -109,12 +113,16 @@ def _resolve_auto() -> str:
 
 
 # What no usage text from a provider has a reason to contain: an auth scheme with its value, a credential-named
-# assignment, userinfo in a URL, or one long opaque run. The redactor catches known token prefixes; this catches the shape.
+# assignment, userinfo in a URL, one long opaque run, or a shorter run of 24+ letters and digits that mixes both (a
+# 32-hex key, a base64 secret). The redactor catches known token prefixes; this catches the shape. Words, numbers,
+# dates and slugs such as ``default_claude_max_20x`` stay: a word has no digits, a number no letters, and ``_``,
+# ``-`` and ``:`` break a run.
 _CREDENTIAL_SHAPES = re.compile(
     r"(?i)\b(bearer|basic|authorization)\b[:\s]+\S{6,}"
     r"|\b(token|api[_-]?key|secret|password|passwd|credential)s?\b\s*[=:]\s*\S{4,}"
     r"|://[^/\s@]*@"
-    r"|[A-Za-z0-9_\-.=+/]{40,}")
+    r"|[A-Za-z0-9_\-.=+/]{40,}"
+    r"|(?<![A-Za-z0-9])(?=[A-Za-z]*[0-9])(?=[0-9]*[A-Za-z])[A-Za-z0-9]{24,}")
 
 
 def _safe_text(value: Any) -> Optional[str]:
@@ -133,10 +141,16 @@ def _finite(value: Any) -> Optional[float]:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
 
 
-def _window_ids(labels: Sequence[str]) -> list[str]:
+#: The label of a window whose own label was dropped as credential-shaped (its id is ``window_<n>``).
+_FALLBACK_WINDOW_LABEL = "Usage window"
+
+
+def _window_ids(labels: Sequence[Optional[str]]) -> list[str]:
+    """A stable slug per window. *labels* are the already vetted ones (``_safe_text``): a dropped label (None)
+    gets ``window_<position>``, never a slug of the text that was dropped, which would carry it out reworded."""
     ids: list[str] = []
-    for label in labels:
-        base = "".join(ch if ch.isalnum() else "_" for ch in label.lower()).strip("_") or "window"
+    for position, label in enumerate(labels, start=1):
+        base = "".join(ch if ch.isalnum() else "_" for ch in (label or "").lower()).strip("_") or f"window_{position}"
         base = "_".join(part for part in base.split("_") if part)
         candidate, n = base, 2
         while candidate in ids:
@@ -150,12 +164,13 @@ def entry_from_snapshot(provider: str, snapshot: Any) -> dict:
     if snapshot is None:
         return unavailable_entry(provider, "Not signed in to this provider in this profile.")
     windows_in = list(snapshot.windows)
-    ids = _window_ids([str(w.label or "") for w in windows_in])
+    labels = [_safe_text(window.label) for window in windows_in]
+    ids = _window_ids(labels)
     windows = []
-    for window_id, window in zip(ids, windows_in):
+    for window_id, label, window in zip(ids, labels, windows_in):
         used = _finite(window.used_percent)
         windows.append({
-            "id": window_id, "label": _safe_text(window.label) or window_id,
+            "id": window_id, "label": label or _FALLBACK_WINDOW_LABEL,
             "used_percent": None if used is None else round(max(0.0, min(100.0, used)), 2),
             "reset_at": iso_utc(window.reset_at), "detail": _safe_text(window.detail),
         })
@@ -276,9 +291,18 @@ def _fetch_entry(provider: str, fetch: Fetcher) -> tuple[dict, float]:
 def provider_entry(profile_key: str, provider: str, *, refresh: bool = False, fetch: Optional[Fetcher] = None) -> dict:
     """The entry for (*profile_key*, *provider*): the cached one while it is younger than the TTL, else one
     bounded fetch. ``refresh`` skips a fresh entry only when the pair was last fetched at least
-    ``REFRESH_MIN_INTERVAL_S`` ago. Callers for the same pair queue on one lock, so a burst makes one fetch."""
+    ``REFRESH_MIN_INTERVAL_S`` ago. One fetch per pair at a time, so a burst makes one fetch; a caller that finds
+    it running does not queue behind it for up to the bound (it would hold an RPC worker all that time): it
+    answers the entry the pair has, however old, or with nothing cached waits ``WAITER_TIMEOUT_S`` for the
+    fetch and else answers :data:`REFRESHING_REASON`, which is not cached."""
     key = (profile_key, provider)
-    with _key_lock(key):
+    lock = _key_lock(key)
+    if not lock.acquire(blocking=False):
+        if (slot := _read(key)) is not None:
+            return copy.deepcopy(slot.entry)
+        if not lock.acquire(timeout=WAITER_TIMEOUT_S):
+            return unavailable_entry(provider, REFRESHING_REASON)
+    try:
         slot = _read(key)
         now = time.monotonic()
         if slot is not None:
@@ -290,6 +314,8 @@ def provider_entry(profile_key: str, provider: str, *, refresh: bool = False, fe
         stamp = time.monotonic()
         _store(key, _Slot(entry=entry, stored_at=stamp, fetched_at=stamp, ttl=ttl))
         return copy.deepcopy(entry)
+    finally:
+        lock.release()
 
 
 def collect(profile_key: str, providers: Sequence[str], *, refresh: bool = False,

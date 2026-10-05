@@ -79,7 +79,13 @@ def relabel_imported_text(text: Any) -> Any:
 def _image_url(value: Any) -> Optional[str]:
     if not isinstance(value, str) or not value.strip().lower().startswith(_IMAGE_URL_PREFIXES):
         return None
-    return value.strip()
+    value = value.strip()
+    # The scheme (and a data URL's header) stored lower-case: the converters match it case-sensitively.
+    if value[:5].lower() == "data:":
+        header, comma, rest = value.partition(",")
+        return header.lower() + comma + rest
+    scheme, sep, rest = value.partition("://")
+    return scheme.lower() + sep + rest
 
 
 def _clean_part(part: Any) -> Optional[Dict[str, Any]]:
@@ -207,7 +213,13 @@ def _special_title(title: str) -> bool:
     from agent.turn_sender import _folded
 
     folded = " ".join(_folded(title)[0].split()).casefold()
-    return folded == "bot chat" or folded.startswith("group:")
+    if folded == "bot chat" or folded.startswith("group:"):
+        return True
+    # "<title> #<n>": a numbered title joins an existing title's lineage, and the newest of a lineage is what
+    # resolving that title (``hermes --resume "<title>"``, ``/resume``) returns.
+    from hermes_state_titles import _NUMBERED_TITLE_RE
+
+    return _NUMBERED_TITLE_RE.match(title.strip()) is not None
 
 
 def _untrusted_title(title: Any) -> Any:
@@ -228,5 +240,19 @@ def untrusted_session(session: Dict[str, Any], importer_id: Optional[str],
         "parent_session_id": renamed.get(parent_id, parent_id) if parent_id else parent_id,
         "system_prompt": None, "model_config": None, "user_id": importer_id or None, "source": "import",
         "end_reason": None, "cwd": None, "git_branch": None, "git_repo_root": None,
+        "billing_provider": None, "billing_base_url": None, "billing_mode": None,
+        "started_at": _not_after_now(session.get("started_at")),
+        "ended_at": _not_after_now(session.get("ended_at")),
         "title": _untrusted_title(session.get("title")),
     }
+
+
+def _not_after_now(value: Any) -> Any:
+    """A timestamp from the payload, never later than now: a session dated in the future would sort as the
+    newest of everything it is listed or resolved with."""
+    import time
+
+    from hermes_cli.timefmt import coerce_epoch
+
+    epoch = coerce_epoch(value, field="started_at")
+    return value if epoch is None else min(epoch, time.time())

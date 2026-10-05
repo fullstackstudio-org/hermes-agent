@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -454,3 +455,34 @@ def test_the_cli_restores_with_provenance_only_when_told_to(tmp_path, capsys):
         guessed.close()
     out = capsys.readouterr().out
     assert "untrusted" in out and "--from hermes" in out
+
+
+def test_an_import_cannot_take_over_an_existing_titles_lineage(db):
+    db.create_session("v-chat", source="tui")
+    db.set_session_title("v-chat", "marker-chat")
+    future = 4102444800  # 2100-01-01: newer than anything here
+    db.import_sessions([
+        {"id": "g-7", "title": "marker-chat #7", "started_at": future, "messages": []},
+        {"id": "g-bot", "title": "Bot Chat #2", "started_at": future, "messages": []},
+    ], importer_author=SAM)
+
+    assert db.resolve_session_by_title("marker-chat") == "v-chat"
+    assert db.resolve_session_by_title("Bot Chat") != "g-bot"
+    assert db.get_session("g-7")["title"].startswith("Imported: ")
+    assert db.get_session("g-7")["started_at"] <= time.time()
+
+
+def test_an_import_brings_no_billing_endpoint(db):
+    db.import_sessions([_forged_payload(billing_provider="marker", billing_base_url="https://marker.invalid/v1",
+                                        billing_mode="marker")], importer_author=SAM)
+    session = db.get_session("forged-1")
+    assert session.get("billing_provider") is None and session.get("billing_base_url") is None
+    assert session.get("billing_mode") is None
+
+
+def test_an_imported_image_url_keeps_a_lower_case_scheme():
+    from hermes_state_import_provenance import _image_url
+
+    assert _image_url("DATA:IMAGE/PNG;base64,QUJD") == "data:image/png;base64,QUJD"
+    assert _image_url("HTTPS://marker.invalid/A.png") == "https://marker.invalid/A.png"
+    assert _image_url("javascript:alert(1)") is None

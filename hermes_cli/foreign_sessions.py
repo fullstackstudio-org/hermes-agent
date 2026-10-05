@@ -302,11 +302,18 @@ def run_sessions_import(args, db=None) -> Optional[str]:
     """`hermes sessions import` entry point. Returns new session id or None."""
     source = getattr(args, "from_source", None)
     path = getattr(args, "path", None)
+    if source == "hermes" and not path:
+        print("--from hermes needs the export file: hermes sessions import --from hermes <file>")
+        return None
     if path:
         # A missing file is reported as such, not as the misleading "cannot infer source".
         if not Path(path).exists():
             print(f"Error: file not found: {path}")
             return None
+        if source == "hermes" or not source:
+            from hermes_cli.session_restore import read_hermes_export
+            if source == "hermes" or read_hermes_export(path) is not None:
+                return _restore_hermes_export(path, db)
         if not source:  # guess from the path shape; a codex match wins over a claude match
             p = str(path)
             if "/.claude/" in p or p.endswith(".jsonl") and "claude" in p:
@@ -329,6 +336,28 @@ def run_sessions_import(args, db=None) -> Optional[str]:
     print(f"✓ Imported {_SOURCE_LABELS.get(source, source)} session as {session_id}")
     print(f"  Continue it with:  hermes --resume {session_id}")
     return session_id
+
+
+def _restore_hermes_export(path, db) -> Optional[str]:
+    """Restore a Hermes session export as the operator, provenance kept (hermes_cli/session_restore.py);
+    the first restored (or already present) session id, None on failure."""
+    from hermes_cli.session_restore import restore_hermes_export
+    try:
+        report = restore_hermes_export(path, db=db)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return None
+    if not report.get("ok"):
+        for error in report.get("errors") or ():
+            print(f"Error: session {error.get('session_id') or error.get('index')}: {error.get('error')}")
+        return None
+    imported, skipped = report.get("imported_ids") or [], report.get("skipped_ids") or []
+    print(f"✓ Restored {len(imported)} session{'' if len(imported) == 1 else 's'} "
+          f"({len(skipped)} already present)")
+    ids = imported or skipped
+    if ids:
+        print(f"  Continue it with:  hermes --resume {ids[0]}")
+    return ids[0] if ids else ""
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import re
 import sys
 import threading
 from collections import OrderedDict
@@ -547,6 +548,10 @@ CONTROL_FRAME_OPENERS = (
     "System note:", "System:", "SYSTEM]", "IMPORTANT:", "Planning state preserved", "ASYNC DELEGATION",
     "Gateway note:",
 )
+#: ``[`` opening one of :data:`CONTROL_FRAME_OPENERS` (case-insensitive); ``sub`` it with a label of your
+#: own ("[member-quoted ", "[imported ") so the words stay and the exact trusted shape does not.
+CONTROL_FRAME_RE = re.compile(
+    r"\[(?=" + "|".join(opener.replace("]", r"\]") for opener in CONTROL_FRAME_OPENERS) + ")", re.IGNORECASE)
 
 
 def format_steer_marker(steer_text: str) -> str:

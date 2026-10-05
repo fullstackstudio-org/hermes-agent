@@ -5736,7 +5736,8 @@ class TestDisplayMetadataReadPaths:
 
         target = SessionDB(db_path=tmp_path / "imported.db")
         try:
-            target.import_sessions([json.loads(json.dumps(blob))])
+            # An operator restore keeps display_metadata; an untrusted import drops it (HERM-127).
+            target.import_sessions([json.loads(json.dumps(blob))], keep_provenance=True)
             assert target.get_messages_as_conversation("s1")[0]["display_metadata"] == self.META
             assert target.get_messages("s1")[0]["display_metadata"] == self.META
         finally:

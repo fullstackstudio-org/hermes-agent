@@ -772,6 +772,27 @@ activity condensed to short `[ran tool: …]` notes inside assistant turns.
 System prompts, injected context, reasoning traces, and raw tool output are
 left behind — the import is a clean transcript, not a byte-for-byte replay.
 
+### Restoring a Hermes export
+
+```bash
+hermes sessions export backup.jsonl          # every session, one per line
+hermes sessions import --from hermes backup.jsonl
+```
+
+A file written by `hermes sessions export` (or the dashboard's per-session
+export) is recognised without `--from hermes` too. This restore is the
+operator's and keeps everything: who wrote each message, the exact text the
+model was sent, the stored system prompt and runtime settings. Run it only on
+exports you trust.
+
+Importing through the dashboard (`POST /api/sessions/import`) is different: it
+is open to every signed-in user, so the file is that user's statement. Each
+user message is stored as written by the person importing it (or by nobody
+when no one is signed in); the model-facing copies, authors, gateway notices,
+stored system prompt and runtime settings in the file are dropped; Hermes'
+own control frames in the text are visibly relabelled; and an imported
+session is only linked to a parent that came in the same file.
+
 
 ## Session Search Tool
 

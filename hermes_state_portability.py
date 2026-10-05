@@ -361,7 +361,7 @@ class SessionPortabilityMixin:
                 logger.warning("adoption divergence: donor segment %s has %d messages, "
                                "local copy has %d — donor will NOT be retired", seg_id, donor_count, local_count)
 
-        result = self.import_sessions([dict(seg) for seg in segments])
+        result = self.import_sessions([dict(seg) for seg in segments], keep_provenance=True)
         imported = int(result.get("imported") or 0)
         skipped = int(result.get("skipped") or 0)
         adopted = result.get("ok", False) and (imported + skipped) == len(segments)
@@ -573,10 +573,18 @@ class SessionPortabilityMixin:
                 detached += 1
         return detached
 
-    def import_sessions(self, sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def import_sessions(self, sessions: List[Dict[str, Any]], *, keep_provenance: bool = False,
+                        importer_author: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Import sessions exported by :meth:`export_session` or ``export_all``. Existing ids
         are skipped. A child keeps its parent only when the parent exists or is in the
         same payload; otherwise it is detached so partial imports pass FK validation.
+
+        By default the payload is UNTRUSTED (``hermes_state_import_provenance``): nothing in it may set
+        what only Hermes writes -- a sidecar, an author, a gateway notice, a stored system prompt or
+        runtime config, the session's login, a parent outside the payload -- and every user row names
+        *importer_author* (the signed-in importer's row author, or nobody). ``keep_provenance=True``
+        stores the payload as it is, for a local operator restore and the gateway's own lineage
+        adoption only.
         Gateway routing, handoff, rewind and other live runtime state are reset: this
         restores history, not ownership of a live channel or process. Export INCLUDES
         ``last_activity_*`` but import RESETS them to NULL — resurrecting a stale
@@ -595,6 +603,12 @@ class SessionPortabilityMixin:
         normalized, errors = self._validate_import_payload(sessions)
         if errors:
             return {"ok": False, "imported": 0, "skipped": 0, "detached": 0, "errors": errors}
+        payload_ids = {str(item["session"].get("id") or "").strip() for item in normalized}
+        if not keep_provenance:
+            from hermes_state_import_provenance import untrusted_messages, untrusted_session
+            importer_id = importer_author.get("id") if isinstance(importer_author, dict) else None
+            normalized = [{**item, "session": untrusted_session(item["session"], importer_id),
+                           "messages": untrusted_messages(item["messages"], importer_author)} for item in normalized]
 
         def _do(conn):
             imported_ids: List[str] = []
@@ -611,9 +625,13 @@ class SessionPortabilityMixin:
                 if parent_id:
                     parent_updates.append((session_id, parent_id))
                 imported_ids.append(session_id)
+            # An untrusted payload links only within itself: grafting onto a session already here
+            # would put the importer's rows into somebody else's lineage.
+            foreign = [] if keep_provenance else [u for u in parent_updates if u[1] not in payload_ids]
+            linkable = [u for u in parent_updates if u not in foreign]
             return {
                 "ok": True, "imported": len(imported_ids), "skipped": len(skipped_ids),
-                "detached": self._attach_import_parents(conn, parent_updates),
+                "detached": len(foreign) + self._attach_import_parents(conn, linkable),
                 "imported_ids": imported_ids, "skipped_ids": skipped_ids, "errors": [],
             }
 

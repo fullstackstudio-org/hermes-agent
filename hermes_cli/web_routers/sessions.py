@@ -441,6 +441,20 @@ async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
     return {"ok": True, "deleted": deleted}
 
 
+def _importer_author(request: Request) -> Optional[dict]:
+    """The row author (``tui_gateway.row_author.row_author``) of the person signed in on *request*: the
+    verified dashboard session the auth middleware attached, never anything the body says. None without
+    one (the legacy token, an ungated dashboard): an imported row then names nobody."""
+    from tui_gateway.row_author import row_author
+
+    session = getattr(request.state, "session", None)
+    provider = str(getattr(session, "provider", "") or "").strip()
+    user_id = str(getattr(session, "user_id", "") or "").strip()
+    if not provider or not user_id:
+        return None
+    return row_author((f"{provider}:{user_id}", str(getattr(session, "display_name", "") or "").strip()))
+
+
 @manage_router.post("/api/sessions/import")
 async def import_sessions_endpoint(request: Request):
     """Import sessions exported from the dashboard or CLI (session rows only —
@@ -453,9 +467,15 @@ async def import_sessions_endpoint(request: Request):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid session import payload") from exc
 
+    # Whatever the payload says is the importer's statement: it may not set what only the gateway writes
+    # (sidecars, authors, notices, the stored system prompt, the session's login), and every user row
+    # names the signed-in importer (hermes_state_import_provenance). Only a local operator restore keeps
+    # provenance (`hermes sessions import --from hermes`).
+    importer = _importer_author(request)
     try:
         result = await asyncio.to_thread(
-            _with_db, body.profile, lambda db: db.import_sessions(body.sessions), read_only=False)
+            _with_db, body.profile, lambda db: db.import_sessions(body.sessions, importer_author=importer),
+            read_only=False)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

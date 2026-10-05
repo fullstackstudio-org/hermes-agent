@@ -232,7 +232,8 @@ def test_imported_prompts_are_deduplicated(tmp_path):
 
     target = SessionDB(db_path=tmp_path / "target.db")
     try:
-        result = target.import_sessions(exported)
+        # An operator restore keeps the stored prompts; an untrusted import stores none (HERM-127).
+        result = target.import_sessions(exported, keep_provenance=True)
         assert result["ok"] is True
         assert result["imported"] == 2
         assert _prompt_count(target) == 1

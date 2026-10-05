@@ -3325,6 +3325,25 @@ export interface SessionInterruptResult {
   turn_isolation?: boolean | null
 }
 export type InterruptStatus = 'interrupted' | 'not_interrupted'
+/** ``profile`` limits the stop to the sessions of that profile; omitted = every profile this process hosts. */
+export interface SessionInterruptAllParams {
+  profile?: string | null
+}
+/** ``already_idle``: sessions the caller may act on with no turn running (or whose turn ended during the call). ``not_allowed``: BUSY sessions it may not stop (another person's, or another person's turn in a shared chat). ``failed``: turns whose stop raised (logged); they are not in ``stopped``. */
+export interface SessionInterruptAllResult {
+  stopped: InterruptedSession[]
+  already_idle: number
+  not_allowed: number
+  failed: number
+}
+/** One turn that was stopped. ``session_id`` is the runtime id (``session.active_list``'s ``id``), ``session_key`` the stored one; ``profile`` the session's own profile; ``title`` null while it has none. */
+export interface InterruptedSession {
+  session_id: string
+  session_key: string
+  profile: string
+  title?: string | null
+  source: string
+}
 export interface SessionCorrectionParams {
   session_id: string
   profile?: string | null
@@ -5621,6 +5640,8 @@ export interface RpcMethods {
   'session.history': { params: SessionHistoryParams; result: SessionHistoryResult }
   /** Stop the running turn (and streaming TTS); retires the crash-recovery marker. */
   'session.interrupt': { params: SessionInterruptParams; result: SessionInterruptResult }
+  /** Stop every running turn the caller's login may stop, across profiles, in one call (authorised per session as session.interrupt; cron runs are outside the registry and untouched). */
+  'session.interrupt_all': { params: SessionInterruptAllParams; result: SessionInterruptAllResult }
   /** Human-facing stored sessions, most recent first (sub-agent / kanban sources denied). */
   'session.list': { params: SessionListParams; result: SessionListResult }
   /** Most recent human-facing session; errors fold into a null session_id. */
@@ -5916,6 +5937,7 @@ export const RPC_METHODS = [
   'session.foreign.preview',
   'session.history',
   'session.interrupt',
+  'session.interrupt_all',
   'session.list',
   'session.most_recent',
   'session.redirect',

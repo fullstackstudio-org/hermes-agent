@@ -2265,9 +2265,14 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     _interrupt_session_turn(sid, session)
-    # Retire the crash-recovery marker NOW: until the run thread's finally, a backend exit looks like a crash
-    # and session.resume auto-continues the turn the user just stopped (the extra key covers compression
-    # rotating session_key mid-turn).
+    _retire_stopped_turn_marker(session)
+    return _ok(rid, {"status": "interrupted"})
+
+
+def _retire_stopped_turn_marker(session: dict) -> None:
+    """Retire the crash-recovery marker of a turn a person just stopped, NOW: until the run thread's finally, a
+    backend exit looks like a crash and session.resume auto-continues the turn the user just stopped (the extra
+    key covers compression rotating session_key mid-turn)."""
     with session["history_lock"]:
         active_marker_key = str(session.pop("_active_turn_marker_key", "") or "")
         # A stop that lands while a shutdown is interrupting the same turn wins: the person asked for the turn to
@@ -2275,7 +2280,84 @@ def _(rid, params: dict) -> dict:
         for key in ("_shutdown_interrupt", "_shutdown_queued", "_shutdown_token"):
             session.pop(key, None)
     _retire_turn_marker(session, active_marker_key, keep_queued=False)
-    return _ok(rid, {"status": "interrupted"})
+
+
+def _turn_in_flight(session: dict) -> bool:
+    """A turn is running here: on the run thread, or in the compute-host child of an isolated session."""
+    return bool(session.get("running") or session.get("_compute_host_turn_id"))
+
+
+def _turn_is_callers(session: dict, login: str) -> bool:
+    """Whether the turn running in *session* is *login*'s own: the person who sent it (the in-flight record's
+    ``display_metadata.author``), and for a turn nobody signed in sent (a wake-up, a crash continuation, a
+    delegation's result) the session's owner, but only while the session is not shared -- in a shared chat such a
+    turn is nobody's in particular. Read without ``history_lock``: the caller holds the registry lock."""
+    inflight = session.get("inflight_turn")
+    metadata = inflight.get("display_metadata") if isinstance(inflight, dict) else None
+    author = metadata.get("author") if isinstance(metadata, dict) else None
+    if isinstance(author, dict) and author.get("id"):
+        return author["id"] == login
+    return not session.get("auth_user_shared") and _session_auth_user_id(session) == login
+
+
+@method("session.interrupt_all")
+def _(rid, params: dict) -> dict:
+    """Stop every running turn this caller may stop, in one call: its own login's turns across every profile
+    this process hosts (or just ``profile``), started from this client, from its other clients or from the
+    session's own wake-ups. Authorised per session exactly as ``session.interrupt`` is
+    (``_transport_may_access_session``), and on top of that a person's connection stops only turns that are its
+    login's: a turn another person sent into a shared chat is ``not_allowed``. A connection without a per-person
+    identity (session-token mode, stdio) keeps stopping whatever it may reach, as ``session.interrupt`` does.
+
+    The registry is read once under its lock: who is running and who may be stopped are decided against one
+    state of it; the stops follow outside the lock (an interrupt may wait out a compression commit), and a
+    turn that ended in between is counted idle. Cron runs are not here: they run in the scheduler's own pool,
+    outside this registry, and no cron record names the login that owns it, so ownership cannot be shown and none
+    is stopped (``cron.manage`` pauses a job). ``not_allowed`` counts only busy sessions, like the bare rows of
+    ``session.active_list``, so it tells nothing about idle ones."""
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "stop every running turn")) is not None:
+        return refused
+    profile = _str_param(params, "profile")
+    target = _profile_home(profile) if profile else _ANY_PROFILE
+    transport = current_transport()
+    login = _transport_auth_user_id(transport)
+    todo, idle, not_allowed = [], 0, 0
+    with _sessions_lock:
+        for sid, session in list(_sessions.items()):
+            if not isinstance(session, dict) or session.get("_finalized") or not _live_profile_matches(session, target):
+                continue
+            running = _turn_in_flight(session)
+            if not _transport_may_access_session(session, transport, sid=sid) or (
+                    running and login is not None and not _turn_is_callers(session, login)):
+                not_allowed += running
+            elif running:
+                todo.append((sid, session))
+            else:
+                idle += 1
+    stopped, failed = [], 0
+    if todo:
+        _tts_stream_stop()  # as session.interrupt: a stop silences streaming TTS (voice is process-global)
+    for sid, session in todo:
+        if not _turn_in_flight(session):
+            idle += 1
+            continue
+        try:
+            if _session_uses_compute_host(session):
+                _interrupt_session_turn(sid, session, request_id=f"interrupt-all-{rid}-{sid}")
+            else:
+                _interrupt_session_turn(sid, session)
+                _retire_stopped_turn_marker(session)
+        except Exception:
+            logger.warning("session.interrupt_all: could not stop session %s", sid, exc_info=True)
+            failed += 1
+            continue
+        key = _session_lookup_key(session, fallback=sid)
+        stopped.append({"session_id": sid, "session_key": key,
+                        "profile": profile_name_for_home(session.get("profile_home")) or _current_profile_name(),
+                        "title": _session_live_title(session, key) or None,
+                        "source": str(session.get("source") or "")})
+    return _ok(rid, {"stopped": stopped, "already_idle": idle, "not_allowed": not_allowed, "failed": failed})
 
 
 def _apply_correction(rid, session: dict, verb: str, text: str, accepted_status: str) -> dict:

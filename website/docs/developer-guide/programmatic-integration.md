@@ -46,7 +46,7 @@ session.create          session.list            session.active_list
 session.activate        session.close           session.interrupt
 session.history         session.compress        session.branch
 session.title           session.usage           session.status
-account.usage
+session.interrupt_all   account.usage
 clarify.lock            config.set / config.get commands.catalog
 client.capabilities     gateway.capabilities    ping
 command.resolve         command.dispatch        cli.exec
@@ -59,6 +59,29 @@ terminal.resize         clipboard.paste         image.attach
 `session.active_list`, `session.activate`, and `session.close` are the process-local live-session controls used by the TUI session switcher. Use `session.list` / `/resume` for saved transcript discovery; use the active-session methods only for sessions that are currently open in the TUI gateway process.
 
 Within one authenticated gateway, resuming or activating a live session attaches another event subscriber rather than replacing the previous connection. Streaming and terminal events go to all attached clients; disconnecting one client does not end a session another client is viewing. Existing submit exclusivity and configured busy-input policy remain in force. Attached clients can steer the session's subagents; browser-controller results still require the connection that registered that controller. This does not enable independent gateway processes to write the same session, nor does it imply durable prompt admission across an owner restart.
+
+### Stopping every running turn: `session.interrupt_all`
+
+`session.interrupt` stops one session. `session.interrupt_all {profile?}` stops every running turn the caller may stop, in one call, for a "stop everything" control. It reads the live-session registry once under its lock, decides per session, then stops the turns the way `session.interrupt` does (queue cleared, pending prompts denied, crash-recovery marker retired, compute-host turns stopped through the host).
+
+```
+→ {"jsonrpc":"2.0","id":1,"method":"session.interrupt_all","params":{"profile":"work"}}
+← {"jsonrpc":"2.0","id":1,"result":{
+     "stopped":[{"session_id":"a1b2c3d4","session_key":"20261005_101500_ab12cd","profile":"work","title":"Release notes","source":"hermie"}],
+     "already_idle":2,"not_allowed":1,"failed":0}}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `profile` (param) | Only sessions of that profile (`default` is the launch profile). Omitted: every profile this process hosts. An unknown profile answers `4064`. |
+| `stopped[]` | One row per turn stopped: `session_id` (the runtime id, `session.active_list`'s `id`), `session_key` (the stored id), the session's own `profile`, `title` (`null` while it has none) and `source`. |
+| `already_idle` | Sessions the caller may act on with no turn running, including a turn that ended during the call. |
+| `not_allowed` | **Busy** sessions the caller may not stop. Idle sessions of other people are not counted, so the number reveals no more than the bare "working" rows of `session.active_list`. |
+| `failed` | Turns whose stop raised (logged server-side); they are not in `stopped`. |
+
+Authorisation is the one `session.interrupt` uses, asked per session (`session_transports._transport_may_access_session`: attached now, or the login that created the session or attached before), and a signed-in connection additionally stops only turns that are its own login's. That covers turns started from its other clients, in any profile, and turns nobody signed in sent (a wake-up, a crash continuation) in a session that is not shared. In a shared chat a turn another person sent is `not_allowed`, as is a turn nobody in particular sent. A connection without a per-person identity (session-token mode, stdio) reaches what `session.interrupt` lets it reach. An agent connected through MCP is refused (`4033`): it stops only its own turn, by id, through `session.interrupt`.
+
+**Cron runs are not stopped.** They run in the scheduler's own thread pool, outside the live-session registry, and no cron record names the login that owns it, so ownership cannot be shown. They are neither stopped nor counted; pause or remove the job with `cron.manage`. The call runs on the RPC pool, not the socket reader, because an interrupt may wait out a compression commit.
 
 ### Provider account usage: `account.usage`
 

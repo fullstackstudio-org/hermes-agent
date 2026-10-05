@@ -3319,6 +3319,24 @@
       }
     },
     {
+      "name": "session.interrupt_all",
+      "summary": "Stop every running turn the caller's login may stop, across profiles, in one call (authorised per session as session.interrupt; cron runs are outside the registry and untouched).",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionInterruptAllParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SessionInterruptAllResult"
+        }
+      }
+    },
+    {
       "name": "session.list",
       "summary": "Human-facing stored sessions, most recent first (sub-agent / kanban sources denied).",
       "params": [
@@ -18977,6 +18995,48 @@
         "title": "InterruptStatus",
         "type": "string"
       },
+      "InterruptedSession": {
+        "additionalProperties": false,
+        "description": "One turn that was stopped. ``session_id`` is the runtime id (``session.active_list``'s ``id``),\n``session_key`` the stored one; ``profile`` the session's own profile; ``title`` null while it has none.",
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "session_key": {
+            "title": "Session Key",
+            "type": "string"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Title"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "session_key",
+          "profile",
+          "source"
+        ],
+        "title": "InterruptedSession",
+        "type": "object"
+      },
       "LayoutApplyPayload": {
         "additionalProperties": true,
         "description": "``tools/apply_layout_tool.py``.",
@@ -33284,6 +33344,59 @@
           "messages"
         ],
         "title": "SessionHistoryResult",
+        "type": "object"
+      },
+      "SessionInterruptAllParams": {
+        "additionalProperties": false,
+        "description": "``profile`` limits the stop to the sessions of that profile; omitted = every profile this process hosts.",
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          }
+        },
+        "title": "SessionInterruptAllParams",
+        "type": "object"
+      },
+      "SessionInterruptAllResult": {
+        "additionalProperties": false,
+        "description": "``already_idle``: sessions the caller may act on with no turn running (or whose turn ended during the call).\n``not_allowed``: BUSY sessions it may not stop (another person's, or another person's turn in a shared chat).\n``failed``: turns whose stop raised (logged); they are not in ``stopped``.",
+        "properties": {
+          "stopped": {
+            "items": {
+              "$ref": "#/components/schemas/InterruptedSession"
+            },
+            "title": "Stopped",
+            "type": "array"
+          },
+          "already_idle": {
+            "title": "Already Idle",
+            "type": "integer"
+          },
+          "not_allowed": {
+            "title": "Not Allowed",
+            "type": "integer"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stopped",
+          "already_idle",
+          "not_allowed",
+          "failed"
+        ],
+        "title": "SessionInterruptAllResult",
         "type": "object"
       },
       "SessionInterruptParams": {

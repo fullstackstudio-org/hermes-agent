@@ -577,6 +577,37 @@ method("session.interrupt", params=SessionInterruptParams, result=SessionInterru
        doc="Stop the running turn (and streaming TTS); retires the crash-recovery marker.")
 
 
+class SessionInterruptAllParams(ProfileParams):
+    """``profile`` limits the stop to the sessions of that profile; omitted = every profile this process hosts."""
+
+
+class InterruptedSession(Result):
+    """One turn that was stopped. ``session_id`` is the runtime id (``session.active_list``'s ``id``),
+    ``session_key`` the stored one; ``profile`` the session's own profile; ``title`` null while it has none."""
+
+    session_id: str
+    session_key: str
+    profile: str
+    title: str | None = None
+    source: str
+
+
+class SessionInterruptAllResult(Result):
+    """``already_idle``: sessions the caller may act on with no turn running (or whose turn ended during the call).
+    ``not_allowed``: BUSY sessions it may not stop (another person's, or another person's turn in a shared chat).
+    ``failed``: turns whose stop raised (logged); they are not in ``stopped``."""
+
+    stopped: list[InterruptedSession]
+    already_idle: int
+    not_allowed: int
+    failed: int
+
+
+method("session.interrupt_all", params=SessionInterruptAllParams, result=SessionInterruptAllResult,
+       doc="Stop every running turn the caller's login may stop, across profiles, in one call (authorised per "
+           "session as session.interrupt; cron runs are outside the registry and untouched).")
+
+
 class CorrectionStatus(WireEnum):
     queued = "queued"
     redirected = "redirected"

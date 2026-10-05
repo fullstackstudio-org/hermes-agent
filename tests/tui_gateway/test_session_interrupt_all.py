@@ -406,3 +406,22 @@ def test_the_method_does_not_wait_behind_a_full_rpc_pool(homes, monkeypatch):
             assert _ids(answer["result"]) == ["mine"] and _stopped(session) and not blocked.done()
         finally:
             release.set()
+
+
+def test_a_turn_still_starting_up_is_stopped_once_its_ids_are_filled_in(homes, monkeypatch):
+    # prompt.submit stamped the in-flight record (turn id T); the run thread sets session["turn_id"] only later,
+    # here between the registry pass and the stop.
+    chat = _session("chat", turn_author=ALICE)
+    chat["inflight_turn"]["display_metadata"]["turn_id"] = "marker-turn"
+    chat.pop("turn_id", None)
+    monkeypatch.setattr(server, "_tts_stream_stop", lambda *a, **k: chat.__setitem__("turn_id", "marker-turn"))
+
+    assert _ids(_call(_WS("laptop", ALICE))["result"]) == ["chat"]
+
+
+def test_a_part_of_the_token_that_was_set_must_not_change():
+    from tui_gateway.methods_session import _same_turn
+
+    assert _same_turn(("t1", None, "t1"), (None, None, "t1"))
+    assert not _same_turn(("t2", None, "t2"), ("t1", None, "t1"))
+    assert not _same_turn((None, None, "t2"), (None, None, "t1"))

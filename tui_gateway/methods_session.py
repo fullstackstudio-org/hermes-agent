@@ -2311,6 +2311,13 @@ def _turn_token(session: dict) -> tuple:
     return session.get("turn_id"), session.get("_compute_host_turn_id"), turn_id_of(metadata)
 
 
+def _same_turn(now: tuple, then: tuple) -> bool:
+    """Whether the token read *now* is still the turn read *then*. A turn fills its ids in while it starts
+    (``prompt.submit`` marks it running before the in-flight record and the run thread name it), so a part
+    that was unset then may be set now; a part that was set must not have changed."""
+    return all(before is None or before == after for before, after in zip(then, now))
+
+
 def _stop_checked_turn(sid: str, session: dict, login: str | None, token: tuple, rid) -> bool:
     """Stop the turn ``session.interrupt_all`` decided on, if it is still the one running; returns whether it was.
 
@@ -2327,12 +2334,14 @@ def _stop_checked_turn(sid: str, session: dict, login: str | None, token: tuple,
     from tui_gateway.agent_guard import turn_start_fence
 
     def still_that_turn() -> bool:  # under history_lock
-        return (_turn_in_flight(session) and _turn_token(session) == token
+        return (_turn_in_flight(session) and _same_turn(_turn_token(session), token)
                 and (login is None or _turn_is_callers(session, login)))
 
     compute_host = _session_uses_compute_host(session)
     request_id = f"interrupt-all-{rid}-{sid}"
-    if _session_identity_is_ambiguous(session):
+    # A connection with no login (session token, stdio) reaches what ``session.interrupt`` reaches, and
+    # stops it the same way: the narrow stop is for a person in a chat other people are in.
+    if login is not None and _session_identity_is_ambiguous(session):
         return _stop_turn_narrowly(
             sid, session, request_id=request_id if compute_host else None, may_stop=still_that_turn,
             keep_queued=lambda entry: _transport_auth_user_id(entry.get("transport")) != login)

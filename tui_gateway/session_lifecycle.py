@@ -478,15 +478,16 @@ def _announce_session_reclaimed(session: dict, end_reason: str) -> None:
         logger.debug("session.reclaimed broadcast failed", exc_info=True)
 
 
-# End reasons after which the person is done with the chat: its session approvals, YOLO and code kernels go
-# with it (``tools.approval.clear_session``, what /new and a close do on the messaging gateway). A runtime the
-# backend reclaimed (idle, LRU, a dropped socket) or one a resume replaced keeps them: the conversation goes
-# on, a resume reuses the same key, and ``approval.grants`` lists them again once it is live.
+# End reasons after which the person is done with the chat: its session approvals go with it. Only the grants:
+# YOLO and code kernels stay, because a client also closes a runtime it brought up just to read or name a chat
+# (Hermie's ``putAway``), and that must not switch off the chat's YOLO. A runtime the backend reclaimed (idle,
+# LRU, a dropped socket) or one a resume replaced keeps its grants too: the conversation goes on, a resume
+# reuses the same key, and ``approval.grants`` lists them again once it is live.
 _APPROVAL_ENDING_REASONS = frozenset({"tui_close", "setup_reset"})
 
 
 def _end_session_approvals(session: dict, end_reason: str) -> None:
-    """Clear *session*'s approval state when the person ended the chat, unless another live runtime carries the
+    """Drop *session*'s session approvals when the person ended the chat, unless another live runtime carries the
     same key on (a takeover, a second window)."""
     key = session.get("session_key")
     if not key or end_reason not in _APPROVAL_ENDING_REASONS or session.get("_lease_taken_over"):
@@ -496,8 +497,8 @@ def _end_session_approvals(session: dict, end_reason: str) -> None:
                and not other.get("_finalized") for other in _sessions.values()):
             return
     with contextlib.suppress(Exception):
-        from tools.approval import clear_session
-        clear_session(key)
+        from tools.approval import revoke_session
+        revoke_session(key, lambda stored: stored)
 
 
 def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") -> None:

@@ -337,7 +337,7 @@ def test_session_grants_follow_a_compression_rotation(homes, monkeypatch):
     assert approval.session_grants("key-mine") == []
 
 
-def test_closing_a_chat_ends_its_session_grants_but_a_reclaim_keeps_them(homes):
+def test_closing_a_chat_ends_its_session_grants_keeps_yolo_and_a_reclaim_keeps_them(homes):
     closed, reclaimed, twin = _session("closed"), _session("reclaimed"), _session("twin")
     twin["session_key"] = "key-shared"
     for key in ("key-closed", "key-reclaimed", "key-shared"):
@@ -345,7 +345,8 @@ def test_closing_a_chat_ends_its_session_grants_but_a_reclaim_keeps_them(homes):
     approval.enable_session_yolo("key-closed")
 
     assert _result(_call("session.close", {"session_id": "closed"})) == {"closed": True}
-    assert approval.session_grants("key-closed") == [] and not approval.is_session_yolo_enabled("key-closed")
+    assert approval.session_grants("key-closed") == []
+    assert approval.is_session_yolo_enabled("key-closed")              # YOLO is the chat's toggle, not a grant
 
     server._sessions.pop("reclaimed")
     server._teardown_session(reclaimed, end_reason="idle_timeout")       # the backend reclaimed it; chat goes on

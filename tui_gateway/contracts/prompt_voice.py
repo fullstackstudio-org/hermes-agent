@@ -7,6 +7,8 @@ and voice / wake-word control (``methods_voice.py``).
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 
 from .base import JsonValue, Params, Result, WireEnum
@@ -331,6 +333,98 @@ class ApprovalRespondResult(Result):
 
 method("approval.respond", params=ApprovalRespondParams, result=ApprovalRespondResult,
        doc="Deliver the user's decision on a dangerous command (falls back to durable identity on a stale sid).")
+
+
+class ApprovalMode(WireEnum):
+    manual = "manual"
+    smart = "smart"
+    off = "off"
+
+
+class ApprovalGrantKind(WireEnum):
+    """``pattern``: a dangerous-pattern rule key (what an ``always`` answer stores); ``command``: exact
+    command text; ``glob``: shell-style wildcard command text. Advisory, for display."""
+
+    pattern = "pattern"
+    command = "command"
+    glob = "glob"
+
+
+class ApprovalGrantScope(WireEnum):
+    permanent = "permanent"
+    session = "session"
+
+
+class ApprovalGrantsParams(Params):
+    """``profile`` names the profile (unknown: 4064); without it ``session_id`` does, else the launch
+    profile. ``session_id`` limits ``sessions`` to that one live session (4001 when the caller may not
+    access it)."""
+
+    profile: str | None = None
+    session_id: str | None = None
+
+
+class PermanentGrant(Result):
+    """One ``command_allowlist`` entry (an entry and its legacy key alias are one grant). ``id`` is
+    opaque and stable for the entry in its profile; ``label`` is redacted like an approval card."""
+
+    id: str
+    kind: ApprovalGrantKind
+    label: str
+
+
+class SessionGrant(Result):
+    """One approval given for one session only. ``tirith``: a content-security finding (never
+    permanent)."""
+
+    id: str
+    kind: Literal["pattern"]
+    label: str
+    tirith: bool
+
+
+class SessionGrants(Result):
+    """``session_id`` the runtime id, ``session_key`` the stored one; ``yolo`` the session's own
+    bypass toggle (changed through ``config.set yolo``, not revoked here)."""
+
+    session_id: str
+    session_key: str
+    yolo: bool
+    grants: list[SessionGrant]
+
+
+class ApprovalGrantsResult(Result):
+    """``permanent``: the profile's standing approvals (config.yaml read now, plus what this process
+    holds). ``sessions``: the live sessions of the profile the caller may access that hold a grant or
+    YOLO (the one named by ``session_id`` always)."""
+
+    mode: ApprovalMode
+    permanent: list[PermanentGrant]
+    sessions: list[SessionGrants]
+
+
+method("approval.grants", params=ApprovalGrantsParams, result=ApprovalGrantsResult,
+       doc="List a profile's standing (always) approvals and its live sessions' session approvals.")
+
+
+class ApprovalRevokeParams(Params):
+    """Exactly one of ``id`` (from ``approval.grants``) or ``all``. ``session_id`` is required for
+    ``scope: session`` (4001 when the caller may not access it); for ``permanent`` it may name the
+    profile instead of ``profile``."""
+
+    scope: ApprovalGrantScope
+    id: str | None = None
+    all: bool | None = None
+    session_id: str | None = None
+    profile: str | None = None
+
+
+class ApprovalRevokeResult(Result):
+    revoked: int  # entries removed; 0 when the id no longer names a grant
+
+
+method("approval.revoke", params=ApprovalRevokeParams, result=ApprovalRevokeResult,
+       doc="Withdraw a standing or a session approval, at once and for good (a later save never restores it).")
 
 
 # ── voice ─────────────────────────────────────────────────────────────────────────────────────

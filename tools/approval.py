@@ -49,6 +49,9 @@ _YOLO_MODE_FROZEN: bool = is_truthy_value(os.getenv("HERMES_YOLO_MODE", ""))
 # --- Per-session approval state (thread-safe) -----------------------------------------------------------------------
 
 _lock = threading.Lock()
+# Serialises the read-modify-write of a profile's ``command_allowlist`` (an ``always`` answer, a
+# revoke). Taken before ``_lock``, never inside it.
+_permanent_write_lock = threading.Lock()
 _pending: dict[str, dict] = {}
 _session_approved: dict[str, set] = {}
 _session_yolo: set[str] = set()
@@ -253,6 +256,39 @@ def approve_session(session_key: str, pattern_key: str):
         _session_approved.setdefault(session_key, set()).add(pattern_key)
 
 
+def session_grants(session_key: str) -> list[str]:
+    """The pattern keys approved for *session_key* only (sorted snapshot)."""
+    with _lock:
+        return sorted(_session_approved.get(session_key, ()))
+
+
+def revoke_session(session_key: str, key: str | None) -> int:
+    """Withdraw one session approval (with its key aliases), or every one when *key* is None.
+    Returns how many entries went. YOLO is a separate toggle and is left alone."""
+    if not session_key:
+        return 0
+    with _lock:
+        approved = _session_approved.get(session_key)
+        if not approved:
+            return 0
+        doomed = set(approved) if key is None else approved & (_approval_key_aliases(key) | {key})
+        approved -= doomed
+        if not approved:
+            _session_approved.pop(session_key, None)
+    return len(doomed)
+
+
+def transfer_session_grants(old_key: str, new_key: str) -> None:
+    """Carry session approvals across a session-key rotation (a compression continuation), so
+    the person is not asked again for what they allowed in the same conversation."""
+    if not old_key or not new_key or old_key == new_key:
+        return
+    with _lock:
+        moved = _session_approved.pop(old_key, None)
+        if moved:
+            _session_approved.setdefault(new_key, set()).update(moved)
+
+
 def _release_permission_mode_dependents(session_key: str) -> None:
     """Drop resources whose immutable mode derives from Hermes YOLO. Lazy import so approval-only
     sessions never load computer-use; releasing on BOTH edges makes enabling YOLO replace a
@@ -387,10 +423,13 @@ def _persist_choice(session_key: str, choice: str, warnings: list[tuple]) -> Non
             continue
         approve_session(session_key, key)
         if choice == "always" and not is_tirith:
-            approve_permanent(key)
-            with _lock:
-                snapshot = set(_permanent_set())
-            save_permanent_allowlist(snapshot)
+            # One write at a time: a revoke landing between the snapshot and the save would
+            # otherwise be written back by it (the snapshot still holds the revoked key).
+            with _permanent_write_lock:
+                approve_permanent(key)
+                with _lock:
+                    snapshot = set(_permanent_set())
+                save_permanent_allowlist(snapshot)
 
 
 # --- Config persistence for permanent allowlist ---------------------------------------------------------------------
@@ -398,8 +437,11 @@ def _persist_choice(session_key: str, choice: str, warnings: list[tuple]) -> Non
 def _read_permanent_allowlist() -> set:
     """``command_allowlist`` of the active profile's config as a set (empty on malformed input)."""
     from hermes_cli.config import load_config_readonly
-    config = load_config_readonly()
-    raw = config.get("command_allowlist")
+    return set(_allowlist_entries(load_config_readonly().get("command_allowlist")))
+
+
+def _allowlist_entries(raw) -> list[str]:
+    """A ``command_allowlist`` value as its list of entries ([] on malformed input)."""
     legacy = isinstance(raw, str)
     if legacy:
         # Old config-set versions serialized list values as scalar strings.
@@ -412,10 +454,10 @@ def _read_permanent_allowlist() -> set:
         raw = []
     if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
         logger.warning("Ignoring malformed command_allowlist; configure a list of strings.")
-        return set()
+        return []
     if legacy:
         logger.warning("Recovered legacy string command_allowlist; re-save it as a list of strings.")
-    return set(raw)
+    return list(raw)
 
 
 # What ``command_allowlist`` held the last time this process synchronised with the
@@ -478,6 +520,38 @@ def save_permanent_allowlist(patterns: set):
             governing.update(merged)
     except Exception as e:
         logger.warning("Could not save allowlist: %s", e)
+
+
+def permanent_grants() -> list[str]:
+    """Every standing approval of the active profile, sorted: ``command_allowlist`` read now (so
+    hand edits show) plus what this process holds in memory (an entry removed on disk stays
+    honoured here until the next save or a revoke)."""
+    on_disk = _read_permanent_allowlist()
+    with _lock:
+        return sorted(on_disk | _permanent_set())
+
+
+def revoke_permanent(key: str) -> int:
+    """Withdraw a standing approval of the active profile at once: *key* and its key aliases leave
+    the governing set, this process's baseline and ``command_allowlist``. Leaving the baseline is
+    what keeps a later :func:`save_permanent_allowlist` from writing it back. Returns how many
+    entries went (0: nothing held it). Raises when config.yaml cannot be written; memory is then
+    left as it was."""
+    from hermes_cli.config import load_config, save_config
+    doomed = _approval_key_aliases(key) | {key}
+    with _permanent_write_lock, _lock:
+        config = load_config()
+        entries = _allowlist_entries(config.get("command_allowlist"))
+        kept = [entry for entry in entries if entry not in doomed]
+        governing = _permanent_set()
+        removed = (set(entries) - set(kept)) | (governing & doomed)
+        if len(kept) != len(entries):
+            config["command_allowlist"] = kept
+            save_config(config)
+        governing -= doomed
+        if (baseline := _permanent_baseline_by_home.get(_baseline_key())) is not None:
+            baseline -= doomed
+    return len(removed)
 
 
 # --- Bypass check (yolo / mode=off) ---------------------------------------------------------------------------------

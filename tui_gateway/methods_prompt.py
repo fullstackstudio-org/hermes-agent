@@ -1476,6 +1476,82 @@ def _(rid, params: dict) -> dict:
             resolve_all=params.get("all", False), request_id=params.get("request_id")))
 
 
+# ── standing approvals: list / revoke ───────────────────────────────────────
+# Who may: any connection that may change the profile's settings (``config.set``: everyone but an
+# agent through MCP, 4033) reads and revokes the profile's standing approvals, as it could already add
+# one by answering ``always`` or switch approvals off with ``approvals.mode``. A revoke only narrows, so
+# no passkey. Session approvals only for live sessions the connection may access (4001 otherwise).
+
+def _grants_target(rid, params: dict):
+    """``(profile home or None, named live session or None, error)``. ``profile`` names the profile
+    (unknown: ProfileUnavailableError, 4064); without it ``session_id`` does, else the launch profile.
+    A session the caller may not access, or one of another profile, answers 4001 like an unknown id."""
+    profile = str(params.get("profile") or "").strip()
+    target = _profile_home(profile) if profile else None
+    if not (sid := str(params.get("session_id") or "")):
+        return target, None, None
+    session = _sessions.get(sid)
+    if (not isinstance(session, dict) or session.get("_finalized")
+            or not _transport_may_access_session(session, current_transport(), sid=sid)
+            or (profile and not _live_profile_matches(session, target))):
+        return target, None, _err(rid, 4001, "session not found")
+    return (target if profile else session.get("profile_home") or None), session, None
+
+
+@method("approval.grants")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "read the standing approvals")) is not None:
+        return refused
+    target, named, err = _grants_target(rid, params)
+    if err:
+        return err
+    try:
+        from tools.approval_context import _get_approval_mode
+        from tui_gateway import approval_grants
+        if named is not None:
+            live = [(str(params["session_id"]), named)]
+        else:
+            transport = current_transport()
+            live = [(sid, session) for sid, session in list(_sessions.items())
+                    if isinstance(session, dict) and not session.get("_finalized")
+                    and _live_profile_matches(session, target)
+                    and _transport_may_access_session(session, transport, sid=sid)]
+        rows = [approval_grants.session_row(sid, session, keep_empty=named is not None) for sid, session in live]
+        return _ok(rid, {"mode": _get_approval_mode(), "permanent": approval_grants.permanent_rows(),
+                         "sessions": [row for row in rows if row is not None]})
+    except Exception as e:
+        return _err(rid, 5004, str(e))
+
+
+@method("approval.revoke")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    from tui_gateway.agent_guard import refusal as _agent_refusal
+    if (refused := _agent_refusal(rid, "revoke an approval")) is not None:
+        return refused
+    grant_id, revoke_all, scope = params.get("id") or None, bool(params.get("all")), params.get("scope")
+    if bool(grant_id) == revoke_all:
+        return _err(rid, 4006, "send exactly one of id or all")
+    if scope not in ("permanent", "session"):
+        return _err(rid, 4006, "scope must be permanent or session")
+    if scope == "session" and not params.get("session_id"):
+        return _err(rid, 4006, "session_id required for scope session")
+    _target, session, err = _grants_target(rid, params)
+    if err:
+        return err
+    try:
+        from tui_gateway import approval_grants
+        revoked = (approval_grants.revoke_session(session, grant_id) if scope == "session"
+                   else approval_grants.revoke_permanent(grant_id))
+    except Exception as e:
+        return _err(rid, 5004, str(e))
+    if revoked:
+        _emit_all_session_info()  # the approval indicators of every open chat
+    return _ok(rid, {"revoked": revoked})
+
+
 def register(server) -> None:
     """Publish this module's helpers + handlers onto ``server``, rebound to its globals."""
     bind_module(globals(), server, skip=("_",))

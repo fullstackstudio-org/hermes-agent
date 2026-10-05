@@ -299,11 +299,16 @@ your configuration file.
 Use `hermes config edit` to review or remove patterns from your permanent allowlist.
 :::
 
+A client of the gateway (the desktop or mobile app) can list these entries and
+remove one with `approval.revoke`; that takes effect in the running Hermes at
+once, no restart needed. See
+[Standing approvals](../developer-guide/programmatic-integration.md#standing-approvals-approvalgrants-and-approvalrevoke).
+
 :::caution
-The list is read when Hermes starts. A pattern you remove while a session is
-already running stays approved in that session until it next writes the file
-(the next time you answer `always` to a prompt) or you restart Hermes. If you
-removed it for safety reasons, restart.
+The list is read when Hermes starts. A pattern you remove from the file by hand
+while a session is already running stays approved in that session until it next
+writes the file (the next time you answer `always` to a prompt) or you restart
+Hermes. If you removed it for safety reasons, restart, or revoke it from the app.
 :::
 
 ### Mining Approval History (`hermes approvals suggest`)

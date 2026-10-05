@@ -2706,6 +2706,52 @@ export interface ApprovalRespondParams {
 export interface ApprovalRespondResult {
   resolved: number
 }
+/** ``profile`` names the profile (unknown: 4064); without it ``session_id`` does, else the launch profile. ``session_id`` limits ``sessions`` to that one live session (4001 when the caller may not access it). */
+export interface ApprovalGrantsParams {
+  profile?: string | null
+  session_id?: string | null
+}
+/** ``permanent``: the profile's standing approvals (config.yaml read now, plus what this process holds). ``sessions``: the live sessions of the profile the caller may access that hold a grant or YOLO (the one named by ``session_id`` always). */
+export interface ApprovalGrantsResult {
+  mode: ApprovalMode
+  permanent: PermanentGrant[]
+  sessions: SessionGrants[]
+}
+export type ApprovalMode = 'manual' | 'smart' | 'off'
+/** One ``command_allowlist`` entry (an entry and its legacy key alias are one grant). ``id`` is opaque and stable for the entry in its profile; ``label`` is redacted like an approval card. */
+export interface PermanentGrant {
+  id: string
+  kind: ApprovalGrantKind
+  label: string
+}
+/** ``pattern``: a dangerous-pattern rule key (what an ``always`` answer stores); ``command``: exact command text; ``glob``: shell-style wildcard command text. Advisory, for display. */
+export type ApprovalGrantKind = 'pattern' | 'command' | 'glob'
+/** ``session_id`` the runtime id, ``session_key`` the stored one; ``yolo`` the session's own bypass toggle (changed through ``config.set yolo``, not revoked here). */
+export interface SessionGrants {
+  session_id: string
+  session_key: string
+  yolo: boolean
+  grants: SessionGrant[]
+}
+/** One approval given for one session only. ``tirith``: a content-security finding (never permanent). */
+export interface SessionGrant {
+  id: string
+  kind: 'pattern'
+  label: string
+  tirith: boolean
+}
+/** Exactly one of ``id`` (from ``approval.grants``) or ``all``. ``session_id`` is required for ``scope: session`` (4001 when the caller may not access it); for ``permanent`` it may name the profile instead of ``profile``. */
+export interface ApprovalRevokeParams {
+  scope: ApprovalGrantScope
+  id?: string | null
+  all?: boolean | null
+  session_id?: string | null
+  profile?: string | null
+}
+export type ApprovalGrantScope = 'permanent' | 'session'
+export interface ApprovalRevokeResult {
+  revoked: number
+}
 export interface VoiceToggleParams {
   action?: VoiceToggleAction
   profile?: string | null
@@ -5276,12 +5322,16 @@ export interface RpcMethods {
   'account.usage': { params: AccountUsageParams; result: AccountUsageResult }
   /** Registry-wide background process summary for ``/agents``. */
   'agents.list': { params: AgentsListParams; result: AgentsListResult }
+  /** List a profile's standing (always) approvals and its live sessions' session approvals. */
+  'approval.grants': { params: ApprovalGrantsParams; result: ApprovalGrantsResult }
   /** Replay the approvals still waiting on this session (reconnect / polling). */
   'approval.pending': { params: ApprovalPendingParams; result: ApprovalPendingResult }
   /** Tell the backend the card is on screen, so its timeout clock starts. */
   'approval.received': { params: ApprovalReceivedParams; result: ApprovalReceivedResult }
   /** Deliver the user's decision on a dangerous command (falls back to durable identity on a stale sid). */
   'approval.respond': { params: ApprovalRespondParams; result: ApprovalRespondResult }
+  /** Withdraw a standing or a session approval, at once and for good (a later save never restores it). */
+  'approval.revoke': { params: ApprovalRevokeParams; result: ApprovalRevokeResult }
   /** Enable/disable auto top-up with its threshold and reload amount (billing:manage). */
   'billing.auto_reload': { params: BillingAutoReloadParams; result: BillingMutationResult }
   /** Start a one-off top-up charge (billing:manage, idempotent). */
@@ -5755,9 +5805,11 @@ export type RpcMethod = keyof RpcMethods
 export const RPC_METHODS = [
   'account.usage',
   'agents.list',
+  'approval.grants',
   'approval.pending',
   'approval.received',
   'approval.respond',
+  'approval.revoke',
   'billing.auto_reload',
   'billing.charge',
   'billing.charge_status',

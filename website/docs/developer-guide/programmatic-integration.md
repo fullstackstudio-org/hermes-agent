@@ -47,6 +47,7 @@ session.activate        session.close           session.interrupt
 session.history         session.compress        session.branch
 session.title           session.usage           session.status
 session.interrupt_all   account.usage
+approval.grants         approval.revoke
 clarify.lock            config.set / config.get commands.catalog
 client.capabilities     gateway.capabilities    ping
 command.resolve         command.dispatch        cli.exec
@@ -110,6 +111,35 @@ Authorisation is the one `session.interrupt` uses, asked per session (`session_t
 - **Who may read it**: like `config.get` and `billing.state`, any signed-in connection may read it for any profile the gateway hosts. On a gateway shared by several people, each of them sees every profile's plan, limits and credit balance. Nothing per person guards it.
 - **Cache and rate limit**: an entry is served for about 60 s per (profile, provider) (15 s for a failed fetch). `refresh: true` skips a fresh entry, but a pair is fetched at most once per 15 s, so a refresh inside that window is answered from cache and `fetched_at` shows its age. Concurrent callers for one pair share one fetch, and a caller never waits out someone else's fetch: it gets the cached entry, however old, or with nothing cached waits up to 2 s and otherwise gets `available: false` with a "being refreshed" reason (not cached). Signing in or out of a provider does not clear the cache; the change shows once the entry expires. Providers are fetched side by side, each bounded to 10 s, so the call takes about 10 s at worst. It runs on the RPC pool.
 - An MCP agent cannot call it (`4033`, outside the bridge's allowlist).
+
+### Standing approvals: `approval.grants` and `approval.revoke`
+
+An `always` answer to an approval prompt adds an entry to the profile's `command_allowlist`; a `session` answer allows a pattern for that one session. `approval.grants {profile?, session_id?}` lists both, so a host can show what a bot may do without asking, and `approval.revoke` takes a grant back.
+
+```
+→ {"jsonrpc":"2.0","id":1,"method":"approval.grants","params":{"profile":"work"}}
+← {"jsonrpc":"2.0","id":1,"result":{"mode":"manual",
+     "permanent":[{"id":"perm:3f9a0c1d2e4b5a69","kind":"pattern","label":"script execution via heredoc"},
+                  {"id":"perm:8c1e77a0b2d94f13","kind":"glob","label":"podman *"}],
+     "sessions":[{"session_id":"a1b2c3d4","session_key":"20261005_101500_ab12cd","yolo":false,
+                  "grants":[{"id":"sess:5b0e2a9c7d1f3e84","kind":"pattern","label":"tirith:homograph_url","tirith":true}]}]}}
+→ {"jsonrpc":"2.0","id":2,"method":"approval.revoke","params":{"profile":"work","scope":"permanent","id":"perm:3f9a0c1d2e4b5a69"}}
+← {"jsonrpc":"2.0","id":2,"result":{"revoked":1}}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `mode` | The profile's `approvals.mode`: `manual`, `smart` or `off`. |
+| `permanent[]` | The profile's standing approvals: `command_allowlist` as it is on disk now (a hand edit shows at once) plus what the running process still honours. An entry and its legacy regex-derived key are one grant. `kind` is `pattern` (a rule key, what `always` stores), `command` (exact command text) or `glob` (a wildcard); it is for display only. |
+| `sessions[]` | The profile's live sessions the caller may access that hold a session grant or YOLO; with `session_id`, just that session, even when it holds nothing. `tirith` marks a content-security finding (these are only ever allowed per session). `yolo` is the session's own bypass, switched with `config.set yolo`, not revoked here. |
+| `id` | Opaque: `perm:` or `sess:` plus 16 hex characters of a SHA-256 over the profile home and the rule key. The gateway recomputes it on revoke, so command text never has to travel back. |
+| `label` | The rule key or command, redacted as on an approval card (a token in a command shows as `***`). |
+
+`approval.revoke {scope, id? | all?, session_id?, profile?}` takes exactly one of `id` and `all: true` (`4006` otherwise). `scope: "permanent"` removes the entry, with its legacy alias, from `command_allowlist` and from the running process at once: it stops being honoured immediately and a later `always` answer for something else does not write it back. `scope: "session"` needs `session_id` and drops that session's grant (`all`: every one). The result is `{revoked: n}`, the entries removed; an id that no longer names a grant answers `0`, not an error. Every open chat then gets a fresh `session.info`.
+
+Session grants follow a session through compression, and end when the chat is closed (`session.close`, which also clears the session's YOLO and code kernels, as `/new` does on the messaging gateway). A runtime the backend reclaimed (idle timeout, a dropped connection) keeps them, because resuming the chat continues the same session.
+
+**Who may**: an agent connected through MCP is refused (`4033`). Every other connection may list and revoke the standing approvals of any profile the gateway hosts, exactly as `config.set` lets it change that profile's settings (it can already add a grant by answering `always`, or switch approvals off with `approvals.mode`); revoking only narrows what the bot may do, so no passkey is asked. On a gateway shared by several people this means any of them can withdraw a standing approval another person gave on a shared profile. Session grants are per chat: a session the caller may not access (`session_transports._transport_may_access_session`) answers `4001` "session not found" and is left out of the list. An unknown profile answers `4064`.
 
 ### Model overrides on `session.create`
 

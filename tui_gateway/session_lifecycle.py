@@ -478,6 +478,28 @@ def _announce_session_reclaimed(session: dict, end_reason: str) -> None:
         logger.debug("session.reclaimed broadcast failed", exc_info=True)
 
 
+# End reasons after which the person is done with the chat: its session approvals, YOLO and code kernels go
+# with it (``tools.approval.clear_session``, what /new and a close do on the messaging gateway). A runtime the
+# backend reclaimed (idle, LRU, a dropped socket) or one a resume replaced keeps them: the conversation goes
+# on, a resume reuses the same key, and ``approval.grants`` lists them again once it is live.
+_APPROVAL_ENDING_REASONS = frozenset({"tui_close", "setup_reset"})
+
+
+def _end_session_approvals(session: dict, end_reason: str) -> None:
+    """Clear *session*'s approval state when the person ended the chat, unless another live runtime carries the
+    same key on (a takeover, a second window)."""
+    key = session.get("session_key")
+    if not key or end_reason not in _APPROVAL_ENDING_REASONS or session.get("_lease_taken_over"):
+        return
+    with _sessions_lock:
+        if any(other is not session and isinstance(other, dict) and other.get("session_key") == key
+               and not other.get("_finalized") for other in _sessions.values()):
+            return
+    with contextlib.suppress(Exception):
+        from tools.approval import clear_session
+        clear_session(key)
+
+
 def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") -> None:
     """Fully tear down a session: finalize, unregister notifier, close agent (``session.close`` + WS reaper). The
     slash-worker is closed in ``_finalize_session`` (the single chokepoint), NOT here. Idempotent via ``_finalized``."""
@@ -491,6 +513,7 @@ def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") ->
         if (key := session.get("session_key")) and not session.get("_lease_taken_over"):
             unregister_gateway_notify(key)
             _unregister_strong_confirm(key)
+    _end_session_approvals(session, end_reason)
     # agent.close() → shutdown_memory_provider reads the provider's config/credentials at call time; same
     # scope rule as _finalize_session (every caller here is an unscoped reaper/atexit/pool thread).
     with contextlib.suppress(Exception), _session_profile_runtime_scope(session):

@@ -46,6 +46,7 @@ session.create          session.list            session.active_list
 session.activate        session.close           session.interrupt
 session.history         session.compress        session.branch
 session.title           session.usage           session.status
+account.usage
 clarify.lock            config.set / config.get commands.catalog
 client.capabilities     gateway.capabilities    ping
 command.resolve         command.dispatch        cli.exec
@@ -58,6 +59,28 @@ terminal.resize         clipboard.paste         image.attach
 `session.active_list`, `session.activate`, and `session.close` are the process-local live-session controls used by the TUI session switcher. Use `session.list` / `/resume` for saved transcript discovery; use the active-session methods only for sessions that are currently open in the TUI gateway process.
 
 Within one authenticated gateway, resuming or activating a live session attaches another event subscriber rather than replacing the previous connection. Streaming and terminal events go to all attached clients; disconnecting one client does not end a session another client is viewing. Existing submit exclusivity and configured busy-input policy remain in force. Attached clients can steer the session's subagents; browser-controller results still require the connection that registered that controller. This does not enable independent gateway processes to write the same session, nor does it imply durable prompt admission across an owner restart.
+
+### Provider account usage: `account.usage`
+
+`session.usage` carries a provider's account limits as rendered text (`account_lines`). `account.usage {profile?, refresh?}` returns the same numbers as fields, for the providers the profile's configured models run on (`model.provider`, or what `auto` resolves to, then the fallback chain): Anthropic OAuth subscription windows, OpenAI Codex windows and credits, Nous credits, OpenRouter credits, and any provider plugin that implements `fetch_account_usage`. A provider with no usage source is not listed.
+
+```
+→ {"jsonrpc":"2.0","id":1,"method":"account.usage","params":{"profile":"work","refresh":false}}
+← {"jsonrpc":"2.0","id":1,"result":{"ok":true,"profile":"work","providers":[{
+     "provider":"anthropic","source":"oauth_usage_api","title":"Claude account limits","plan":null,
+     "available":true,"unavailable_reason":null,"fetched_at":"2026-10-05T12:00:00Z",
+     "windows":[{"id":"current_session","label":"Current session","used_percent":41.5,"reset_at":"2026-10-05T17:00:00Z","detail":null}],
+     "details":["Extra usage: 3.00 / 20.00 USD"],
+     "credits":{"currency":"USD","remaining":17.0,"total":20.0}}]}}
+```
+
+- `windows[].id` is a stable slug per provider (`current_session`, `current_week`, `opus_week`, `session`, `weekly`, `subscription`, `api_key_quota`); `used_percent` is 0 to 100 or `null`; `reset_at` and `fetched_at` are ISO 8601 UTC.
+- `credits` is a money balance when the provider reports one: `remaining` of `total` (`null` when it names no cap) in `currency`.
+- `available: false` always has an `unavailable_reason`: not signed in to that provider in this profile, the provider answered an error, or no answer within 10 seconds. The reason is one of a few fixed sentences, never an exception's text.
+- **Nothing secret leaves.** Each entry is built field by field from the snapshot; the raw provider body, headers, request URLs and tokens are never copied, and a free-text field (plan, detail line) that looks like a credential is dropped whole.
+- `profile` selects whose credentials are used, with the same profile scope as `config.get` (home, `.env` and secret scope together); an unknown profile answers `4064`. The default is the launch profile.
+- **Cache and rate limit**: an entry is served for about 60 s per (profile, provider) (15 s for a failed fetch). `refresh: true` skips a fresh entry, but a pair is fetched at most once per 15 s, so a refresh inside that window is answered from cache and `fetched_at` shows its age. Concurrent callers for one pair share one fetch. Providers are fetched side by side, each bounded to 10 s, so the call takes about 10 s at worst. It runs on the RPC pool.
+- An MCP agent cannot call it (`4033`, outside the bridge's allowlist).
 
 ### Model overrides on `session.create`
 

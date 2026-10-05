@@ -74,6 +74,63 @@ method("usage.bars", params=ProfileParams, result=UsageModel,
        doc="Two-bar dollar usage view shared by /usage, /topup and /subscription; fail-open to unavailable.")
 
 
+# ── account.usage (provider account limits and credits as fields) ─────────────────────────────
+
+
+class AccountUsageParams(ProfileParams):
+    """``profile`` picks whose credentials are used (default: the launch profile). ``refresh`` skips the ~60 s
+    cache, at most once per 15 s per (profile, provider); a refresh inside that floor is served from cache."""
+
+    refresh: bool | None = None
+
+
+class AccountUsageWindow(Result):
+    """One quota window. ``id`` is stable per provider (``current_session``, ``current_week``, ``weekly``,
+    ``subscription``...); ``used_percent`` is 0..100 or null when the provider gave none; ``reset_at`` is ISO UTC."""
+
+    id: str
+    label: str
+    used_percent: float | None = None
+    reset_at: str | None = None
+    detail: str | None = None
+
+
+class AccountUsageCredits(Result):
+    """A money balance: ``remaining`` of ``total`` (null when the provider names no cap) in ``currency``."""
+
+    currency: str
+    remaining: float
+    total: float | None = None
+
+
+class AccountUsageProvider(Result):
+    """``agent/account_usage_view.py::entry_from_snapshot``: built field by field, so no credential, header or
+    raw provider body can ride along. ``available`` false carries ``unavailable_reason`` (not signed in, timed
+    out after 10 s, the provider refused) and empty ``windows`` / ``details``."""
+
+    provider: str
+    source: str
+    title: str
+    plan: str | None = None
+    available: bool
+    unavailable_reason: str | None = None
+    fetched_at: str
+    windows: list[AccountUsageWindow]
+    details: list[str]
+    credits: AccountUsageCredits | None = None
+
+
+class AccountUsageResult(Result):
+    ok: bool
+    profile: str
+    providers: list[AccountUsageProvider]
+
+
+method("account.usage", params=AccountUsageParams, result=AccountUsageResult,
+       doc="Account limits and credits of the providers the profile's configured models run on; "
+           "cached ~60 s per (profile, provider), each fetch bounded to 10 s.")
+
+
 # ── billing.state ─────────────────────────────────────────────────────────────────────────────
 
 

@@ -32,6 +32,43 @@ export interface UsageBar {
   fill_fraction: number
 }
 export type UsageBarKind = 'plan' | 'topup'
+/** ``profile`` picks whose credentials are used (default: the launch profile). ``refresh`` skips the ~60 s cache, at most once per 15 s per (profile, provider); a refresh inside that floor is served from cache. */
+export interface AccountUsageParams {
+  profile?: string | null
+  refresh?: boolean | null
+}
+export interface AccountUsageResult {
+  ok: boolean
+  profile: string
+  providers: AccountUsageProvider[]
+}
+/** ``agent/account_usage_view.py::entry_from_snapshot``: built field by field, so no credential, header or raw provider body can ride along. ``available`` false carries ``unavailable_reason`` (not signed in, timed out after 10 s, the provider refused) and empty ``windows`` / ``details``. */
+export interface AccountUsageProvider {
+  provider: string
+  source: string
+  title: string
+  plan?: string | null
+  available: boolean
+  unavailable_reason?: string | null
+  fetched_at: string
+  windows: AccountUsageWindow[]
+  details: string[]
+  credits?: AccountUsageCredits | null
+}
+/** One quota window. ``id`` is stable per provider (``current_session``, ``current_week``, ``weekly``, ``subscription``...); ``used_percent`` is 0..100 or null when the provider gave none; ``reset_at`` is ISO UTC. */
+export interface AccountUsageWindow {
+  id: string
+  label: string
+  used_percent?: number | null
+  reset_at?: string | null
+  detail?: string | null
+}
+/** A money balance: ``remaining`` of ``total`` (null when the provider names no cap) in ``currency``. */
+export interface AccountUsageCredits {
+  currency: string
+  remaining: number
+  total?: number | null
+}
 /** ``_serialize_billing_state`` (money as strings); the ``except`` fallback emits only ``ok / logged_in / free_tier / error``, so everything else is optional. */
 export interface BillingStateResult {
   ok: boolean
@@ -5216,6 +5253,8 @@ export type ConnectorErrorReason = 'INVALID_PARAMS' | 'NOT_OWNER' | 'UNSUPPORTED
 
 // ── Client→server methods ──
 export interface RpcMethods {
+  /** Account limits and credits of the providers the profile's configured models run on; cached ~60 s per (profile, provider), each fetch bounded to 10 s. */
+  'account.usage': { params: AccountUsageParams; result: AccountUsageResult }
   /** Registry-wide background process summary for ``/agents``. */
   'agents.list': { params: AgentsListParams; result: AgentsListResult }
   /** Replay the approvals still waiting on this session (reconnect / polling). */
@@ -5693,6 +5732,7 @@ export interface RpcMethods {
 }
 export type RpcMethod = keyof RpcMethods
 export const RPC_METHODS = [
+  'account.usage',
   'agents.list',
   'approval.pending',
   'approval.received',

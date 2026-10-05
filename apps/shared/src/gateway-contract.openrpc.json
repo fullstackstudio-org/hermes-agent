@@ -7,6 +7,24 @@
   },
   "methods": [
     {
+      "name": "account.usage",
+      "summary": "Account limits and credits of the providers the profile's configured models run on; cached ~60 s per (profile, provider), each fetch bounded to 10 s.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/AccountUsageParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/AccountUsageResult"
+        }
+      }
+    },
+    {
       "name": "agents.list",
       "summary": "Registry-wide background process summary for ``/agents``.",
       "params": [
@@ -4288,6 +4306,239 @@
           "type"
         ],
         "title": "AccountOwner",
+        "type": "object"
+      },
+      "AccountUsageCredits": {
+        "additionalProperties": false,
+        "description": "A money balance: ``remaining`` of ``total`` (null when the provider names no cap) in ``currency``.",
+        "properties": {
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "remaining": {
+            "title": "Remaining",
+            "type": "number"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Total"
+          }
+        },
+        "required": [
+          "currency",
+          "remaining"
+        ],
+        "title": "AccountUsageCredits",
+        "type": "object"
+      },
+      "AccountUsageParams": {
+        "additionalProperties": false,
+        "description": "``profile`` picks whose credentials are used (default: the launch profile). ``refresh`` skips the ~60 s\ncache, at most once per 15 s per (profile, provider); a refresh inside that floor is served from cache.",
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "refresh": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Refresh"
+          }
+        },
+        "title": "AccountUsageParams",
+        "type": "object"
+      },
+      "AccountUsageProvider": {
+        "additionalProperties": false,
+        "description": "``agent/account_usage_view.py::entry_from_snapshot``: built field by field, so no credential, header or\nraw provider body can ride along. ``available`` false carries ``unavailable_reason`` (not signed in, timed\nout after 10 s, the provider refused) and empty ``windows`` / ``details``.",
+        "properties": {
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Plan"
+          },
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "unavailable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Unavailable Reason"
+          },
+          "fetched_at": {
+            "title": "Fetched At",
+            "type": "string"
+          },
+          "windows": {
+            "items": {
+              "$ref": "#/components/schemas/AccountUsageWindow"
+            },
+            "title": "Windows",
+            "type": "array"
+          },
+          "details": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Details",
+            "type": "array"
+          },
+          "credits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountUsageCredits"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "provider",
+          "source",
+          "title",
+          "available",
+          "fetched_at",
+          "windows",
+          "details"
+        ],
+        "title": "AccountUsageProvider",
+        "type": "object"
+      },
+      "AccountUsageResult": {
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/AccountUsageProvider"
+            },
+            "title": "Providers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ok",
+          "profile",
+          "providers"
+        ],
+        "title": "AccountUsageResult",
+        "type": "object"
+      },
+      "AccountUsageWindow": {
+        "additionalProperties": false,
+        "description": "One quota window. ``id`` is stable per provider (``current_session``, ``current_week``, ``weekly``,\n``subscription``...); ``used_percent`` is 0..100 or null when the provider gave none; ``reset_at`` is ISO UTC.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "used_percent": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Used Percent"
+          },
+          "reset_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reset At"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Detail"
+          }
+        },
+        "required": [
+          "id",
+          "label"
+        ],
+        "title": "AccountUsageWindow",
         "type": "object"
       },
       "ActiveIdResult": {

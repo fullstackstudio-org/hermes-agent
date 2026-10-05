@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -34,6 +34,16 @@ class AccountUsageWindow:
 
 
 @dataclass(frozen=True)
+class AccountCredits:
+    """A money balance the provider reports next to (or instead of) quota windows. ``total`` is the cap or the
+    purchased amount when the provider says so, else None."""
+
+    currency: str
+    remaining: float
+    total: Optional[float] = None
+
+
+@dataclass(frozen=True)
 class AccountUsageSnapshot:
     provider: str
     source: str
@@ -46,10 +56,11 @@ class AccountUsageSnapshot:
     # Exact decoded provider response body (no headers/credentials) for integrations that need
     # fields Hermes does not normalize yet. Only populated by providers that fetch a JSON body.
     raw: Optional[dict] = None
+    credits: Optional[AccountCredits] = None
 
     @property
     def available(self) -> bool:
-        return bool(self.windows or self.details) and not self.unavailable_reason
+        return bool(self.windows or self.details or self.credits) and not self.unavailable_reason
 
 
 def _snapshot(provider: str, source: str, windows: list, details: list, **kw: Any) -> AccountUsageSnapshot:
@@ -171,8 +182,11 @@ def build_nous_credits_snapshot(account_info) -> Optional[AccountUsageSnapshot]:
                 details.append(f"Renews: {period_end}")
         if getattr(account_info, "paid_service_access", None) is False:
             details.append(_DEPLETED_LINE)
-        return _nous_snapshot(windows, details, [f"Top up: {nous_portal_topup_url(account_info)}", "(or run /topup)"],
-                              source="portal-account", plan=getattr(sub, "plan", None) if sub is not None else None)
+        usable = getattr(access, "total_usable_credits", None) if access is not None else None
+        credits = AccountCredits(currency="USD", remaining=float(usable)) if _is_finite_num(usable) else None
+        snapshot = _nous_snapshot(windows, details, [f"Top up: {nous_portal_topup_url(account_info)}", "(or run /topup)"],
+                                  source="portal-account", plan=getattr(sub, "plan", None) if sub is not None else None)
+        return replace(snapshot, credits=credits) if snapshot is not None and credits is not None else snapshot
     except (AttributeError, TypeError):
         return None
 
@@ -451,12 +465,14 @@ def _fetch_codex_account_usage(
     if count > 0:
         details.append(f"You have {count} reset{_plural(count)} banked - use /usage reset to activate")
     credits, balance = payload.get("credits") or {}, (payload.get("credits") or {}).get("balance")
-    if credits.get("has_credits") and _is_num(balance):
+    structured: Optional[AccountCredits] = None
+    if credits.get("has_credits") and _is_finite_num(balance):
         details.append(f"Credits balance: ${float(balance):.2f}")
+        structured = AccountCredits(currency="USD", remaining=float(balance))
     elif credits.get("has_credits") and credits.get("unlimited"):
         details.append("Credits balance: unlimited")
     return _snapshot("openai-codex", "usage_api", windows, details, plan=_title_case_slug(payload.get("plan_type")),
-                     raw=payload)
+                     raw=payload, credits=structured)
 
 
 @dataclass(frozen=True)
@@ -601,11 +617,16 @@ def _fetch_anthropic_account_usage(
                   ("seven_day_sonnet", "Sonnet week")), "utilization", "resets_at", fraction=True,
     )
     details: list[str] = []
+    structured: Optional[AccountCredits] = None
     extra = payload.get("extra_usage") or {}
     used_credits, monthly_limit = extra.get("used_credits"), extra.get("monthly_limit")
     if extra.get("is_enabled") and _is_num(used_credits) and _is_num(monthly_limit):
-        details.append(f"Extra usage: {used_credits:.2f} / {monthly_limit:.2f} {extra.get('currency') or 'USD'}")
-    return _snapshot("anthropic", "oauth_usage_api", windows, details)
+        currency = str(extra.get("currency") or "USD")
+        details.append(f"Extra usage: {used_credits:.2f} / {monthly_limit:.2f} {currency}")
+        if _is_finite_num(used_credits) and _is_finite_num(monthly_limit):
+            structured = AccountCredits(currency=currency, remaining=max(0.0, float(monthly_limit) - float(used_credits)),
+                                        total=float(monthly_limit))
+    return _snapshot("anthropic", "oauth_usage_api", windows, details, credits=structured)
 
 
 def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[str]) -> Optional[AccountUsageSnapshot]:
@@ -625,8 +646,11 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
             key_data = _data("key")
         except Exception:
             key_data = {}
-    balance = float(credits.get("total_credits") or 0.0) - float(credits.get("total_usage") or 0.0)
+    total_credits = float(credits.get("total_credits") or 0.0)
+    balance = total_credits - float(credits.get("total_usage") or 0.0)
     details = [f"Credits balance: ${max(0.0, balance):.2f}"]
+    structured = (AccountCredits(currency="USD", remaining=max(0.0, balance), total=total_credits)
+                  if math.isfinite(balance) and math.isfinite(total_credits) else None)
     windows: list[AccountUsageWindow] = []
     limit, limit_remaining, usage = key_data.get("limit"), key_data.get("limit_remaining"), key_data.get("usage")
     limit_reset = str(key_data.get("limit_reset") or "").strip()
@@ -642,7 +666,7 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
             if _is_num(value) and float(value) > 0:
                 usage_parts.append(f"${float(value):.2f} {label}")
         details.append(" • ".join(usage_parts))
-    return _snapshot("openrouter", "credits_api", windows, details)
+    return _snapshot("openrouter", "credits_api", windows, details, credits=structured)
 
 
 _USAGE_FETCHERS: dict[str, Callable[[Optional[str], Optional[str]], Optional[AccountUsageSnapshot]]] = {
@@ -670,6 +694,46 @@ def _call_plugin_usage_hook(profile, base_url: Optional[str], api_key: Optional[
         lambda: profile.fetch_account_usage(base_url=base_url, api_key=api_key),
         PLUGIN_USAGE_HOOK_DEADLINE_S, label="plugin-account-usage")
     return None if bounded.timed_out else bounded.value
+
+
+def usage_supported(provider: Optional[str]) -> bool:
+    """Whether *provider* has a source of account usage at all: a built-in fetcher, the Nous portal, or a
+    provider plugin that overrides ``fetch_account_usage``."""
+    name = str(provider or "").strip().lower()
+    if name in _USAGE_FETCHERS or name == "nous":
+        return True
+    try:
+        from providers import get_provider_profile
+        from providers.base import ProviderProfile
+
+        profile = get_provider_profile(name) if name else None
+        return profile is not None and type(profile).fetch_account_usage is not ProviderProfile.fetch_account_usage
+    except Exception:
+        return False
+
+
+def fetch_nous_account_usage(timeout: float = 10.0) -> Optional[AccountUsageSnapshot]:
+    """Nous credits as a snapshot, or None when this profile is not signed in to Nous. Raises on a portal failure."""
+    if not _nous_logged_in():
+        return None
+    return build_nous_credits_snapshot(_fetch_portal_account(timeout))
+
+
+def fetch_account_usage_strict(
+    provider: Optional[str], *, base_url: Optional[str] = None, api_key: Optional[str] = None,
+) -> Optional[AccountUsageSnapshot]:
+    """:func:`fetch_account_usage` that lets a failure propagate (the structured ``account.usage`` view tells a
+    failed fetch from a provider with nothing to show) and that covers Nous too. None means no credentials for
+    this provider in the active profile."""
+    name = str(provider or "").strip().lower()
+    if name == "nous":
+        return fetch_nous_account_usage()
+    if fetcher := _USAGE_FETCHERS.get(name):
+        return fetcher(base_url, api_key)
+    from providers import get_provider_profile
+
+    profile = get_provider_profile(name) if name else None
+    return _call_plugin_usage_hook(profile, base_url, api_key) if profile else None
 
 
 def fetch_account_usage(

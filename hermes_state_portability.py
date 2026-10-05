@@ -584,7 +584,8 @@ class SessionPortabilityMixin:
         runtime config, the session's login, a parent outside the payload -- and every user row names
         *importer_author* (the signed-in importer's row author, or nobody). ``keep_provenance=True``
         stores the payload as it is, for a local operator restore and the gateway's own lineage
-        adoption only.
+        adoption only. An untrusted child is linked only to a parent inserted by this same call, never
+        to one already stored (the payload may name it too; it is then skipped).
         Gateway routing, handoff, rewind and other live runtime state are reset: this
         restores history, not ownership of a live channel or process. Export INCLUDES
         ``last_activity_*`` but import RESETS them to NULL — resurrecting a stale
@@ -603,11 +604,11 @@ class SessionPortabilityMixin:
         normalized, errors = self._validate_import_payload(sessions)
         if errors:
             return {"ok": False, "imported": 0, "skipped": 0, "detached": 0, "errors": errors}
-        payload_ids = {str(item["session"].get("id") or "").strip() for item in normalized}
         if not keep_provenance:
-            from hermes_state_import_provenance import untrusted_messages, untrusted_session
+            from hermes_state_import_provenance import fresh_session_ids, untrusted_messages, untrusted_session
             importer_id = importer_author.get("id") if isinstance(importer_author, dict) else None
-            normalized = [{**item, "session": untrusted_session(item["session"], importer_id),
+            renamed = fresh_session_ids(str(item["session"].get("id") or "").strip() for item in normalized)
+            normalized = [{**item, "session": untrusted_session(item["session"], importer_id, renamed),
                            "messages": untrusted_messages(item["messages"], importer_author)} for item in normalized]
 
         def _do(conn):
@@ -625,9 +626,11 @@ class SessionPortabilityMixin:
                 if parent_id:
                     parent_updates.append((session_id, parent_id))
                 imported_ids.append(session_id)
-            # An untrusted payload links only within itself: grafting onto a session already here
-            # would put the importer's rows into somebody else's lineage.
-            foreign = [] if keep_provenance else [u for u in parent_updates if u[1] not in payload_ids]
+            # An untrusted payload links only to a parent this call inserted: grafting onto a session
+            # already here -- even one the payload names too, which is then skipped -- would put the
+            # importer's rows into somebody else's lineage (and, as a compression child, move its tip).
+            inserted = set(imported_ids)
+            foreign = [] if keep_provenance else [u for u in parent_updates if u[1] not in inserted]
             linkable = [u for u in parent_updates if u not in foreign]
             return {
                 "ok": True, "imported": len(imported_ids), "skipped": len(skipped_ids),

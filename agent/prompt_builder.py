@@ -548,10 +548,22 @@ CONTROL_FRAME_OPENERS = (
     "System note:", "System:", "SYSTEM]", "IMPORTANT:", "Planning state preserved", "ASYNC DELEGATION",
     "Gateway note:",
 )
-#: ``[`` opening one of :data:`CONTROL_FRAME_OPENERS` (case-insensitive); ``sub`` it with a label of your
-#: own ("[member-quoted ", "[imported ") so the words stay and the exact trusted shape does not.
+#: ``[`` (and any spaces or tabs after it) opening one of :data:`CONTROL_FRAME_OPENERS` (case-insensitive).
+#: Match it through :func:`relabel_control_frames`, which also catches the fullwidth, zero-width-split and
+#: look-alike-letter spellings; a plain ``sub`` sees only the literal ones.
 CONTROL_FRAME_RE = re.compile(
-    r"\[(?=" + "|".join(opener.replace("]", r"\]") for opener in CONTROL_FRAME_OPENERS) + ")", re.IGNORECASE)
+    r"\[[^\S\n]*(?=" + "|".join(opener.replace("]", r"\]") for opener in CONTROL_FRAME_OPENERS) + ")",
+    re.IGNORECASE)
+
+
+def relabel_control_frames(text: Any, label: str) -> Any:
+    """``text`` with the ``[`` (and following blanks) of every Hermes control frame replaced by ``label`` (your
+    own, "[member-quoted ", "[imported "), so the words stay and the exact trusted shape does not. Matched
+    after NFKC, with zero-width and other format characters ignored and look-alike letters folded onto Latin,
+    as the gateway-note relabel does (``agent.turn_sender.relabel_folded_matches``). Non-strings unchanged."""
+    from agent.turn_sender import relabel_folded_matches
+
+    return relabel_folded_matches(text, CONTROL_FRAME_RE, label)
 
 
 def format_steer_marker(steer_text: str) -> str:

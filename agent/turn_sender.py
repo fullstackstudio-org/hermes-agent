@@ -127,6 +127,14 @@ _CONFUSABLES = str.maketrans({
     "\u0441": "c", "\u03f2": "c", "\u0421": "c",
     "\u0261": "g", "\u0262": "g", "\u039d": "n", "\u0274": "n", "\u1d00": "a", "\u1d07": "e",
     "\u1d0f": "o", "\u1d1b": "t", "\u028f": "y", "\u1d21": "w",
+    # The letters of Hermes' control-frame openers (``agent.prompt_builder.CONTROL_FRAME_OPENERS``).
+    "\u0412": "b", "\u0392": "b", "\u03f9": "c", "\u0501": "d", "\u050c": "g", "\u041d": "h", "\u0397": "h",
+    "\u04bb": "h", "\u04c0": "i", "\u04cf": "l", "\u0408": "j", "\u0458": "j", "\u041a": "k", "\u039a": "k",
+    "\u041c": "m", "\u039c": "m", "\u0420": "p", "\u03a1": "p", "\u0440": "p", "\u03c1": "p", "\u0405": "s",
+    "\u0455": "s", "\u0425": "x", "\u03a7": "x", "\u0445": "x", "\u04ae": "y", "\u0396": "z",
+    # Dashes and hyphens ("OUT-OF-BAND").
+    "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2015": "-", "\u2212": "-",
+    "\ufe58": "-", "\ufe63": "-",
 })
 
 
@@ -175,6 +183,15 @@ def _folded(text: str) -> tuple[str, list[int]]:
     return "".join(folded), index
 
 
+def relabel_folded_matches(text: Any, pattern: re.Pattern[str], label: str) -> Any:
+    """``text`` with every match of ``pattern`` in its folded form (NFKC, zero-width and other format
+    characters dropped, look-alike letters folded onto Latin: :func:`_folded`) replaced by ``label`` in the
+    original; non-strings unchanged. A match must not be empty."""
+    if not isinstance(text, str) or not text:
+        return text
+    return _relabel(text, [m.span() for m in pattern.finditer(_folded(text)[0])], label)
+
+
 def relabel_note_lookalikes(text: Any) -> Any:
     """``text`` with every opener shaped like the gateway note relabelled; non-strings unchanged."""
     if not isinstance(text, str) or not text:
@@ -198,13 +215,18 @@ def _relabel(text: str, folded_spans: list, label: str) -> str:
     return "".join(parts)
 
 
+_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
+
+
 def relabel_text_parts(content: Any) -> Any:
-    """A copy of multimodal ``content`` with its text parts relabelled; other content unchanged."""
+    """A copy of multimodal ``content`` with its text parts relabelled -- typed text parts and bare
+    strings, which the provider converters turn into text blocks too; other content unchanged."""
     if not isinstance(content, list):
         return content
     return [
-        {**part, "text": relabel_note_lookalikes(part["text"])}
-        if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+        relabel_note_lookalikes(part) if isinstance(part, str)
+        else {**part, "text": relabel_note_lookalikes(part["text"])}
+        if isinstance(part, dict) and part.get("type") in _TEXT_PART_TYPES and isinstance(part.get("text"), str)
         else part
         for part in content
     ]

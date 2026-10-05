@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from functools import partial
 from typing import Any, Literal
 
-from agent.prompt_builder import CONTROL_FRAME_RE
+from agent.prompt_builder import relabel_control_frames
 from gateway import hosted_room_driver as driver
 from gateway import hosted_rooms
 from gateway import hosted_rooms_common as common
@@ -39,9 +39,9 @@ _MENTION_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9._:-]*)", re.IGNORECASE)
 # Openers of Hermes' own control frames (agent.prompt_builder.CONTROL_FRAME_OPENERS: the steer marker, the
 # compaction handoff, runtime/system notes, background-process and prior-context frames). A member reply is
 # republished to every peer inside a role=user prompt, so a reply reproducing one of these reads as harness
-# input to the peers; the opener is relabelled visibly (the words stay, the exact trusted shape does not).
-# Genuine user lines are never touched. Keep in sync with apps/desktop hermes-bots/group-round-prompt.ts.
-_MEMBER_CONTROL_FRAME_RE = CONTROL_FRAME_RE
+# input to the peers; the opener is relabelled visibly (the words stay, the exact trusted shape does not),
+# look-alike spellings too (``relabel_control_frames``). Genuine user lines are never touched. The desktop's
+# apps/desktop hermes-bots/group-round-prompt.ts carries the same regex.
 _MEMBER_CONTROL_FRAME_RELABEL = "[member-quoted "
 _TURN_ID_RE = re.compile(
     r"^d(?P<source>[1-9][0-9]*)\.r(?P<round>[0-2])\."
@@ -500,7 +500,7 @@ def _rotate(members: Sequence[DiscussionMember], round_index: int) -> tuple[Disc
 def _format_message(event: _ValidatedEvent, room: DiscussionRoom) -> str:
     if event.kind == "message.user":
         return f"User (user): {event.payload['text']}"
-    text = _MEMBER_CONTROL_FRAME_RE.sub(_MEMBER_CONTROL_FRAME_RELABEL, event.payload["text"])
+    text = relabel_control_frames(event.payload["text"], _MEMBER_CONTROL_FRAME_RELABEL)
     return f"@{_member_by_id(room, event.payload['member_id']).handle}: {text}"
 
 

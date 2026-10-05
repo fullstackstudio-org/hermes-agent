@@ -3,8 +3,9 @@
 The file is what ``hermes sessions export`` (JSONL, one session per line), the dashboard's per-session
 export (one JSON object) or a ``{"sessions": [...]}`` body holds. Unlike ``POST /api/sessions/import``,
 this restore keeps provenance -- sidecars, authors, the stored system prompt, the session's login --
-because the person running it is the operator of this Hermes home, on this machine
-(``hermes_state_import_provenance``).
+because the person running it is the operator of this Hermes home, on this machine, and named the file
+as a Hermes export (``hermes_state_import_provenance``). A file only recognised as one (no ``--from``)
+is imported untrusted, as the HTTP import does.
 """
 
 from __future__ import annotations
@@ -50,8 +51,9 @@ def read_hermes_export(path) -> Optional[List[Dict[str, Any]]]:
     return sessions or None
 
 
-def restore_hermes_export(path, db=None) -> Dict[str, Any]:
-    """Import every session in the export at *path* with provenance kept; returns ``import_sessions``'
+def restore_hermes_export(path, db=None, *, keep_provenance: bool = True) -> Dict[str, Any]:
+    """Import every session in the export at *path* (with provenance kept unless *keep_provenance* is
+    False: then as the untrusted import ``POST /api/sessions/import`` does); returns ``import_sessions``'
     report. Raises ``ValueError`` when the file is not a Hermes export."""
     sessions = read_hermes_export(path)
     if sessions is None:
@@ -61,7 +63,7 @@ def restore_hermes_export(path, db=None) -> Dict[str, Any]:
         from hermes_state_registry import acquire
         db = acquire()
     try:
-        return db.import_sessions(sessions, keep_provenance=True)
+        return db.import_sessions(sessions, keep_provenance=keep_provenance)
     finally:
         if owns_db:
             with contextlib.suppress(Exception):

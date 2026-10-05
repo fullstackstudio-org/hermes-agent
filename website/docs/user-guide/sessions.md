@@ -779,19 +779,28 @@ hermes sessions export backup.jsonl          # every session, one per line
 hermes sessions import --from hermes backup.jsonl
 ```
 
-A file written by `hermes sessions export` (or the dashboard's per-session
-export) is recognised without `--from hermes` too. This restore is the
-operator's and keeps everything: who wrote each message, the exact text the
-model was sent, the stored system prompt and runtime settings. Run it only on
-exports you trust.
+With `--from hermes`, a file written by `hermes sessions export` (or the
+dashboard's per-session export) is restored as the operator's and keeps
+everything: who wrote each message, the exact text the model was sent, the
+stored system prompt and runtime settings. Run it only on exports you trust.
+Without `--from`, such a file is still recognised, but imported as untrusted
+data, the way the dashboard imports it; the command says so and prints the
+`--from hermes` line to restore it in full.
 
 Importing through the dashboard (`POST /api/sessions/import`) is different: it
 is open to every signed-in user, so the file is that user's statement. Each
 user message is stored as written by the person importing it (or by nobody
-when no one is signed in); the model-facing copies, authors, gateway notices,
-stored system prompt and runtime settings in the file are dropped; Hermes'
-own control frames in the text are visibly relabelled; and an imported
-session is only linked to a parent that came in the same file.
+when no one is signed in), and every imported message is marked `imported`
+in its display metadata; the name the file claimed for a message is kept
+only as display text (`imported_author`). The model-facing copies, authors,
+gateway notices, stored system prompt, runtime settings, working directory,
+end reason and source in the file are dropped (the source becomes `import`).
+Message content keeps only text and images; Hermes' own control frames in the
+text, look-alike spellings included, are visibly relabelled, in tool call
+arguments too. A session id shaped like one Hermes mints itself (`cron_…`,
+`room_…`) gets a fresh id, a title that would switch on a special mode
+(`Bot Chat`, `Group: …`) is prefixed `Imported: `, and an imported session is
+only linked to a parent that the same import created.
 
 
 ## Session Search Tool

@@ -310,10 +310,18 @@ def run_sessions_import(args, db=None) -> Optional[str]:
         if not Path(path).exists():
             print(f"Error: file not found: {path}")
             return None
-        if source == "hermes" or not source:
+        if source == "hermes":
+            return _restore_hermes_export(path, db, trusted=True)
+        if not source:
             from hermes_cli.session_restore import read_hermes_export
-            if source == "hermes" or read_hermes_export(path) is not None:
-                return _restore_hermes_export(path, db)
+            if read_hermes_export(path) is not None:
+                # Recognised, not named: the file may come from anyone, so nothing in it may speak for
+                # Hermes. Only the explicit --from hermes restores provenance.
+                print("This file is a Hermes session export; importing it as untrusted (authors, the model's "
+                      "copies of messages, system prompts and runtime settings are left out).")
+                print(f"  To restore it with full provenance, if you trust it:  "
+                      f"hermes sessions import --from hermes {path}")
+                return _restore_hermes_export(path, db, trusted=False)
         if not source:  # guess from the path shape; a codex match wins over a claude match
             p = str(path)
             if "/.claude/" in p or p.endswith(".jsonl") and "claude" in p:
@@ -338,12 +346,13 @@ def run_sessions_import(args, db=None) -> Optional[str]:
     return session_id
 
 
-def _restore_hermes_export(path, db) -> Optional[str]:
-    """Restore a Hermes session export as the operator, provenance kept (hermes_cli/session_restore.py);
-    the first restored (or already present) session id, None on failure."""
+def _restore_hermes_export(path, db, *, trusted: bool) -> Optional[str]:
+    """Import a Hermes session export (hermes_cli/session_restore.py): as the operator with provenance
+    kept when *trusted*, else as untrusted data; the first restored (or already present) session id, None
+    on failure."""
     from hermes_cli.session_restore import restore_hermes_export
     try:
-        report = restore_hermes_export(path, db=db)
+        report = restore_hermes_export(path, db=db, keep_provenance=trusted)
     except ValueError as e:
         print(f"Error: {e}")
         return None
@@ -352,7 +361,7 @@ def _restore_hermes_export(path, db) -> Optional[str]:
             print(f"Error: session {error.get('session_id') or error.get('index')}: {error.get('error')}")
         return None
     imported, skipped = report.get("imported_ids") or [], report.get("skipped_ids") or []
-    print(f"✓ Restored {len(imported)} session{'' if len(imported) == 1 else 's'} "
+    print(f"✓ {'Restored' if trusted else 'Imported'} {len(imported)} session{'' if len(imported) == 1 else 's'} "
           f"({len(skipped)} already present)")
     ids = imported or skipped
     if ids:

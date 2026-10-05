@@ -13,11 +13,13 @@ import type { GroupMember, GroupMessage, GroupMessageAuthor } from './types'
 // handoff, runtime/system notes). A member reply is republished to every peer inside
 // a role=user prompt, so a reply reproducing one of these reads as harness input to
 // the peers; the opener is relabelled visibly (the words stay, the exact trusted
-// shape does not). Genuine user lines are never touched. Keep in sync with
-// agent/prompt_builder.py::CONTROL_FRAME_OPENERS (the source of
-// gateway/hosted_room_discussion.py::_MEMBER_CONTROL_FRAME_RE).
+// shape does not). Genuine user lines are never touched. Byte-equivalent to
+// agent/prompt_builder.py::CONTROL_FRAME_RE (pinned by
+// tests/hermes_state/test_session_import_provenance.py). The gateway also matches
+// fullwidth, zero-width-split and look-alike-letter spellings; this copy only the
+// literal ones.
 const MEMBER_CONTROL_FRAME_RE =
-  /\[(?=\/?OUT-OF-BAND USER MESSAGE|CONTEXT COMPACTION|CONTEXT SUMMARY\]|PRIOR CONTEXT|Runtime note:|System note:|System:|SYSTEM\]|IMPORTANT:|Planning state preserved|ASYNC DELEGATION|Gateway note:)/gi
+  /\[[^\S\n]*(?=\/?OUT-OF-BAND USER MESSAGE|CONTEXT COMPACTION|CONTEXT SUMMARY\]|PRIOR CONTEXT|Runtime note:|System note:|System:|SYSTEM\]|IMPORTANT:|Planning state preserved|ASYNC DELEGATION|Gateway note:)/gi
 
 function relabelMemberControlFrames(text: string) {
   return text.replace(MEMBER_CONTROL_FRAME_RE, '[member-quoted ')

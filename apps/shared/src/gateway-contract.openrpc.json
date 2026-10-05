@@ -23057,7 +23057,7 @@
       },
       "PermanentGrant": {
         "additionalProperties": false,
-        "description": "One ``command_allowlist`` entry (an entry and its legacy key alias are one grant). ``id`` is\nopaque and stable for the entry in its profile; ``label`` is redacted like an approval card.",
+        "description": "One standing grant: the ``command_allowlist`` entries that approve overlapping rules (a rule's\nlegacy spellings, a legacy key shared by several rules). ``label`` names every rule they approve\n(``; ``-separated), redacted; a revoke removes all of them. ``id`` is opaque, stable per rule set.",
         "properties": {
           "id": {
             "title": "Id",
@@ -33525,7 +33525,7 @@
       },
       "SessionGrant": {
         "additionalProperties": false,
-        "description": "One approval given for one session only. ``tirith``: a content-security finding (never\npermanent).",
+        "description": "One approval given for one session only, grouped and labelled like ``PermanentGrant``.\n``tirith``: a content-security finding (never permanent).",
         "properties": {
           "id": {
             "title": "Id",

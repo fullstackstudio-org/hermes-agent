@@ -2718,7 +2718,7 @@ export interface ApprovalGrantsResult {
   sessions: SessionGrants[]
 }
 export type ApprovalMode = 'manual' | 'smart' | 'off'
-/** One ``command_allowlist`` entry (an entry and its legacy key alias are one grant). ``id`` is opaque and stable for the entry in its profile; ``label`` is redacted like an approval card. */
+/** One standing grant: the ``command_allowlist`` entries that approve overlapping rules (a rule's legacy spellings, a legacy key shared by several rules). ``label`` names every rule they approve (``; ``-separated), redacted; a revoke removes all of them. ``id`` is opaque, stable per rule set. */
 export interface PermanentGrant {
   id: string
   kind: ApprovalGrantKind
@@ -2733,7 +2733,7 @@ export interface SessionGrants {
   yolo: boolean
   grants: SessionGrant[]
 }
-/** One approval given for one session only. ``tirith``: a content-security finding (never permanent). */
+/** One approval given for one session only, grouped and labelled like ``PermanentGrant``. ``tirith``: a content-security finding (never permanent). */
 export interface SessionGrant {
   id: string
   kind: 'pattern'

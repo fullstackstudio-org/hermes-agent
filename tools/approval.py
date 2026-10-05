@@ -12,12 +12,13 @@ call time; sibling-defined names are imported from their defining module.
 """
 
 from dataclasses import dataclass
+import contextlib
 import hashlib
 import importlib
 import logging
 import os
 import threading
-from typing import Optional
+from typing import Callable, Iterable, Optional
 
 from utils import env_var_enabled, is_truthy_value
 from tools import approval_context
@@ -262,16 +263,17 @@ def session_grants(session_key: str) -> list[str]:
         return sorted(_session_approved.get(session_key, ()))
 
 
-def revoke_session(session_key: str, key: str | None) -> int:
-    """Withdraw one session approval (with its key aliases), or every one when *key* is None.
-    Returns how many entries went. YOLO is a separate toggle and is left alone."""
+def revoke_session(session_key: str, choose: Callable[[set[str]], Iterable[str]]) -> int:
+    """Withdraw session approvals of *session_key*: ``choose(stored keys)`` names the ones to remove,
+    decided under ``_lock`` against what is stored at that moment. Returns how many entries went.
+    YOLO is a separate toggle and is left alone."""
     if not session_key:
         return 0
     with _lock:
         approved = _session_approved.get(session_key)
         if not approved:
             return 0
-        doomed = set(approved) if key is None else approved & (_approval_key_aliases(key) | {key})
+        doomed = approved & set(choose(set(approved)))
         approved -= doomed
         if not approved:
             _session_approved.pop(session_key, None)
@@ -506,9 +508,9 @@ def save_permanent_allowlist(patterns: set):
     """
     try:
         from hermes_cli.config import load_config, save_config
-        config = load_config()
-        on_disk = set(config.get("command_allowlist", []) or [])
-        with _lock:
+        with _config_mutation_lock(load=False), _lock:
+            config = load_config()
+            on_disk = set(config.get("command_allowlist", []) or [])
             key = _baseline_key()
             baseline = _permanent_baseline_by_home.get(key, set())
             merged = on_disk | (set(patterns) - baseline)
@@ -531,27 +533,43 @@ def permanent_grants() -> list[str]:
         return sorted(on_disk | _permanent_set())
 
 
-def revoke_permanent(key: str) -> int:
-    """Withdraw a standing approval of the active profile at once: *key* and its key aliases leave
-    the governing set, this process's baseline and ``command_allowlist``. Leaving the baseline is
-    what keeps a later :func:`save_permanent_allowlist` from writing it back. Returns how many
-    entries went (0: nothing held it). Raises when config.yaml cannot be written; memory is then
-    left as it was."""
+def revoke_permanent(choose: Callable[[set[str]], Iterable[str]]) -> int:
+    """Withdraw standing approvals of the active profile at once. ``choose(stored keys)`` names the
+    entries to remove; it runs under the locks against ``command_allowlist`` as read now plus the
+    governing set, so the decision and the write see one state. The chosen keys leave the governing
+    set, this process's baseline and the file; leaving the baseline is what keeps a later
+    :func:`save_permanent_allowlist` from writing them back. One load and one save, under the
+    process's config read-modify-write lock (``_config_mutation_lock``) so a concurrent settings save
+    cannot put the old list back. Returns how many entries went. Raises when config.yaml cannot be
+    written; memory is then left as it was."""
     from hermes_cli.config import load_config, save_config
-    doomed = _approval_key_aliases(key) | {key}
-    with _permanent_write_lock, _lock:
+    with _permanent_write_lock, _config_mutation_lock(), _lock:
         config = load_config()
         entries = _allowlist_entries(config.get("command_allowlist"))
-        kept = [entry for entry in entries if entry not in doomed]
         governing = _permanent_set()
-        removed = (set(entries) - set(kept)) | (governing & doomed)
+        stored = set(entries) | governing
+        doomed = stored & set(choose(set(stored)))
+        kept = [entry for entry in entries if entry not in doomed]
         if len(kept) != len(entries):
             config["command_allowlist"] = kept
             save_config(config)
         governing -= doomed
         if (baseline := _permanent_baseline_by_home.get(_baseline_key())) is not None:
             baseline -= doomed
-    return len(removed)
+    return len(doomed)
+
+
+def _config_mutation_lock(*, load: bool = True):
+    """The lock every in-process config.yaml read-modify-write holds from load to save (the dashboard
+    routers, ``profile.configure``; ``hermes_cli.web_server._CONFIG_MUTATION_LOCK``). ``load=False``
+    on the approval hot path: when nothing has imported the web server, no writer in this process
+    takes that lock, so there is nothing to wait for and the import is not paid in a plain CLI."""
+    import sys
+    if load:
+        import hermes_cli.web_server  # noqa: F401
+    web_server = sys.modules.get("hermes_cli.web_server")
+    lock = getattr(web_server, "_CONFIG_MUTATION_LOCK", None)
+    return lock if lock is not None else contextlib.nullcontext()
 
 
 # --- Bypass check (yolo / mode=off) ---------------------------------------------------------------------------------

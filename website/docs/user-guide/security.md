@@ -300,8 +300,10 @@ Use `hermes config edit` to review or remove patterns from your permanent allowl
 :::
 
 A client of the gateway (the desktop or mobile app) can list these entries and
-remove one with `approval.revoke`; that takes effect in the running Hermes at
-once, no restart needed. See
+remove one with `approval.revoke`; that takes effect at once in the gateway the
+app is connected to, no restart needed. Other Hermes processes on the same
+profile (a `hermes` CLI session, a separate messaging gateway) keep honouring it
+until they restart or next save an `always` answer. See
 [Standing approvals](../developer-guide/programmatic-integration.md#standing-approvals-approvalgrants-and-approvalrevoke).
 
 :::caution

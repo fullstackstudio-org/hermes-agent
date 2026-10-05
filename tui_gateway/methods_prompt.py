@@ -1538,7 +1538,7 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4006, "scope must be permanent or session")
     if scope == "session" and not params.get("session_id"):
         return _err(rid, 4006, "session_id required for scope session")
-    _target, session, err = _grants_target(rid, params)
+    target, session, err = _grants_target(rid, params)
     if err:
         return err
     try:
@@ -1547,6 +1547,10 @@ def _(rid, params: dict) -> dict:
                    else approval_grants.revoke_permanent(grant_id))
     except Exception as e:
         return _err(rid, 5004, str(e))
+    logger.info("approval.revoke: login=%s profile=%s scope=%s session=%s %s revoked=%d",
+                _transport_auth_user_id(current_transport()) or "-",
+                (profile_name_for_home(target) or str(target)) if target else _current_profile_name(), scope,
+                (session or {}).get("session_key") or "-", "all" if revoke_all else "one", revoked)
     if revoked:
         _emit_all_session_info()  # the approval indicators of every open chat
     return _ok(rid, {"revoked": revoked})

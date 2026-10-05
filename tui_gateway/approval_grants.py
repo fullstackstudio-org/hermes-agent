@@ -1,16 +1,23 @@
 """Standing and session approvals as the apps list and revoke them (``approval.grants`` /
 ``approval.revoke`` in ``methods_prompt.py``).
 
-The state lives in ``tools/approval.py``; this leaf only shapes it for the wire. A grant's ``id`` is
-``perm:`` / ``sess:`` plus the first 16 hex characters of sha256(``profile home key`` NUL ``key``),
-recomputed on revoke, so a client never has to echo raw command text back. An allowlist entry and
-its legacy regex-derived alias are one grant: the canonical rule key names it, and a revoke removes
-both. Callers run under the profile's scope (``@_profile_scoped``).
+The state lives in ``tools/approval.py``; this leaf shapes it for the wire. One grant (one row) is a
+group of stored keys that approve overlapping rules. ``is_approved`` honours a stored key for every
+rule whose alias set contains it, and that relation is neither symmetric nor transitive: a legacy
+regex key such as ``sudo`` or ``git\\s+push`` approves several rules at once, and one rule may be
+approved by several spellings. So a row names every rule its keys approve, and revoking it removes
+every key of the group: afterwards none of those rules is approved permanently, and nothing outside
+them is touched.
+
+A row's ``id`` is ``perm:`` / ``sess:`` plus the first 16 hex characters of sha256(``profile home
+key`` NUL the group's rules), recomputed on revoke, so a client never echoes raw command text back.
+Callers run under the profile's scope (``@_profile_scoped``).
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 
 # Keys the approval gates store that are not detection descriptions (``tools/approval.py``
 # ``check_execute_code_guard``, ``file_tools_write_guards``, ``computer_use/tool.py``,
@@ -18,14 +25,23 @@ import hashlib
 _SYNTHETIC_KEYS = frozenset({"execute_code", "ssh_config_write", "shell command via -c/-lc flag"})
 _SYNTHETIC_PREFIXES = ("tirith:", "plugin_rule:", "cua:", "arbitrary program execution via ")
 
+# Password shapes the shared redactor leaves in command text (it has no notion of CLI flags). A
+# label is display only, so masking a harmless ``-p22`` too is the right side to err on.
+_PASSWORD_SHAPES = (
+    (re.compile(r"(?<![\w-])(-p)(\S+)"), r"\1***"),                                   # mysql -pSECRET
+    (re.compile(r"(--pass(?:word|wd)?)(=|\s+)(\S+)", re.I), r"\1\2***"),              # --password SECRET
+    (re.compile(r"(\bsshpass\s+-p\s+)(\S+)"), r"\1***"),
+    (re.compile(r"(\b[A-Za-z0-9_]*(?:PASS(?:WORD|WD)?|SECRET|TOKEN)[A-Za-z0-9_]*=)(\S+)", re.I), r"\1***"),
+)
+
 
 def _home() -> str:
     from hermes_constants import hermes_home_key
     return hermes_home_key()
 
 
-def _grant_id(prefix: str, key: str) -> str:
-    digest = hashlib.sha256(f"{_home()}\0{key}".encode("utf-8")).hexdigest()
+def _grant_id(prefix: str, rules: frozenset[str]) -> str:
+    digest = hashlib.sha256(f"{_home()}\0{chr(10).join(sorted(rules))}".encode("utf-8")).hexdigest()
     return f"{prefix}:{digest[:16]}"
 
 
@@ -37,50 +53,69 @@ def _descriptions() -> frozenset[str]:
                         detection._GATEWAY_LIFECYCLE_SPLICE_DESCRIPTION})
 
 
-def _canonical(key: str, descriptions: frozenset[str]) -> str:
-    """The rule description an alias group is known by (a legacy regex key maps to it), else *key*."""
+def _rule_index(descriptions: frozenset[str]) -> dict[str, frozenset[str]]:
+    """stored key -> the rules ``is_approved`` honours it for (``key in _approval_key_aliases(rule)``)."""
     from tools.approval_detection import _approval_key_aliases
-    if key in descriptions:
-        return key
-    named = sorted(alias for alias in _approval_key_aliases(key) if alias in descriptions)
-    return named[0] if named else key
+    index: dict[str, set[str]] = {}
+    for rule in descriptions:
+        for alias in _approval_key_aliases(rule):
+            index.setdefault(alias, set()).add(rule)
+    return {key: frozenset(rules) for key, rules in index.items()}
 
 
-def _kind(key: str, descriptions: frozenset[str]) -> str:
-    from tools.approval_detection import _PATTERN_KEY_ALIASES
-    if (key in descriptions or key in _PATTERN_KEY_ALIASES or key in _SYNTHETIC_KEYS
-            or key.startswith(_SYNTHETIC_PREFIXES)):
-        return "pattern"
-    return "glob" if any(ch in key for ch in "*?[") else "command"
-
-
-def _label(key: str) -> str:
-    from agent.redact import redact_sensitive_text
-    return redact_sensitive_text(key)
-
-
-def _grouped(keys) -> list[tuple[str, str]]:
-    """``(stored key, canonical key)`` per grant, one per alias group, in a stable order."""
-    descriptions = _descriptions()
-    groups: dict[str, str] = {}
+def _groups(keys) -> list[tuple[frozenset[str], frozenset[str]]]:
+    """``(stored keys, rules)`` per grant: keys whose rules overlap are one grant. A key no rule
+    lists (command text, a glob, a synthetic gate key) is its own rule. Sorted by rules."""
+    index = _rule_index(_descriptions())
+    groups: list[tuple[set[str], set[str]]] = []
     for key in sorted(keys):
-        groups.setdefault(_canonical(key, descriptions), key)
-    return sorted((key, canonical) for canonical, key in groups.items())
+        members, rules = {key}, set(index.get(key) or {key})
+        disjoint = []
+        for other_members, other_rules in groups:  # existing groups are pairwise disjoint
+            if other_rules & rules:
+                members |= other_members
+                rules |= other_rules
+            else:
+                disjoint.append((other_members, other_rules))
+        groups = [*disjoint, (members, rules)]
+    return sorted(((frozenset(m), frozenset(r)) for m, r in groups), key=lambda group: sorted(group[1]))
 
 
-def _permanent() -> list[tuple[str, dict]]:
+def _kind(members: frozenset[str], rules: frozenset[str], descriptions: frozenset[str]) -> str:
+    from tools.approval_detection import _PATTERN_KEY_ALIASES
+    if any(rule in descriptions or rule in _PATTERN_KEY_ALIASES or rule in _SYNTHETIC_KEYS
+           or rule.startswith(_SYNTHETIC_PREFIXES) for rule in rules):
+        return "pattern"
+    return "glob" if any(ch in key for key in members for ch in "*?[") else "command"
+
+
+def _redact(text: str) -> str:
+    """Like an approval card, but forced (a profile with ``security.redact_secrets: false`` too) and
+    with URL credentials (``?token=``, ``user:pass@``) and password flags masked."""
+    from agent.redact import redact_sensitive_text
+    text = redact_sensitive_text(text, force=True, redact_url_credentials=True)
+    for shape, replacement in _PASSWORD_SHAPES:
+        text = shape.sub(replacement, text)
+    return text
+
+
+def _label(rules: frozenset[str]) -> str:
+    return "; ".join(_redact(rule) for rule in sorted(rules))
+
+
+def _permanent() -> list[tuple[frozenset[str], dict]]:
     from tools import approval
     descriptions = _descriptions()
-    return [(key, {"id": _grant_id("perm", canonical), "kind": _kind(canonical, descriptions),
-                   "label": _label(canonical)})
-            for key, canonical in _grouped(approval.permanent_grants())]
+    return [(members, {"id": _grant_id("perm", rules), "kind": _kind(members, rules, descriptions),
+                       "label": _label(rules)})
+            for members, rules in _groups(approval.permanent_grants())]
 
 
-def _session(session_key: str) -> list[tuple[str, dict]]:
+def _session(session_key: str) -> list[tuple[frozenset[str], dict]]:
     from tools import approval
-    return [(key, {"id": _grant_id("sess", canonical), "kind": "pattern", "label": _label(canonical),
-                   "tirith": canonical.startswith("tirith:")})
-            for key, canonical in _grouped(approval.session_grants(session_key))]
+    return [(members, {"id": _grant_id("sess", rules), "kind": "pattern", "label": _label(rules),
+                       "tirith": any(rule.startswith("tirith:") for rule in rules)})
+            for members, rules in _groups(approval.session_grants(session_key))]
 
 
 def permanent_rows() -> list[dict]:
@@ -98,18 +133,24 @@ def session_row(sid: str, session: dict, *, keep_empty: bool) -> dict | None:
     return {"session_id": sid, "session_key": session_key, "yolo": yolo, "grants": grants}
 
 
+def _chooser(prefix: str, grant_id: str | None):
+    """The stored keys to remove, decided by ``tools.approval`` under its locks against what is
+    stored at that moment: every key (``all``), or every key of the group *grant_id* names."""
+    def choose(keys: set[str]) -> set[str]:
+        if grant_id is None:
+            return set(keys)
+        return next((set(members) for members, rules in _groups(keys)
+                     if _grant_id(prefix, rules) == grant_id), set())
+    return choose
+
+
 def revoke_permanent(grant_id: str | None) -> int:
-    """Revoke the standing grant *grant_id* names, or every one when it is None."""
+    """Revoke the standing grant *grant_id* names, or every one when it is None (one pass)."""
     from tools import approval
-    return sum(approval.revoke_permanent(key) for key, row in _permanent()
-               if grant_id is None or row["id"] == grant_id)
+    return approval.revoke_permanent(_chooser("perm", grant_id))
 
 
 def revoke_session(session: dict, grant_id: str | None) -> int:
     """Revoke one of *session*'s session grants, or every one when *grant_id* is None."""
     from tools import approval
-    session_key = str(session.get("session_key") or "")
-    if grant_id is None:
-        return approval.revoke_session(session_key, None)
-    return sum(approval.revoke_session(session_key, key) for key, row in _session(session_key)
-               if row["id"] == grant_id)
+    return approval.revoke_session(str(session.get("session_key") or ""), _chooser("sess", grant_id))

@@ -53,7 +53,7 @@ def _start_with(store, entries):
 def test_revoke_removes_the_entry_and_its_alias_everywhere_and_a_later_save_keeps_it_out(fake_config):
     _start_with(fake_config, [CANONICAL, LEGACY, "podman *"])
 
-    assert approval.revoke_permanent(LEGACY) == 2
+    assert approval.revoke_permanent(lambda stored: {CANONICAL, LEGACY}) == 2
 
     assert fake_config["command_allowlist"] == ["podman *"]
     assert not {CANONICAL, LEGACY} & approval._permanent_approved
@@ -75,8 +75,8 @@ def test_an_entry_held_only_in_memory_is_revoked_without_rewriting_the_file(fake
     writes = []
     monkeypatch.setattr("hermes_cli.config.save_config", writes.append, raising=False)
 
-    assert approval.revoke_permanent("make deploy") == 1
-    assert approval.revoke_permanent("make deploy") == 0  # idempotent
+    assert approval.revoke_permanent(lambda stored: {"make deploy"}) == 1
+    assert approval.revoke_permanent(lambda stored: {"make deploy"}) == 0  # idempotent
     assert writes == [] and "make deploy" not in approval._permanent_approved
 
 
@@ -85,7 +85,7 @@ def test_a_revoke_during_an_always_answer_is_not_written_back(fake_config, monke
     that save (the snapshot still held the key, the baseline no longer did)."""
     _start_with(fake_config, ["podman *"])
     real_save = approval.save_permanent_allowlist
-    revoker = threading.Thread(target=approval.revoke_permanent, args=("podman *",))
+    revoker = threading.Thread(target=approval.revoke_permanent, args=(lambda stored: {"podman *"},))
 
     def save_while_revoking(snapshot):
         revoker.start()
@@ -109,7 +109,34 @@ def test_revoke_session_by_key_and_all_and_transfer_on_rotation(fake_config):
     assert approval.session_grants("old") == []
     assert approval.session_grants("new") == sorted([LEGACY, "tirith:homograph_url", "execute_code"])
 
-    assert approval.revoke_session("new", CANONICAL) == 1  # an alias names the same grant
+    assert approval.revoke_session("new", lambda stored: {LEGACY, "not-stored"}) == 1  # only what is stored
     assert not approval.is_approved("new", CANONICAL)
-    assert approval.revoke_session("new", None) == 2
+    assert approval.revoke_session("new", lambda stored: set()) == 0
+    assert approval.revoke_session("new", lambda stored: stored) == 2
     assert approval.session_grants("new") == [] and "new" not in approval._session_approved
+
+
+def test_a_settings_save_racing_a_revoke_cannot_put_the_entry_back(fake_config):
+    """A dashboard / ``profile.configure`` save loads config.yaml, changes its own key and saves it, all
+    under ``_CONFIG_MUTATION_LOCK``. A revoke outside that lock lands between its load and its save and is
+    then overwritten with the list as it was."""
+    from hermes_cli import config as config_module
+    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
+    _start_with(fake_config, ["podman *", "make test"])
+    loaded = threading.Event()
+
+    def settings_save():
+        with _CONFIG_MUTATION_LOCK:
+            config = config_module.load_config()
+            loaded.set()
+            time.sleep(0.2)                               # unserialised, the revoke would finish here
+            config["display"] = {"compact": True}
+            config_module.save_config(config)
+
+    writer = threading.Thread(target=settings_save)
+    writer.start()
+    loaded.wait(5)
+    assert approval.revoke_permanent(lambda stored: {"podman *"}) == 1
+    writer.join(5)
+
+    assert fake_config["command_allowlist"] == ["make test"]

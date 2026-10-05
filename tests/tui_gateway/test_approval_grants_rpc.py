@@ -38,8 +38,8 @@ class _WS:
         pass
 
 
-def _write_allowlist(home: Path, entries, mode: str = "manual") -> None:
-    config = {"approvals": {"mode": mode}, "command_allowlist": list(entries)}
+def _write_allowlist(home: Path, entries, mode: str = "manual", **extra) -> None:
+    config = {"approvals": {"mode": mode}, "command_allowlist": list(entries), **extra}
     (home / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
 
 
@@ -156,12 +156,14 @@ def test_a_named_session_is_listed_even_when_it_holds_nothing(homes):
 # ── revoking ────────────────────────────────────────────────────────────────────────────────────
 
 
-def test_revoking_a_standing_grant_is_immediate_and_survives_the_next_always(homes):
+def test_revoking_a_standing_grant_is_immediate_and_survives_the_next_always(homes, caplog):
     launch, work, emitted = homes
     _session("mine")
     grant = _perm(_result(_call("approval.grants", {})), CANONICAL)
 
-    assert _result(_call("approval.revoke", {"scope": "permanent", "id": grant["id"]})) == {"revoked": 2}
+    with caplog.at_level("INFO"):
+        assert _result(_call("approval.revoke", {"scope": "permanent", "id": grant["id"]})) == {"revoked": 2}
+    assert "alice" in caplog.text and "scope=permanent" in caplog.text and "revoked=2" in caplog.text
 
     assert sorted(_allowlist(launch)) == sorted(["podman *", WITH_SECRET])
     assert not approval.is_approved("key-mine", CANONICAL)
@@ -208,6 +210,79 @@ def test_revoking_session_grants_one_and_all_leaves_yolo_alone(homes):
         "revoked": 1}
     assert approval.session_grants("key-mine") == []
     assert approval.is_session_yolo_enabled("key-mine")
+
+
+GIT_D_OLD, GIT_D_NEW = r"git\s+branch\s+-D", r"git\s+branch\s+(?-i:-D)"
+SUDO_RULES = ("sudo with combined-flag privilege escalation", "sudo with privilege flag (stdin/askpass/shell/list)")
+PUSH_RULES = ("git force push (rewrites remote history)", "git force push short flag (rewrites remote history)")
+
+
+def _restart_with(home, entries, **extra):
+    _write_allowlist(home, entries, **extra)
+    approval.load_permanent_allowlist()
+
+
+@pytest.mark.parametrize("revoke", ["id", "all"])
+def test_every_spelling_of_a_rule_goes_with_its_grant(homes, revoke):
+    """Two legacy spellings approve one rule. Revoking it must remove both, or the other keeps it approved."""
+    launch, _work, _ = homes
+    _restart_with(launch, [GIT_D_OLD, GIT_D_NEW])
+    rows = _result(_call("approval.grants", {}))["permanent"]
+    assert [row["label"] for row in rows] == ["git branch force delete"]
+    params = {"id": rows[0]["id"]} if revoke == "id" else {"all": True}
+
+    assert _result(_call("approval.revoke", {"scope": "permanent", **params})) == {"revoked": 2}
+    assert _allowlist(launch) == []
+    assert not approval.is_approved("any-session", "git branch force delete")
+
+
+def test_a_shared_legacy_key_is_one_row_naming_every_rule_and_revokes_only_those(homes):
+    launch, _work, _ = homes
+    _restart_with(launch, ["sudo", SUDO_RULES[0], r"git\s+push", "find -delete"])
+    rows = {row["label"]: row for row in _result(_call("approval.grants", {}))["permanent"]}
+    assert set(rows) == {"; ".join(SUDO_RULES), "; ".join(PUSH_RULES), "find -delete"}
+
+    sudo = rows["; ".join(SUDO_RULES)]
+    assert _result(_call("approval.revoke", {"scope": "permanent", "id": sudo["id"]})) == {"revoked": 2}
+    assert sorted(_allowlist(launch)) == sorted([r"git\s+push", "find -delete"])
+    assert not any(approval.is_approved("s", rule) for rule in SUDO_RULES)
+    assert all(approval.is_approved("s", rule) for rule in (*PUSH_RULES, "find -delete"))
+
+
+def test_a_shared_legacy_key_in_a_session_is_one_grant_too(homes):
+    _session("mine")
+    approval.approve_session("key-mine", "sudo")
+    approval.approve_session("key-mine", "tee")
+    grants = _result(_call("approval.grants", {"session_id": "mine"}))["sessions"][0]["grants"]
+    sudo = next(grant for grant in grants if grant["label"] == "; ".join(SUDO_RULES))
+    assert _result(_call("approval.revoke", {"scope": "session", "session_id": "mine", "id": sudo["id"]})) == {
+        "revoked": 1}
+    assert approval.session_grants("key-mine") == ["tee"]
+
+
+def test_labels_hide_url_credentials_and_passwords_even_with_redaction_off(homes):
+    _launch, work, _ = homes
+    secrets = ("abc123def456ghi", "hunter2pass", "S3cretPassw0rd", "an0therSecret")
+    _write_allowlist(work, [f"curl https://api.example.test/v1?token={secrets[0]}",
+                            f"git clone https://alice:{secrets[1]}@git.example.test/r.git",
+                            f"mysql -uroot -p{secrets[2]} shop", f"mysql --password {secrets[3]} shop"],
+                     security={"redact_secrets": False})
+    result = _result(_call("approval.grants", {"profile": "work"}))
+    assert len(result["permanent"]) == 4
+    assert not any(secret in repr(result) for secret in secrets)
+
+
+def test_a_work_profile_revoke_then_an_always_answer_keeps_it_gone(homes):
+    """A routed profile's allowlist is loaded lazily, with no baseline: the revoke and the next save must
+    still agree."""
+    launch, work, _ = homes
+    launch_before = sorted(_allowlist(launch))
+    assert _result(_call("approval.revoke", {"scope": "permanent", "all": True, "profile": "work"})) == {"revoked": 1}
+    with server._session_profile_runtime_scope({"profile_home": str(work)}):
+        approval._persist_choice("key-work", "always", [("make deploy", None, False)])
+        assert not approval._command_matches_permanent_allowlist("cargo build")
+    assert _allowlist(work) == ["make deploy"]
+    assert sorted(_allowlist(launch)) == launch_before
 
 
 # ── who may ─────────────────────────────────────────────────────────────────────────────────────

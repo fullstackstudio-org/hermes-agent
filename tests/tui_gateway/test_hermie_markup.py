@@ -77,6 +77,10 @@ def test_the_chart_numbers_are_the_schemas():
     assert f"Names at most {label} characters" in CHART
     assert f"title at most {props['title']['maxLength']}, unit at most {props['unit']['maxLength']}" in CHART
     assert all(f'"{kind}"' in CHART for kind in props["type"]["enum"])
+    values = series["values"]["items"]
+    assert -values["minimum"] == values["maximum"] == float("1e15") and "numbers within \u00b11e15" in CHART
+    assert props["x"]["uniqueItems"] is True and "categories and series names are unique once trimmed" in CHART
+    assert "A pie's values are not negative and at least one is above zero" in CHART
     assert set(props) == {"type", "title", "unit", "x", "series"} and set(series) == {"name", "values"}
     assert all(f'"{key}"' in CHART for key in (*props, *series))
 

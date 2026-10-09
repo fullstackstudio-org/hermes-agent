@@ -32,8 +32,9 @@ GUIDE: dict[str, str] = {
         "fenced code block with the language hermie-chart holding one JSON object {\"type\": \"bar\" | \"line\" | "
         "\"pie\", \"title\"?, \"unit\"?, \"x\": [categories], \"series\": [{\"name\", \"values\": [numbers]}]}. "
         "At most 8 series and 100 points; a pie has one series and at most 24 slices. Every values list is as "
-        "long as x. Names at most 60 characters, title at most 120, unit at most 12. Values are numbers: no "
-        "strings, no null, no extra keys."
+        "long as x. Names at most 60 characters, title at most 120, unit at most 12; categories and series names "
+        "are unique once trimmed. Values are numbers within \u00b11e15: no strings, no null, no extra keys. A pie's "
+        "values are not negative and at least one is above zero."
     ),
     "cards": (
         "Cards, for a plan, a setup, steps or options as a picture: a fenced code block with the language "

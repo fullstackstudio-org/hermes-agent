@@ -22,13 +22,15 @@ import re
 import sys
 import threading
 import types
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from functools import cached_property, wraps
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple, Union
 
-from hermes_constants import get_hermes_home, get_process_hermes_home, hermes_home_key
+from hermes_constants import (
+    get_hermes_home, get_process_hermes_home, get_routing_process_hermes_home, hermes_home_key,
+)
 from registration_lifecycle import replacement_coordinator
 from utils import env_var_enabled
 from hermes_cli.config import load_config_readonly
@@ -37,7 +39,7 @@ from hermes_cli.plugin_capabilities import plugin_capability_granted
 from hermes_cli.relay_plugin_cutover import RELAY_PLUGINS_CONFIG_ENV, legacy_relay_plugin_keys
 # Sibling modules' names are re-exported here (origin) so plugins and tests keep one import path.
 from hermes_cli.plugins_manifest import (  # noqa: F401 — re-exported
-    _CONFIG_SCHEMA_TYPES, SUPPORTED_MANIFEST_VERSION, PluginManifest, _portable_skill_namespace,
+    _CONFIG_SCHEMA_TYPES, PLUGIN_SCOPE_GATEWAY, SUPPORTED_MANIFEST_VERSION, PluginManifest, _portable_skill_namespace,
     manifest_key, parse_manifest_file, resolve_module_origin, resolve_plugin_load_order,
     validate_config_schema,
 )
@@ -301,7 +303,9 @@ class PluginContext:
         """Read plugin-relative ``plugins.entries.<plugin_id>.settings.<key>`` (falls back to the
         legacy ``config`` subtree for migration compatibility)."""
         segments = self._segments(key)
-        entry = _plugin_settings_entry(load_config_readonly() or {}, self.plugin_id)
+        with self._owner_home():
+            raw_config = load_config_readonly() or {}
+        entry = _plugin_settings_entry(raw_config, self.plugin_id)
         if entry is None:
             return default
         value = _nested_plugin_value(entry.get("settings"), segments, _UNSET)
@@ -311,12 +315,37 @@ class PluginContext:
 
     def set_config(self, key: str, value: Any) -> None:
         """Atomically write one value in this plugin's ``settings`` subtree."""
-        save_plugin_setting(self.plugin_id, self._segments(key), value)
+        segments = self._segments(key)
+        with self._owner_home():
+            save_plugin_setting(self.plugin_id, segments, value)
 
     @cached_property
     def state(self) -> PluginState:
-        """This plugin's profile-scoped durable JSON state facade."""
-        return PluginState(self.plugin_id, self.manifest.skill_namespace)
+        """This plugin's profile-scoped durable JSON state facade (a gateway-scope plugin's is pinned to
+        the home it was loaded from)."""
+        home = self._manager.home_path if self._is_gateway_scope else None
+        return PluginState(self.plugin_id, self.manifest.skill_namespace, home=home)
+
+    @property
+    def _is_gateway_scope(self) -> bool:
+        return getattr(self.manifest, "scope", "") == PLUGIN_SCOPE_GATEWAY
+
+    @contextmanager
+    def _owner_home(self):
+        """Fork: run the body in the home this plugin was loaded from when it is a gateway-scope plugin
+        that a routed profile turn is running (see :func:`invoke_hook`): its settings live in the
+        gateway's config, never in the profile's. A no-op for every other plugin and every other turn."""
+        home_path = getattr(self._manager, "home_path", None)
+        if (not self._is_gateway_scope or home_path is None
+                or hermes_home_key() == getattr(self._manager, "scope_key", None)):
+            yield
+            return
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+        token = set_hermes_home_override(str(home_path))
+        try:
+            yield
+        finally:
+            reset_hermes_home_override(token)
 
     @cached_property
     def platform_actions(self):
@@ -436,6 +465,13 @@ class PluginContext:
             return get_active_profile_name()
         except Exception:
             return "default"
+
+    @property
+    def profile_home(self) -> Path:
+        """Home of the profile the current task runs for (fork). Inside a gateway-scope plugin's hook for
+        a routed turn this is the turn's profile home, which differs from the home the plugin was loaded
+        from; ``ctx.state`` and ``ctx.get_config`` keep using the latter."""
+        return get_hermes_home()
 
     def on_unload(self, callback: Callable[[], None]) -> PluginRegistration:
         """Register a cleanup callback for unload: runs in reverse acquisition order interleaved
@@ -941,8 +977,16 @@ class PluginContext:
         return count
 
     def register_hook(self, hook_name: str, callback: Callable) -> PluginRegistration:
-        """Register a lifecycle hook callback (unknown names warn but are still stored)."""
-        return self._track_callback("hook", hook_name, callback, self._manager._hooks, VALID_HOOKS)
+        """Register a lifecycle hook callback (unknown names warn but are still stored). A gateway-scope
+        plugin's hook is also recorded for routed profile turns (see :func:`invoke_hook`)."""
+        handle = self._track_callback("hook", hook_name, callback, self._manager._hooks, VALID_HOOKS)
+        if self._is_gateway_scope:
+            mapping = self._manager._gateway_scope_hooks
+            entry = (self.plugin_id, callback)
+            mapping.setdefault(hook_name, []).append(entry)
+            self._track("gateway_scope_hook", hook_name,
+                        lambda: self._manager._remove_callback(mapping, hook_name, entry))
+        return handle
 
     def register_middleware(self, kind: str, callback: Callable) -> PluginRegistration:
         """Register behavior-changing middleware (request kinds rewrite the payload, execution kinds
@@ -1210,6 +1254,9 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         # (matcher, callback, plugin_name), platform handler factories (lowercase platform -> list).
         self._plugins: Dict[str, LoadedPlugin] = {}
         self._hooks: Dict[str, List[Callable]] = {}
+        # Fork: hook name -> (plugin key, callback) for gateway-scope plugins, the subset of ``_hooks``
+        # that routed profile turns also hear (see :func:`invoke_hook`).
+        self._gateway_scope_hooks: Dict[str, List[Tuple[str, Callable]]] = {}
         # Fallback hooks registered by a memory provider before general discovery.
         self._memory_hook_registrations: Dict[Tuple[str, str], List[PluginRegistration]] = {}
         self._middleware: Dict[str, List[Callable]] = {}
@@ -1268,6 +1315,18 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         # and contributed tool names (so `hermes plugins list` still attributes them).
         self._predeclared_modules: Dict[str, types.ModuleType] = {}
         self._predeclared_tools: Dict[str, List[str]] = {}
+
+    def gateway_scope_callbacks(self, hook_name: str, skip_plugin_keys: Set[str] = frozenset()) -> List[Callable]:
+        """Callbacks of gateway-scope plugins for *hook_name*, in registration order, minus plugins in
+        *skip_plugin_keys*. Only callbacks still registered in ``_hooks`` count, so a disposed hook
+        handle stops here too."""
+        entries = self._gateway_scope_hooks.get(hook_name)
+        if not entries:
+            return []
+        owners = {id(callback): key for key, callback in entries if key not in skip_plugin_keys}
+        if not owners:
+            return []
+        return [cb for cb in self._hooks.get(hook_name, ()) if id(cb) in owners]
 
     @property
     def has_gateway_message_injector(self) -> bool:
@@ -1775,8 +1834,52 @@ def _delivery_manager() -> PluginManager:
     return manager
 
 
+def _gateway_scope_delivery(active: PluginManager) -> Optional[Tuple[PluginManager, Set[str]]]:
+    """The gateway's own manager and the plugin keys to leave out, when *active* serves a routed profile
+    turn and the gateway home has gateway-scope hooks; else ``None``.
+
+    Fork (FORK.md). A routed turn runs under its profile's HERMES_HOME override, so ``get_plugin_manager()``
+    answers that profile's manager and a plugin enabled only at the gateway's own home never hears the
+    turn. A plugin that declares ``scope: gateway`` is heard as well. Never in the gateway's own home (that
+    manager already ran it), never for a plugin the profile has its own copy of (enabled or disabled there:
+    the profile decided), and never from a gateway manager that has not finished discovery (discovering
+    it mid-turn would load the gateway's plugins under the profile's secret and terminal scopes).
+    """
+    gateway_home = hermes_home_key(get_routing_process_hermes_home())
+    if getattr(active, "scope_key", gateway_home) == gateway_home:
+        return None
+    with _plugin_managers_lock:
+        gateway = _plugin_managers_by_home.get(Path(gateway_home))
+        if gateway is None:
+            gateway = next((m for m in _plugin_managers_by_home.values()
+                            if getattr(m, "scope_key", None) == gateway_home), None)
+    if gateway is None or gateway is active or not getattr(gateway, "_discovered", False):
+        return None
+    if not getattr(gateway, "_gateway_scope_hooks", None):
+        return None
+    return gateway, set(getattr(active, "_plugins", {}) or ())
+
+
+def _gateway_scope_callbacks(active: PluginManager, hook_name: str) -> Tuple[Optional[PluginManager], List[Callable]]:
+    """(gateway manager, its gateway-scope callbacks for *hook_name*) for a routed turn; never raises."""
+    try:
+        delivery = _gateway_scope_delivery(active)
+        if delivery is None:
+            return None, []
+        gateway, skip = delivery
+        return gateway, gateway.gateway_scope_callbacks(hook_name, skip)
+    except Exception:
+        logger.debug("gateway-scope hook lookup for %s failed", hook_name, exc_info=True)
+        return None, []
+
+
 def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     """Invoke a lifecycle hook (lazy-discovers first); return non-``None`` callback results.
+
+    Fork: in a turn routed to another profile, gateway-scope plugins of the gateway's own home run after
+    the profile's own callbacks, fail-open (a raising or hung one is skipped and logged, a policy hook
+    included), in the turn's own context (``ctx.profile_name`` names the routed profile). See
+    :func:`_gateway_scope_delivery`.
 
     Hot-path / observer hooks in ``_HOOK_TIMEOUT_BOUNDED_HOOKS`` and the policy hook ``pre_tool_call`` are
     bounded by ``plugins.hook_callback_timeout`` (default 30s). On timeout the worker is abandoned (not
@@ -1786,13 +1889,23 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     ``discover_plugins()`` (gateway platform events, TUI slash workers, query mode, cron) still fire
     callbacks registered by user plugins (tracking #64178).
     """
-    return _delivery_manager().invoke_hook(hook_name, **kwargs)
+    manager = _delivery_manager()
+    results = manager.invoke_hook(hook_name, **kwargs)
+    gateway, callbacks = _gateway_scope_callbacks(manager, hook_name)
+    if callbacks:
+        results.extend(gateway._invoke_hook_callbacks(hook_name, callbacks, dict(kwargs), fail_open=True))
+    return results
 
 
 async def ainvoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     """:func:`invoke_hook` for callers on an event loop: ``async def`` callbacks are awaited
     there instead of bridged through a helper thread (see ``PluginManager.ainvoke_hook``)."""
-    return await _delivery_manager().ainvoke_hook(hook_name, **kwargs)
+    manager = _delivery_manager()
+    results = await manager.ainvoke_hook(hook_name, **kwargs)
+    gateway, callbacks = _gateway_scope_callbacks(manager, hook_name)
+    if callbacks:
+        results.extend(await gateway._ainvoke_hook_callbacks(hook_name, callbacks, dict(kwargs), fail_open=True))
+    return results
 
 
 def render_system_prompt_sections(session_info: Mapping[str, Any]) -> List[RenderedPluginSystemPromptSection]:
@@ -1828,12 +1941,15 @@ def has_hook(hook_name: str) -> bool:
 
     Lazy-discovers first — same gate-before-invoke rationale as :func:`has_middleware` (tracking #64178).
     """
-    return _delivery_manager().has_hook(hook_name)
+    manager = _delivery_manager()
+    return manager.has_hook(hook_name) or bool(_gateway_scope_callbacks(manager, hook_name)[1])
 
 
 def iter_hook_callbacks(hook_name: str) -> tuple[Callable, ...]:
-    """Return a stable snapshot of callbacks registered for a hook."""
-    return get_plugin_manager().iter_hook_callbacks(hook_name)
+    """Return a stable snapshot of callbacks registered for a hook (the active home's, then, in a routed
+    turn, the gateway's gateway-scope ones; see :func:`invoke_hook`)."""
+    manager = get_plugin_manager()
+    return manager.iter_hook_callbacks(hook_name) + tuple(_gateway_scope_callbacks(manager, hook_name)[1])
 
 
 def fire_pre_command_hook(

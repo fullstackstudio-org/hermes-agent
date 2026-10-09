@@ -112,6 +112,24 @@ A hook named in `optional_hooks` is declared whether `register()` added it or no
 
 Both lists must be lists of strings. `optional_hooks` is a fork key: upstream Hermes ignores it (with a log line at manifest version 2).
 
+### Hooks for every profile: `scope: gateway`
+
+A gateway serving several profiles runs each routed turn under that profile's own home, so a plugin hears only the turns of the home it is enabled in. A plugin that works for the gateway as a whole (push notifications for every bot, say) can declare that it wants the hooks of routed turns too:
+
+```yaml
+scope: gateway   # default: profile
+```
+
+Enable it at the gateway's own home only. Then, for a turn routed to another profile:
+
+- every hook the plugin registered fires (through `invoke_hook`, `ainvoke_hook`, `has_hook` and the streaming observers), after the profile's own plugins, so a profile plugin's result comes first wherever the first result wins;
+- the callback runs in the turn's own context: `ctx.profile_name` names the routed profile and `ctx.profile_home` is its home, while `ctx.get_config`, `ctx.set_config` and `ctx.state` keep using the gateway's own home, where the plugin is configured;
+- a callback that raises or times out is logged and skipped, `pre_tool_call` included: a gateway-scope plugin observes another profile's turns and is not that profile's guard, so its failure never blocks a tool call there. A directive it returns on purpose is honoured;
+- only hooks cross over. Its tools, commands, middleware, prompt sections, skills and context engine stay in the gateway's home;
+- a profile that has its own copy of the plugin (enabled or disabled) is left to that copy, and a turn in the gateway's own home fires the plugin once, as before.
+
+Hooks fan out only from a gateway home whose plugins finished loading; a turn never starts that discovery itself. Any value other than `profile` or `gateway` loads as `profile` with a warning, and `hermes plugins validate` fails its `scope` check. `scope` is a fork key: upstream Hermes ignores it.
+
 Project-local plugins under `./.hermes/plugins/` are disabled by default. Enable them only for trusted repositories by setting `HERMES_ENABLE_PROJECT_PLUGINS=true` before starting Hermes.
 
 ## What plugins can do

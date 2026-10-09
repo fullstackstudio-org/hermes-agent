@@ -224,6 +224,15 @@ class PluginDispatchMixin:
         closed with a block directive, others skip. ``_HOOK_CALLER_THREAD_HOOKS`` always run on the
         caller thread. ``pre_llm_call`` may return ``{"context": "..."}`` (or a str) to inject.
         """
+        return self._invoke_hook_callbacks(hook_name, self._hooks.get(hook_name, []), kwargs)
+
+    def _invoke_hook_callbacks(
+        self, hook_name: str, callbacks: List[Callable], kwargs: Dict[str, Any], *, fail_open: bool = False,
+    ) -> List[Any]:
+        """The body of :meth:`invoke_hook` over an explicit callback list. ``fail_open`` (fork: a
+        gateway-scope plugin heard from a routed profile turn) turns a raising or timed-out policy
+        callback into a skip instead of a block directive: that plugin is an observer of another
+        profile's turn, not its guard."""
         from hermes_cli.plugins import _resolve_hook_callback_timeout
         # Gateway platform events define event-local envelopes; a bus-wide version here would turn
         # unrelated adapter payloads into one monolithic compatibility contract.
@@ -232,8 +241,8 @@ class PluginDispatchMixin:
         results: List[Any] = []
         timeout = _resolve_hook_callback_timeout()
         use_timeout = _hook_uses_callback_timeout(hook_name, timeout)
-        fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
-        for cb in self._hooks.get(hook_name, []):
+        fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS and not fail_open
+        for cb in callbacks:
             try:
                 if use_timeout:
                     ret = self._run_hook_callback_bounded(hook_name, cb, kwargs, timeout)
@@ -500,14 +509,21 @@ class PluginDispatchMixin:
         run inline. Bounded hooks keep ``plugins.hook_callback_timeout`` via ``asyncio.wait_for``
         (the coroutine is cancelled, not abandoned); a timed-out ``pre_tool_call`` fails closed.
         """
+        return await self._ainvoke_hook_callbacks(hook_name, self._hooks.get(hook_name, []), kwargs)
+
+    async def _ainvoke_hook_callbacks(
+        self, hook_name: str, callbacks: List[Callable], kwargs: Dict[str, Any], *, fail_open: bool = False,
+    ) -> List[Any]:
+        """The body of :meth:`ainvoke_hook` over an explicit callback list (``fail_open``: see
+        :meth:`_invoke_hook_callbacks`)."""
         from hermes_cli.plugins import _resolve_hook_callback_timeout
         if hook_name != "gateway_platform_event":
             kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
         results: List[Any] = []
         timeout = _resolve_hook_callback_timeout()
         use_timeout = _hook_uses_callback_timeout(hook_name, timeout)
-        fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
-        for cb in self._hooks.get(hook_name, []):
+        fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS and not fail_open
+        for cb in callbacks:
             callback_name = getattr(cb, "__name__", repr(cb))
             try:
                 ret = cb(**self._hook_callback_kwargs(cb, kwargs))

@@ -36,8 +36,15 @@ _KNOWN_MANIFEST_FIELDS: Set[str] = {
     "pip_dependencies", "provides_browser_providers", "provides_web_providers",
     "manifest_version", "api_version", "requires_plugins", "python_dependencies", "config_schema",
     "license", "homepage", "tags", "capabilities", "emits", "listens", "hermes", "depends",
-    "requires_hermes", "python_runtime", "optional_hooks",
+    "requires_hermes", "python_runtime", "optional_hooks", "scope",
 }
+
+# Fork: ``scope: gateway`` lets a plugin enabled at the gateway's own home receive the hooks of turns
+# routed to other profiles (see ``hermes_cli.plugins.invoke_hook`` and FORK.md). ``profile`` (the
+# default) is upstream's behaviour: a plugin hears only the turns of the home it was loaded in.
+PLUGIN_SCOPE_PROFILE = "profile"
+PLUGIN_SCOPE_GATEWAY = "gateway"
+_VALID_PLUGIN_SCOPES: Set[str] = {PLUGIN_SCOPE_PROFILE, PLUGIN_SCOPE_GATEWAY}
 
 # Highest manifest schema version this Hermes understands.
 SUPPORTED_MANIFEST_VERSION = 2
@@ -392,6 +399,9 @@ class PluginManifest:
     # (the hooks it always registers) would be wrong for either Hermes. ``hermes plugins validate`` and
     # ``doctor`` accept a hook listed here whether or not it was registered; an unknown name is still reported.
     optional_hooks: List[str] = field(default_factory=list)
+    # Fork: ``profile`` (default) or ``gateway``. A gateway-scope plugin's HOOKS (not its tools, commands,
+    # middleware, prompt sections or skills) also fire for turns routed to other profiles.
+    scope: str = "profile"
 
 
 # ── requires_hermes version gate ─────────────────────────────────────────────
@@ -470,6 +480,19 @@ def portable_plugin_manifest(child: Path, source: str, prefix: str) -> PluginMan
     )
 
 
+def _manifest_scope(data: Mapping, key: str) -> str:
+    """Normalize ``scope``; anything but ``profile``/``gateway`` warns and keeps the default."""
+    raw = data.get("scope")
+    if raw is None:
+        return PLUGIN_SCOPE_PROFILE
+    scope = raw.strip().lower() if isinstance(raw, str) else ""
+    if scope not in _VALID_PLUGIN_SCOPES:
+        logger.warning("Plugin %s: unknown scope %r (valid: %s); treating as 'profile'",
+                       key, raw, ", ".join(sorted(_VALID_PLUGIN_SCOPES)))
+        return PLUGIN_SCOPE_PROFILE
+    return scope
+
+
 def _manifest_kind(data: Mapping, key: str, plugin_dir: Path) -> str:
     """Normalize ``kind``; undeclared memory/model providers are auto-detected from ``__init__.py`` so they
     route to their own discovery instead of the general manager."""
@@ -522,6 +545,7 @@ def parse_manifest_file(
             capabilities=_parse_declared_capabilities(data.get("capabilities"), name),
             **_parse_manifest_v2_fields(data, key), emits=data.get("emits") or [],
             listens=data.get("listens") or [], optional_hooks=data.get("optional_hooks") or [],
+            scope=_manifest_scope(data, key),
         )
     except Exception as exc:
         logger.warning("Failed to parse %s: %s", manifest_file, exc, exc_info=_plugins_debug())

@@ -240,6 +240,7 @@ Optional fields you could add:
 author: Your Name
 optional_hooks:        # hooks you register only where this Hermes has them (fork)
   - pre_confirm_request  # see the user guide: Declaring hooks in the manifest
+scope: gateway         # also hear routed profiles' turns (fork; user guide: Hooks for every profile)
 requires_env:          # gate loading on env vars; prompted during install
   - SOME_API_KEY       # simple format — plugin disabled if missing
   - name: OTHER_KEY    # rich format — shows description/url during install

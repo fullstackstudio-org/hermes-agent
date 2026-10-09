@@ -134,13 +134,17 @@ def _locked_plugin_state(path: Path):
 class PluginState:
     """Atomic, quota-bounded JSON key/value state owned by one plugin."""
 
-    def __init__(self, plugin_id: str, skill_namespace: str = "") -> None:
+    def __init__(self, plugin_id: str, skill_namespace: str = "", *, home: Path | None = None) -> None:
         self._data_namespace = _plugin_data_namespace(plugin_id, skill_namespace)
+        # Fork: a gateway-scope plugin's state is pinned to the home it was loaded from (``None``: the
+        # active home, upstream's behaviour), so a hook it runs for a routed profile turn never writes
+        # into that profile.
+        self._home = home
 
     @property
     def data_dir(self) -> Path:
         """Profile-scoped directory matching portable plugins' PLUGIN_DATA."""
-        return get_hermes_home() / "plugin-data" / self._data_namespace
+        return (self._home if self._home is not None else get_hermes_home()) / "plugin-data" / self._data_namespace
 
     @property
     def path(self) -> Path:

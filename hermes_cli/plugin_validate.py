@@ -393,6 +393,22 @@ def _check_optional_hooks(report: ValidationReport, manifest: dict) -> None:
         report.add("optional hooks", True, f"{len(raw)} named, all known")
 
 
+def _check_scope(report: ValidationReport, manifest: dict) -> None:
+    """The manifest's ``scope`` (fork): ``profile`` (default) or ``gateway``. Anything else loads as
+    ``profile`` with a warning, so a typo would silently keep a gateway plugin deaf to routed turns."""
+    raw = manifest.get("scope")
+    if raw is None:
+        report.add("scope", True, "profile (default)")
+        return
+    from hermes_cli.plugins_manifest import _VALID_PLUGIN_SCOPES
+
+    value = raw.strip().lower() if isinstance(raw, str) else None
+    if value in _VALID_PLUGIN_SCOPES:
+        report.add("scope", True, value)
+    else:
+        report.add("scope", False, f"scope must be one of {', '.join(sorted(_VALID_PLUGIN_SCOPES))}, got {raw!r}")
+
+
 def _check_capabilities(
     report: ValidationReport, manifest: dict, plugin_dir: Path
 ) -> Optional[dict]:
@@ -537,6 +553,7 @@ def validate_plugin_dir(plugin_dir: Path) -> ValidationReport:
     _check_config_spec(report, manifest)
     _check_requires_env(report, manifest)
     _check_optional_hooks(report, manifest)
+    _check_scope(report, manifest)
     _check_loadable(report, plugin_dir)
     _check_python_dependencies(report, plugin_dir)
     recorded = _check_capabilities(report, manifest, plugin_dir)

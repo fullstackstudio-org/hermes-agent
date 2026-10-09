@@ -51,7 +51,7 @@ def accepted_names(value: Any) -> frozenset[str]:
     """The names of *value* this gateway accepts: empty unless *value* is a well-formed list (see the module
     docstring), then the ones in :data:`VOCABULARY`. Also re-checks a list read back from a queue envelope,
     a restart journal or a compute-host frame."""
-    if not isinstance(value, (list, tuple, frozenset, set)) or len(value) > MAX_NAMES:
+    if value is UNGUIDED or not isinstance(value, (list, tuple, frozenset, set)) or len(value) > MAX_NAMES:
         return frozenset()
     names = []
     for name in value:
@@ -97,8 +97,17 @@ def forget(transport: Any) -> None:
 # gateway dispatched for somebody else (a relayed bot message, a hosted room) and an MCP agent's turn name no
 # such connection, so their continuations carry no guide either.
 
+#: A turn the gateway dispatched for somebody other than a connection (a relayed bot message, a hosted-room
+#: task): it carries no guide, and neither do the turns that follow from it (its ``/goal`` continuation). It
+#: leaves the session's source alone, so the person's own unsubmitted turns afterwards follow their connection
+#: again. Its reply goes back to whoever sent it, where a block would be raw JSON.
+UNGUIDED = object()
+
 #: ``session["_markup_source"]`` of a compute-host child: its only peer is the pipe, so it keeps the names its
-#: last frame carried (``session["_markup_names"]``) instead of a connection.
+#: last frame carried (``session["_markup_names"]``) instead of a connection. Known difference from an inline
+#: session: the child cannot see the connection itself, so a continuation it runs keeps those names even when
+#: that connection disconnected or changed its advertisement after the frame; the next frame corrects it. A
+#: relayed turn's frame says ``turn_unguided`` and leaves the names alone, as an inline relay leaves the source.
 FRAME_SOURCE = object()
 
 
@@ -117,6 +126,8 @@ def resolve_turn_markup(session: dict | None, value: Any) -> frozenset[str]:
     """The names a turn carries: *value* re-checked when a submitter's names were handed in (an empty set
     included), or, for ``None`` (a turn nobody submitted), the names of the connection the session's last
     submitted turn came from, as that connection advertises them now."""
+    if value is UNGUIDED:
+        return frozenset()
     if value is not None:
         return accepted_names(value)
     source = session.get("_markup_source") if isinstance(session, dict) else None
@@ -125,6 +136,12 @@ def resolve_turn_markup(session: dict | None, value: Any) -> frozenset[str]:
     return accepted(source)
 
 
+def followup_markup(value: Any) -> Any:
+    """What a turn's own follow-on turn (its ``/goal`` continuation) is handed, from what the turn itself was
+    handed: :data:`UNGUIDED` stays unguided, anything else follows the session's source (``None``)."""
+    return UNGUIDED if value is UNGUIDED else None
+
+
 def wire(names: Iterable[str]) -> list[str]:
     """*names* as they travel in a queue envelope, its restart journal and a compute-host frame: sorted text."""
-    return sorted(accepted_names(list(names)))
+    return [] if names is UNGUIDED else sorted(accepted_names(list(names)))

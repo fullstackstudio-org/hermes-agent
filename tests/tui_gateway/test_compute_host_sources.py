@@ -115,3 +115,13 @@ def test_a_frame_without_names_stages_nothing(child):
     _wait_end(child.out)
     assert child.seen["guide"] == ""
     assert _complete(child.out)["message"]["params"]["payload"]["sources"] == SOURCES
+
+
+def test_an_unguided_frame_stages_nothing_and_keeps_the_childs_names(child):
+    from tui_gateway import client_markup
+    client_markup.remember_frame_names(child.session, ["cards"])
+    child.host.handle_frame({"type": "turn.start", "sid": "s1", "request_id": "turn", "prompt": "marker",
+                             "turn_markup": ["chart"], "turn_unguided": True})
+    _wait_end(child.out)
+    assert child.seen["guide"] == ""
+    assert client_markup.resolve_turn_markup(child.session, None) == frozenset({"cards"})

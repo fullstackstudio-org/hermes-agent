@@ -68,7 +68,7 @@ def _compute_host_turn_frame(
     turn_user_profile: dict = {}
     # An agent acting for that submitter through MCP rides beside them as ``turn_agent``, so the child's
     # note, tool variables and rows say what an inline turn says. Only beside a named submitter.
-    from tui_gateway.client_markup import resolve_turn_markup, wire as markup_wire
+    from tui_gateway.client_markup import UNGUIDED, resolve_turn_markup, wire as markup_wire
     from tui_gateway.row_author import agent_marker
     turn_agent = agent_marker(turn_agent) if turn_auth_user and turn_auth_user[0] else None
     if turn_auth_user:
@@ -107,6 +107,9 @@ def _compute_host_turn_frame(
         # connection, so the child learns them here and stages the same guide an inline turn would.
         # ``None`` (a turn nobody submitted) is resolved here, where the session's last connection is known.
         **({"turn_markup": markup} if (markup := markup_wire(resolve_turn_markup(session, turn_markup))) else {}),
+        # A relayed or hosted turn: unguided, and the child must not let it replace the names its continuations
+        # follow (``client_markup.UNGUIDED``).
+        **({"turn_unguided": True} if turn_markup is UNGUIDED else {}),
         # How the turn came about. The pair above is the SCOPE the parent resolved (a turn nobody submitted
         # falls back to the owner there, for tools); this is what keeps the child from telling the model
         # that the owner sent it.

@@ -457,15 +457,71 @@ def test_an_mcp_agents_turn_and_its_continuation_carry_nothing(room, monkeypatch
     assert _turn(agent, "marker agent continue")["system"] == "CACHED"
 
 
-def test_a_relayed_turns_continuation_carries_nothing(room):
+def test_a_relayed_prompt_and_its_continuation_carry_nothing_but_the_persons_keep_theirs(room, monkeypatch):
     from tools.bot_relay import DeliveryAuthor
     agent, call, _peers = room
     call("phone", "prompt.submit", text="marker phone")
+    _goal_once(monkeypatch, agent, "marker relayed")
     call("phone", "prompt.submit", text="marker relayed",
          _turn_author=DeliveryAuthor({"id": "bot:marker", "name": "marker", "is_bot": True}))
-    server._run_prompt_submit("rid", "sid", agent.session, "marker relayed continue")
     assert _turn(agent, "marker relayed")["system"] == "CACHED"
-    assert _turn(agent, "marker relayed continue")["system"] == "CACHED"
+    assert _turn(agent, "marker continue marker relayed")["system"] == "CACHED"
+    # The person's own unsubmitted turn afterwards (a wake-up) follows their connection again.
+    server._run_prompt_submit("rid", "sid", agent.session, "marker wake")
+    assert CARDS in _turn(agent, "marker wake")["system"]
+
+
+def test_a_bot_dm_delivered_to_the_live_session_carries_no_guide(room, monkeypatch, tmp_path):
+    """``session_notifications._poll_bot_live_delivery_once``: person turn, then a bot's DM answered back to the
+    bot (no guide: its reply would be raw JSON there), its /goal continuation (none), then the person's own next
+    continuation (the guide again)."""
+    import types
+    import tools.bot_live_delivery as mailbox
+    agent, call, _peers = room
+    session = agent.session
+    session["active_session_lease"] = types.SimpleNamespace(lease_id="lease", released=False)
+    owner = {"lease_id": "lease", "live_session_id": "sid", "session_id": "room"}
+    pending = [{"id": "dm-1", "message": "marker dm", "author": {"id": "bot:coder", "name": "coder", "is_bot": True}}]
+    receipts = []
+    monkeypatch.setattr(mailbox, "has_mailbox", lambda home: True)
+    monkeypatch.setattr(mailbox, "find_canonical_live_owner", lambda home: owner)
+    monkeypatch.setattr(mailbox, "claim_pending_delivery", lambda home, pinned: pending.pop(0) if pending else None)
+    monkeypatch.setattr(mailbox, "complete_delivery", lambda *a, **k: receipts.append(k))
+    monkeypatch.setattr(server, "_session_home", lambda _session: tmp_path)
+    call("phone", "prompt.submit", text="marker phone")
+    _goal_once(monkeypatch, agent, "marker dm")
+    assert server._poll_bot_live_delivery_once("sid", session) is True
+    assert receipts and receipts[0]["status"] == "settled"
+    assert _turn(agent, "marker dm")["system"] == "CACHED"
+    assert _turn(agent, "marker continue marker dm")["system"] == "CACHED"
+    server._run_prompt_submit("rid", "sid", session, "marker wake after dm")
+    assert CARDS in _turn(agent, "marker wake after dm")["system"]
+
+
+def test_an_isolated_relayed_turn_is_unguided_and_leaves_the_childs_names_alone(room):
+    from tui_gateway.compute_host import _frame_turn_markup
+    agent, call, _peers = room
+    call("phone", "prompt.submit", text="marker phone")
+    relay = server._compute_host_turn_frame("rid", "sid", agent.session, "marker relay",
+                                            turn_markup=client_markup.UNGUIDED)
+    assert relay.get("turn_unguided") is True and "turn_markup" not in relay
+    person = server._compute_host_turn_frame("rid", "sid", agent.session, "marker person")
+    assert "turn_unguided" not in person and person["turn_markup"] == ["cards"]
+    child = dict(agent.session)
+    client_markup.remember_frame_names(child, _frame_turn_markup(person))
+    # The child keeps these names through an unguided frame (test_compute_host_sources).
+    assert client_markup.resolve_turn_markup(child, None) == frozenset({"cards"})
+
+
+def test_a_relayed_prompt_queued_behind_a_turn_stays_unguided(room, monkeypatch):
+    agent, _call, _peers = room
+    agent.session["queued_prompt"] = {"text": "marker queued relay", "transport": None,
+                                      "turn_author": {"id": "bot:marker", "name": "marker"},
+                                      "turn_markup": ["cards"]}
+    client_markup.remember_source(agent.session, _peers["phone"])
+    assert server._drain_queued_prompt("rid", "sid", agent.session) is True
+    assert _turn(agent, "marker queued relay")["system"] == "CACHED"
+    assert agent.session["_markup_source"] is _peers["phone"]
 
 
 def test_an_isolated_continuation_is_resolved_by_the_gateway_and_kept_by_the_child(room):

@@ -223,17 +223,17 @@ def _submit_agent(params: dict) -> dict | None:
     return None if _is_internal_submit(params) else _submitting_agent()
 
 
-def _submit_markup(params: dict) -> frozenset[str]:
+def _submit_markup(params: dict):
     """The Hermie blocks the connection that sent this submit draws (``client_markup``), read on its own request
-    context beside :func:`_submit_auth_user`; empty for an internal dispatch (a relayed bot DM, a hosted room),
-    which arrives on somebody else's socket. A ``/retry`` is pressed on the presser's own connection
+    context beside :func:`_submit_auth_user`; ``client_markup.UNGUIDED`` for an internal dispatch (a relayed bot
+    DM, a hosted room), which arrives on somebody else's socket and answers somebody other than a connection. A ``/retry`` is pressed on the presser's own connection
     (``methods_tools._submit_retried_turn`` calls this handler in that request), so it reads the presser's."""
     from tui_gateway import client_markup
     from tui_gateway.row_author import ReplayedTurn
     if _INTERNAL_DISPATCH.get():
-        return frozenset()
+        return client_markup.UNGUIDED
     if _is_internal_submit(params) and not isinstance(params.get("_replayed_turn"), ReplayedTurn):
-        return frozenset()
+        return client_markup.UNGUIDED
     return client_markup.accepted(current_transport())
 
 
@@ -796,12 +796,12 @@ def _(rid, params: dict) -> dict:
             turn_markup=submit_markup)
         if busy_response is not None:
             return busy_response
-    # This submit runs now (not queued): the session's later unsubmitted turns follow its connection's names,
-    # and an internal dispatch's follow nobody's (``client_markup.resolve_turn_markup``).
+    # This submit runs now (not queued): the session's later unsubmitted turns follow its connection's names
+    # (``client_markup.resolve_turn_markup``). An internal dispatch leaves the source alone: it is unguided, and
+    # so is what follows from it, while the person's own continuations keep following their connection.
     from tui_gateway import client_markup
-    client_markup.remember_source(
-        session, None if _INTERNAL_DISPATCH.get() or (
-            _is_internal_submit(params) and replayed is None) else current_transport())
+    if submit_markup is not client_markup.UNGUIDED:
+        client_markup.remember_source(session, current_transport())
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
     requested_rebind_ids = (
         {r for r in raw_rebind_ids if isinstance(r, int) and not isinstance(r, bool)}

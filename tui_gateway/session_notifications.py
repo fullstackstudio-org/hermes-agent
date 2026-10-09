@@ -651,8 +651,11 @@ def _poll_bot_live_delivery_once(sid: str, session: dict) -> bool:
                           error=error, reason=reason)
 
     try:
+        # A bot's DM is answered back to that bot: no Hermie block guide (its reply would be raw JSON there),
+        # and none for what follows from it; the person's own later continuations are untouched.
+        from tui_gateway.client_markup import UNGUIDED
         started = _run_prompt_submit(f"__bot_dm__{delivery_id}", sid, session, claimed["message"],
-                                     image_paths=[], terminal_callback=terminal_receipt,
+                                     image_paths=[], terminal_callback=terminal_receipt, turn_markup=UNGUIDED,
                                      turn_author=claimed.get("author") or None,
                                      **({"display_metadata": {"notification_category": "diagnostic"}}
                                         if claimed.get("notification_category") == "diagnostic" else {}))

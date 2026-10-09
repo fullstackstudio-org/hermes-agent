@@ -435,7 +435,8 @@ def _after_complete_turn(sid: str, session: dict, st: _TurnRun, raw: Any) -> Non
 
 
 def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str, *,
-                            on_done=None, on_error=None, turn_auth_user=None, turn_agent=None) -> None:
+                            on_done=None, on_error=None, turn_auth_user=None, turn_agent=None,
+                            turn_markup: Any = None) -> None:
     """Chain one follow-up turn (caller set ``running``); on failure run ``on_error``, log,
     release ``running``. The chained turn continues the work of whoever submitted the turn it follows,
     so it is SCOPED to them (memory, tools, permissions) and not re-resolved from the session record.
@@ -446,7 +447,8 @@ def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str
         begin_turn_id(session)
         _emit("message.start", sid)
         _run_prompt_submit(rid, sid, session, prompt, turn_auth_user=turn_auth_user, origin="continuation",
-                           **({"turn_agent": turn_agent} if turn_agent else {}))
+                           **({"turn_agent": turn_agent} if turn_agent else {}),
+                           **({"turn_markup": turn_markup} if turn_markup is not None else {}))
         if on_done is not None:
             on_done()
     except Exception as exc:
@@ -460,8 +462,10 @@ def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str
 
 def _run_post_turn_followups(
     rid, sid: str, session: dict, result: Any, goal_followup: str | None, *,
-    turn_auth_user: tuple[str, str] | None = None, turn_agent: dict | None = None) -> None:
-    """Chain whatever should run after ``running`` was released.  Order: a mid-turn user
+    turn_auth_user: tuple[str, str] | None = None, turn_agent: dict | None = None,
+    turn_markup: Any = None) -> None:
+    """Chain whatever should run after ``running`` was released.  ``turn_markup`` is what the goal continuation
+    is handed (``client_markup.followup_markup`` of the finished turn's).  Order: a mid-turn user
     prompt wins over every auto follow-up (drain it, skip the rest); a leftover /steer is
     requeued first so it isn't dropped; then goal continuation, then completion
     notifications.  Each nested submit re-checks ``running`` under the lock."""
@@ -492,7 +496,7 @@ def _run_post_turn_followups(
             from tui_gateway.session_lifecycle import _claim_turn_running
             _claim_turn_running(session)
         _dispatch_followup_turn(rid, sid, session, goal_followup, "goal continuation dispatch",
-                                turn_auth_user=turn_auth_user, turn_agent=turn_agent)
+                                turn_auth_user=turn_auth_user, turn_agent=turn_agent, turn_markup=turn_markup)
     # Safety net for completion events that arrived mid-turn.  Ownership is positive-proof
     # and compression-chain aware (same fail-closed gate as the poller): session B must
     # not consume session A's event.  Unclaimable events are requeued for the poller.
@@ -1272,7 +1276,8 @@ def _run_prompt_submit(
     # (an envelope may have come back from a journal). ``None`` is a turn nobody submitted that continues this
     # chat (``/goal``, auto-continue, a wake-up): it follows the connection of the session's last submitted turn
     # while that still advertises them (``client_markup.resolve_turn_markup``), so its system message matches.
-    from tui_gateway.client_markup import TURN_MARKUP, resolve_turn_markup
+    from tui_gateway.client_markup import TURN_MARKUP, followup_markup, resolve_turn_markup
+    next_markup = followup_markup(turn_markup)
     turn_markup = resolve_turn_markup(session, turn_markup)
     display_metadata = with_row_author(display_metadata, row_auth_user, row_agent)
     turn_agent = agent_marker(turn_agent) if isinstance(turn_auth_user, tuple) and turn_auth_user[0] else None
@@ -1456,7 +1461,7 @@ def _run_prompt_submit(
             followup = run_body()
         if followup is not None:
             _run_post_turn_followups(rid, sid, session, *followup, turn_auth_user=turn_auth_user,
-                                     turn_agent=turn_agent)
+                                     turn_agent=turn_agent, turn_markup=next_markup)
     # The handle is resolved BEFORE _sessions_lock: a profile session opens its own SessionDB through the
     # state registry, and _sessions_lock gates every create/close/prompt on this backend.
     with _routing_provenance_db(session) as routing_db, _sessions_lock:

@@ -295,14 +295,17 @@ class ComputeHost:
             with contextlib.suppress(Exception):
                 server._persist_branch_seed(session)
             # The names the gateway resolved for this turn; a continuation this child runs itself follows them.
-            from tui_gateway.client_markup import remember_frame_names
-            remember_frame_names(session, _frame_turn_markup(frame))
+            from tui_gateway.client_markup import UNGUIDED, remember_frame_names
+            unguided = frame.get("turn_unguided") is True
+            if not unguided:
+                remember_frame_names(session, _frame_turn_markup(frame))
             server._run_prompt_submit(
                 request_id, sid, session, text, display_kind=frame.get("display_kind") or None,
                 display_metadata=(frame.get("display_metadata")
                                   if isinstance(frame.get("display_metadata"), dict) else None),
                 turn_auth_user=_frame_turn_auth_user(frame), turn_agent=_frame_turn_agent(frame),
-                turn_markup=_frame_turn_markup(frame), origin=str(frame.get("turn_origin") or ""),
+                turn_markup=UNGUIDED if unguided else _frame_turn_markup(frame),
+                origin=str(frame.get("turn_origin") or ""),
                 contributors=frame.get("turn_contributors") if isinstance(frame.get("turn_contributors"), list) else ())
             run_thread = session.get("_run_thread")
             if run_thread is not None and hasattr(run_thread, "join"):

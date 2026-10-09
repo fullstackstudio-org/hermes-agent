@@ -220,6 +220,8 @@ def _record_codex_app_server_compaction(agent, turn, *, approx_tokens: int | Non
     so local transcript rows are NOT rewritten — only session event/usage counters."""
     if not force and not getattr(turn, "compacted", False):
         return False
+    # The compacted thread may no longer hold the turn addition it was given: the next turn sends it again.
+    agent._codex_turn_addition_sent = None
     thread_id, turn_id = getattr(turn, "thread_id", None) or "", getattr(turn, "turn_id", None) or ""
     logger.info("codex app-server compaction observed: session=%s thread=%s turn=%s force=%s",
                 getattr(agent, "session_id", None) or "none", thread_id, turn_id, force)
@@ -455,7 +457,7 @@ def _consume_user_interrupt(agent, active: bool = True) -> tuple[bool, Any]:
 def _codex_developer_instructions(agent) -> str:
     """The prompt composition the standard loop sends as its system message (turn_context order), without the
     turn's own API-time addition: this is the thread's identity, and a per-turn change must not retire the
-    thread. That addition rides in the turn's input instead (``with_turn_input_addition``)."""
+    thread. That addition rides in a turn's input instead (``with_changed_turn_input_addition``)."""
     from agent.prompt_additions import with_session_additions
     return with_session_additions(getattr(agent, "_cached_system_prompt", None) or "", agent)
 
@@ -552,6 +554,8 @@ def _ensure_codex_session(agent, messages: List[Dict[str, Any]] | None = None) -
     if str(getattr(agent, "provider", "") or "").strip().lower() == "custom":
         from hermes_cli.runtime_provider_custom import codex_model_provider_id
         model_provider = codex_model_provider_id(str(getattr(agent, "requested_provider", "") or ""))
+    # A new (or resumed) thread has been given no turn addition by this session yet: the next turn sends it.
+    agent._codex_turn_addition_sent = None
     agent._codex_session = CodexAppServerSession(
         cwd=getattr(agent, "session_cwd", None) or str(resolve_agent_cwd()), approval_callback=approval_callback,
         codex_bin=get_configured_codex_binary(load_config()),
@@ -635,8 +639,12 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
     _ensure_codex_session(agent, messages)
     try:
         _start_codex_thread(agent)
-        from agent.prompt_additions import with_turn_input_addition
-        turn = agent._codex_session.run_turn(user_input=with_turn_input_addition(user_message, agent))
+        # The turn's API-time addition (a client's block guide) goes in with the input only when it changed since
+        # this thread last got it: the thread keeps every input, so one copy per change, not one per turn.
+        from agent.prompt_additions import with_changed_turn_input_addition
+        user_input, agent._codex_turn_addition_sent = with_changed_turn_input_addition(
+            user_message, agent, getattr(agent, "_codex_turn_addition_sent", None))
+        turn = agent._codex_session.run_turn(user_input=user_input)
     except Exception as exc:
         logger.exception("codex app-server turn failed")
         _close_codex_session(agent)

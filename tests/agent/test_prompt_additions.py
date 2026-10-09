@@ -88,29 +88,80 @@ def test_a_guide_change_never_retires_the_codex_thread(monkeypatch):
     assert closed == [agent]
 
 
-def test_the_codex_turn_input_carries_the_addition(monkeypatch):
+def _codex_turns(monkeypatch, agent):
+    """Run Codex turns against a recording session; returns (run, sent inputs)."""
     from agent import codex_runtime
-    from agent.prompt_additions import TURN_INPUT_HEADER, with_turn_input_addition
     sent = []
 
     class Session:
         def run_turn(self, user_input):
             sent.append(user_input)
-            raise RuntimeError("marker stop")
+            return SimpleNamespace(interrupted=False, error=None, should_retire=False, compacted=False,
+                                   final_text="ok", thread_id="thread", turn_id="turn", projected_messages=[])
 
-    agent = _staged(_codex_session=Session())
+    agent._codex_session = Session()
     monkeypatch.setattr(codex_runtime, "_ensure_codex_session", lambda *_a, **_k: None)
     monkeypatch.setattr(codex_runtime, "_start_codex_thread", lambda _agent: "thread")
-    monkeypatch.setattr(codex_runtime, "_close_codex_session", lambda _agent: None)
-    monkeypatch.setattr(codex_runtime, "_consume_user_interrupt", lambda *_a, **_k: None)
+    monkeypatch.setattr(codex_runtime, "_consume_user_interrupt", lambda *_a, **_k: (False, None))
+    monkeypatch.setattr(codex_runtime, "_persist_projected_messages", lambda *_a, **_k: False)
+    monkeypatch.setattr(codex_runtime, "_finish_codex_turn", lambda *_a, **_k: {})
     monkeypatch.setattr(codex_runtime, "_turn_result", lambda *_a, **_k: {})
-    codex_runtime.run_codex_app_server_turn(agent, user_message="marker question", original_user_message="x",
-                                            messages=[], effective_task_id="t")
-    assert sent == [f"marker question\n\n{TURN_INPUT_HEADER}\nMARKER GUIDE"]
-    parts = with_turn_input_addition([{"type": "text", "text": "q"}], agent)
-    assert parts[-1] == {"type": "text", "text": f"{TURN_INPUT_HEADER}\nMARKER GUIDE"}
+
+    def run(text, guide):
+        stage_turn_system_addition(agent, guide)
+        codex_runtime.run_codex_app_server_turn(agent, user_message=text, original_user_message=text,
+                                                messages=[], effective_task_id="t")
+    return run, sent
+
+
+def test_codex_gets_the_block_once_per_change_and_one_line_when_it_is_withdrawn(monkeypatch):
+    from agent.prompt_additions import TURN_INPUT_HEADER, TURN_INPUT_WITHDRAWN
+    agent = SimpleNamespace(ephemeral_system_prompt=None, _cached_system_prompt="CACHED")
+    run, sent = _codex_turns(monkeypatch, agent)
+    for text in ("one", "two", "three"):
+        run(text, "MARKER GUIDE")
+    assert sent == [f"one\n\n{TURN_INPUT_HEADER}\nMARKER GUIDE", "two", "three"]
+    run("four", "OTHER GUIDE")
+    run("five", "OTHER GUIDE")
+    assert sent[3:] == [f"four\n\n{TURN_INPUT_HEADER}\nOTHER GUIDE", "five"]
+    run("six", "")
+    run("seven", "")
+    assert sent[5:] == [f"six\n\n{TURN_INPUT_WITHDRAWN}", "seven"]
+    run("eight", "MARKER GUIDE")
+    assert sent[7] == f"eight\n\n{TURN_INPUT_HEADER}\nMARKER GUIDE"
+
+
+def test_codex_resends_after_a_new_thread_or_a_compaction(monkeypatch):
+    from agent import codex_runtime
+    from agent.prompt_additions import TURN_INPUT_HEADER
+    agent = SimpleNamespace(ephemeral_system_prompt=None, _cached_system_prompt="CACHED", context_compressor=None,
+                            session_id="s", _emit_status=lambda *_a: None)
+    run, sent = _codex_turns(monkeypatch, agent)
+    run("one", "MARKER GUIDE")
+    run("two", "MARKER GUIDE")
+    codex_runtime._record_codex_app_server_compaction(agent, SimpleNamespace(compacted=True))
+    run("three", "MARKER GUIDE")
+    agent._codex_turn_addition_sent = None  # what a new CodexAppServerSession sets (a retired thread)
+    run("four", "MARKER GUIDE")
+    assert sent == ["one\n\n" + TURN_INPUT_HEADER + "\nMARKER GUIDE", "two",
+                    "three\n\n" + TURN_INPUT_HEADER + "\nMARKER GUIDE", "four\n\n" + TURN_INPUT_HEADER + "\nMARKER GUIDE"]
+    # A list input (text and image parts) gains one text part; nothing staged and nothing sent leaves it alone.
+    from agent.prompt_additions import with_changed_turn_input_addition
+    stage_turn_system_addition(agent, "MARKER GUIDE")
+    parts, now = with_changed_turn_input_addition([{"type": "text", "text": "q"}], agent, None)
+    assert parts[-1] == {"type": "text", "text": f"{TURN_INPUT_HEADER}\nMARKER GUIDE"} and now == "MARKER GUIDE"
     stage_turn_system_addition(agent, "")
-    assert with_turn_input_addition("marker question", agent) == "marker question"
+    assert with_changed_turn_input_addition("q", agent, None) == ("q", "")
+
+
+def test_a_new_codex_session_starts_with_nothing_sent(monkeypatch):
+    from agent import codex_runtime
+    agent = SimpleNamespace(ephemeral_system_prompt=None, _cached_system_prompt="CACHED", _codex_session=None,
+                            _codex_turn_addition_sent="MARKER GUIDE", session_cwd="/tmp", provider="openai")
+    monkeypatch.setattr(codex_runtime, "_stored_codex_thread_id", lambda _agent: None)
+    with contextlib.suppress(Exception):
+        codex_runtime._ensure_codex_session(agent, [])
+    assert agent._codex_turn_addition_sent is None
 
 
 def test_a_side_question_fork_gets_the_plain_personality_prompt():

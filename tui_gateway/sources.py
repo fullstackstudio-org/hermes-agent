@@ -8,8 +8,10 @@ reply's stored row as ``display_metadata.sources``, which ``session.history`` fo
 row's metadata. Absent (never ``[]``) when the turn used no web tool or none of its results qualified.
 
 A tool result is itself untrusted (a page can claim any title): a URL must be ``http``/``https`` with a host
-and no user info, at most :data:`MAX_URL_CHARS`, and is kept as the tool returned it (trimmed, not
-normalised); a title goes through ``request_text.clean_text`` (control, format and invisible characters out,
+that IDNA can encode, a valid port and no user info, holds no control, format (bidi, zero-width), surrogate or
+white-space character, and is at most :data:`MAX_URL_CHARS`; its scheme and host are stored as lower-case ASCII
+(punycode for a non-ASCII host), the rest as the tool returned it, so a client shows a host that cannot be
+spoofed by look-alike or reordered characters. A title goes through ``request_text.clean_text`` (control, format and invisible characters out,
 whitespace collapsed) and is cut at :data:`MAX_TITLE_CHARS`. No page content or description leaves the
 gateway, and nothing but counts is logged.
 
@@ -39,21 +41,72 @@ METADATA_KEY = "sources"
 MAX_CANDIDATES = 512
 
 
+#: Code point categories a URL never carries: controls (C0 and C1), format characters (bidi overrides and
+#: isolates, zero-width characters, the soft hyphen), lone surrogates, private use, unassigned, separators.
+_REFUSED_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zs", "Zl", "Zp"})
+
+
+def _ascii_host(host: str) -> str | None:
+    """*host* as the lower-case ASCII a client shows: an IP literal as written, a name IDNA-encoded (UTS 46
+    mapping, punycode for a non-ASCII label), or None when it cannot be encoded."""
+    host = host.lower().rstrip(".")
+    if not host or len(host) > 253:
+        return None
+    try:
+        import ipaddress
+        ipaddress.ip_address(host.strip("[]"))
+        return host
+    except ValueError:
+        pass
+    try:
+        import idna
+    except ImportError:  # a dependency of the HTTP stack; without it only a plain ASCII name passes
+        labels = host.split(".")
+        plain = host.isascii() and all(0 < len(label) <= 63 and label.replace("-", "").isalnum()
+                                       and not label.startswith(("-", "xn--")) and not label.endswith("-")
+                                       for label in labels)
+        return host if plain else None
+    try:
+        encoded = idna.encode(host, uts46=True).decode("ascii")
+        idna.decode(encoded)  # a punycode label must also decode to a valid name
+    except (idna.IDNAError, UnicodeError, ValueError):
+        return None
+    return encoded.lower()
+
+
 def clean_url(value: Any) -> str | None:
-    """*value* as a source URL, or None when it is not one (see the module docstring)."""
+    """*value* as a source URL, or None when it is not one: ``http``/``https`` with a host and no user info,
+    a valid port, no control, format, surrogate or white-space character anywhere, at most
+    :data:`MAX_URL_CHARS`. The scheme and host come back as lower-case ASCII (a non-ASCII host as punycode);
+    path, query and fragment are kept as the tool returned them."""
     if not isinstance(value, str):
         return None
-    url = value.strip()
-    if not url or len(url) > MAX_URL_CHARS or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+    url = value.strip(" \t\r\n")  # only ASCII white space is trimmed; any other control is a refusal below
+    if not url or len(url) > MAX_URL_CHARS:
+        return None
+    import unicodedata
+    if any(unicodedata.category(ch) in _REFUSED_CATEGORIES for ch in url):
         return None
     try:
         parts = urlsplit(url)
+        port = parts.port  # raises ValueError for a non-numeric or out-of-range port
         host = parts.hostname
     except ValueError:
         return None
-    if parts.scheme.lower() not in ("http", "https") or not host or "@" in parts.netloc:
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https") or not host or "@" in parts.netloc:
         return None
-    return url
+    if ":" in parts.netloc.rsplit("]", 1)[-1] and port is None:
+        return None  # "host:" with an empty port
+    ascii_host = _ascii_host(host)
+    if ascii_host is None:
+        return None
+    netloc = f"[{ascii_host}]" if ":" in ascii_host else ascii_host
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    rest = url.split("//", 1)[1][len(parts.netloc):]
+    cleaned = f"{scheme}://{netloc}{rest}"
+    return cleaned if len(cleaned) <= MAX_URL_CHARS else None
 
 
 def clean_title(value: Any) -> str:

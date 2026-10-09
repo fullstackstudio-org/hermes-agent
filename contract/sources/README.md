@@ -35,11 +35,18 @@ Only results of the turn that the reply ends count. A page's content or descript
 - Ordered: every `read` entry first, then the `found` ones; within a tier, in the order the tools returned
   them.
 - At most 24 entries; the rest are dropped.
-- `url`: `http` or `https`, with a host and no user info, at most 2048 characters, as the tool returned it
-  (trimmed, not normalised). A result whose URL is anything else is left out.
+- `url`: `http` or `https`, with a host and no user info, at most 2048 characters. The scheme and the host are
+  stored in lower-case ASCII: a host with non-ASCII characters as its IDNA (UTS 46) punycode form, an IPv6
+  address in brackets, a port only when it is a number from 0 to 65535. The path, query and fragment are kept as
+  the tool returned them. The URL holds no white space, no control character (C0 or C1), no format character
+  (Unicode category `Cf`: bidi overrides and isolates, zero-width characters, the soft hyphen) and no lone
+  surrogate. A result whose URL is anything else, or whose host IDNA cannot encode, is left out.
 - `title`: at most 160 characters, with control, format and invisible characters removed and whitespace
   collapsed. It may be empty. A page can claim any title: it is text, never markup.
 - `via`: `read` or `found`.
+- Lengths (2048, 160) count Unicode code points, as Python's `len` does. A reader in TypeScript MUST count code
+  points (`[...text].length`), not UTF-16 units (`text.length`), or it refuses a valid entry that holds
+  characters outside the Basic Multilingual Plane.
 
 ## 3. Where a client finds it
 
@@ -55,6 +62,8 @@ reads it SHOULD check every entry against `schema.json` and drop the ones that f
 
 - It MUST NOT load anything for an entry: no favicon, no preview, no request to the page or to a third party.
   A monogram (the domain's first letter) stands in for an icon.
-- It MUST show the entry's domain beside its title, so a misleading title cannot hide where the link goes,
-  and SHOULD let VoiceOver and other screen readers read the domain.
+- It MUST show the entry's host beside its title, exactly as stored (lower-case ASCII, punycode for a
+  non-ASCII name), never decoded to Unicode, so a look-alike or reordered name cannot pass for another. It
+  MUST NOT present the title as the destination: the title says what the page claims to be, the host where
+  the link goes. It SHOULD let VoiceOver and other screen readers read the host.
 - It opens the URL only on the person's own tap, through its usual link policy.

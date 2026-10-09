@@ -197,8 +197,14 @@ class Source(Result):
     web tool results, never from the model's text. A client shows the domain beside the title and opens the URL
     only on the person's tap; it never fetches anything for it."""
 
-    #: ``http``/``https`` with a host and no user info, as the tool returned it (trimmed).
-    url: Annotated[str, Field(min_length=1, max_length=2048, pattern=r"^[Hh][Tt][Tt][Pp][Ss]?://[^\s@/?#]+(?:[/?#][^\s]*)?$")]
+    #: ``http``/``https`` with a host and no user info. Scheme and host are lower-case ASCII (a non-ASCII host as
+    #: punycode, an IPv6 literal in brackets), with an optional port; path, query and fragment as the tool returned
+    #: them, without white space, controls (C0, C1) or format characters (the gateway refuses every Unicode ``Cf``;
+    #: the pattern names the BMP ones).
+    url: Annotated[str, Field(min_length=1, max_length=2048, pattern=(
+        r"^https?://(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])(?::[0-9]{1,5})?"
+        r"(?:[/?#][^\s\u0000-\u001F\u007F-\u009F\u00AD\u0600-\u0605\u061C\u06DD\u070F\u0890\u0891\u08E2"
+        r"\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]*)?$"))]
     #: Cleaned text (no control or invisible characters, whitespace collapsed); may be empty.
     title: Annotated[str, Field(max_length=160)]
     via: SourceVia

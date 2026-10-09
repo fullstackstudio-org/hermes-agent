@@ -44,10 +44,11 @@ def test_valid_entries_parse_and_survive_the_gateways_own_checks():
 def test_invalid_entries_are_refused(case):
     with pytest.raises(ValidationError):
         Source.model_validate(case["value"])
-    # The gateway never builds one: a URL or a tier it refuses leaves the entry out (a title it cuts and cleans
-    # itself, and it writes no other key).
-    if case["why"] not in ("title over 160 characters", "missing title", "unknown key"):
-        assert sources.merge([case["value"]]) == [], case["why"]
+    # The gateway never sends one: what it builds from such an entry is dropped (a URL or tier it refuses) or
+    # stored in the form the contract allows (a host made lower-case ASCII, a title cut and cleaned, no other key).
+    for built in sources.merge([case["value"]]):
+        Source.model_validate(built)
+        assert built != case["value"], case["why"]
 
 
 def test_the_schema_agrees_with_the_examples():

@@ -66,10 +66,28 @@ def test_a_url_that_is_not_a_web_page_is_left_out(url):
     assert sources.collect("web_search", {"success": True, "data": {"web": [{"url": url, "title": "x"}]}}) == []
 
 
-def test_a_url_is_kept_as_returned_only_trimmed():
-    assert sources.clean_url("  HTTPS://A.example/Path?q=1#f  ") == "HTTPS://A.example/Path?q=1#f"
+def test_scheme_and_host_become_lower_case_ascii_and_the_rest_is_kept():
+    assert sources.clean_url("  HTTPS://A.example/Path?q=1#f  ") == "https://a.example/Path?q=1#f"
+    assert sources.clean_url("https://B\u00fccher.Example/K\u00fcche?q=\u00fc") == \
+        "https://xn--bcher-kva.example/K\u00fcche?q=\u00fc"
     assert sources.clean_url("https://a.example/" + "x" * (2048 - 18)) is not None
-    assert sources.clean_url("http://[2001:db8::1]:8443/p") == "http://[2001:db8::1]:8443/p"
+    assert sources.clean_url("http://[2001:DB8::1]:8443/p") == "http://[2001:db8::1]:8443/p"
+    assert sources.clean_url("http://192.168.0.1:65535/x") == "http://192.168.0.1:65535/x"
+    assert sources.clean_url("https://a.example./x") == "https://a.example/x"
+    # A look-alike name is not refused (IDNA accepts it) but can no longer pass for the real one.
+    assert sources.clean_url("https://p\u0430ypal.com/") == "https://xn--pypal-4ve.com/"
+
+
+@pytest.mark.parametrize("url", [
+    "https://a.example/\u202egnp.exe", "https://a.exa\u202emple/", "https://a.example/a\u200bb",
+    "https://a.example/\u2066x", "https://a.example/\u00ad", "https://a.example/\ufeff", "https://a.example/\U000e0041",
+    "https://a.example/\x85", "https://a.example/\x9f", "https://a.example/\x1b", "https://a.example/\ud800",
+    "https://a.example:70000/", "https://a.example:65536/", "https://a.example:http/", "https://a.example:/x",
+    "https://a.example:-1/", "https://xn--zz.example/", "https://a_b.example/", "https://-a.example/",
+    "https://a..example/", "https://" + "a" * 64 + ".example/", "https://a.example\u3000/",
+])
+def test_a_url_with_a_hidden_character_a_bad_port_or_a_bad_host_is_left_out(url):
+    assert sources.clean_url(url) is None
 
 
 def test_a_title_is_cleaned_and_cut():

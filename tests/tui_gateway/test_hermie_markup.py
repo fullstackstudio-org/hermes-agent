@@ -67,16 +67,18 @@ def _schema(name):
 def test_the_chart_numbers_are_the_schemas():
     schema = _schema("chart.schema.json")
     props = schema["properties"]
-    pie = schema["allOf"][0]["then"]["properties"]
+    [pie_rule] = [rule for rule in schema["allOf"] if rule["if"]["properties"]["type"] == {"const": "pie"}]
+    pie = pie_rule["then"]["properties"]
     series = schema["$defs"]["series"]["properties"]
     assert f"At most {props['series']['maxItems']} series and {props['x']['maxItems']} points" in CHART
-    assert (f"a pie has {pie['series']['maxItems'] == 1 and 'one'} series and at most {pie['x']['maxItems']} slices"
-            in CHART)
-    label = props["x"]["items"]["anyOf"][0]["maxLength"]
-    assert label == series["name"]["maxLength"]
+    assert pie["series"]["maxItems"] == 1
+    assert f"a pie has one series and at most {pie['x']['maxItems']} slices" in CHART
+    [label] = {props["x"]["items"]["anyOf"][0]["maxLength"], series["name"]["maxLength"]}
     assert f"Names at most {label} characters" in CHART
     assert f"title at most {props['title']['maxLength']}, unit at most {props['unit']['maxLength']}" in CHART
-    assert all(f'\\"{kind}\\"' in json.dumps(CHART) for kind in props["type"]["enum"])
+    assert all(f'"{kind}"' in CHART for kind in props["type"]["enum"])
+    assert set(props) == {"type", "title", "unit", "x", "series"} and set(series) == {"name", "values"}
+    assert all(f'"{key}"' in CHART for key in (*props, *series))
 
 
 def test_the_cards_numbers_are_the_schemas():
@@ -93,9 +95,41 @@ def test_the_cards_numbers_are_the_schemas():
             f"{tags['items']['maxLength']} characters") in CARDS
     assert f"next at most {card['next']['maxLength']}" in CARDS
     for value in (*props["layout"]["enum"], *props["connector"]["enum"]):
-        assert f'"{value}"' in CARDS
+        assert value is None or f'"{value}"' in CARDS
+    # With a grid there is no connector and no label on one (the schema's grid branch).
+    grid = schema["then"]["properties"]
+    assert schema["if"]["properties"]["layout"] == {"const": "grid"}
+    assert grid["connector"] == {"type": "null"} and grid["cards"]["items"]["properties"]["next"]["maxLength"] == 0
+    assert "connector and next only in a stack" in CARDS
+    assert set(props) == {"title", "layout", "connector", "cards"}
     assert set(card) == {"title", "subtitle", "icon", "tags", "highlight", "next"}
-    assert all(f'"{key}"' in CARDS for key in card)
+    assert all(f'"{key}"' in CARDS for key in (*props, *card))
+
+
+def test_the_examples_limits_are_the_schemas_and_the_guides():
+    """``examples.json`` states the caps once more for the client validators: the three must agree."""
+    limits = _schema("examples.json")["limits"]
+    schema = _schema("cards.schema.json")
+    props, card = schema["properties"], schema["$defs"]["card"]["properties"]
+    assert limits == {
+        "maxSourceBytes": 16384,
+        "minCards": props["cards"]["minItems"], "maxCards": props["cards"]["maxItems"],
+        "maxTitleLength": props["title"]["maxLength"], "maxCardTitleLength": card["title"]["maxLength"],
+        "maxSubtitleLength": card["subtitle"]["maxLength"], "maxTags": card["tags"]["maxItems"],
+        "maxTagLength": card["tags"]["items"]["maxLength"], "maxNextLength": card["next"]["maxLength"],
+        "maxIconLength": card["icon"]["maxLength"],
+    }
+    assert "16384 bytes" in schema["description"] and "16384 bytes" in _schema("chart.schema.json")["description"]
+
+
+def test_the_guides_icons_come_from_the_vocabulary():
+    icons = _schema("icons.json")
+    vocabulary = {entry["name"] for entry in icons["icons"]}
+    match = re.search(r"icon is one word such as ([a-z, ]+?) or ([a-z]+); another word draws a plain glyph", CARDS)
+    assert match, CARDS
+    named = [name.strip() for name in match.group(1).split(",")] + [match.group(2)]
+    assert set(named) <= vocabulary and 5 <= len(named) <= 12, named
+    assert icons["generic"]["name"] == "generic" and "generic" not in vocabulary
 
 
 def test_every_number_in_the_guide_comes_from_a_schema():
@@ -109,9 +143,19 @@ def test_every_number_in_the_guide_comes_from_a_schema():
 
 def test_the_markup_contract_is_pinned():
     import hashlib
-    for line in (MARKUP / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+    lines = (MARKUP / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+    assert {line.split("  ", 1)[1] for line in lines} == {
+        "README.md", "cards.schema.json", "chart.schema.json", "examples.json", "icons.json"}
+    for line in lines:
         digest, name = line.split("  ", 1)
         assert hashlib.sha256((MARKUP / name).read_bytes()).hexdigest() == digest, name
+
+
+def test_the_alert_markers_in_the_guide_are_the_contracts():
+    alerts = _schema("examples.json")["alerts"]
+    kinds = {case["alert"] for case in alerts if case.get("alert")}
+    assert kinds == {"note", "tip", "important", "warning", "caution"}
+    assert all(f"[!{kind.upper()}]" in ALERTS for kind in kinds)
 
 
 # ── the carriers ────────────────────────────────────────────────────────────────────────────────

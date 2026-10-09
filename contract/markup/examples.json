@@ -1,0 +1,1387 @@
+{
+  "$comment": "Normative examples of hermie-cards blocks and alert quotes. Every client validator and the fork guide test read this file. See README.md.",
+  "version": 1,
+  "limits": {
+    "maxSourceBytes": 16384,
+    "minCards": 2,
+    "maxCards": 12,
+    "maxTitleLength": 120,
+    "maxCardTitleLength": 60,
+    "maxSubtitleLength": 140,
+    "maxTags": 6,
+    "maxTagLength": 24,
+    "maxNextLength": 40,
+    "maxIconLength": 32
+  },
+  "cards": {
+    "valid": [
+      {
+        "name": "two cards, everything defaulted",
+        "block": {
+          "cards": [
+            {
+              "title": "Gateway"
+            },
+            {
+              "title": "Website"
+            }
+          ]
+        },
+        "expect": {
+          "layout": "stack",
+          "connector": "arrow",
+          "cards": [
+            {
+              "title": "Gateway",
+              "tags": [],
+              "highlight": false
+            },
+            {
+              "title": "Website",
+              "tags": [],
+              "highlight": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "the picture from the design: icons, tags, a highlight and connector labels",
+        "block": {
+          "title": "Hoe ik het zou opzetten",
+          "layout": "stack",
+          "connector": "arrow",
+          "cards": [
+            {
+              "icon": "server",
+              "title": "Gateway per klant",
+              "subtitle": "k3s, eigen Postgres",
+              "tags": ["k3s", "Postgres"],
+              "highlight": true,
+              "next": "deployt naar"
+            },
+            {
+              "icon": "globe",
+              "title": "Website",
+              "subtitle": "Next.js standalone"
+            }
+          ]
+        },
+        "expect": {
+          "title": "Hoe ik het zou opzetten",
+          "layout": "stack",
+          "connector": "arrow",
+          "cards": [
+            {
+              "icon": "server",
+              "title": "Gateway per klant",
+              "subtitle": "k3s, eigen Postgres",
+              "tags": ["k3s", "Postgres"],
+              "highlight": true,
+              "next": "deployt naar"
+            },
+            {
+              "icon": "globe",
+              "title": "Website",
+              "subtitle": "Next.js standalone",
+              "tags": [],
+              "highlight": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "a grid of four",
+        "block": {
+          "layout": "grid",
+          "cards": [
+            {
+              "title": "One",
+              "icon": "star"
+            },
+            {
+              "title": "Two",
+              "icon": "heart"
+            },
+            {
+              "title": "Three",
+              "icon": "bolt"
+            },
+            {
+              "title": "Four",
+              "icon": "leaf"
+            }
+          ]
+        },
+        "expect": {
+          "layout": "grid",
+          "cards": [
+            {
+              "icon": "star",
+              "title": "One",
+              "tags": [],
+              "highlight": false
+            },
+            {
+              "icon": "heart",
+              "title": "Two",
+              "tags": [],
+              "highlight": false
+            },
+            {
+              "icon": "bolt",
+              "title": "Three",
+              "tags": [],
+              "highlight": false
+            },
+            {
+              "icon": "leaf",
+              "title": "Four",
+              "tags": [],
+              "highlight": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "a plain line between cards, with a label",
+        "block": {
+          "connector": "line",
+          "cards": [
+            {
+              "title": "Plan",
+              "next": "then"
+            },
+            {
+              "title": "Build"
+            }
+          ]
+        },
+        "expect": {
+          "layout": "stack",
+          "connector": "line",
+          "cards": [
+            {
+              "title": "Plan",
+              "tags": [],
+              "highlight": false,
+              "next": "then"
+            },
+            {
+              "title": "Build",
+              "tags": [],
+              "highlight": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "no connector",
+        "block": {
+          "layout": "stack",
+          "connector": "none",
+          "cards": [
+            {
+              "title": "A"
+            },
+            {
+              "title": "B"
+            },
+            {
+              "title": "C"
+            }
+          ]
+        },
+        "expect": {
+          "layout": "stack",
+          "connector": "none",
+          "cards": [
+            {
+              "title": "A",
+              "tags": [],
+              "highlight": false
+            },
+            {
+              "title": "B",
+              "tags": [],
+              "highlight": false
+            },
+            {
+              "title": "C",
+              "tags": [],
+              "highlight": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "an icon that is not in the vocabulary draws the generic glyph; a vocabulary name is matched without regard to case",
+        "block": {
+          "cards": [
+            {
+              "title": "One",
+              "icon": "rocket"
+            },
+            {
+              "title": "Two",
+              "icon": " Server "
+            }
+          ]
+        },
+        "expect": {
+          "layout": "stack",
+          "connector": "arrow",
+          "cards": [
+            {
+              "icon": "generic",
+              "title": "One",
+              "tags": [],
+              "highlight": false
+            },
+            {
+              "icon": "server",
+              "title": "Two",
+              "tags": [],
+              "highlight": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "text is trimmed, and an empty or null optional value is absent",
+        "block": {
+          "title": "   ",
+          "cards": [
+            {
+              "title": "  Padded  ",
+              "subtitle": "",
+              "icon": null,
+              "tags": [],
+              "highlight": false,
+              "next": null
+            },
+            {
+              "title": "Second",
+              "subtitle": "  ",
+              "tags": null
+            }
+          ]
+        },
+        "expect": {
+          "layout": "stack",
+          "connector": "arrow",
+          "cards": [
+            {
+              "title": "Padded",
+              "tags": [],
+              "highlight": false
+            },
+            {
+              "title": "Second",
+              "tags": [],
+              "highlight": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "the caps exactly: 12 cards, 6 tags of 24 characters, a title of 120 and a card title of 60",
+        "block": {
+          "title": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+          "cards": [
+            {
+              "title": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 2",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 3",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 4",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 5",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 6",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 7",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 8",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 9",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 10",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 11",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 12",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ]
+            }
+          ]
+        },
+        "expect": {
+          "title": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+          "layout": "stack",
+          "connector": "arrow",
+          "cards": [
+            {
+              "title": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "highlight": false,
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 2",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "highlight": false,
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 3",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "highlight": false,
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 4",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "highlight": false,
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 5",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "highlight": false,
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 6",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "highlight": false,
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 7",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "highlight": false,
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 8",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "highlight": false,
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 9",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "highlight": false,
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 10",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "highlight": false,
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 11",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "highlight": false,
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "Card 12",
+              "subtitle": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+              "tags": [
+                "0xxxxxxxxxxxxxxxxxxxxxxx",
+                "1xxxxxxxxxxxxxxxxxxxxxxx",
+                "2xxxxxxxxxxxxxxxxxxxxxxx",
+                "3xxxxxxxxxxxxxxxxxxxxxxx",
+                "4xxxxxxxxxxxxxxxxxxxxxxx",
+                "5xxxxxxxxxxxxxxxxxxxxxxx"
+              ],
+              "highlight": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "length is counted in characters as a reader sees them: sixty family emoji are sixty characters",
+        "block": {
+          "cards": [
+            {
+              "title": "👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧"
+            },
+            {
+              "title": "Two"
+            }
+          ]
+        },
+        "expect": {
+          "layout": "stack",
+          "connector": "arrow",
+          "cards": [
+            {
+              "title": "👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧👨‍👩‍👧",
+              "tags": [],
+              "highlight": false
+            },
+            {
+              "title": "Two",
+              "tags": [],
+              "highlight": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "one highlighted card among several, in a grid",
+        "block": {
+          "layout": "grid",
+          "cards": [
+            {
+              "title": "A"
+            },
+            {
+              "title": "B",
+              "highlight": true
+            },
+            {
+              "title": "C",
+              "highlight": false
+            }
+          ]
+        },
+        "expect": {
+          "layout": "grid",
+          "cards": [
+            {
+              "title": "A",
+              "tags": [],
+              "highlight": false
+            },
+            {
+              "title": "B",
+              "tags": [],
+              "highlight": true
+            },
+            {
+              "title": "C",
+              "tags": [],
+              "highlight": false
+            }
+          ]
+        }
+      },
+      {
+        "name": "the same tag on two different cards is fine, and so are tags that differ only in case",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "tags": ["api", "API"]
+            },
+            {
+              "title": "B",
+              "tags": ["api"]
+            }
+          ]
+        },
+        "expect": {
+          "layout": "stack",
+          "connector": "arrow",
+          "cards": [
+            {
+              "title": "A",
+              "tags": ["api", "API"],
+              "highlight": false
+            },
+            {
+              "title": "B",
+              "tags": ["api"],
+              "highlight": false
+            }
+          ]
+        }
+      }
+    ],
+    "invalid": [
+      {
+        "name": "the text is not JSON",
+        "rule": "notJSON",
+        "source": "Gateway -> Website -> Users"
+      },
+      {
+        "name": "JSON cut off in the middle (a fence still streaming)",
+        "rule": "notJSON",
+        "source": "{\"cards\": [{\"title\": \"Gateway\"}, {\"title\": \"Web"
+      },
+      {
+        "name": "JSON that has a trailing comma",
+        "rule": "notJSON",
+        "source": "{\"cards\": [{\"title\": \"A\"}, {\"title\": \"B\"},]}"
+      },
+      {
+        "name": "an array is not an object",
+        "rule": "notAnObject",
+        "source": "[{\"title\": \"A\"}, {\"title\": \"B\"}]"
+      },
+      {
+        "name": "a string is not an object",
+        "rule": "notAnObject",
+        "source": "\"cards\""
+      },
+      {
+        "name": "null is not an object",
+        "rule": "notAnObject",
+        "source": "null"
+      },
+      {
+        "name": "the text is over 16384 bytes before it is even parsed",
+        "rule": "tooLarge",
+        "block": {
+          "cards": [
+            {
+              "title": "A"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        },
+        "padTo": 16385
+      },
+      {
+        "name": "an unknown key at the top",
+        "rule": "unknownKey",
+        "key": "colour",
+        "block": {
+          "colour": "red",
+          "cards": [
+            {
+              "title": "A"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "an unknown key in a card",
+        "rule": "unknownKey",
+        "key": "image",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "image": "https://example.org/a.png"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "the cards are missing",
+        "rule": "missing",
+        "key": "cards",
+        "block": {
+          "title": "No cards"
+        }
+      },
+      {
+        "name": "a card has no title",
+        "rule": "missing",
+        "key": "title",
+        "block": {
+          "cards": [
+            {
+              "subtitle": "orphan"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "cards is not a list",
+        "rule": "wrongType",
+        "key": "cards",
+        "block": {
+          "cards": "A, B"
+        }
+      },
+      {
+        "name": "a card is not an object",
+        "rule": "wrongType",
+        "key": "cards",
+        "block": {
+          "cards": ["A", "B"]
+        }
+      },
+      {
+        "name": "the block title is a number",
+        "rule": "wrongType",
+        "key": "title",
+        "block": {
+          "title": 42,
+          "cards": [
+            {
+              "title": "A"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "a card title is a number",
+        "rule": "wrongType",
+        "key": "title",
+        "block": {
+          "cards": [
+            {
+              "title": 1
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "a tag is a number",
+        "rule": "wrongType",
+        "key": "tags",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "tags": ["ok", 2026]
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "tags is a string",
+        "rule": "wrongType",
+        "key": "tags",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "tags": "k3s"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "highlight is a string",
+        "rule": "wrongType",
+        "key": "highlight",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "highlight": "yes"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "highlight is a number",
+        "rule": "wrongType",
+        "key": "highlight",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "highlight": 1
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "the icon is a number",
+        "rule": "wrongType",
+        "key": "icon",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "icon": 7
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "layout is not a string",
+        "rule": "wrongType",
+        "key": "layout",
+        "block": {
+          "layout": 1,
+          "cards": [
+            {
+              "title": "A"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "an unknown layout",
+        "rule": "unknownLayout",
+        "key": "carousel",
+        "block": {
+          "layout": "carousel",
+          "cards": [
+            {
+              "title": "A"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "an unknown connector",
+        "rule": "unknownConnector",
+        "key": "dashed",
+        "block": {
+          "connector": "dashed",
+          "cards": [
+            {
+              "title": "A"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "a connector on a grid",
+        "rule": "connectorNeedsStack",
+        "block": {
+          "layout": "grid",
+          "connector": "arrow",
+          "cards": [
+            {
+              "title": "A"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "a connector on a grid, even \"none\"",
+        "rule": "connectorNeedsStack",
+        "block": {
+          "layout": "grid",
+          "connector": "none",
+          "cards": [
+            {
+              "title": "A"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "no cards at all",
+        "rule": "tooFewCards",
+        "block": {
+          "cards": []
+        }
+      },
+      {
+        "name": "one card",
+        "rule": "tooFewCards",
+        "block": {
+          "cards": [
+            {
+              "title": "Alone"
+            }
+          ]
+        }
+      },
+      {
+        "name": "thirteen cards",
+        "rule": "tooManyCards",
+        "block": {
+          "cards": [
+            {
+              "title": "Card 1"
+            },
+            {
+              "title": "Card 2"
+            },
+            {
+              "title": "Card 3"
+            },
+            {
+              "title": "Card 4"
+            },
+            {
+              "title": "Card 5"
+            },
+            {
+              "title": "Card 6"
+            },
+            {
+              "title": "Card 7"
+            },
+            {
+              "title": "Card 8"
+            },
+            {
+              "title": "Card 9"
+            },
+            {
+              "title": "Card 10"
+            },
+            {
+              "title": "Card 11"
+            },
+            {
+              "title": "Card 12"
+            },
+            {
+              "title": "Card 13"
+            }
+          ]
+        }
+      },
+      {
+        "name": "a block title of 121 characters",
+        "rule": "labelTooLong",
+        "key": "title",
+        "block": {
+          "title": "ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+          "cards": [
+            {
+              "title": "A"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "a card title of 61 characters",
+        "rule": "labelTooLong",
+        "key": "title",
+        "block": {
+          "cards": [
+            {
+              "title": "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "a subtitle of 141 characters",
+        "rule": "labelTooLong",
+        "key": "subtitle",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "subtitle": "sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "a connector label of 41 characters",
+        "rule": "labelTooLong",
+        "key": "next",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "next": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "a tag of 25 characters",
+        "rule": "labelTooLong",
+        "key": "tags",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "tags": ["xxxxxxxxxxxxxxxxxxxxxxxxx"]
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "an icon name of 33 characters",
+        "rule": "labelTooLong",
+        "key": "icon",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "icon": "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "a card title that is only white space",
+        "rule": "emptyLabel",
+        "key": "title",
+        "block": {
+          "cards": [
+            {
+              "title": "   "
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "an empty tag",
+        "rule": "emptyLabel",
+        "key": "tags",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "tags": ["ok", " "]
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "seven tags",
+        "rule": "tooManyTags",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "tags": ["1", "2", "3", "4", "5", "6", "7"]
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "the same tag twice on a card",
+        "rule": "duplicateTag",
+        "key": "k3s",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "tags": ["k3s", " k3s "]
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      },
+      {
+        "name": "two highlighted cards",
+        "rule": "twoHighlights",
+        "block": {
+          "cards": [
+            {
+              "title": "A",
+              "highlight": true
+            },
+            {
+              "title": "B",
+              "highlight": true
+            }
+          ]
+        }
+      },
+      {
+        "name": "a connector label on the last card",
+        "rule": "nextOnLastCard",
+        "block": {
+          "cards": [
+            {
+              "title": "A"
+            },
+            {
+              "title": "B",
+              "next": "and then"
+            }
+          ]
+        }
+      },
+      {
+        "name": "a connector label on a card in a grid",
+        "rule": "nextNeedsStack",
+        "block": {
+          "layout": "grid",
+          "cards": [
+            {
+              "title": "A",
+              "next": "to"
+            },
+            {
+              "title": "B"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "alerts": [
+    {
+      "name": "a note",
+      "markdown": "> [!NOTE]\n> Useful information.",
+      "alert": "note",
+      "body": "Useful information."
+    },
+    {
+      "name": "a tip",
+      "markdown": "> [!TIP]\n> Try the other way round.",
+      "alert": "tip",
+      "body": "Try the other way round."
+    },
+    {
+      "name": "important",
+      "markdown": "> [!IMPORTANT]\n> Do this first.",
+      "alert": "important",
+      "body": "Do this first."
+    },
+    {
+      "name": "a warning",
+      "markdown": "> [!WARNING]\n> This cannot be undone.",
+      "alert": "warning",
+      "body": "This cannot be undone."
+    },
+    {
+      "name": "a caution",
+      "markdown": "> [!CAUTION]\n> Data may be lost.",
+      "alert": "caution",
+      "body": "Data may be lost."
+    },
+    {
+      "name": "several paragraphs and a list keep their shape",
+      "markdown": "> [!TIP]\n> First paragraph.\n>\n> - one\n> - two",
+      "alert": "tip",
+      "body": "First paragraph.\n\n- one\n- two"
+    },
+    {
+      "name": "a marker with nothing after it is a callout with a title only",
+      "markdown": "> [!NOTE]",
+      "alert": "note",
+      "body": ""
+    },
+    {
+      "name": "trailing spaces after the marker are allowed",
+      "markdown": "> [!NOTE]  \n> Spaced.",
+      "alert": "note",
+      "body": "Spaced."
+    },
+    {
+      "name": "a lower-case marker is a quote",
+      "markdown": "> [!note]\n> Not an alert.",
+      "alert": null
+    },
+    {
+      "name": "a mixed-case marker is a quote",
+      "markdown": "> [!Note]\n> Not an alert.",
+      "alert": null
+    },
+    {
+      "name": "text after the marker on the same line is a quote",
+      "markdown": "> [!NOTE] Heads up\n> More.",
+      "alert": null
+    },
+    {
+      "name": "a marker that is not on the first line is a quote",
+      "markdown": "> Heads up.\n> [!NOTE]\n> Not first.",
+      "alert": null
+    },
+    {
+      "name": "an unknown marker is a quote",
+      "markdown": "> [!DANGER]\n> Not one of the five.",
+      "alert": null
+    },
+    {
+      "name": "a marker with a space is a quote",
+      "markdown": "> [! NOTE]\n> No.",
+      "alert": null
+    },
+    {
+      "name": "a marker outside a quote is a paragraph",
+      "markdown": "[!NOTE]\nNot in a quote.",
+      "alert": null
+    }
+  ]
+}

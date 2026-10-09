@@ -2,15 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hermie.app/contract/markup/chart.schema.json",
   "title": "hermie-chart block",
-  "description": "The JSON object inside a fenced code block whose language is hermie-chart (docs/charts.md in the Hermie apps repository). A block that does not validate is shown as code, never repaired. Rules JSON Schema cannot state are in README.md (every values list is as long as x; series names unique; a pie's values not negative with one above zero).",
-  "x-maxSourceBytes": 16384,
+  "description": "The body of a fenced code block whose language is `hermie-chart`, as docs/charts.md describes it. A JSON null for `title` or `unit` is the same as an absent key; a null `type`, `x` or `series` is refused. Rules that JSON Schema cannot say are in docs/charts.md and are enforced by the validators: every `values` list is exactly as long as `x`, categories (numbers written out as text) and series names are unique after trimming, every string is trimmed (an empty `title` or `unit` is absent, an empty category or series name is refused), a pie's values are not negative with at least one above zero, lengths are counted in characters as a reader sees them, and the text of the block is at most 16384 bytes of UTF-8, checked before it is parsed.",
   "type": "object",
   "additionalProperties": false,
   "required": ["type", "x", "series"],
   "properties": {
-    "type": {"enum": ["bar", "line", "pie"]},
-    "title": {"type": ["string", "null"], "maxLength": 120},
-    "unit": {"type": ["string", "null"], "maxLength": 12},
+    "type": { "enum": ["bar", "line", "pie"] },
+    "title": { "type": ["string", "null"], "maxLength": 120 },
+    "unit": { "type": ["string", "null"], "maxLength": 12 },
     "x": {
       "type": "array",
       "minItems": 1,
@@ -18,8 +17,8 @@
       "uniqueItems": true,
       "items": {
         "anyOf": [
-          {"type": "string", "minLength": 1, "maxLength": 60},
-          {"type": "number"}
+          { "type": "string", "minLength": 1, "maxLength": 60 },
+          { "type": "number" }
         ]
       }
     },
@@ -27,16 +26,19 @@
       "type": "array",
       "minItems": 1,
       "maxItems": 8,
-      "items": {"$ref": "#/$defs/series"}
+      "items": { "$ref": "#/$defs/series" }
     }
   },
   "allOf": [
     {
-      "if": {"properties": {"type": {"const": "pie"}}},
+      "if": {
+        "properties": { "type": { "const": "pie" } },
+        "required": ["type"]
+      },
       "then": {
         "properties": {
-          "x": {"maxItems": 24},
-          "series": {"maxItems": 1}
+          "x": { "maxItems": 24 },
+          "series": { "maxItems": 1 }
         }
       }
     }
@@ -47,10 +49,10 @@
       "additionalProperties": false,
       "required": ["name", "values"],
       "properties": {
-        "name": {"type": "string", "minLength": 1, "maxLength": 60},
+        "name": { "type": "string", "minLength": 1, "maxLength": 60 },
         "values": {
           "type": "array",
-          "items": {"type": "number", "minimum": -1e15, "maximum": 1e15}
+          "items": { "type": "number", "minimum": -1e15, "maximum": 1e15 }
         }
       }
     }

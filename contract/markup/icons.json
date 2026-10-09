@@ -1,0 +1,251 @@
+{
+  "$comment": "The closed icon vocabulary of hermie-cards. `svg` is the d attribute of ONE path on a 24x24 grid, drawn as an outline (stroke currentColor, 1.75 wide, round caps and joins, no fill). It is path data, never markup. Authored here; the clients read it, they do not copy it.",
+  "viewBox": "0 0 24 24",
+  "generic": {
+    "name": "generic",
+    "sfSymbol": "square.grid.2x2",
+    "svg": "M5 5h6v6H5zM13 5h6v6h-6zM5 13h6v6H5zM13 13h6v6h-6z"
+  },
+  "icons": [
+    {
+      "name": "people",
+      "sfSymbol": "person.2",
+      "svg": "M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20M6.8 8a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0M20 20v-1.5a3.5 3.5 0 0 0-2.5-3.36M15 4.8a3.2 3.2 0 0 1 0 6.2"
+    },
+    {
+      "name": "device",
+      "sfSymbol": "laptopcomputer",
+      "svg": "M6 5h12a1 1 0 0 1 1 1v9H5V6a1 1 0 0 1 1-1zM3 19h18"
+    },
+    {
+      "name": "server",
+      "sfSymbol": "server.rack",
+      "svg": "M5 4h14a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM5 14h14a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1zM8 7h.01M8 17h.01"
+    },
+    {
+      "name": "database",
+      "sfSymbol": "cylinder.split.1x2",
+      "svg": "M4 6c0-1.66 3.58-3 8-3s8 1.34 8 3-3.58 3-8 3-8-1.34-8-3zM4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"
+    },
+    {
+      "name": "cloud",
+      "sfSymbol": "cloud",
+      "svg": "M7 18.5a4.25 4.25 0 0 1-.6-8.46A5.75 5.75 0 0 1 17.5 9.4 4.55 4.55 0 0 1 17 18.5z"
+    },
+    {
+      "name": "globe",
+      "sfSymbol": "globe",
+      "svg": "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"
+    },
+    {
+      "name": "lock",
+      "sfSymbol": "lock",
+      "svg": "M6 11h12a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1zM8 11V8a4 4 0 0 1 8 0v3"
+    },
+    {
+      "name": "key",
+      "sfSymbol": "key",
+      "svg": "M4 15a4 4 0 1 0 8 0a4 4 0 1 0 -8 0M11 12l9-9M16 7l3 3M14 9l2 2"
+    },
+    {
+      "name": "mail",
+      "sfSymbol": "envelope",
+      "svg": "M4 6h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1zM3 7l9 6 9-6"
+    },
+    {
+      "name": "calendar",
+      "sfSymbol": "calendar",
+      "svg": "M5 5h14a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM4 10h16M8 3v4M16 3v4"
+    },
+    {
+      "name": "clock",
+      "sfSymbol": "clock",
+      "svg": "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M12 7v5l3 2"
+    },
+    {
+      "name": "chart",
+      "sfSymbol": "chart.bar",
+      "svg": "M4 20h16M7 20v-7M12 20V6M17 20v-10"
+    },
+    {
+      "name": "document",
+      "sfSymbol": "doc.text",
+      "svg": "M7 3h7l5 5v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM14 3v5h5M9 13h6M9 17h6"
+    },
+    {
+      "name": "folder",
+      "sfSymbol": "folder",
+      "svg": "M3 7a1 1 0 0 1 1-1h5l2 2h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"
+    },
+    {
+      "name": "code",
+      "sfSymbol": "chevron.left.forwardslash.chevron.right",
+      "svg": "M8 7l-5 5 5 5M16 7l5 5-5 5M14 5l-4 14"
+    },
+    {
+      "name": "terminal",
+      "sfSymbol": "terminal",
+      "svg": "M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM7 10l3 2-3 2M12 15h5"
+    },
+    {
+      "name": "gear",
+      "sfSymbol": "gearshape",
+      "svg": "M5.5 12a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0 -13 0M9.6 12a2.4 2.4 0 1 0 4.8 0a2.4 2.4 0 1 0 -4.8 0M18.01 14.49L20.59 15.56M14.49 18.01L15.56 20.59M9.51 18.01L8.44 20.59M5.99 14.49L3.41 15.56M5.99 9.51L3.41 8.44M9.51 5.99L8.44 3.41M14.49 5.99L15.56 3.41M18.01 9.51L20.59 8.44"
+    },
+    {
+      "name": "bolt",
+      "sfSymbol": "bolt",
+      "svg": "M13 3L5 13h6l-1 8 8-10h-6z"
+    },
+    {
+      "name": "flag",
+      "sfSymbol": "flag",
+      "svg": "M5 21V4M5 4h11l-2 4 2 4H5"
+    },
+    {
+      "name": "star",
+      "sfSymbol": "star",
+      "svg": "M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"
+    },
+    {
+      "name": "heart",
+      "sfSymbol": "heart",
+      "svg": "M12 20s-8-4.9-8-10.5A4.5 4.5 0 0 1 12 7a4.5 4.5 0 0 1 8 2.5C20 15.1 12 20 12 20z"
+    },
+    {
+      "name": "check",
+      "sfSymbol": "checkmark.circle",
+      "svg": "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M8 12.5l3 3 5-6"
+    },
+    {
+      "name": "warning",
+      "sfSymbol": "exclamationmark.triangle",
+      "svg": "M12 4L3 19.5h18zM12 10v4.5M12 17.2h.01"
+    },
+    {
+      "name": "question",
+      "sfSymbol": "questionmark.circle",
+      "svg": "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 16.8h.01"
+    },
+    {
+      "name": "pin",
+      "sfSymbol": "mappin",
+      "svg": "M12 21s-6.5-6.2-6.5-11a6.5 6.5 0 0 1 13 0c0 4.8-6.5 11-6.5 11zM9.7 10a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0 -4.6 0"
+    },
+    {
+      "name": "map",
+      "sfSymbol": "map",
+      "svg": "M9 4L3 6v14l6-2 6 2 6-2V4l-6 2zM9 4v14M15 6v14"
+    },
+    {
+      "name": "car",
+      "sfSymbol": "car",
+      "svg": "M5 13l1.6-4.6a1 1 0 0 1 .9-.7h9a1 1 0 0 1 .9.7L19 13M3.5 13h17a.5.5 0 0 1 .5.5V17H3v-3.5a.5.5 0 0 1 .5-.5zM7 17v1.8M17 17v1.8M7.5 15h.01M16.5 15h.01"
+    },
+    {
+      "name": "home",
+      "sfSymbol": "house",
+      "svg": "M4 11l8-7 8 7M6 10v10h12V10M10 20v-6h4v6"
+    },
+    {
+      "name": "shop",
+      "sfSymbol": "storefront",
+      "svg": "M4 9l1.5-5h13L20 9M4 9a2.7 2.7 0 0 0 5.3 0 2.7 2.7 0 0 0 5.4 0A2.7 2.7 0 0 0 20 9M5 12v8h14v-8M10 20v-4h4v4"
+    },
+    {
+      "name": "money",
+      "sfSymbol": "eurosign.circle",
+      "svg": "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M15 9a3.5 3.5 0 1 0 0 6M7.5 11h5M7.5 13h5"
+    },
+    {
+      "name": "cart",
+      "sfSymbol": "cart",
+      "svg": "M3 4h2.5l2.3 11h10.2l2-8H6.5M9.5 20h.01M17 20h.01"
+    },
+    {
+      "name": "bell",
+      "sfSymbol": "bell",
+      "svg": "M6 16v-5a6 6 0 0 1 12 0v5l1.5 2h-15zM10 21h4"
+    },
+    {
+      "name": "camera",
+      "sfSymbol": "camera",
+      "svg": "M4 8h3l1.5-2.5h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1zM8.5 13a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0"
+    },
+    {
+      "name": "image",
+      "sfSymbol": "photo",
+      "svg": "M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM4 17l5-5 4 4 3-3 4 4M7.5 9a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0"
+    },
+    {
+      "name": "music",
+      "sfSymbol": "music.note",
+      "svg": "M9 18V6l10-2v12M4 18a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0M14 16a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0"
+    },
+    {
+      "name": "phone",
+      "sfSymbol": "phone",
+      "svg": "M8 3h8a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM11 18h2"
+    },
+    {
+      "name": "chat",
+      "sfSymbol": "bubble.left",
+      "svg": "M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-7l-4 4v-4H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"
+    },
+    {
+      "name": "link",
+      "sfSymbol": "link",
+      "svg": "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"
+    },
+    {
+      "name": "search",
+      "sfSymbol": "magnifyingglass",
+      "svg": "M4 10.5a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0 -13 0M15.5 15.5L21 21"
+    },
+    {
+      "name": "filter",
+      "sfSymbol": "line.3.horizontal.decrease",
+      "svg": "M4 5h16l-6 8v6l-4-2v-4z"
+    },
+    {
+      "name": "tag",
+      "sfSymbol": "tag",
+      "svg": "M3 4h8l10 10-7 7L3 11zM7.5 8.5h.01"
+    },
+    {
+      "name": "box",
+      "sfSymbol": "shippingbox",
+      "svg": "M12 3L4 7v10l8 4 8-4V7zM4 7l8 4 8-4M12 11v10"
+    },
+    {
+      "name": "truck",
+      "sfSymbol": "truck.box",
+      "svg": "M2 6h11v12M13 9h4.5l2.5 3.5V18M8.3 18h6.4M2 18h2.7M18.3 18H20M4.7 18a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0 -3.6 0M14.7 18a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0 -3.6 0"
+    },
+    {
+      "name": "plane",
+      "sfSymbol": "airplane",
+      "svg": "M21 3L3 10l7 3 3 7zM10 13L21 3"
+    },
+    {
+      "name": "leaf",
+      "sfSymbol": "leaf",
+      "svg": "M5 19C5 10 10 5 20 4c0 10-5 15-14 15zM5 19c3-5 6-8 10-10"
+    },
+    {
+      "name": "flame",
+      "sfSymbol": "flame",
+      "svg": "M12 3c1 3.5 5 5.5 5 10a5 5 0 0 1-10 0c0-2 1-3 2-4 .5 1.5 1.5 2 2 2 0-3-.5-5 1-8z"
+    },
+    {
+      "name": "sun",
+      "sfSymbol": "sun.max",
+      "svg": "M8 12a4 4 0 1 0 8 0a4 4 0 1 0 -8 0M18.6 12L21 12M16.67 16.67L18.36 18.36M12 18.6L12 21M7.33 16.67L5.64 18.36M5.4 12L3 12M7.33 7.33L5.64 5.64M12 5.4L12 3M16.67 7.33L18.36 5.64"
+    },
+    {
+      "name": "moon",
+      "sfSymbol": "moon",
+      "svg": "M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"
+    }
+  ]
+}

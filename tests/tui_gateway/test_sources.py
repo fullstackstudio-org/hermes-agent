@@ -73,6 +73,8 @@ def test_scheme_and_host_become_lower_case_ascii_and_the_rest_is_kept():
     assert sources.clean_url("https://a.example/" + "x" * (2048 - 18)) is not None
     assert sources.clean_url("http://[2001:DB8::1]:8443/p") == "http://[2001:db8::1]:8443/p"
     assert sources.clean_url("http://192.168.0.1:65535/x") == "http://192.168.0.1:65535/x"
+    assert sources.clean_url("http://[2001:db8:0:0::1]/") == "http://[2001:db8::1]/"
+    assert sources.clean_url("http://example.123abc/") == "http://example.123abc/"  # not a number: a name
     assert sources.clean_url("https://a.example./x") == "https://a.example/x"
     # A look-alike name is not refused (IDNA accepts it) but can no longer pass for the real one.
     assert sources.clean_url("https://p\u0430ypal.com/") == "https://xn--pypal-4ve.com/"
@@ -85,6 +87,8 @@ def test_scheme_and_host_become_lower_case_ascii_and_the_rest_is_kept():
     "https://a.example:70000/", "https://a.example:65536/", "https://a.example:http/", "https://a.example:/x",
     "https://a.example:-1/", "https://xn--zz.example/", "https://a_b.example/", "https://-a.example/",
     "https://a..example/", "https://" + "a" * 64 + ".example/", "https://a.example\u3000/",
+    "http://[fe80::1%25en0]/", "http://[fe80::1%en0]/", "http://0x7f.1/", "http://2130706433/", "http://127.1/",
+    "http://0177.0.0.1/", "http://127.000.0.1/", "http://a.123/", "http://1.2.3.4.5/", "http://[::g]/",
 ])
 def test_a_url_with_a_hidden_character_a_bad_port_or_a_bad_host_is_left_out(url):
     assert sources.clean_url(url) is None

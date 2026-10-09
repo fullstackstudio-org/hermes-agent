@@ -49,15 +49,25 @@ _REFUSED_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zs", "Zl", "Zp"}
 def _ascii_host(host: str) -> str | None:
     """*host* as the lower-case ASCII a client shows: an IP literal as written, a name IDNA-encoded (UTS 46
     mapping, punycode for a non-ASCII label), or None when it cannot be encoded."""
+    import ipaddress
+    import re
     host = host.lower().rstrip(".")
-    if not host or len(host) > 253:
+    if not host or len(host) > 253 or "%" in host:  # no IPv6 zone ("%en0"): it names an interface, not a site
         return None
-    try:
-        import ipaddress
-        ipaddress.ip_address(host.strip("[]"))
-        return host
-    except ValueError:
-        pass
+    if ":" in host:
+        try:
+            return ipaddress.IPv6Address(host.strip("[]")).compressed
+        except ValueError:
+            return None
+    # A host whose last label reads as a number is an IPv4 address to a browser ("127.1", "0x7f.1",
+    # "2130706433" all reach 127.0.0.1): only the canonical dotted quad is taken, so what a client shows is
+    # where the link goes.
+    if re.fullmatch(r"(?:0x[0-9a-f]*|[0-9]+)", host.rsplit(".", 1)[-1]):
+        try:
+            address = ipaddress.IPv4Address(host)
+        except ValueError:
+            return None
+        return host if str(address) == host else None
     try:
         import idna
     except ImportError:  # a dependency of the HTTP stack; without it only a plain ASCII name passes

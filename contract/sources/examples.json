@@ -57,7 +57,7 @@
       ]
     },
     {
-      "why": "a host is stored as lower-case ASCII, a non-ASCII one as punycode; a URL the gateway refuses is left out",
+      "why": "a host is stored as lower-case ASCII, a non-ASCII one as punycode, an IPv6 one compressed; a URL the gateway refuses is left out",
       "tools": [
         {"name": "web_search", "result": {"success": true, "data": {"web": [
           {"title": "Upper case host", "url": "HTTPS://Five.Example/Path", "description": "", "position": 1},
@@ -66,12 +66,17 @@
           {"title": "Port out of range", "url": "https://seven.example:70000/", "description": "", "position": 4},
           {"title": "Not a port", "url": "https://eight.example:http/", "description": "", "position": 5},
           {"title": "User info", "url": "https://me@nine.example/", "description": "", "position": 6},
-          {"title": "Not a valid name", "url": "https://xn--zz.example/", "description": "", "position": 7}
+          {"title": "Not a valid name", "url": "https://xn--zz.example/", "description": "", "position": 7},
+          {"title": "A short IPv4 form", "url": "http://127.1/", "description": "", "position": 8},
+          {"title": "A hexadecimal IPv4 form", "url": "http://0x7f.0.0.1/", "description": "", "position": 9},
+          {"title": "An IPv6 zone", "url": "http://[fe80::1%25en0]/", "description": "", "position": 10},
+          {"title": "An IPv6 address", "url": "http://[2001:DB8:0:0::1]:8080/x", "description": "", "position": 11}
         ]}}}
       ],
       "sources": [
         {"url": "https://five.example/Path", "title": "Upper case host", "via": "found"},
-        {"url": "https://xn--bcher-kva.example/", "title": "Non-ASCII host", "via": "found"}
+        {"url": "https://xn--bcher-kva.example/", "title": "Non-ASCII host", "via": "found"},
+        {"url": "http://[2001:db8::1]:8080/x", "title": "An IPv6 address", "via": "found"}
       ]
     },
     {

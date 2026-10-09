@@ -37,7 +37,9 @@ Only results of the turn that the reply ends count. A page's content or descript
 - At most 24 entries; the rest are dropped.
 - `url`: `http` or `https`, with a host and no user info, at most 2048 characters. The scheme and the host are
   stored in lower-case ASCII: a host with non-ASCII characters as its IDNA (UTS 46) punycode form, an IPv6
-  address in brackets, a port only when it is a number from 0 to 65535. The path, query and fragment are kept as
+  address in brackets in its compressed form and without a zone (`%`), an IPv4 address only as the canonical
+  dotted quad (a host whose last label reads as a number, such as `127.1`, `0x7f.1` or `2130706433`, is left
+  out), a port only when it is a number from 0 to 65535. The path, query and fragment are kept as
   the tool returned them. The URL holds no white space, no control character (C0 or C1), no format character
   (Unicode category `Cf`: bidi overrides and isolates, zero-width characters, the soft hyphen) and no lone
   surrogate. A result whose URL is anything else, or whose host IDNA cannot encode, is left out.

@@ -21297,6 +21297,23 @@
             ],
             "default": null,
             "title": "Attachments"
+          },
+          "sources": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/Source"
+                },
+                "maxItems": 24,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sources"
           }
         },
         "title": "MessageCompletePayload",
@@ -36337,6 +36354,43 @@
         },
         "title": "SlashExecResult",
         "type": "object"
+      },
+      "Source": {
+        "additionalProperties": false,
+        "description": "A page a reply used (``tui_gateway/sources.py``; ``contract/sources``): built by the gateway from the turn's\nweb tool results, never from the model's text. A client shows the domain beside the title and opens the URL\nonly on the person's tap; it never fetches anything for it.",
+        "properties": {
+          "url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://[^\\s@/?#]+(?:[/?#][^\\s]*)?$",
+            "title": "Url",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 160,
+            "title": "Title",
+            "type": "string"
+          },
+          "via": {
+            "$ref": "#/components/schemas/SourceVia"
+          }
+        },
+        "required": [
+          "url",
+          "title",
+          "via"
+        ],
+        "title": "Source",
+        "type": "object"
+      },
+      "SourceVia": {
+        "description": "How a reply used a page (``tui_gateway/sources.py``): ``read`` = ``web_extract`` fetched it; ``found`` =\n``web_search`` returned it.",
+        "enum": [
+          "read",
+          "found"
+        ],
+        "title": "SourceVia",
+        "type": "string"
       },
       "SpawnTreeEntry": {
         "additionalProperties": true,

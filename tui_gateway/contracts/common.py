@@ -184,6 +184,26 @@ class OutboxAttachment(Result):
     url: str
 
 
+class SourceVia(WireEnum):
+    """How a reply used a page (``tui_gateway/sources.py``): ``read`` = ``web_extract`` fetched it; ``found`` =
+    ``web_search`` returned it."""
+
+    read = "read"
+    found = "found"
+
+
+class Source(Result):
+    """A page a reply used (``tui_gateway/sources.py``; ``contract/sources``): built by the gateway from the turn's
+    web tool results, never from the model's text. A client shows the domain beside the title and opens the URL
+    only on the person's tap; it never fetches anything for it."""
+
+    #: ``http``/``https`` with a host and no user info, as the tool returned it (trimmed).
+    url: Annotated[str, Field(min_length=1, max_length=2048, pattern=r"^[Hh][Tt][Tt][Pp][Ss]?://[^\s@/?#]+(?:[/?#][^\s]*)?$")]
+    #: Cleaned text (no control or invisible characters, whitespace collapsed); may be empty.
+    title: Annotated[str, Field(max_length=160)]
+    via: SourceVia
+
+
 class TranscriptMessage(OpenModel):
     """One transcript row as the gateway PROJECTS it for renderers (``session_history._project_history``):
     ``text``, display-only ``timestamp`` / ``display_kind`` / ``display_metadata``, the durable ``row_id``

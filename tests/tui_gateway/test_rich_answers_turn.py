@@ -1,10 +1,12 @@
-"""End to end (plan rich-answers T2): one real turn through ``prompt.submit`` into a real ``AIAgent`` over a real
+"""End to end (plan rich-answers T2, T3): one real turn through ``prompt.submit`` into a real ``AIAgent`` over a real
 ``SessionDB`` with a mocked model.
 
 * The guide: a turn submitted by a connection that advertised ``markup`` sends the guide for exactly those
   blocks on the system message of its requests, and nowhere else: not in the cached system prompt, not in the
   stored session, not in a turn the next (older) client submits in the same chat, not in a session of another
   surface.
+* The sources: the model calls ``web_search`` and ``web_extract``; ``message.complete.sources``, the live
+  history, ``session.history`` and the stored row carry the same list. A turn without web tools carries none.
 
 Every payload is a harmless marker; no request leaves the test.
 """
@@ -250,3 +252,51 @@ def test_a_session_of_another_surface_never_hears_of_it(desktop):
     _turn(desktop, desktop.phone, "marker question", web=False)
     assert desktop.systems and all(hermie_markup.INTRO not in s for s in desktop.systems)
     assert desktop.systems[0] == "You are helpful."
+
+
+# ── the sources ────────────────────────────────────────────────────────────────────────────────
+
+
+def test_message_complete_carries_the_pages_read_and_found(hermie):
+    _turn(hermie, hermie.phone, "marker question")
+    [payload] = _completes(hermie.phone)
+    assert payload["sources"] == SOURCES
+    assert "never sent" not in json.dumps(payload)
+    from tui_gateway.contracts.events import MessageCompletePayload
+    MessageCompletePayload.model_validate(payload)
+
+
+def test_the_history_and_the_stored_row_carry_the_same_list(hermie):
+    final = _turn(hermie, hermie.phone, "marker question")
+    [payload] = _completes(hermie.phone)
+    stored = hermie.db.get_messages_as_conversation(KEY, include_row_ids=True)
+    assert stored[-1]["content"] == final and stored[-1]["display_metadata"]["sources"] == SOURCES
+    token = bind_transport(hermie.phone)
+    try:
+        live = server._methods["session.history"]("rid", {"session_id": SID})["result"]["messages"][-1]
+        hermie.session["history"] = []  # what a reload reads: the store
+        reloaded = server._methods["session.history"]("rid", {"session_id": SID})["result"]["messages"][-1]
+    finally:
+        reset_transport(token)
+    for row in (live, reloaded):
+        assert row["role"] == "assistant" and row["display_metadata"]["sources"] == SOURCES
+        assert row.get("row_id") == payload.get("row_id")
+    from hermes_cli.web_routers.sessions import _project_for_display
+    rows = _project_for_display(hermie.db.get_messages(KEY))
+    assert rows[-1]["display_metadata"]["sources"] == SOURCES
+
+
+def test_a_turn_without_web_tools_has_no_key(hermie):
+    _turn(hermie, hermie.phone, "marker plain", web=False)
+    [payload] = _completes(hermie.phone)
+    assert "sources" not in payload
+    stored = hermie.db.get_messages_as_conversation(KEY, include_row_ids=True)
+    assert "sources" not in (stored[-1].get("display_metadata") or {})
+
+
+def test_a_later_turn_does_not_inherit_the_earlier_ones_sources(hermie):
+    _turn(hermie, hermie.phone, "marker one")
+    _turn(hermie, hermie.phone, "marker two", web=False, final="Marker second answer.")
+    first, second = _completes(hermie.phone)
+    assert first["sources"] == SOURCES and "sources" not in second
+    assert "_turn_sources" not in hermie.session

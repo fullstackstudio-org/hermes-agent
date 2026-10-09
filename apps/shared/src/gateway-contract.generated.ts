@@ -4987,6 +4987,7 @@ export interface MessageCompletePayload {
   row_id?: number | null
   interrupt_reason?: string | null
   attachments?: OutboxAttachment[] | null
+  sources?: Source[] | null
 }
 /** ``prompt_turn._result_status``. */
 export type TurnStatus = 'complete' | 'error' | 'interrupted'
@@ -5017,6 +5018,14 @@ export interface PersistedTurn {
   user_row_id?: number | null
   final_assistant_row_id?: number | null
 }
+/** A page a reply used (``tui_gateway/sources.py``; ``contract/sources``): built by the gateway from the turn's web tool results, never from the model's text. A client shows the domain beside the title and opens the URL only on the person's tap; it never fetches anything for it. */
+export interface Source {
+  url: string
+  title: string
+  via: SourceVia
+}
+/** How a reply used a page (``tui_gateway/sources.py``): ``read`` = ``web_extract`` fetched it; ``found`` = ``web_search`` returned it. */
+export type SourceVia = 'read' | 'found'
 /** ``server._status_update`` and the direct emitters (goal / loop / heartbeat / process). */
 export interface StatusUpdatePayload {
   kind: string

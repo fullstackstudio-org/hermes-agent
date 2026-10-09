@@ -935,6 +935,8 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     shown = raw
     if st.outbox is not None and status == "complete" and isinstance(raw, str):
         shown = _share_turn_outbox(session, st, raw, final_row_id, payload)
+    if status == "complete" and isinstance(raw, str):
+        _attach_turn_sources(session, st, raw, final_row_id, payload)
     if last_reasoning:
         payload["reasoning"] = last_reasoning
     if status_note:
@@ -1080,12 +1082,45 @@ def _share_turn_outbox(session: dict, st: _TurnRun, raw: str, final_row_id: int 
     return shared.text
 
 
+def _attach_turn_sources(session: dict, st: _TurnRun, raw: str, final_row_id: int | None, payload: dict) -> None:
+    """The pages this turn's web tools found and read (``tui_gateway/sources.py``): ``payload["sources"]``, the
+    reply in the live history and its stored row get the same list (``display_metadata.sources``). Nothing when the
+    turn collected none; a failure leaves the reply without sources, never without its text."""
+    from tui_gateway import sources
+    collector = session.get("_turn_sources")
+    if collector is None or collector.turn_id != session.get("turn_id"):
+        return
+    try:
+        found = collector.sources()
+    except Exception:
+        logger.debug("sources: building the list failed", exc_info=True)
+        return
+    if not found:
+        return
+    payload["sources"] = found
+    meta_update = {sources.METADATA_KEY: found}
+    with session["history_lock"]:
+        for message in reversed(session.get("history") or []):
+            if isinstance(message, dict) and message.get("role") == "assistant" and message.get("content") == raw:
+                message["display_metadata"] = {**(message.get("display_metadata") or {}), **meta_update}
+                break
+    agent = st.agent
+    session_id = str(getattr(agent, "session_id", "") or session.get("session_key") or "")
+    _persist_reply_metadata(agent, session_id, st, raw, final_row_id, meta_update, "sources")
+
+
 def _persist_turn_attachments(agent: Any, session_id: str, st: _TurnRun, raw: str, final_row_id: int | None,
                               meta_update: dict) -> None:
-    """Record the attachments on the reply's stored row, so a reload shows them and not the path. The row is the
-    receipt's final row; without a receipt (compaction, a redirected turn) the committed id of the result's last
-    message when that is the reply; failing that, the newest active assistant row of the session whose content
-    is exactly the reply."""
+    """Record the attachments on the reply's stored row, so a reload shows them and not the path."""
+    _persist_reply_metadata(agent, session_id, st, raw, final_row_id, meta_update, "outbox")
+
+
+def _persist_reply_metadata(agent: Any, session_id: str, st: _TurnRun, raw: str, final_row_id: int | None,
+                            meta_update: dict, what: str) -> None:
+    """Merge *meta_update* into the reply's stored row's ``display_metadata``. The row is the receipt's final
+    row; without a receipt (compaction, a redirected turn) the committed id of the result's last message when
+    that is the reply; failing that, the newest active assistant row of the session whose content is exactly
+    the reply. *what* names the feature in the log."""
     db = getattr(agent, "_session_db", None)
     if db is None:
         return
@@ -1096,11 +1131,11 @@ def _persist_turn_attachments(agent: Any, session_id: str, st: _TurnRun, raw: st
     try:
         done = db.set_message_attachments(session_id, final_row_id, meta_update, content=raw)
     except Exception:
-        logger.exception("outbox: could not record the attachments of session %s", session_id)
+        logger.exception("%s: could not record the reply metadata of session %s", what, session_id)
         return
     if not done:
-        logger.warning("outbox: no stored row of session %s holds the reply; its attachments live only in memory",
-                       session_id)
+        logger.warning("%s: no stored row of session %s holds the reply; its metadata lives only in memory",
+                       what, session_id)
 
 
 def _recover_turn_exception(sid: str, session: dict, st: _TurnRun, e: BaseException) -> None:
@@ -1312,6 +1347,9 @@ def _run_prompt_submit(
         try:
             # THIS turn's own id for every frame this thread emits, whatever the session says by then.
             emitting_turn_token = bind_emitting_turn(sid, turn_id)
+            # The pages this turn's web tools find and read (``tui_gateway/sources.py``), for message.complete.
+            from tui_gateway.sources import TurnSources
+            session["_turn_sources"] = TurnSources(turn_id)
             # RPC-dispatcher ContextVars do not follow onto this thread: rebind the transport
             # before any tool can commission a child (delegate_task captures it as authority).
             transport_token = bind_transport(session.get("transport"))
@@ -1354,6 +1392,8 @@ def _run_prompt_submit(
             _recover_turn_exception(sid, session, st, e)
         finally:
             _finish_turn(sid, session, st)  # still inside every scope this turn bound
+            if getattr(session.get("_turn_sources"), "turn_id", None) == turn_id:
+                session.pop("_turn_sources", None)
             if runtime_session_token is not None:
                 _current_runtime_session_record.reset(runtime_session_token)
             if emitting_turn_token is not None:

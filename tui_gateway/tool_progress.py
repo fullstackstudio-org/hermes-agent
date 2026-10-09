@@ -303,6 +303,21 @@ def _prepare_tool_result_metadata(sid: str, tool_call_id: str, name: str, args: 
     return {"tool_result_metadata": metadata} if metadata else {}
 
 
+def _collect_turn_sources(session: dict | None, name: str, result: object) -> None:
+    """Hand a web tool's result to the running turn's source list (``tui_gateway/sources.py``): only the turn
+    that set the collector up (``prompt_turn.run_body``) and only while it is the session's turn."""
+    from tui_gateway.sources import SOURCE_TOOLS
+    if session is None or name not in SOURCE_TOOLS:
+        return
+    collector = session.get("_turn_sources")
+    if collector is None or collector.turn_id != session.get("turn_id"):
+        return
+    try:
+        collector.add(name, result)
+    except Exception:  # a source list is a courtesy: never let it fail the tool's completion
+        logger.debug("sources: collecting from %s failed", name, exc_info=True)
+
+
 def _on_tool_complete(
     sid: str, tool_call_id: str, name: str, args: dict, result: str, *,
     call_row_id=None, call_index=None, row_id=None,
@@ -333,6 +348,7 @@ def _on_tool_complete(
         payload["result"] = json.loads(result)
     except Exception:
         payload["result"] = result
+    _collect_turn_sources(session, name, payload["result"])
     summary = _tool_summary(name, result, duration_s)
     if summary:
         payload["summary"] = summary

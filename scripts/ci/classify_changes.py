@@ -101,7 +101,8 @@ _PY_RELEVANT_CONTRACT_FILES = {
     "apps/shared/src/gateway-contract.openrpc.json",
     # tests/tui_gateway/contracts/test_requests_contract.py (pinned by contract/requests/SHA256SUMS)
     "contract/requests/README.md",
-    # tests/tui_gateway/test_hermie_markup.py (pinned by contract/markup/SHA256SUMS)
+    # tests/tui_gateway/contracts/test_sources_contract.py and test_hermie_markup.py (pinned by their SHA256SUMS)
+    "contract/sources/README.md",
     "contract/markup/README.md",
     # tests/hermes_cli/test_desktop_slash_registry.py
     "apps/desktop/src/lib/desktop-slash-registry.json",

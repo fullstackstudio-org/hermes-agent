@@ -19,7 +19,7 @@ from pydantic import Field
 
 from .base import JsonValue, Payload, WireEnum
 from .common import (
-    MessageReaction, OutboxAttachment, SessionLiveInfo, SubagentStatus, ToolLabel, ToolLabelKind, Usage,
+    MessageReaction, OutboxAttachment, SessionLiveInfo, Source, SubagentStatus, ToolLabel, ToolLabelKind, Usage,
 )
 from .config_free_tier_control import SessionControlSnapshot
 from .registry import event
@@ -224,6 +224,10 @@ class MessageCompletePayload(Payload):
     # source ``files.outbox_sources`` lists; ``text`` then carries no ``MEDIA:`` directive. ``[]`` when the
     # reply named files and none could be shared. Absent otherwise.
     attachments: list[OutboxAttachment] | None = None
+    # The pages the turn's ``web_search`` / ``web_extract`` found and read (``tui_gateway/sources.py``), ``read``
+    # first, at most 24, unique by ``url``; the reply's stored row carries the same list as
+    # ``display_metadata.sources``. Absent when the turn used no web tool (never ``[]``).
+    sources: list[Source] | None = Field(default=None, min_length=1, max_length=24)
 
 
 event("message.complete", MessageCompletePayload, doc="The turn ended: final text, usage and outcome.")

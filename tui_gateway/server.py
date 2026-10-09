@@ -3671,3 +3671,9 @@ for _m in (
     _methods_account_usage):
     _m.register(sys.modules[__name__])
 del _m
+
+# Fork: plugins ask who takes part in the session a hook is about (hermes_cli.turn_audience, FORK.md).
+from hermes_cli.turn_audience import set_turn_audience_provider as _set_turn_audience_provider  # noqa: E402
+from tui_gateway.turn_audience import provide as _provide_turn_audience  # noqa: E402
+
+_set_turn_audience_provider(_provide_turn_audience)

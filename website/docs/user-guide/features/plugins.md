@@ -137,6 +137,19 @@ Only a plugin installed in a home's own `plugins/` directory can be gateway-scop
 
 **For guard authors:** a gateway-scope `pre_tool_call` callback that raises or times out does not block the routed profile's tool call (a profile's own guard still fails closed). A gateway-scope plugin observes other profiles' turns; it is not their guard. Where a guard must hold in every profile, install it in each profile.
 
+#### Who a turn's notification is for
+
+A plugin that notifies people about a turn can ask the gateway who takes part in the session, from inside the hook:
+
+```python
+from hermes_cli.turn_audience import turn_audience
+
+audience = turn_audience(session_id=kwargs.get("session_id", ""), session_key=kwargs.get("session_key", ""))
+# None: this process cannot say. Else {"acting_user_id": "oidc:…" or "", "user_ids": [...]}
+```
+
+`acting_user_id` is the person the turn acts for (`""` for a turn nobody can be credited with). `user_ids` lists, acting person first, everyone the gateway knows takes part: the login the session was created under, the logins attached to it now, and the authors stamped on its rows. It is a function rather than more hook arguments because the answer reads the session's rows, and hooks such as `pre_tool_call` fire on every tool call. Fork only.
+
 Project-local plugins under `./.hermes/plugins/` are disabled by default. Enable them only for trusted repositories by setting `HERMES_ENABLE_PROJECT_PLUGINS=true` before starting Hermes.
 
 ## What plugins can do

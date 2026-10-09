@@ -1104,6 +1104,18 @@ class SessionMessagesMixin:
         """Audit: every row; display: active plus compaction-archived (never Undo/Rewind rows); default: live."""
         return "" if include_inactive else (_DISPLAY_ACTIVE_CLAUSE if include_compacted else " AND active = 1")
 
+    def get_session_author_ids(self, session_id: str, limit: int = 32) -> List[str]:
+        """Distinct ``display_metadata.author.id`` values on *session_id*'s rows (fork: the people who wrote in
+        it, ``tui_gateway.row_author``), oldest first, at most *limit*. Rows without valid JSON or without an
+        author are skipped; rewound and compacted rows count, since their authors took part all the same."""
+        rows = self._read_all(
+            "SELECT json_extract(display_metadata, '$.author.id') AS author, MIN(id) AS first_id FROM messages "
+            "WHERE session_id = ? AND display_metadata IS NOT NULL AND json_valid(display_metadata) "
+            "AND json_type(display_metadata, '$.author.id') = 'text' "
+            "GROUP BY author ORDER BY first_id LIMIT ?",
+            (session_id, max(0, int(limit))))
+        return [str(row["author"]) for row in rows if row["author"]]
+
     def get_messages(self, session_id: str, include_inactive: bool = False, include_compacted: bool = False,
                      limit: Optional[int] = None, offset: int = 0, latest: bool = False,
                      after_id: Optional[int] = None) -> List[Dict[str, Any]]:

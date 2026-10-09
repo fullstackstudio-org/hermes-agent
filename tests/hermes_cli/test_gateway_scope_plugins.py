@@ -421,3 +421,115 @@ def test_undiscovered_gateway_manager_is_not_discovered_from_a_profile_turn(home
     gateway_key = Path(get_hermes_home()).resolve()
     manager = plugins_mod._plugin_managers_by_home.get(gateway_key)
     assert manager is None or not manager._discovered
+
+
+# ── review follow-ups ──────────────────────────────────────────────────────
+
+
+def test_a_gateway_scope_guard_that_hangs_does_not_block_and_uses_the_gateways_timeout(homes, recorder):
+    import time
+
+    gateway, profile = homes
+    _plugin(gateway, "gwp", """
+import time
+def slow(**kwargs):
+    time.sleep(3)
+ctx.register_hook("pre_tool_call", slow)
+""")
+    config = yaml.safe_load((gateway / "config.yaml").read_text(encoding="utf-8"))
+    config["plugins"]["hook_callback_timeout"] = 0.2
+    (gateway / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    _write_config(profile, {"plugins": {"enabled": [], "hook_callback_timeout": 30}})
+    _discover(None)
+    started = time.monotonic()
+    with _InProfile(profile):
+        block, _ = plugins_mod._dispatch_pre_tool_call_hooks("read_file", {"path": "x"}, tool_call_id="c1")
+    assert block is None
+    assert time.monotonic() - started < 2.5  # the gateway's 0.2s, not the profile's 30s
+
+
+def test_a_deliberate_block_from_a_gateway_scope_guard_is_honoured(homes, recorder):
+    gateway, profile = homes
+    _plugin(gateway, "gwp", """
+ctx.register_hook("pre_tool_call", lambda **kw: {"action": "block", "message": "not here"})
+""")
+    _discover(None)
+    with _InProfile(profile):
+        block, _ = plugins_mod._dispatch_pre_tool_call_hooks("read_file", {"path": "x"})
+    assert block == "not here"
+
+
+def test_ainvoke_hook_is_fail_open_for_gateway_scope_callbacks(homes, recorder):
+    gateway, profile = homes
+    _plugin(gateway, "gwp", """
+async def boom(**kwargs):
+    raise RuntimeError("gateway plugin failed")
+ctx.register_hook("pre_tool_call", boom)
+""")
+    _discover(None)
+
+    async def run():
+        with _InProfile(profile):
+            return await plugins_mod.ainvoke_hook("pre_tool_call", tool_name="read_file", args={})
+
+    assert asyncio.run(run()) == []
+
+
+def test_streaming_observers_reach_gateway_scope_callbacks(homes, recorder):
+    from agent import plugin_stream_hooks
+
+    gateway, profile = homes
+    _plugin(gateway, "gwp", """
+def on_delta(**kwargs):
+    rec.calls.append(("delta", ctx.profile_name))
+ctx.register_hook("on_stream_delta", on_delta)
+""")
+    _discover(None)
+    with _InProfile(profile):
+        dispatchers = plugin_stream_hooks._dispatchers_for("on_stream_delta")
+    try:
+        assert [d.callback.__name__ for d in dispatchers] == ["on_delta"]
+    finally:
+        for dispatcher in dispatchers:
+            plugin_stream_hooks._stop_dispatcher(dispatcher, timeout=1.0)
+        with plugin_stream_hooks._dispatcher_lock:
+            for key in [k for k in plugin_stream_hooks._dispatchers if k[0] == "on_stream_delta"]:
+                plugin_stream_hooks._dispatchers.pop(key, None)
+
+
+def test_a_half_registered_gateway_manager_is_not_used(homes, recorder):
+    gateway, profile = homes
+    _plugin(gateway, "gwp", RECORDING_HOOK + "\nrec.complete_during_register = ctx._manager._sweep_complete")
+    manager = _discover(None)
+    assert recorder.complete_during_register is False
+    assert manager._sweep_complete is True
+
+    manager._sweep_complete = False  # what a force re-discovery looks like between its unload and its end
+    with _InProfile(profile):
+        assert plugins_mod.invoke_hook("post_llm_call", session_id="s1") == []
+    assert recorder.calls == []
+
+    manager.discover_and_load(force=True)
+    assert manager._sweep_complete is True
+    manager.unload()
+    assert manager._sweep_complete is False
+
+
+def test_a_profile_can_opt_out_through_plugins_disabled(homes, recorder):
+    gateway, profile = homes
+    _plugin(gateway, "gwp", RECORDING_HOOK)
+    _write_config(profile, {"plugins": {"enabled": [], "disabled": ["gwp"]}})
+    _discover(None)
+    with _InProfile(profile):
+        assert plugins_mod.invoke_hook("post_llm_call", session_id="s1") == []
+        assert plugins_mod.has_hook("post_llm_call") is False
+    assert recorder.calls == []
+
+
+def test_only_a_user_installed_plugin_can_be_gateway_scope(tmp_path):
+    directory = tmp_path / "proj"
+    directory.mkdir()
+    (directory / "plugin.yaml").write_text(yaml.safe_dump({"name": "p", "scope": "gateway"}), encoding="utf-8")
+    assert parse_manifest_file(directory / "plugin.yaml", directory, "project", "").scope == "profile"
+    assert parse_manifest_file(directory / "plugin.yaml", directory, "bundled", "").scope == "profile"
+    assert parse_manifest_file(directory / "plugin.yaml", directory, "user", "").scope == "gateway"

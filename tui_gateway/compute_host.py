@@ -569,6 +569,24 @@ def _default_workers() -> int:
         return 8
 
 
+def _discover_gateway_home_plugins() -> None:
+    """Load the plugins of this process's own home (the gateway's) once, before the first frame.
+
+    Fork (FORK.md, gateway-scope plugins). Every turn this child runs for a routed profile builds its agent
+    under that profile's HERMES_HOME override, so the first plugin discovery in the child (the import of
+    run_agent / model_tools) loads the PROFILE's manager and the gateway home's never exists here. A
+    gateway-scope plugin is only heard from a gateway manager whose sweep finished, and a profile turn never
+    starts that sweep itself, so without this an isolated turn never reaches such a plugin (no push after a
+    bot reply under ``dashboard.turn_isolation``). Discovered with no override bound, as the parent does at
+    boot. A default-profile isolated turn already loaded the same set in this child; nothing new is loaded
+    for it. Failing is logged and never stops the host."""
+    try:
+        from hermes_cli.plugins import discover_plugins
+        discover_plugins()
+    except Exception:
+        logging.getLogger(__name__).warning("compute host: gateway-home plugin discovery failed", exc_info=True)
+
+
 def run_host(stdin: Any = None, stdout: Any = None) -> None:
     os.environ["HERMES_COMPUTE_HOST_CHILD"] = "1"
     stdin = stdin or sys.stdin
@@ -593,6 +611,8 @@ def run_host(stdin: Any = None, stdout: Any = None) -> None:
         "type": "hello", "host_pid": os.getpid(), "boot_id": host._boot_id,
         "build_sha": _build_sha(), "cwd": os.getcwd(),
         "hermes_home": os.environ.get("HERMES_HOME", "")})
+    # After ``hello`` (the parent's handshake does not wait on plugin imports), before any frame is read.
+    _discover_gateway_home_plugins()
 
     def _reader() -> None:
         for raw in stdin:

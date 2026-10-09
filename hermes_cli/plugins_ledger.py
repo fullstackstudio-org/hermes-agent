@@ -301,3 +301,4 @@ class PluginLedgerMixin:
             self._hook_timeout_suppressed_until.clear()
         self._hook_failures_reported.clear()
         self._discovered = False
+        self._sweep_complete = False

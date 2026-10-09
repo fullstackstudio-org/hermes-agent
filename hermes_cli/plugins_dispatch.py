@@ -228,6 +228,7 @@ class PluginDispatchMixin:
 
     def _invoke_hook_callbacks(
         self, hook_name: str, callbacks: List[Callable], kwargs: Dict[str, Any], *, fail_open: bool = False,
+        timeout: Optional[float] = None,
     ) -> List[Any]:
         """The body of :meth:`invoke_hook` over an explicit callback list. ``fail_open`` (fork: a
         gateway-scope plugin heard from a routed profile turn) turns a raising or timed-out policy
@@ -239,7 +240,8 @@ class PluginDispatchMixin:
         if hook_name != "gateway_platform_event":
             kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
         results: List[Any] = []
-        timeout = _resolve_hook_callback_timeout()
+        # ``timeout``: the caller resolved it elsewhere (fork: a gateway-scope plugin's own home).
+        timeout = _resolve_hook_callback_timeout() if timeout is None else timeout
         use_timeout = _hook_uses_callback_timeout(hook_name, timeout)
         fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS and not fail_open
         for cb in callbacks:
@@ -513,6 +515,7 @@ class PluginDispatchMixin:
 
     async def _ainvoke_hook_callbacks(
         self, hook_name: str, callbacks: List[Callable], kwargs: Dict[str, Any], *, fail_open: bool = False,
+        timeout: Optional[float] = None,
     ) -> List[Any]:
         """The body of :meth:`ainvoke_hook` over an explicit callback list (``fail_open``: see
         :meth:`_invoke_hook_callbacks`)."""
@@ -520,7 +523,8 @@ class PluginDispatchMixin:
         if hook_name != "gateway_platform_event":
             kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
         results: List[Any] = []
-        timeout = _resolve_hook_callback_timeout()
+        # ``timeout``: the caller resolved it elsewhere (fork: a gateway-scope plugin's own home).
+        timeout = _resolve_hook_callback_timeout() if timeout is None else timeout
         use_timeout = _hook_uses_callback_timeout(hook_name, timeout)
         fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS and not fail_open
         for cb in callbacks:

@@ -120,15 +120,22 @@ A gateway serving several profiles runs each routed turn under that profile's ow
 scope: gateway   # default: profile
 ```
 
-Enable it at the gateway's own home only. Then, for a turn routed to another profile:
+Install and enable it in the gateway's own home only. Then, for a turn routed to another profile:
 
 - every hook the plugin registered fires (through `invoke_hook`, `ainvoke_hook`, `has_hook` and the streaming observers), after the profile's own plugins, so a profile plugin's result comes first wherever the first result wins;
-- the callback runs in the turn's own context: `ctx.profile_name` names the routed profile and `ctx.profile_home` is its home, while `ctx.get_config`, `ctx.set_config` and `ctx.state` keep using the gateway's own home, where the plugin is configured;
-- a callback that raises or times out is logged and skipped, `pre_tool_call` included: a gateway-scope plugin observes another profile's turns and is not that profile's guard, so its failure never blocks a tool call there. A directive it returns on purpose is honoured;
-- only hooks cross over. Its tools, commands, middleware, prompt sections, skills and context engine stay in the gateway's home;
-- a profile that has its own copy of the plugin (enabled or disabled) is left to that copy, and a turn in the gateway's own home fires the plugin once, as before.
+- the callback runs in the turn's own context: `ctx.profile_name` names the routed profile and `ctx.profile_home` is its home, while `ctx.get_config`, `ctx.set_config` and `ctx.state` keep using the gateway's own home, where the plugin is configured. `plugins.hook_callback_timeout` is read from the gateway's home too;
+- a callback that raises or times out is logged and skipped. A directive it returns on purpose is honoured;
+- only hooks cross over. Its tools, commands, middleware, prompt sections, skills and context engine stay in the gateway's home.
 
-Hooks fan out only from a gateway home whose plugins finished loading; a turn never starts that discovery itself. Any value other than `profile` or `gateway` loads as `profile` with a warning, and `hermes plugins validate` fails its `scope` check. `scope` is a fork key: upstream Hermes ignores it.
+It is not heard:
+
+- in a turn in the gateway's own home, beyond the one call every plugin gets there;
+- in a profile that has its own copy of the plugin, enabled or disabled (that copy decides), or that lists the plugin under its own `plugins.disabled`, which opts the profile out without a copy;
+- before the gateway home's discovery has finished registering every plugin (at boot, or during a forced re-discovery). A turn never starts that discovery itself. A turn-isolation child (`dashboard.turn_isolation`) loads the gateway home's plugins once, before its first turn.
+
+Only a plugin installed in a home's own `plugins/` directory can be gateway-scope. A project plugin (`./.hermes/plugins/`) or a bundled one declaring it loads as `profile` with a warning, and a pip entry-point plugin has no `plugin.yaml` to declare it in. Any value other than `profile` or `gateway` also loads as `profile` with a warning, and `hermes plugins validate` fails its `scope` check. `scope` is a fork key: upstream Hermes ignores it.
+
+**For guard authors:** a gateway-scope `pre_tool_call` callback that raises or times out does not block the routed profile's tool call (a profile's own guard still fails closed). A gateway-scope plugin observes other profiles' turns; it is not their guard. Where a guard must hold in every profile, install it in each profile.
 
 Project-local plugins under `./.hermes/plugins/` are disabled by default. Enable them only for trusted repositories by setting `HERMES_ENABLE_PROJECT_PLUGINS=true` before starting Hermes.
 

@@ -1245,6 +1245,10 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self.home_path = Path(self.scope_key)
         self._discovery_lock = threading.RLock()
         self._discovered: bool = False
+        # Fork: True only once a sweep has finished registering every plugin. ``_discovered`` is set up front as
+        # a re-entrancy guard, so it is already True while register() calls are still running; routed profile
+        # turns must not hear a gateway-scope plugin set that is half registered (see _gateway_scope_delivery).
+        self._sweep_complete: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
         self._gateway_message_injector: tuple[object, Callable] | None = None
         self._context_engine = None  # Set by a plugin via register_context_engine()
@@ -1363,9 +1367,11 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             loaded_before = frozenset(k for k, p in self._plugins.items() if not p.error and not p.deferred)
             if force:
                 self.unload()  # the ledger owns teardown of process-global registries
+            self._sweep_complete = False
             if env_var_enabled("HERMES_SAFE_MODE"):
                 logger.info("HERMES_SAFE_MODE=1 — plugin discovery skipped")
                 self._discovered = True
+                self._sweep_complete = True
                 return
             # Flag set up front as a re-entrancy guard (register() can trigger discovery again) but
             # reset on failure so a failed scan is NOT cached as "discovered with an empty registry"
@@ -1389,6 +1395,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
                     # Re-register so force-reload is symmetric (#60036; tracking #64178 — salvaged from PR
                     # #64188; outbound webhooks added per #92682 review).
                     self._re_register_config_hooks_after_force()
+                self._sweep_complete = True
             except BaseException:
                 self._discovered = False
                 raise
@@ -1840,10 +1847,14 @@ def _gateway_scope_delivery(active: PluginManager) -> Optional[Tuple[PluginManag
 
     Fork (FORK.md). A routed turn runs under its profile's HERMES_HOME override, so ``get_plugin_manager()``
     answers that profile's manager and a plugin enabled only at the gateway's own home never hears the
-    turn. A plugin that declares ``scope: gateway`` is heard as well. Never in the gateway's own home (that
-    manager already ran it), never for a plugin the profile has its own copy of (enabled or disabled there:
-    the profile decided), and never from a gateway manager that has not finished discovery (discovering
-    it mid-turn would load the gateway's plugins under the profile's secret and terminal scopes).
+    turn. A plugin that declares ``scope: gateway`` is heard as well, except:
+
+    - in the gateway's own home (that manager already ran it);
+    - for a plugin the profile has its own copy of, enabled or disabled there (the profile decided), or
+      lists under its own ``plugins.disabled`` (an opt-out that needs no copy);
+    - from a gateway manager whose discovery sweep has not finished: not discovered at all (discovering it
+      mid-turn would load the gateway's plugins under the profile's secret and terminal scopes), at boot
+      while register() calls still run, or between a force re-discovery's unload and its end.
     """
     gateway_home = hermes_home_key(get_routing_process_hermes_home())
     if getattr(active, "scope_key", gateway_home) == gateway_home:
@@ -1853,11 +1864,34 @@ def _gateway_scope_delivery(active: PluginManager) -> Optional[Tuple[PluginManag
         if gateway is None:
             gateway = next((m for m in _plugin_managers_by_home.values()
                             if getattr(m, "scope_key", None) == gateway_home), None)
-    if gateway is None or gateway is active or not getattr(gateway, "_discovered", False):
+    if gateway is None or gateway is active or not getattr(gateway, "_sweep_complete", False):
         return None
     if not getattr(gateway, "_gateway_scope_hooks", None):
         return None
-    return gateway, set(getattr(active, "_plugins", {}) or ())
+    return gateway, set(getattr(active, "_plugins", {}) or ()) | _profile_disabled_plugin_keys()
+
+
+def _profile_disabled_plugin_keys() -> Set[str]:
+    """The active home's ``plugins.disabled`` (cached config read: a stat and a dict lookup)."""
+    try:
+        disabled = ((load_config_readonly() or {}).get("plugins") or {}).get("disabled")
+    except Exception:
+        return set()
+    return {str(name) for name in disabled} if isinstance(disabled, list) else set()
+
+
+def _gateway_hook_callback_timeout(gateway: PluginManager) -> Optional[float]:
+    """``plugins.hook_callback_timeout`` as the gateway's own home sets it: the plugin is configured there,
+    not in the routed profile. ``None`` (the ambient answer) when the home cannot be bound."""
+    home_path = getattr(gateway, "home_path", None)
+    if home_path is None:
+        return None
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(str(home_path))
+    try:
+        return _resolve_hook_callback_timeout()
+    finally:
+        reset_hermes_home_override(token)
 
 
 def _gateway_scope_callbacks(active: PluginManager, hook_name: str) -> Tuple[Optional[PluginManager], List[Callable]]:
@@ -1893,7 +1927,8 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     results = manager.invoke_hook(hook_name, **kwargs)
     gateway, callbacks = _gateway_scope_callbacks(manager, hook_name)
     if callbacks:
-        results.extend(gateway._invoke_hook_callbacks(hook_name, callbacks, dict(kwargs), fail_open=True))
+        results.extend(gateway._invoke_hook_callbacks(
+            hook_name, callbacks, dict(kwargs), fail_open=True, timeout=_gateway_hook_callback_timeout(gateway)))
     return results
 
 
@@ -1904,7 +1939,8 @@ async def ainvoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     results = await manager.ainvoke_hook(hook_name, **kwargs)
     gateway, callbacks = _gateway_scope_callbacks(manager, hook_name)
     if callbacks:
-        results.extend(await gateway._ainvoke_hook_callbacks(hook_name, callbacks, dict(kwargs), fail_open=True))
+        results.extend(await gateway._ainvoke_hook_callbacks(
+            hook_name, callbacks, dict(kwargs), fail_open=True, timeout=_gateway_hook_callback_timeout(gateway)))
     return results
 
 

@@ -480,8 +480,11 @@ def portable_plugin_manifest(child: Path, source: str, prefix: str) -> PluginMan
     )
 
 
-def _manifest_scope(data: Mapping, key: str) -> str:
-    """Normalize ``scope``; anything but ``profile``/``gateway`` warns and keeps the default."""
+def _manifest_scope(data: Mapping, key: str, source: str = "user") -> str:
+    """Normalize ``scope``; anything but ``profile``/``gateway`` warns and keeps the default. Only a plugin
+    installed in a home's own ``plugins/`` (source ``user``) may be gateway-scope: a project plugin comes from
+    whatever directory a process was started in, and a bundled one is present in every profile already (pip
+    entry-point plugins have no plugin.yaml and are always ``profile``)."""
     raw = data.get("scope")
     if raw is None:
         return PLUGIN_SCOPE_PROFILE
@@ -489,6 +492,10 @@ def _manifest_scope(data: Mapping, key: str) -> str:
     if scope not in _VALID_PLUGIN_SCOPES:
         logger.warning("Plugin %s: unknown scope %r (valid: %s); treating as 'profile'",
                        key, raw, ", ".join(sorted(_VALID_PLUGIN_SCOPES)))
+        return PLUGIN_SCOPE_PROFILE
+    if scope == PLUGIN_SCOPE_GATEWAY and source != "user":
+        logger.warning("Plugin %s: scope 'gateway' is honoured only for a plugin installed in a Hermes home's "
+                       "plugins/ directory, not a %s plugin; treating as 'profile'", key, source)
         return PLUGIN_SCOPE_PROFILE
     return scope
 
@@ -545,7 +552,7 @@ def parse_manifest_file(
             capabilities=_parse_declared_capabilities(data.get("capabilities"), name),
             **_parse_manifest_v2_fields(data, key), emits=data.get("emits") or [],
             listens=data.get("listens") or [], optional_hooks=data.get("optional_hooks") or [],
-            scope=_manifest_scope(data, key),
+            scope=_manifest_scope(data, key, source),
         )
     except Exception as exc:
         logger.warning("Failed to parse %s: %s", manifest_file, exc, exc_info=_plugins_debug())

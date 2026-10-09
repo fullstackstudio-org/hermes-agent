@@ -260,7 +260,7 @@ def _ac_inflight_original(session: dict) -> str:
 def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[str] | None = None,
                     turn_author: dict | None = None, turn_auth_user: tuple[str, str] | None = None,
                     row_metadata: dict | None = None, origin: str = "", contributors: Any = (),
-                    turn_agent: dict | None = None) -> None:
+                    turn_agent: dict | None = None, turn_markup: Any = ()) -> None:
     """Queue a message for the next turn. Text-only arrivals share a slot and merge losslessly (like the
     consecutive-user merge in ``repair_message_sequence``); image-bearing and authored ones stay separate
     envelopes so attachment chronology and the sender survive. ``transport`` is pinned so the drained turn
@@ -272,9 +272,14 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
     as, and such an envelope never merges with another. ``turn_agent`` is the marker of an agent that sent
     it for ``turn_auth_user`` through MCP: it rides in the envelope as ``turn_agent`` (and in the restart
     journal), and an agent's message never merges with another message, the person's own or another agent
-    prompt's: each prompt an agent sends is one turn the agent can match to its own connection exactly."""
+    prompt's: each prompt an agent sends is one turn the agent can match to its own connection exactly.
+    ``turn_markup`` (the Hermie blocks the sender's app draws, ``client_markup``) rides as sorted names, and
+    two arrivals from apps that draw different blocks never merge either: the one turn would tell the model
+    about the wrong set for one of them."""
+    from tui_gateway.client_markup import wire as markup_wire
     from tui_gateway.row_author import agent_marker
     turn_agent = agent_marker(turn_agent) if turn_auth_user else None
+    turn_markup = markup_wire(turn_markup or ())
     image_paths = list(image_paths or [])
     # Scrub live-turn self-duplicates first so the text merge below can't glue "{original}\n\n{later}" and re-fire the
     # original after a correction settles.
@@ -288,6 +293,7 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
               **({"turn_author": turn_author} if turn_author else {}),
               **({"turn_auth_user": turn_auth_user} if turn_auth_user else {}),
               **({"turn_agent": turn_agent} if turn_agent else {}),
+              **({"turn_markup": turn_markup} if turn_markup else {}),
               **({"row_metadata": row_metadata} if row_metadata is not None else {}),
               **({"origin": origin} if origin else {}),
               **({"contributors": list(contributors)} if contributors else {})}
@@ -298,6 +304,7 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
             and not existing.get("image_paths") and not existing.get("turn_author")
             and existing.get("turn_auth_user") == turn_auth_user
             and existing.get("turn_agent") == turn_agent
+            and (existing.get("turn_markup") or []) == turn_markup
             and existing.get("origin", "") == origin
             and not contributors and not existing.get("contributors")
             and not session.get("queued_prompts")):
@@ -399,7 +406,7 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
                         turn_author: dict | None = None,
                         turn_auth_user: tuple[str, str] | None = None,
                         row_metadata: dict | None = None, origin: str = "",
-                        turn_agent: dict | None = None) -> dict | None:
+                        turn_agent: dict | None = None, turn_markup: Any = ()) -> dict | None:
     """Apply ``display.busy_input_mode`` to a mid-turn prompt instead of rejecting it (rejection made clients busy-retry
     and drop sends): ``interrupt`` (default) → redirect, falling back to hard interrupt + queue; ``queue`` → queue only;
     ``steer`` → inject after the current atomic action. ``queued=True`` (client queue drain) forces queue mode: a "run
@@ -434,7 +441,7 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
             return None
         _enqueue_prompt(session, text, transport, image_paths=image_paths, turn_author=turn_author,
                         turn_auth_user=turn_auth_user, row_metadata=row_metadata, origin=origin,
-                        turn_agent=turn_agent)
+                        turn_agent=turn_agent, turn_markup=turn_markup)
         session["last_active"] = time.time()
     # Attachments need their own model invocation: queue without cancelling so the user gets both results in order.
     # ``steer`` must NEVER escalate to a hard interrupt: it would kill the live turn AND drop ``AIAgent._pending_steer``
@@ -498,6 +505,10 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         kwargs["turn_agent"] = queued_agent
     if queued.get("origin"):
         kwargs["origin"] = queued["origin"]
+    # The blocks the sender's app draws, from the same envelope (re-checked: a journal is a file); both runners.
+    from tui_gateway.client_markup import accepted_names
+    if markup := accepted_names(queued.get("turn_markup") or ()):
+        kwargs["turn_markup"] = markup
     if queued.get("contributors"):
         kwargs["contributors"] = queued["contributors"]
     # The isolated child only learns the frame's SCOPE identity, which the parent resolves from the session

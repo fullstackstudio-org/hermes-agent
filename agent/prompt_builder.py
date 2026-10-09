@@ -666,7 +666,24 @@ _LOCAL_CRON_DELIVERY_NOTE = (
     "default-deliver cron job will message them in this session."
 )
 
+# The Hermie apps (native and web, source "hermie"): what every build draws since the native rewrite. The
+# blocks a newer build draws (charts, cards, callouts) are told per turn, only to the connection that
+# advertised them (tui_gateway/hermie_markup.py). The files sentence holds while the outbox serves "hermie"
+# (files.outbox_sources, its default); _default_platform_hint drops it otherwise.
+HERMIE_PLATFORM_HINT = (
+    "You are chatting in Hermie, a chat app. Markdown renders with GitHub flavor: headings, lists, task "
+    "lists, tables, links, and fenced code blocks (name the language for highlighting). Math renders from "
+    "$...$ inline and $$...$$ on its own lines. Mermaid renders in a mermaid code block, flowcharts and pie "
+    "charts only; other diagram kinds show as code. Raw HTML and ::preview directives do not render, so never "
+    "use them. Images are never loaded from a web URL (only their alt text shows), so do not embed remote images."
+)
+HERMIE_FILES_HINT = (
+    "Deliver a file by writing MEDIA:/absolute/path/to/file on its own line: the person gets it as an "
+    "attachment to open or save, never the path."
+)
+
 PLATFORM_HINTS = {
+    "hermie": f"{HERMIE_PLATFORM_HINT} {HERMIE_FILES_HINT}",
     "whatsapp": (
         "You are on WhatsApp. Standard markdown auto-converts to WhatsApp syntax (*bold*, _italic_, ~strike~, "
         "monospace) \u2014 write markdown freely, bullets included. No tables \u2014 use bullets or labeled lines. "

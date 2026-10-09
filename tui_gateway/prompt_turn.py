@@ -759,6 +759,12 @@ def _invoke_agent(
         _acting_auth_user(session), origin=origin, record_login=_session_auth_user_id(session),
         display_metadata=display_metadata, turn_author=turn_author, contributors=contributors,
         agent=acting_agent), agent_client=(acting_agent or {}).get("client", ""))
+    # The blocks the submitting app draws, on the system message of this turn's requests only (API time,
+    # never the cached prompt): staged every turn, "" included, like the note above. Only in a Hermie chat.
+    from agent.prompt_additions import stage_turn_system_addition
+    from tui_gateway.client_markup import TURN_MARKUP
+    from tui_gateway.hermie_markup import turn_guide
+    stage_turn_system_addition(agent, turn_guide(_session_source(session), TURN_MARKUP.get()))
     # Live-rename hook: auto-titling fires inside the turn prologue.
     _title_key = session.get("session_key") or sid
     agent._on_session_title = lambda t, _src, _k=_title_key: _emit(
@@ -1212,7 +1218,8 @@ def _run_prompt_submit(
     turn_author: dict | None = None,
     turn_auth_user: tuple[str, str] | None = None,
     row_auth_user: tuple[str, str] | None = None, origin: str = "", contributors: Any = (),
-    turn_agent: dict | None = None, row_agent: dict | None = None) -> bool:
+    turn_agent: dict | None = None, row_agent: dict | None = None,
+    turn_markup: Any = frozenset()) -> bool:
     # TWO identities. ``turn_auth_user`` is who the turn works FOR -- memory, tools, permissions -- and a
     # turn nobody typed (the /goal continuation) still carries the person whose work it continues.
     # ``row_auth_user`` is who TYPED this exact text, passed only by a caller that holds it beside the
@@ -1225,6 +1232,11 @@ def _run_prompt_submit(
     from tui_gateway.row_author import TURN_AGENT, agent_marker, with_row_author
     from tui_gateway.row_identity import (
         bind_emitting_turn, mint_turn_id, release_turn_identity, turn_id_of, unbind_emitting_turn, with_turn_id)
+    # ``turn_markup``: the Hermie blocks the SUBMITTING connection draws (``client_markup``), handed in by whoever
+    # held that connection's request context (prompt.submit, a queue envelope, a compute-host frame); a turn
+    # nobody submitted passes none. Re-checked: an envelope may have come back from a journal.
+    from tui_gateway.client_markup import TURN_MARKUP, accepted_names
+    turn_markup = accepted_names(turn_markup)
     display_metadata = with_row_author(display_metadata, row_auth_user, row_agent)
     turn_agent = agent_marker(turn_agent) if isinstance(turn_auth_user, tuple) and turn_auth_user[0] else None
     # THIS turn's id. ``prompt.submit`` minted one and persisted it on the user row; a turn the gateway starts
@@ -1296,6 +1308,7 @@ def _run_prompt_submit(
         # bookkeeping -- ``_acting_auth_user`` reads the bound transport when no turn is in scope, so a
         # leaked one makes later work name whoever that socket belonged to.
         transport_token = auth_user_token = agent_token = runtime_session_token = emitting_turn_token = None
+        markup_token = None
         try:
             # THIS turn's own id for every frame this thread emits, whatever the session says by then.
             emitting_turn_token = bind_emitting_turn(sid, turn_id)
@@ -1311,6 +1324,8 @@ def _run_prompt_submit(
             # The agent beside that person, when one sent the turn through MCP (None otherwise): the note,
             # HERMES_SESSION_AGENT and every row this turn writes read it from here.
             agent_token = TURN_AGENT.set(turn_agent)
+            # The blocks the submitter's app draws: ``_invoke_agent`` stages their guide for this turn only.
+            markup_token = TURN_MARKUP.set(turn_markup)
             runtime_session_token = _current_runtime_session_record.set(session)
             prepared = _prepare_turn_input(sid, session, st, text, images)
             if prepared is None:
@@ -1345,12 +1360,17 @@ def _run_prompt_submit(
                 unbind_emitting_turn(emitting_turn_token)
             if agent_token is not None:
                 TURN_AGENT.reset(agent_token)
+            if markup_token is not None:
+                TURN_MARKUP.reset(markup_token)
             if auth_user_token is not None:
                 _turn_auth_user.reset(auth_user_token)
             if transport_token is not None:
                 reset_transport(transport_token)
             # A stale interim closure must not fire during a later turn.
             st.agent.interim_assistant_callback = None
+            # Nor this turn's system addition reach a request made outside it.
+            from agent.prompt_additions import stage_turn_system_addition
+            stage_turn_system_addition(st.agent, "")
             with session["history_lock"]:
                 # Only a turn's own id: the session is free the moment ``running`` drops, and the next turn
                 # may already have set its own.

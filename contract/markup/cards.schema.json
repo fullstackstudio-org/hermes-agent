@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermie.app/contract/markup/cards.schema.json",
+  "title": "hermie-cards block",
+  "description": "The JSON object inside a fenced code block whose language is hermie-cards. A block that does not validate is shown as code, never repaired. Rules JSON Schema cannot state are in README.md (at most one highlighted card; next refused on the last card).",
+  "x-maxSourceBytes": 16384,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cards"],
+  "properties": {
+    "title": {"type": "string", "maxLength": 120},
+    "layout": {"enum": ["stack", "grid"], "default": "stack"},
+    "connector": {"enum": ["arrow", "line", "none"], "default": "arrow"},
+    "cards": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 12,
+      "items": {"$ref": "#/$defs/card"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"required": ["layout"], "properties": {"layout": {"const": "grid"}}},
+      "then": {
+        "not": {"required": ["connector"]},
+        "properties": {"cards": {"items": {"not": {"required": ["next"]}}}}
+      }
+    }
+  ],
+  "$defs": {
+    "card": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title"],
+      "properties": {
+        "title": {"type": "string", "minLength": 1, "maxLength": 60},
+        "subtitle": {"type": "string", "maxLength": 140},
+        "icon": {"type": "string", "maxLength": 32},
+        "tags": {
+          "type": "array",
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 24}
+        },
+        "highlight": {"type": "boolean"},
+        "next": {"type": "string", "maxLength": 40}
+      }
+    }
+  }
+}

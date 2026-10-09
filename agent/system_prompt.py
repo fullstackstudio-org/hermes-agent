@@ -21,7 +21,7 @@ from agent.delegation_context import owned_kanban_task
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, EXECUTION_GUIDANCE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE, HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS, KANBAN_GUIDANCE,
-    PARALLEL_TOOL_CALL_GUIDANCE, PLATFORM_HINTS, SESSION_SEARCH_GUIDANCE,
+    HERMIE_PLATFORM_HINT, PARALLEL_TOOL_CALL_GUIDANCE, PLATFORM_HINTS, SESSION_SEARCH_GUIDANCE,
     SKILLS_GUIDANCE, STEER_CHANNEL_NOTE, TASK_COMPLETION_GUIDANCE, TELEGRAM_RICH_MESSAGES_HINT,
     TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, drain_truncation_warnings,
 )
@@ -421,7 +421,20 @@ def _default_platform_hint(platform_key: str) -> str:
             pass
     if platform_key == "telegram" and hint and _telegram_rich_messages_enabled():
         hint = hint.rstrip() + " " + TELEGRAM_RICH_MESSAGES_HINT
+    if platform_key == "hermie" and hint == PLATFORM_HINTS["hermie"] and not _hermie_outbox_serves_files():
+        hint = HERMIE_PLATFORM_HINT
     return hint
+
+
+def _hermie_outbox_serves_files() -> bool:
+    """Whether ``files.outbox_sources`` lists ``hermie`` (its default): only then does a MEDIA: line reach the
+    person as an attachment (``tui_gateway/outbox_share.py``). True when the config cannot be read, as the
+    outbox itself falls back to its defaults then."""
+    try:
+        from tui_gateway.outbox import load_settings
+        return "hermie" in load_settings().sources
+    except Exception:
+        return True
 
 
 def _cron_delivery_hint(agent: Any) -> str:

@@ -56,6 +56,13 @@ def _frame_turn_agent(frame: dict[str, Any]) -> dict | None:
     return agent_marker(frame.get("turn_agent"))
 
 
+def _frame_turn_markup(frame: dict[str, Any]) -> frozenset[str]:
+    """The Hermie blocks the gateway read on the submitting connection (``turn_markup``), re-checked on this
+    side of the pipe; empty when the frame carries none (a parent that predates the key sends none)."""
+    from tui_gateway.client_markup import accepted_names
+    return accepted_names(frame.get("turn_markup") or ())
+
+
 def now_ns() -> int:
     return time.perf_counter_ns()
 
@@ -292,7 +299,7 @@ class ComputeHost:
                 display_metadata=(frame.get("display_metadata")
                                   if isinstance(frame.get("display_metadata"), dict) else None),
                 turn_auth_user=_frame_turn_auth_user(frame), turn_agent=_frame_turn_agent(frame),
-                origin=str(frame.get("turn_origin") or ""),
+                turn_markup=_frame_turn_markup(frame), origin=str(frame.get("turn_origin") or ""),
                 contributors=frame.get("turn_contributors") if isinstance(frame.get("turn_contributors"), list) else ())
             run_thread = session.get("_run_thread")
             if run_thread is not None and hasattr(run_thread, "join"):

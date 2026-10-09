@@ -223,6 +223,20 @@ def _submit_agent(params: dict) -> dict | None:
     return None if _is_internal_submit(params) else _submitting_agent()
 
 
+def _submit_markup(params: dict) -> frozenset[str]:
+    """The Hermie blocks the connection that sent this submit draws (``client_markup``), read on its own request
+    context beside :func:`_submit_auth_user`; empty for an internal dispatch (a relayed bot DM, a hosted room),
+    which arrives on somebody else's socket. A ``/retry`` is pressed on the presser's own connection
+    (``methods_tools._submit_retried_turn`` calls this handler in that request), so it reads the presser's."""
+    from tui_gateway import client_markup
+    from tui_gateway.row_author import ReplayedTurn
+    if _INTERNAL_DISPATCH.get():
+        return frozenset()
+    if _is_internal_submit(params) and not isinstance(params.get("_replayed_turn"), ReplayedTurn):
+        return frozenset()
+    return client_markup.accepted(current_transport())
+
+
 def _hosted_submit_error(rid, session, hosted_task, hosted_terminal_callback):
     """Validate the hosted-room turn proof carried by an internal submit."""
     if session.get("source") != "bot_room":
@@ -526,7 +540,7 @@ def _persist_session_row_for_submit(rid, session, text=None, display_kind=None, 
 
 def _run_after_agent_ready(
     rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author=None,
-    turn_auth_user=None, origin="", turn_agent=None
+    turn_auth_user=None, origin="", turn_agent=None, turn_markup=frozenset()
 ):
     """Turn thread body: patient wait for a deferred build (a slow build must not eat the
     accepted in-flight message), then run."""
@@ -568,7 +582,7 @@ def _run_after_agent_ready(
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
         terminal_callback=hosted_terminal_callback, turn_author=turn_author, turn_auth_user=turn_auth_user,
-        origin=origin, turn_agent=turn_agent)
+        origin=origin, turn_agent=turn_agent, turn_markup=turn_markup)
 
 
 _TRUNCATION_PARAMS = (
@@ -684,6 +698,9 @@ def _(rid, params: dict) -> dict:
     # person's (scope, memory, limits), and the marker rides beside them -- on the row as ``via``, into the
     # note, the tool variables, the queue envelope and the compute-host frame.
     submit_agent = row_agent = _submit_agent(params)
+    # The Hermie blocks that connection draws, from the same request context: the turn tells the model about
+    # exactly those (``tui_gateway/hermie_markup.py``), and a queued envelope or a compute-host frame carries them.
+    submit_markup = _submit_markup(params)
     # A stored row's own words run again (``/retry``): the row is its author's, the turn acts as whoever
     # pressed Retry. Built in-process only; a client value is refused.
     from tui_gateway.row_author import ReplayedTurn, agent_from_row_author, auth_user_from_row_author
@@ -775,7 +792,8 @@ def _(rid, params: dict) -> dict:
         busy_response = _handle_busy_submit(
             rid, sid, session, text, busy_transport, queued=bool(params.get("queued")) or replayed is not None or agent_submit,
             turn_author=turn_author, turn_auth_user=submitter, turn_agent=submit_agent,
-            row_metadata=display_metadata if replayed is not None else None, origin=origin)
+            row_metadata=display_metadata if replayed is not None else None, origin=origin,
+            turn_markup=submit_markup)
         if busy_response is not None:
             return busy_response
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
@@ -814,7 +832,7 @@ def _(rid, params: dict) -> dict:
                          turn_author.get("id"))
         isolated_response = _submit_prompt_to_compute_host(
             rid, sid, session, text, display_kind=display_kind, display_metadata=display_metadata,
-            turn_auth_user=submitter, origin=origin, turn_agent=submit_agent)
+            turn_auth_user=submitter, origin=origin, turn_agent=submit_agent, turn_markup=submit_markup)
         if not isolated_response.get("error"):
             # The truncation already happened inline above (memory + DB).
             isolated_response["result"].update(survivor_fields)
@@ -843,7 +861,7 @@ def _(rid, params: dict) -> dict:
     run_thread = threading.Thread(
         target=lambda: _run_after_agent_ready(
             rid, sid, session, text, display_kind, display_metadata, hosted_terminal_callback, turn_author,
-            submitter, origin, submit_agent),
+            submitter, origin, submit_agent, submit_markup),
         daemon=True)
     # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
     session["_run_thread"] = run_thread

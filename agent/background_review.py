@@ -16,6 +16,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+from agent.prompt_additions import system_prompt_additions
 from agent.prompt_cache_scope import resolve_prompt_cache_scope_safe
 from agent.thread_scoped_output import thread_scoped_silence
 
@@ -828,7 +829,9 @@ def _same_model_parity_kwargs(agent: Any) -> Dict[str, Any]:
         # Anthropic's cache key is namespaced by ``thinking`` presence; the gateway session context
         # is appended to the cached system prompt at API-call time (without it the prompt diverges).
         "reasoning_config": getattr(agent, "reasoning_config", None),
-        "ephemeral_system_prompt": getattr(agent, "ephemeral_system_prompt", None),
+        # With the parent's per-turn addition (agent/prompt_additions.py) folded in: it is part of the
+        # parent's system message, so leaving it out would miss the cached prefix.
+        "ephemeral_system_prompt": system_prompt_additions(agent) or None,
         **{attr: val for attr in _PROVIDER_PIN_ATTRS if (val := getattr(agent, attr, None))},
     }
     # Prefill sits right after the system message, so a parent with prefill would diverge at

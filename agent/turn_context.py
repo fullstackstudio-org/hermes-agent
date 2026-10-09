@@ -1361,9 +1361,9 @@ def build_api_messages(
     # Final system message = cached prompt + ephemeral additions (API-time only).
     # Plugin/recall context goes into the user message, never the system prompt: the
     # prompt is built ONCE per session and replayed verbatim (stable cache prefix).
-    effective_system = active_system_prompt or ""
-    if agent.ephemeral_system_prompt:
-        effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
+    # The gateway's per-turn addition (agent/prompt_additions.py) joins it here, on the wire only.
+    from agent.prompt_additions import with_system_additions
+    effective_system = with_system_additions(active_system_prompt or "", agent)
     if effective_system:
         api_messages = [{"role": "system", "content": effective_system}] + api_messages
     return api_messages, effective_system

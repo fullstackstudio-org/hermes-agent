@@ -118,6 +118,11 @@ def test_an_agents_connection_cannot_advertise_it():
         reset_transport(token)
 
 
+def test_the_vocabulary_is_the_guide_table():
+    from tui_gateway import client_markup, hermie_markup
+    assert client_markup.VOCABULARY == frozenset(hermie_markup.GUIDE) == frozenset(hermie_markup.ORDER)
+
+
 def test_wire_form_is_sorted_and_rechecked():
     from tui_gateway import client_markup
     assert client_markup.wire({"chart", "alerts"}) == ["alerts", "chart"]

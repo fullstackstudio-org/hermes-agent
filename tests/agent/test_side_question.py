@@ -170,8 +170,9 @@ class TestForkPath:
             def close(self):
                 calls["closed"] = True
 
-        def fake_build(parent, task_cfg, *, max_iterations, write_origin):
+        def fake_build(parent, task_cfg, *, max_iterations, write_origin, turn_addition):
             calls["write_origin"] = write_origin
+            assert turn_addition is False  # a side answer never carries the parent turn's API-time addition
             return FakeFork(), {"model": "m"}, False
 
         whitelists = []

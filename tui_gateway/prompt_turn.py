@@ -1254,7 +1254,7 @@ def _run_prompt_submit(
     turn_auth_user: tuple[str, str] | None = None,
     row_auth_user: tuple[str, str] | None = None, origin: str = "", contributors: Any = (),
     turn_agent: dict | None = None, row_agent: dict | None = None,
-    turn_markup: Any = frozenset()) -> bool:
+    turn_markup: Any = None) -> bool:
     # TWO identities. ``turn_auth_user`` is who the turn works FOR -- memory, tools, permissions -- and a
     # turn nobody typed (the /goal continuation) still carries the person whose work it continues.
     # ``row_auth_user`` is who TYPED this exact text, passed only by a caller that holds it beside the
@@ -1268,10 +1268,12 @@ def _run_prompt_submit(
     from tui_gateway.row_identity import (
         bind_emitting_turn, mint_turn_id, release_turn_identity, turn_id_of, unbind_emitting_turn, with_turn_id)
     # ``turn_markup``: the Hermie blocks the SUBMITTING connection draws (``client_markup``), handed in by whoever
-    # held that connection's request context (prompt.submit, a queue envelope, a compute-host frame); a turn
-    # nobody submitted passes none. Re-checked: an envelope may have come back from a journal.
-    from tui_gateway.client_markup import TURN_MARKUP, accepted_names
-    turn_markup = accepted_names(turn_markup)
+    # held that connection's request context (prompt.submit, a queue envelope, a compute-host frame), re-checked
+    # (an envelope may have come back from a journal). ``None`` is a turn nobody submitted that continues this
+    # chat (``/goal``, auto-continue, a wake-up): it follows the connection of the session's last submitted turn
+    # while that still advertises them (``client_markup.resolve_turn_markup``), so its system message matches.
+    from tui_gateway.client_markup import TURN_MARKUP, resolve_turn_markup
+    turn_markup = resolve_turn_markup(session, turn_markup)
     display_metadata = with_row_author(display_metadata, row_auth_user, row_agent)
     turn_agent = agent_marker(turn_agent) if isinstance(turn_auth_user, tuple) and turn_auth_user[0] else None
     # THIS turn's id. ``prompt.submit`` minted one and persisted it on the user row; a turn the gateway starts

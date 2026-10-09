@@ -391,14 +391,89 @@ def test_an_internal_dispatch_names_no_set(room):
     assert _turn(agent, "marker relayed")["system"] == "CACHED"
 
 
-def test_a_goal_continuation_gets_no_guide(room, monkeypatch):
+def _goal_once(monkeypatch, agent, after):
+    """A ``/goal`` continuation after the turn whose text is *after*, once."""
+    fired = []
+
+    def followup(_sid, _session, _result, _status, _raw):
+        if agent.turns[-1]["text"] == after and not fired:
+            fired.append(after)
+            return f"marker continue {after}"
+        return None
+    monkeypatch.setattr(server, "_goal_followup_after_turn", followup)
+
+
+def test_a_goal_continuation_keeps_its_persons_guide_so_the_system_message_never_flips(room, monkeypatch):
     agent, call, _peers = room
-    monkeypatch.setattr(
-        server, "_goal_followup_after_turn",
-        lambda _sid, _session, _result, _status, _raw: "marker continue" if len(agent.turns) == 1 else None)
+    _goal_once(monkeypatch, agent, "marker goal")
     call("phone", "prompt.submit", text="marker goal")
-    assert CARDS in _turn(agent, "marker goal")["system"]
-    assert _turn(agent, "marker continue")["system"] == "CACHED"
+    call("phone", "prompt.submit", text="marker after")
+    person, continuation, again = (_turn(agent, t)["system"]
+                                   for t in ("marker goal", "marker continue marker goal", "marker after"))
+    assert CARDS in person and person == continuation == again
+
+
+def test_a_continuation_follows_the_connection_live(room, monkeypatch):
+    agent, call, peers = room
+    session = agent.session
+    call("phone", "prompt.submit", text="marker first")
+    server._run_prompt_submit("rid", "sid", session, "marker wake one")  # nobody submitted it
+    assert CARDS in _turn(agent, "marker wake one")["system"]
+    client_markup.advertise(peers["phone"], ["chart"])  # the app now advertises another set
+    server._run_prompt_submit("rid", "sid", session, "marker wake two")
+    assert CHART in _turn(agent, "marker wake two")["system"] and CARDS not in _turn(agent, "marker wake two")["system"]
+    client_markup.forget(peers["phone"])  # it disconnected
+    server._run_prompt_submit("rid", "sid", session, "marker wake three")
+    assert _turn(agent, "marker wake three")["system"] == "CACHED"
+
+
+def test_a_continuation_after_an_old_clients_turn_carries_nothing(room):
+    agent, call, _peers = room
+    call("phone", "prompt.submit", text="marker phone")
+    call("laptop", "prompt.submit", text="marker laptop")
+    server._run_prompt_submit("rid", "sid", agent.session, "marker wake")
+    assert _turn(agent, "marker wake")["system"] == "CACHED"
+
+
+def test_an_mcp_agents_turn_and_its_continuation_carry_nothing(room, monkeypatch):
+    """Accepted cost (lead decision): an agent's turn in the person's chat is told nothing about blocks, nor is
+    what continues it, even though the person's phone that advertised cards is attached."""
+    agent, call, peers = room
+    bridge = _Peer(ROBIN)
+    bridge.auth_identity["agent"] = {"kind": "mcp", "client": "Marker agent", "grant": "grant-g1"}
+    server._attach_session_transport(agent.session, bridge)
+    token = bind_transport(bridge)
+    try:
+        assert server._methods["prompt.submit"]("rid", {"session_id": "sid", "text": "marker agent"})[
+            "result"]["status"] == "streaming"
+    finally:
+        reset_transport(token)
+    assert _turn(agent, "marker agent")["system"] == "CACHED"
+    server._run_prompt_submit("rid", "sid", agent.session, "marker agent continue")
+    assert _turn(agent, "marker agent continue")["system"] == "CACHED"
+
+
+def test_a_relayed_turns_continuation_carries_nothing(room):
+    from tools.bot_relay import DeliveryAuthor
+    agent, call, _peers = room
+    call("phone", "prompt.submit", text="marker phone")
+    call("phone", "prompt.submit", text="marker relayed",
+         _turn_author=DeliveryAuthor({"id": "bot:marker", "name": "marker", "is_bot": True}))
+    server._run_prompt_submit("rid", "sid", agent.session, "marker relayed continue")
+    assert _turn(agent, "marker relayed")["system"] == "CACHED"
+    assert _turn(agent, "marker relayed continue")["system"] == "CACHED"
+
+
+def test_an_isolated_continuation_is_resolved_by_the_gateway_and_kept_by_the_child(room):
+    from tui_gateway.compute_host import _frame_turn_markup
+    agent, call, _peers = room
+    call("phone", "prompt.submit", text="marker phone")
+    frame = server._compute_host_turn_frame("rid", "sid", agent.session, "marker child")  # nobody submitted it
+    assert frame["turn_markup"] == ["cards"]
+    child = dict(agent.session)
+    client_markup.remember_frame_names(child, _frame_turn_markup(frame))
+    assert client_markup.resolve_turn_markup(child, None) == frozenset({"cards"})
+    assert client_markup.resolve_turn_markup(child, frozenset()) == frozenset()
 
 
 def test_a_redirect_queued_in_the_build_window_keeps_the_set(room):

@@ -820,7 +820,7 @@ _PROVIDER_PIN_ATTRS = (
 )
 
 
-def _same_model_parity_kwargs(agent: Any) -> Dict[str, Any]:
+def _same_model_parity_kwargs(agent: Any, *, turn_addition: bool = True) -> Dict[str, Any]:
     """AIAgent kwargs that keep a SAME-model fork's request bytes identical to the parent's. Only
     for the un-routed path: on a different model the cache is cold anyway, and the parent's
     reasoning-effort vocabulary may be invalid for the routed provider (OpenRouter forwards
@@ -830,8 +830,10 @@ def _same_model_parity_kwargs(agent: Any) -> Dict[str, Any]:
         # is appended to the cached system prompt at API-call time (without it the prompt diverges).
         "reasoning_config": getattr(agent, "reasoning_config", None),
         # With the parent's per-turn addition (agent/prompt_additions.py) folded in: it is part of the
-        # parent's system message, so leaving it out would miss the cached prefix.
-        "ephemeral_system_prompt": system_prompt_additions(agent) or None,
+        # parent's system message, so leaving it out would miss the cached prefix. ``turn_addition=False``
+        # (``/btw``) keeps the plain personality prompt: the side answer is not the reply the addition is for.
+        "ephemeral_system_prompt": (system_prompt_additions(agent) if turn_addition
+                                    else getattr(agent, "ephemeral_system_prompt", None)) or None,
         **{attr: val for attr in _PROVIDER_PIN_ATTRS if (val := getattr(agent, attr, None))},
     }
     # Prefill sits right after the system message, so a parent with prefill would diverge at
@@ -917,7 +919,7 @@ def _routed_reasoning_config(task_cfg: Optional[Dict[str, Any]]) -> Optional[Dic
 
 
 def _fork_init_kwargs(agent: Any, rt: Dict[str, Any], routed: bool, max_iterations: int,
-                      task_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                      task_cfg: Optional[Dict[str, Any]] = None, *, turn_addition: bool = True) -> Dict[str, Any]:
     """AIAgent constructor kwargs for the review fork. skip_memory=True: an external memory plugin
     scoped to the parent's session_id would leak the harness prompt into the user's real memory
     namespace; built-in MEMORY.md/USER.md state is re-bound by the caller. Toolsets match the
@@ -937,7 +939,7 @@ def _fork_init_kwargs(agent: Any, rt: Dict[str, Any], routed: bool, max_iteratio
     if isinstance(rt.get("command"), str) and rt["command"]:
         kwargs.update(acp_command=rt["command"], acp_args=rt.get("args") or [])
     if not routed:
-        kwargs.update(_same_model_parity_kwargs(agent))
+        kwargs.update(_same_model_parity_kwargs(agent, turn_addition=turn_addition))
     elif (routed_cfg := _routed_reasoning_config(task_cfg)) is not None:
         kwargs["reasoning_config"] = routed_cfg
     return kwargs
@@ -962,7 +964,7 @@ def _inherit_parent_tool_surface(review_agent: Any, agent: Any) -> None:
 
 def build_cache_parity_fork(
     agent: Any, task_cfg: Optional[Dict[str, Any]] = None, *, max_iterations: int,
-    write_origin: str = "background_review",
+    write_origin: str = "background_review", turn_addition: bool = True,
 ) -> Tuple[Any, Dict[str, Any], bool]:
     """Construct a detached AIAgent fork with warm prompt-cache parity (shared with ``/btw``): same
     runtime/credentials as the parent, byte-identical system prompt / tools[] / reasoning config on
@@ -981,7 +983,8 @@ def build_cache_parity_fork(
     # (_routed_reasoning_config).
     if not _routed and write_origin == "background_review":
         _warn_ignored_reasoning_effort(agent, task_cfg)
-    review_agent = AIAgent(**_fork_init_kwargs(agent, _rt, _routed, max_iterations, task_cfg))
+    review_agent = AIAgent(**_fork_init_kwargs(agent, _rt, _routed, max_iterations, task_cfg,
+                                               turn_addition=turn_addition))
     review_agent._memory_write_origin = review_agent._memory_write_context = write_origin
     # Fork-turn log tag: the fork shares the parent's session_id (and model on the
     # same-model path), so its turn-start/turn-exit log lines are otherwise

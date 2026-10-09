@@ -294,6 +294,9 @@ class ComputeHost:
                 hermes_undo.on_user_message_appended(session["session_key"])
             with contextlib.suppress(Exception):
                 server._persist_branch_seed(session)
+            # The names the gateway resolved for this turn; a continuation this child runs itself follows them.
+            from tui_gateway.client_markup import remember_frame_names
+            remember_frame_names(session, _frame_turn_markup(frame))
             server._run_prompt_submit(
                 request_id, sid, session, text, display_kind=frame.get("display_kind") or None,
                 display_metadata=(frame.get("display_metadata")

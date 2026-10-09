@@ -796,6 +796,12 @@ def _(rid, params: dict) -> dict:
             turn_markup=submit_markup)
         if busy_response is not None:
             return busy_response
+    # This submit runs now (not queued): the session's later unsubmitted turns follow its connection's names,
+    # and an internal dispatch's follow nobody's (``client_markup.resolve_turn_markup``).
+    from tui_gateway import client_markup
+    client_markup.remember_source(
+        session, None if _INTERNAL_DISPATCH.get() or (
+            _is_internal_submit(params) and replayed is None) else current_transport())
     raw_rebind_ids = params.get("rebind_survivor_row_ids")
     requested_rebind_ids = (
         {r for r in raw_rebind_ids if isinstance(r, int) and not isinstance(r, bool)}

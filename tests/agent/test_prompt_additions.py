@@ -9,6 +9,8 @@ iteration summary, the Codex developer instructions) and never touches ``_cached
 
 from __future__ import annotations
 
+import contextlib
+
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -60,11 +62,75 @@ def _staged(**extra):
     return agent
 
 
-def test_the_codex_developer_instructions_carry_it():
+def test_the_codex_thread_identity_leaves_the_turn_addition_out():
     from agent.codex_runtime import _codex_developer_instructions
-    assert _codex_developer_instructions(_staged()) == "CACHED\n\nPERSONA\n\nMARKER GUIDE"
+    assert _codex_developer_instructions(_staged()) == "CACHED\n\nPERSONA"
     plain = SimpleNamespace(ephemeral_system_prompt=None, _cached_system_prompt="CACHED")
     assert _codex_developer_instructions(plain) == "CACHED"
+
+
+def test_a_guide_change_never_retires_the_codex_thread(monkeypatch):
+    from agent import codex_runtime
+    closed = []
+    monkeypatch.setattr(codex_runtime, "_close_codex_session", lambda agent: closed.append(agent))
+    live = object()
+    agent = SimpleNamespace(ephemeral_system_prompt="PERSONA", _cached_system_prompt="CACHED",
+                            _codex_session=live, _codex_session_prompt="CACHED\n\nPERSONA")
+    for guide in ("MARKER GUIDE", "", "ANOTHER GUIDE"):
+        stage_turn_system_addition(agent, guide)
+        codex_runtime._ensure_codex_session(agent, [])
+        assert agent._codex_session is live and closed == []
+    # A personality change still does (the thread's own instructions changed).
+    agent.ephemeral_system_prompt = "OTHER PERSONA"
+    monkeypatch.setattr(codex_runtime, "_stored_codex_thread_id", lambda _agent: None)
+    with contextlib.suppress(Exception):  # building the new session is not this test's business
+        codex_runtime._ensure_codex_session(agent, [])
+    assert closed == [agent]
+
+
+def test_the_codex_turn_input_carries_the_addition(monkeypatch):
+    from agent import codex_runtime
+    from agent.prompt_additions import TURN_INPUT_HEADER, with_turn_input_addition
+    sent = []
+
+    class Session:
+        def run_turn(self, user_input):
+            sent.append(user_input)
+            raise RuntimeError("marker stop")
+
+    agent = _staged(_codex_session=Session())
+    monkeypatch.setattr(codex_runtime, "_ensure_codex_session", lambda *_a, **_k: None)
+    monkeypatch.setattr(codex_runtime, "_start_codex_thread", lambda _agent: "thread")
+    monkeypatch.setattr(codex_runtime, "_close_codex_session", lambda _agent: None)
+    monkeypatch.setattr(codex_runtime, "_consume_user_interrupt", lambda *_a, **_k: None)
+    monkeypatch.setattr(codex_runtime, "_turn_result", lambda *_a, **_k: {})
+    codex_runtime.run_codex_app_server_turn(agent, user_message="marker question", original_user_message="x",
+                                            messages=[], effective_task_id="t")
+    assert sent == [f"marker question\n\n{TURN_INPUT_HEADER}\nMARKER GUIDE"]
+    parts = with_turn_input_addition([{"type": "text", "text": "q"}], agent)
+    assert parts[-1] == {"type": "text", "text": f"{TURN_INPUT_HEADER}\nMARKER GUIDE"}
+    stage_turn_system_addition(agent, "")
+    assert with_turn_input_addition("marker question", agent) == "marker question"
+
+
+def test_a_side_question_fork_gets_the_plain_personality_prompt():
+    from agent.background_review import _same_model_parity_kwargs
+    agent = _staged()
+    assert _same_model_parity_kwargs(agent, turn_addition=False)["ephemeral_system_prompt"] == "PERSONA"
+    assert _same_model_parity_kwargs(agent)["ephemeral_system_prompt"] == "PERSONA\n\nMARKER GUIDE"
+
+
+def test_side_question_asks_for_the_plain_fork(monkeypatch):
+    from agent import background_review, side_question
+    seen = {}
+
+    def fake_build(parent, task_cfg=None, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("marker stop")
+    monkeypatch.setattr(background_review, "build_cache_parity_fork", fake_build)
+    with pytest.raises(RuntimeError):
+        side_question._answer_via_fork(_staged(), "marker?", [])
+    assert seen["turn_addition"] is False
 
 
 def test_a_failover_rewrite_keeps_it():

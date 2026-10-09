@@ -506,9 +506,13 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     if queued.get("origin"):
         kwargs["origin"] = queued["origin"]
     # The blocks the sender's app draws, from the same envelope (re-checked: a journal is a file); both runners.
-    from tui_gateway.client_markup import accepted_names
-    if markup := accepted_names(queued.get("turn_markup") or ()):
-        kwargs["turn_markup"] = markup
+    # Always explicit, an empty set included: a drained prompt was submitted, it never follows somebody else's.
+    # Its connection, while alive, is what the session's next unsubmitted turns follow.
+    from tui_gateway import client_markup
+    kwargs["turn_markup"] = client_markup.accepted_names(queued.get("turn_markup") or ())
+    client_markup.remember_source(
+        session, queued_transport if queued_transport is not None and not _transport_is_dead(queued_transport)
+        else None)
     if queued.get("contributors"):
         kwargs["contributors"] = queued["contributors"]
     # The isolated child only learns the frame's SCOPE identity, which the parent resolves from the session

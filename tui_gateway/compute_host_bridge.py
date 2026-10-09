@@ -51,7 +51,7 @@ def _compute_host_turn_frame(
     rid: str, sid: str, session: dict, text: Any, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None, display_kind: str | None = None,
     display_metadata: dict | None = None, turn_auth_user: tuple[str, str] | None = None,
-    origin: str = "", contributors: Any = (), turn_agent: dict | None = None, turn_markup: Any = ()) -> dict:
+    origin: str = "", contributors: Any = (), turn_agent: dict | None = None, turn_markup: Any = None) -> dict:
     with session["history_lock"]:
         history = list(session.get("history", []))
         history_version = int(session.get("history_version", 0))
@@ -68,7 +68,7 @@ def _compute_host_turn_frame(
     turn_user_profile: dict = {}
     # An agent acting for that submitter through MCP rides beside them as ``turn_agent``, so the child's
     # note, tool variables and rows say what an inline turn says. Only beside a named submitter.
-    from tui_gateway.client_markup import wire as markup_wire
+    from tui_gateway.client_markup import resolve_turn_markup, wire as markup_wire
     from tui_gateway.row_author import agent_marker
     turn_agent = agent_marker(turn_agent) if turn_auth_user and turn_auth_user[0] else None
     if turn_auth_user:
@@ -105,7 +105,8 @@ def _compute_host_turn_frame(
         **({"turn_agent": turn_agent} if turn_agent else {}),
         # The Hermie blocks the submitting connection draws (``client_markup``): only the gateway saw that
         # connection, so the child learns them here and stages the same guide an inline turn would.
-        **({"turn_markup": markup} if (markup := markup_wire(turn_markup or ())) else {}),
+        # ``None`` (a turn nobody submitted) is resolved here, where the session's last connection is known.
+        **({"turn_markup": markup} if (markup := markup_wire(resolve_turn_markup(session, turn_markup))) else {}),
         # How the turn came about. The pair above is the SCOPE the parent resolved (a turn nobody submitted
         # falls back to the owner there, for tools); this is what keeps the child from telling the model
         # that the owner sent it.
@@ -370,7 +371,7 @@ def _submit_prompt_to_compute_host(
     rid: str, sid: str, session: dict, text: Any, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None, display_kind: str | None = None,
     display_metadata: dict | None = None, turn_auth_user: tuple[str, str] | None = None,
-    origin: str = "", contributors: Any = (), turn_agent: dict | None = None, turn_markup: Any = ()) -> dict:
+    origin: str = "", contributors: Any = (), turn_agent: dict | None = None, turn_markup: Any = None) -> dict:
     cfg = _load_dashboard_process_isolation_config()
     frame = _compute_host_turn_frame(rid, sid, session, text, image_paths=image_paths,
                                      queued_prompt_generation=queued_prompt_generation,

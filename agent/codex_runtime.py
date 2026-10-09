@@ -453,9 +453,11 @@ def _consume_user_interrupt(agent, active: bool = True) -> tuple[bool, Any]:
 
 
 def _codex_developer_instructions(agent) -> str:
-    """The prompt composition the standard loop sends as its system message (turn_context order)."""
-    from agent.prompt_additions import with_system_additions
-    return with_system_additions(getattr(agent, "_cached_system_prompt", None) or "", agent)
+    """The prompt composition the standard loop sends as its system message (turn_context order), without the
+    turn's own API-time addition: this is the thread's identity, and a per-turn change must not retire the
+    thread. That addition rides in the turn's input instead (``with_turn_input_addition``)."""
+    from agent.prompt_additions import with_session_additions
+    return with_session_additions(getattr(agent, "_cached_system_prompt", None) or "", agent)
 
 
 # Durable codex thread binding: ``sessions.model_config.codex_thread_id`` (hermes_state), written after the
@@ -633,7 +635,8 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
     _ensure_codex_session(agent, messages)
     try:
         _start_codex_thread(agent)
-        turn = agent._codex_session.run_turn(user_input=user_message)
+        from agent.prompt_additions import with_turn_input_addition
+        turn = agent._codex_session.run_turn(user_input=with_turn_input_addition(user_message, agent))
     except Exception as exc:
         logger.exception("codex app-server turn failed")
         _close_codex_session(agent)

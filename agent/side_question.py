@@ -110,8 +110,11 @@ def _answer_via_fork(parent_agent: Any, question: str, history: Optional[List[Di
     )
     from hermes_cli.plugins import clear_thread_tool_whitelist, set_thread_tool_whitelist
 
+    # Without the parent turn's API-time addition (agent/prompt_additions.py): a client's block guide is for the
+    # reply that client draws, never for a side answer.
     fork, _rt, routed = build_cache_parity_fork(parent_agent, _side_question_task_config(),
-                                                max_iterations=_FORK_MAX_ITERATIONS, write_origin="side_question")
+                                                max_iterations=_FORK_MAX_ITERATIONS, write_origin="side_question",
+                                                turn_addition=False)
     try:
         set_thread_tool_whitelist(set(), deny_msg_fmt=(
             "Side question (/btw) denied tool call: {tool_name}. "

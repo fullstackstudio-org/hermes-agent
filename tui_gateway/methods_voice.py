@@ -456,15 +456,18 @@ def _(rid, params: dict) -> dict:
     ``confirm``'s ``fields``; the result echoes whether it was accepted (with at least one accepted level).
     ``requests: [methods]`` (optional) lists the interactive request methods this connection can show; the
     result echoes the ones accepted (``server_requests.advertise``), and open ones it can now answer are
-    delivered to it. Every result carries ``confirm_passkey``: the level as this connection sees it (contract
-    §8), and ``confirm_fields``."""
+    delivered to it. ``markup: [names]`` (optional, independent of ``server_requests``) lists the Hermie blocks
+    this connection draws; the result echoes the ones accepted (``client_markup.advertise``), and a turn it
+    submits is told about exactly those. Every result carries ``confirm_passkey``: the level as this connection
+    sees it (contract §8), ``confirm_fields`` and ``markup``."""
     from tui_gateway.agent_guard import param_refusal
     # An agent receives the session's requests (read-only but clarify) and never advertises a confirm level.
     if (refused := param_refusal(rid, "client.capabilities", params)) is not None:
         return refused
-    from tui_gateway import confirm_passkey, server_requests
+    from tui_gateway import client_markup, confirm_passkey, server_requests
     from tui_gateway.contracts import registry as contracts
     transport = _caller_transport()
+    markup = client_markup.advertise(transport, params.get("markup"))
     answers = bool(params.get("server_requests"))
     confirm = params.get("confirm")
     detail = (confirm_passkey.accept_advertisement(transport, params.get("confirm_passkey"))
@@ -477,7 +480,8 @@ def _(rid, params: dict) -> dict:
         server_requests.deliver_late(transport)
     return _ok(rid, {"server_requests": sorted(contracts.SERVER_REQUESTS), "confirm": levels,
                      "confirm_passkey": confirm_passkey.capability(transport),
-                     "confirm_fields": server_requests.shows_confirm_fields(transport), "requests": methods})
+                     "confirm_fields": server_requests.shows_confirm_fields(transport), "requests": methods,
+                     "markup": markup})
 
 
 @method("ping")

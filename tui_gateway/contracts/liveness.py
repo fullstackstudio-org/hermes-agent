@@ -83,6 +83,14 @@ class ClientCapabilitiesParams(Params):
     #: only after the first result's ``server_requests`` lists one of them: a backend older than the key
     #: rejects it (4000) and the whole call, ``confirm`` levels included.
     requests: list[str] | None = Field(default=None, max_length=32)
+    #: The Hermie blocks this connection draws in a reply (``chart``, ``cards``, ``alerts``;
+    #: ``tui_gateway/client_markup.py``): a turn this connection submits tells the model about exactly those.
+    #: Optional and additive, independent of ``server_requests``: absent means none, and every call replaces
+    #: the previous list (a call without it clears it). Send it in a SECOND call, only after a result carried
+    #: the key ``markup``: an older backend rejects it (4000) and the whole call. Deliberately permissive here,
+    #: like ``confirm_fields``: a value that is not a list of at most 16 names of at most 32 characters
+    #: ``[a-z][a-z-]*`` counts as none and never fails the call; names this backend has no guide for are dropped.
+    markup: JsonValue = None
 
 
 class ConfirmPasskeyRps(Result):
@@ -120,6 +128,9 @@ class ClientCapabilitiesResult(Result):
     #: The interactive request methods this backend accepted from this connection's ``requests`` (``[]``
     #: when none, or from a backend older than the key).
     requests: list[str] = Field(default_factory=list)
+    #: The Hermie blocks this backend accepted from this connection's ``markup``, sorted (``[]`` when none). A
+    #: backend that knows the key always sends it; one that does not omits it.
+    markup: list[str] | None = None
 
 
 method("client.capabilities", params=ClientCapabilitiesParams, result=ClientCapabilitiesResult,

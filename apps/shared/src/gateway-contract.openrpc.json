@@ -8249,6 +8249,10 @@
             ],
             "default": null,
             "title": "Requests"
+          },
+          "markup": {
+            "default": null,
+            "title": "Markup"
           }
         },
         "title": "ClientCapabilitiesParams",
@@ -8300,6 +8304,21 @@
             },
             "title": "Requests",
             "type": "array"
+          },
+          "markup": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Markup"
           }
         },
         "required": [

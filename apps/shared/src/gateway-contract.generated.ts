@@ -1714,6 +1714,7 @@ export interface ClientCapabilitiesParams {
   confirm_passkey?: ConfirmPasskeyAdvertisement | null
   confirm_fields?: unknown
   requests?: string[] | null
+  markup?: unknown
 }
 /** Second ``client.capabilities`` call, with ``passkey`` in ``confirm``: how this client runs the ceremony, ``{v, kind, rp_id}``. ``v``: ``1``, or ``2`` from a client that also computes the version-2 text digest of a request with ``fields`` (contract §4.1; send it only when the result's ``confirm_passkey.versions`` lists 2). A ``v: 2`` client takes ``v: 1`` and ``v: 2`` frames; a ``v: 1`` client is never sent a ``v: 2`` frame. ``kind``: ``native`` (an app under a native RP) or ``web`` (a browser; ``rp_id`` is its host). Deliberately permissive here (any value, extra keys allowed) and checked in code (``confirm_passkey.accept_advertisement``): a shape this gateway does not accept, including a later client's extra field, only drops ``passkey`` and never fails the call (and ``plain`` with it). */
 export interface ConfirmPasskeyAdvertisement {
@@ -1728,6 +1729,7 @@ export interface ClientCapabilitiesResult {
   confirm_passkey?: ConfirmPasskeyCapability | null
   confirm_fields?: boolean | null
   requests?: string[]
+  markup?: string[] | null
 }
 /** What a confirmation proves. ``plain``: someone tapped Confirm in a connected client; nothing more, and the gateway cannot check even that. ``passkey``: the gateway verified a WebAuthn assertion with user verification, made by a passkey enrolled for the person the turn acts for, over a challenge that commits to this gateway, session, request and text (``contract/confirm-passkey/README.md``). Sent only to connections signed in as that person that advertised the level with an accepted RP. The set is open: a later level is one more value here. */
 export type ConfirmLevel = 'plain' | 'passkey'

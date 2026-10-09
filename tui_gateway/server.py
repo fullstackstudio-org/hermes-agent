@@ -786,6 +786,8 @@ def unregister_live_transport(transport: Transport | None) -> None:
     with _live_transports_lock:
         _live_transports.discard(transport)
     _server_requests.forget(transport)
+    from tui_gateway import client_markup
+    client_markup.forget(transport)
 
 
 def _broadcast_global_event(event: str, payload: dict | None = None) -> None:

@@ -16,10 +16,7 @@
       "maxItems": 100,
       "uniqueItems": true,
       "items": {
-        "anyOf": [
-          { "type": "string", "minLength": 1, "maxLength": 60 },
-          { "type": "number" }
-        ]
+        "anyOf": [{ "type": "string", "minLength": 1, "maxLength": 60 }, { "type": "number" }]
       }
     },
     "series": {

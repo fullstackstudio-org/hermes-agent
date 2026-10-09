@@ -673,9 +673,10 @@ _LOCAL_CRON_DELIVERY_NOTE = (
 HERMIE_PLATFORM_HINT = (
     "You are chatting in Hermie, a chat app. Markdown renders with GitHub flavor: headings, lists, task "
     "lists, tables, links, and fenced code blocks (name the language for highlighting). Math renders from "
-    "$...$ inline and $$...$$ on its own lines. Mermaid renders in a mermaid code block, flowcharts and pie "
-    "charts only; other diagram kinds show as code. Raw HTML and ::preview directives do not render, so never "
-    "use them. Images are never loaded from a web URL (only their alt text shows), so do not embed remote images."
+    "$...$ inline (no space just inside the dollar signs) and from $$...$$ on lines of its own. Mermaid renders "
+    "in a mermaid code block for flowcharts (without subgraphs or styling) and pie charts only; anything else "
+    "shows as code. Raw HTML and ::preview directives show as literal text, so never use them. Images from a web "
+    "URL are never loaded (the reader sees at most their alt text or a link), so do not embed remote images."
 )
 HERMIE_FILES_HINT = (
     "Deliver a file by writing MEDIA:/absolute/path/to/file on its own line: the person gets it as an "

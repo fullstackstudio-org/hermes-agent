@@ -100,8 +100,9 @@ def test_a_hermie_session_gets_its_platform_hint():
     with patch("agent.system_prompt._hermie_outbox_serves_files", return_value=True):
         stable = _stable_prompt(_make_agent(platform="hermie"))
     assert PLATFORM_HINTS["hermie"] in stable
-    for claim in ("tables", "$...$", "Mermaid", "flowcharts and pie charts", "Raw HTML", "::preview",
-                  "MEDIA:/absolute/path/to/file"):
+    for claim in ("task lists, tables", "$...$ inline", "$$...$$ on lines of its own",
+                  "flowcharts (without subgraphs or styling) and pie charts only", "Raw HTML and ::preview",
+                  "never loaded", "MEDIA:/absolute/path/to/file"):
         assert claim in PLATFORM_HINTS["hermie"], claim
     # Version-dependent blocks are told per turn, never in the session's cached prompt.
     assert "hermie-chart" not in stable and "hermie-cards" not in stable and "[!NOTE]" not in stable
